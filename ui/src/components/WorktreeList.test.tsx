@@ -10,6 +10,7 @@ import {
   isPrimaryWorktree,
   isSameWorktreePath,
   normalizeWorktreePath,
+  worktreeListRowProps,
 } from "./WorktreeList";
 import { SidebarWorktreesEmpty } from "./sidebar/SidebarWorktreeRow";
 import { SIDEBAR_EMPTY_TEXT } from "./sidebar/sidebarLabels";
@@ -55,6 +56,15 @@ const rootWorktree: Worktree = {
 afterEach(cleanup);
 
 describe("WorktreeList actions", () => {
+  it("carries an inactive unmanaged root's render workspace into Pin Row", () => {
+    const onLaneAction = vi.fn();
+    const props = worktreeListRowProps(rootWorktree, {
+      activePath: "/another/project", statuses: {}, agentsByPath: new Map(),
+      onSelect: vi.fn(), onDelete: vi.fn(), onLaneAction, sortableWorkspaceId: "inactive-project",
+    });
+    props.onLaneAction?.(rootWorktree, "pin");
+    expect(onLaneAction).toHaveBeenCalledWith({ ...rootWorktree, workspaceId: "inactive-project" }, "pin");
+  });
   it("keeps a dirty worktree row selectable without rendering git dirty status or a refresh control", () => {
     const onSelect = vi.fn();
     render(

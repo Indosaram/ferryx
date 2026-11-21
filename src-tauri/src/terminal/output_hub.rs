@@ -1332,12 +1332,21 @@ impl TerminalOutputHub {
         Some((history, rx))
     }
 
+    /// Full attaches strip replay-only device interrogation, preserving cursor-position
+    /// requests for the terminal emulator. Only an evicted full head is UTF-8-trimmed;
+    /// sequence resumes remain byte-exact ([`super::remote::clean_replay`]).
+    ///
+    /// This is the replay the remote gateway's live terminal socket and its VT-mirror readers are
+    /// served, so it is the same boundary as [`Self::subscribe_with_screen_mirror`] and uses the
+    /// same helper. Cleaning happens on the bytes handed out, not in the buffer: retention keeps
+    /// the byte-exact record that callers addressing history by sequence account for.
     pub fn subscribe_with_sequence(
         &self,
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Option<SessionAttachment> {
         let (mut attachment, ranges) = self.subscribe_with_sequence_ranges(session_id, after_sequence)?;
+        let ranges = super::remote::clean_replay(&mut attachment, ranges, after_sequence);
         attachment.snapshot.history_segments = ranges.into_iter().map(|r| HistorySegment {
             cols: r.cols,
             rows: r.rows,
@@ -1393,6 +1402,13 @@ impl TerminalOutputHub {
 
     /// Like [`Self::subscribe_with_sequence_ranges`] but substitutes the mirrored screen for
     /// raw bytes when the retained replay starts mid-stream (eviction happened).
+    ///
+    /// This is the replay a local session's attach delivers, so it is cleaned the same way a
+    /// remote replay is: full snapshots strip replay-only interrogation but retain emulator
+    /// cursor queries; sequence resumes remain byte-exact ([`super::remote::clean_replay`]).
+    /// Cleaning happens here, on the bytes handed out, and
+    /// not in the buffer: retention keeps the byte-exact record that callers addressing
+    /// history by sequence account for, and eviction is untouched.
     pub(crate) fn subscribe_with_screen_mirror(
         &self,
         session_id: &str,
@@ -1415,6 +1431,8 @@ impl TerminalOutputHub {
                 attachment.snapshot.history = seed.bytes;
             }
         }
+        drop(hub);
+        let ranges = super::remote::clean_replay(&mut attachment, ranges, after_sequence);
         Some((attachment, ranges))
     }
 
@@ -1649,6 +1667,138 @@ mod tests {
         drop(status);
         let _next = hub.begin_exit_status("next");
         assert!(!hub.exits.lock().contains_key("late"));
+    }
+
+    #[test]
+    fn local_attach_strips_device_queries_from_replayed_history() {
+        // Given: a local session whose retained text holds device queries plus a response a
+        // program printed itself.
+        let hub = TerminalOutputHub::new(64 * 1024);
+        let _rx = hub.register_session("local-query");
+        hub.publish("local-query", b"prompt$ \x1b[6n\x1b]11;?\x07".to_vec())
+            .expect("publish the queries");
+        hub.publish("local-query", b"\x1b[1;1Rvisible\r\n".to_vec())
+            .expect("publish the printed response");
+
+        // When: the GUI attaches. For a local session this is the replay the daemon delivers.
+        let (attachment, ranges) = hub
+            .subscribe_with_screen_mirror("local-query", None)
+            .expect("local attach");
+
+        // Cursor queries must reach the emulator; replay-only colour interrogation must not.
+        // Printed responses remain real output.
+        let history = &attachment.snapshot.history;
+        assert!(
+            history.windows(4).any(|w| w == b"\x1b[6n"),
+            "emulator cursor query was stripped: {:?}",
+            String::from_utf8_lossy(history)
+        );
+        assert!(
+            !history.windows(6).any(|w| w == b"\x1b]11;?"),
+            "colour query reached the client: {:?}",
+            String::from_utf8_lossy(history)
+        );
+        assert!(
+            history.windows(6).any(|w| w == b"\x1b[1;1R"),
+            "printed response was stripped: {:?}",
+            String::from_utf8_lossy(history)
+        );
+        assert!(history.windows(7).any(|w| w == b"visible"));
+
+        // And the returned offsets still address the cleaned bytes, so the wire segments the
+        // daemon slices from them cover the replay exactly.
+        let joined: Vec<u8> = ranges
+            .iter()
+            .flat_map(|range| history[range.start..range.end].to_vec())
+            .collect();
+        assert_eq!(joined.as_slice(), history.as_slice(), "segment offsets do not match the cleaned history");
+    }
+
+    #[test]
+    fn sequence_attach_strips_device_queries_from_replayed_history() {
+        // Given: a session whose retained text holds device queries plus a response a program
+        // printed itself.
+        let hub = TerminalOutputHub::new(64 * 1024);
+        let _rx = hub.register_session("sequence-query");
+        hub.publish("sequence-query", b"prompt$ \x1b[6n\x1b]11;?\x07".to_vec())
+            .expect("publish the queries");
+        hub.publish("sequence-query", b"\x1b[1;1Rvisible\r\n".to_vec())
+            .expect("publish the printed response");
+
+        // When: a client attaches through the sequence path - the replay the remote gateway's
+        // live terminal socket and its VT-mirror readers are served.
+        let attachment = hub
+            .subscribe_with_sequence("sequence-query", None)
+            .expect("sequence attach");
+
+        // Keep the emulator's startup handshake while stripping replay-only interrogation.
+        let history = &attachment.snapshot.history;
+        assert!(
+            history.windows(4).any(|w| w == b"\x1b[6n"),
+            "emulator cursor query was stripped: {:?}",
+            String::from_utf8_lossy(history)
+        );
+        assert!(
+            !history.windows(6).any(|w| w == b"\x1b]11;?"),
+            "colour query reached the client: {:?}",
+            String::from_utf8_lossy(history)
+        );
+        assert!(
+            history.windows(6).any(|w| w == b"\x1b[1;1R"),
+            "printed response was stripped: {:?}",
+            String::from_utf8_lossy(history)
+        );
+        assert!(history.windows(7).any(|w| w == b"visible"));
+
+        // And the segments were cut from the cleaned bytes with the remapped offsets, so they
+        // still join back into the history the client is sent.
+        let joined: Vec<u8> = attachment
+            .snapshot
+            .history_segments
+            .iter()
+            .flat_map(|segment| segment.bytes.clone())
+            .collect();
+        assert_eq!(
+            joined.as_slice(),
+            history.as_slice(),
+            "segment offsets do not match the cleaned history"
+        );
+    }
+
+    #[test]
+    fn resumed_replay_preserves_utf8_split_across_sequence_boundary() {
+        let hub = TerminalOutputHub::new(64 * 1024);
+        let _rx = hub.register_session("split-utf8");
+        let first: u64 = hub.publish("split-utf8", vec![0xe2])
+            .expect("publish lead").sequence;
+        hub.publish("split-utf8", vec![0x82, 0xac]).expect("publish tail");
+
+        let attachment = hub.subscribe_with_sequence("split-utf8", Some(first))
+            .expect("resume sequence replay");
+        assert!(attachment.snapshot.gap.is_none());
+        assert_eq!(attachment.snapshot.history, vec![0x82, 0xac]);
+        let mut client = vec![0xe2];
+        client.extend_from_slice(&attachment.snapshot.history);
+        assert_eq!(std::str::from_utf8(&client).expect("complete character"), "\u{20ac}");
+        let segments: Vec<u8> = attachment.snapshot.history_segments.iter()
+            .flat_map(|segment| segment.bytes.iter().copied()).collect();
+        assert_eq!(segments, vec![0x82, 0xac]);
+
+        let (attachment, ranges) = hub.subscribe_with_screen_mirror("split-utf8", Some(first))
+            .expect("resume screen replay");
+        assert_eq!(attachment.snapshot.history, vec![0x82, 0xac]);
+        let joined: Vec<u8> = ranges.iter().flat_map(|range|
+            attachment.snapshot.history[range.start..range.end].iter().copied()).collect();
+        assert_eq!(joined, vec![0x82, 0xac]);
+    }
+
+    #[test]
+    fn full_replay_preserves_a_pending_utf8_lead_without_eviction() {
+        let hub = TerminalOutputHub::new(64 * 1024);
+        let _rx = hub.register_session("pending-utf8");
+        hub.publish("pending-utf8", vec![0xe2]).expect("publish lead");
+        let attachment = hub.subscribe_with_sequence("pending-utf8", None).expect("full replay");
+        assert_eq!(attachment.snapshot.history, vec![0xe2]);
     }
 
     #[test]

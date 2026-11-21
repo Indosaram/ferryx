@@ -240,6 +240,7 @@ pub async fn watch_paired_settle(
         let op = AgentOp::Wait {
             session_id: run.session_id.clone(),
             until: "idle".to_owned(),
+            instance: Some(instance.clone()),
             after_revision: None,
             after,
             timeout_ms: u64::try_from(slice.as_millis()).unwrap_or(u64::MAX).max(1),

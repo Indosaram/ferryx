@@ -35,10 +35,14 @@ describe("desktopChat", () => {
       submit: vi.fn(async () => ({ ok: true as const, data: null })),
       stop: vi.fn(async () => ({ ok: true as const, data: null })),
       answer: vi.fn(async () => ({ ok: true as const, data: null })),
+      resolvePrompt: vi.fn(async () => ({ ok: true as const, data: null })),
     };
     const transport = desktopChatTransportFrom(handlers);
     const signal = new AbortController().signal;
     const history = await transport({ kind: "history", requestId: "r1", target, registryId: null, params: { cursor: null } }, signal);
+    await transport({ kind: "resolvePrompt", requestId: "r2", target, registryId: null,
+      params: { promptId: "p1", screenRevision: "rev-1" } }, signal);
+    expect(handlers.resolvePrompt).toHaveBeenCalledTimes(1);
     expect(history).toEqual({ ok: true, data: page });
     await transport(
       { kind: "stop", requestId: "r2", target, registryId: "claude", params: { capability: "providerInterrupt" } },

@@ -27,7 +27,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::error::Result as HubResult;
@@ -384,8 +384,10 @@ pub async fn injection_block_with_ids(
     Ok(Some((block.join("\n"), ids)))
 }
 
-/// Selects lessons for a corrective turn, advancing each chosen lesson's own usage counters
-/// so a lesson that only ever reaches correction does not look unused to the stale sweep.
+/// Selects lessons for a corrective turn. Selection only: the caller counts the turn with
+/// [`count_turn_injected`] in the transaction that registers its dispatch, so a correction
+/// that never becomes a turn (a revision conflict, a lane pause, an instruction already
+/// queued, an owner hold) leaves every lesson's usage untouched.
 pub async fn injection_block_with_ids_for_turn(
     pool: &SqlitePool,
     domain: LessonDomain,
@@ -406,23 +408,6 @@ pub async fn injection_block_with_ids_for_turn(
     if chosen.is_empty() {
         return Ok(None);
     }
-    // A correction-selected lesson is used now, so its usage has to move with it: otherwise an
-    // actively useful corrective lesson looks untouched and `retire_stale` retires it.
-    let now = Utc::now().to_rfc3339();
-    let mut tx = pool.begin_write().await?;
-    for lesson in &chosen {
-        sqlx::query(
-            "UPDATE supervisor_lessons
-             SET injected = injected + 1, last_injected_at = ?, updated_at = ?
-             WHERE id = ?",
-        )
-        .bind(&now)
-        .bind(&now)
-        .bind(&lesson.id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
     let mut block = vec![INJECTION_HEADER.to_owned(), FENCE_OPEN.to_owned()];
     block.extend(chosen.iter().map(|lesson| fenced_line(&lesson.rule)));
     block.push(FENCE_CLOSE.to_owned());
@@ -479,6 +464,56 @@ pub async fn note_turn_injected(
         .await?;
     }
     tx.commit().await
+}
+
+/// Records `ids` as injected into the turn `turn_ref` inside the caller's write transaction and
+/// advances each lesson's usage counters once per new `(turn, lesson)` row.
+///
+/// A corrective turn that is refused never becomes a dispatch, so it never reaches this call
+/// and leaves usage untouched. The row and the counter move together with the dispatch that
+/// carries the lesson: replaying the same turn finds its row and changes nothing, while the
+/// same lesson carried by a different turn counts again. The rows and their counters commit in
+/// one savepoint, so a lesson that cannot be recorded leaves neither half behind. Returns the
+/// rows this call added.
+pub async fn count_turn_injected(
+    conn: &mut SqliteConnection,
+    turn_ref: &str,
+    ids: &[String],
+) -> Result<u64, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let now = Utc::now().to_rfc3339();
+    let mut savepoint = <SqliteConnection as Connection>::begin(&mut *conn).await?;
+    let mut added = 0;
+    for id in ids {
+        let rows = sqlx::query(
+            "INSERT OR IGNORE INTO lesson_turn_injections(turn_ref, lesson_id, injected_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(turn_ref)
+        .bind(id)
+        .bind(&now)
+        .execute(&mut *savepoint)
+        .await?
+        .rows_affected();
+        if rows == 0 {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE supervisor_lessons
+             SET injected = injected + 1, last_injected_at = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *savepoint)
+        .await?;
+        added += rows;
+    }
+    savepoint.commit().await?;
+    Ok(added)
 }
 
 /// Settles every unsettled injection of `subject_ref` with `outcome` and feeds it to
@@ -966,6 +1001,26 @@ mod tests {
             .collect()
     }
 
+    async fn dispatch_turn(pool: &SqlitePool, turn_ref: &str, ids: &[String]) -> u64 {
+        let mut tx = pool.begin_write().await.unwrap();
+        let added = count_turn_injected(&mut tx, turn_ref, ids).await.unwrap();
+        tx.commit().await.unwrap();
+        added
+    }
+
+    async fn select_turn_lessons(pool: &SqlitePool) -> Vec<String> {
+        injection_block_with_ids_for_turn(
+            pool,
+            LessonDomain::Goal,
+            PROJECT,
+            &["the tests are flaky"],
+        )
+        .await
+        .unwrap()
+        .expect("the correction selects the lesson")
+        .1
+    }
+
     async fn ranked_lesson(
         pool: &SqlitePool,
         rule: &str,
@@ -1092,6 +1147,7 @@ mod tests {
         .await
         .unwrap()
         .expect("the corrective turn should select the lesson");
+        dispatch_turn(&pool, "turn-correction", &block.1).await;
         let injected: i64 =
             sqlx::query_scalar("SELECT injected FROM supervisor_lessons WHERE id = ?")
                 .bind(&seeded.id)
@@ -1099,9 +1155,6 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(injected, 1, "a correction-selected lesson was used");
-        note_turn_injected(&pool, "turn-correction", &block.1)
-            .await
-            .unwrap();
         settle_turns(&pool, "turn-correction", Outcome::Helped)
             .await
             .unwrap();
@@ -1112,6 +1165,43 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(helped, 1, "the correction outcome credited the lesson");
+    }
+
+    #[tokio::test]
+    async fn a_correction_lesson_counts_once_per_real_dispatch_turn() {
+        let pool = pool().await;
+        let seeded = lesson(&pool, PROJECT, "check the flaky probe first").await;
+        let first = select_turn_lessons(&pool).await;
+        assert_eq!(first, vec![seeded.id.clone()]);
+        assert_eq!(
+            get(&pool, &seeded.id).await.unwrap().unwrap().injected,
+            0,
+            "selection alone counts nothing, so a discarded correction is not a use"
+        );
+        assert_eq!(select_turn_lessons(&pool).await, first);
+        assert_eq!(
+            get(&pool, &seeded.id).await.unwrap().unwrap().injected,
+            0,
+            "selecting twice still counts nothing"
+        );
+        assert_eq!(dispatch_turn(&pool, "turn-1", &first).await, 1);
+        assert_eq!(
+            get(&pool, &seeded.id).await.unwrap().unwrap().injected,
+            1,
+            "one dispatched turn is one use"
+        );
+        assert_eq!(dispatch_turn(&pool, "turn-1", &first).await, 0);
+        assert_eq!(
+            get(&pool, &seeded.id).await.unwrap().unwrap().injected,
+            1,
+            "replaying the same recording is a no-op"
+        );
+        assert_eq!(dispatch_turn(&pool, "turn-2", &first).await, 1);
+        assert_eq!(
+            get(&pool, &seeded.id).await.unwrap().unwrap().injected,
+            2,
+            "a different real turn carrying the same lesson counts again"
+        );
     }
 
     #[tokio::test]

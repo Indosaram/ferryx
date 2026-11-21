@@ -6,6 +6,7 @@ use tokio::sync::broadcast;
 
 pub struct MachineEvents {
     sequence: Mutex<u64>,
+    resume_gap_pending: std::sync::atomic::AtomicBool,
     sender: broadcast::Sender<Value>,
     /// Bounds concurrent inventory construction independently of socket count.
     pub snapshot_slots: Arc<tokio::sync::Semaphore>,
@@ -160,6 +161,7 @@ impl MachineEvents {
     pub fn new(capacity: usize) -> Self {
         Self {
             sequence: Mutex::new(0),
+            resume_gap_pending: std::sync::atomic::AtomicBool::new(false),
             sender: broadcast::channel(capacity).0,
             snapshot_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             subscriptions: tokio::sync::watch::channel(0).0,
@@ -174,6 +176,32 @@ impl MachineEvents {
     }
     pub fn sequence(&self) -> u64 {
         *self.sequence.lock()
+    }
+
+    /// Raises the counter to at least `floor`, so a stream rebuilt by a restarted daemon issues
+    /// numbers above the rows the journal kept instead of reusing them. This moves a numeric floor
+    /// only: the stream carries no observer epoch, and the numbers it mints stay this run's own.
+    /// The first subscriber afterwards is told `restart`, because its boundary can sit at a number
+    /// that subscriber already saw, where only the reason can mark it. Never lowers: the counter
+    /// only grows within a run.
+    pub(crate) fn resume_sequence(&self, floor: u64) {
+        let mut sequence = self.sequence.lock();
+        if floor > *sequence {
+            self.resume_gap_pending
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        *sequence = (*sequence).max(floor);
+    }
+
+    fn initial_boundary_reason(&self) -> &'static str {
+        if self
+            .resume_gap_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            "restart"
+        } else {
+            "subscribe"
+        }
     }
     pub fn forwarder_count(&self) -> tokio::sync::watch::Receiver<usize> {
         self.forwarders.subscribe()
@@ -277,7 +305,7 @@ pub(crate) async fn serve(
     events.subscriptions.send_modify(|count| *count += 1);
     let mut watcher: Option<crate::daemon::workspace_service::workspace_watcher::WorkspaceWatch> =
         None;
-    let mut reason = "subscribe";
+    let mut reason = events.initial_boundary_reason();
     let mut stale_sequence = None;
     let mut metadata_forwarders = tokio::task::JoinSet::new();
     let mut forwarded_targets =
@@ -585,6 +613,26 @@ mod panel_frame_tests {
         events::AgentObservation, AgentControlState, AgentStateSource, AgentTier,
     };
     use ferryx_hub::supervisor::panel_contract::{FleetSession, PendingPrompt, SessionRef};
+
+    #[test]
+    fn resumed_machine_cursor_emits_one_restart_boundary_without_lowering_sequence() {
+        let events = MachineEvents::new(4);
+        events.resume_sequence(41);
+        assert_eq!(events.sequence(), 41);
+        assert_eq!(events.initial_boundary_reason(), "restart");
+        assert_eq!(events.initial_boundary_reason(), "subscribe");
+        assert_eq!(events.sequence(), 41);
+    }
+
+    #[test]
+    fn resume_gap_does_not_replace_an_existing_replay_gap_reason() {
+        let events = MachineEvents::new(4);
+        assert_eq!(events.initial_boundary_reason(), "subscribe");
+        events.resume_sequence(0);
+        assert_eq!(events.initial_boundary_reason(), "subscribe");
+        events.resume_sequence(9);
+        assert_eq!(events.initial_boundary_reason(), "restart");
+    }
 
     fn observation() -> AgentObservation {
         AgentObservation {

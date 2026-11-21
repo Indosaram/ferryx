@@ -644,9 +644,13 @@ impl Operation {
                             return Err(ClientError::local("INVALID_REQUEST"));
                         }
                     }
-                    crate::agent_control::AgentControlOp::Events { after } => {
+                    crate::agent_control::AgentControlOp::Events { instance, after } => {
                         path = "agent-control/events";
+                        r.capability = Some(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
                         r.query.push(("after".into(), after.to_string()));
+                        if let Some(instance) = instance {
+                            r.query.push(("instance".into(), instance.clone()));
+                        }
                     }
                     crate::agent_control::AgentControlOp::Spawn { parent_session_id, .. } => {
                         if parent_session_id
@@ -683,6 +687,7 @@ impl Operation {
                 }
                 if let crate::agent_control::AgentControlOp::Wait {
                     until,
+                    instance,
                     after_revision,
                     after,
                     timeout_ms,
@@ -692,9 +697,13 @@ impl Operation {
                     if !crate::agent_control::events::until_is_known(until) || *timeout_ms == 0 {
                         return Err(ClientError::local("INVALID_REQUEST"));
                     }
+                    r.capability = Some(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
                     let timeout_ms = (*timeout_ms)
                         .min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS);
                     r.query.push(("until".into(), until.clone()));
+                    if let Some(instance) = instance {
+                        r.query.push(("instance".into(), instance.clone()));
+                    }
                     r.query.push(("after".into(), after.to_string()));
                     r.query.push(("timeoutMs".into(), timeout_ms.to_string()));
                     if let Some(revision) = after_revision {

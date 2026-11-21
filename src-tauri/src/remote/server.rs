@@ -5026,6 +5026,7 @@ fn gateway_capability_names(
         }
         capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+        capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
         capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
@@ -7761,14 +7762,44 @@ async fn reference_chat_prompt_session(
     state: &Arc<RemoteGatewayState>,
     identity: &reference_history::ReferenceHistoryIdentity,
 ) -> ReferenceChatPromptSession {
-    let agent_status = state.machine_services.as_ref().and_then(|services| {
-        services
-            .sessions
-            .session_activity_state(&identity.target.target.backend_session_id)
-    });
+    let agent_status =
+        reference_chat_agent_status(state, &identity.target.target.backend_session_id);
     ReferenceChatPromptSession {
         jsonl: reference_chat_session_jsonl(state, identity).await,
         agent_status,
+    }
+}
+
+/// The pane's status in herdr's vocabulary, read from the agent's own report.
+///
+/// herdr reads an OmO form on a pane it names `claude`, or names nothing at all, only while the
+/// pane is `blocked` (`omo_form_is_trusted`); the form's own text is never enough. The session
+/// service's activity word is a different vocabulary - it reports a provider `blocked` or `waiting`
+/// as `waiting` - so handing that word to the detector leaves a pane the program itself says is
+/// waiting on the user looking exactly like one that is not, and the phone's first answer to a real
+/// form is refused as unrecorded with nothing typed.
+///
+/// Only the program's own report is evidence. `agent_control_report` carries the state beside the
+/// origin that produced it, so a frame this host raised itself - a process release, a sighting, a
+/// manual reset - is never turned into a wait, however it spells its state. A pane with no provider
+/// report says nothing, and the detector then needs the session's own ask to read the form.
+fn reference_chat_agent_status(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+) -> Option<String> {
+    let report = state
+        .machine_services
+        .as_ref()?
+        .sessions
+        .agent_control_report(session_id)?;
+    if !report.self_reported {
+        return None;
+    }
+    match report.state.trim().to_ascii_lowercase().as_str() {
+        "blocked" | "waiting" => Some("blocked".to_string()),
+        "working" => Some("working".to_string()),
+        "idle" | "done" => Some("idle".to_string()),
+        _ => None,
     }
 }
 
@@ -7786,11 +7817,8 @@ async fn reference_chat_prompt_session_for_screen(
     if omo_reads_forms(agent) && omo_form_on_screen(screen) {
         return reference_chat_prompt_session(state, identity).await;
     }
-    let agent_status = state.machine_services.as_ref().and_then(|services| {
-        services
-            .sessions
-            .session_activity_state(&identity.target.target.backend_session_id)
-    });
+    let agent_status =
+        reference_chat_agent_status(state, &identity.target.target.backend_session_id);
     ReferenceChatPromptSession {
         jsonl: None,
         agent_status,
@@ -8638,11 +8666,44 @@ async fn reference_chat_prompt(
         &snapshot.text,
         &session.borrow(),
     );
-    let prompt = reference_prompts::reference_prompt_occurrence(
+    // The public id a card is answered under has to be the one every surface computes, so this
+    // read uses the shared occurrence helper rather than the process-local ledger directly: it is
+    // the same call the desktop and the generic agent-control read make, so a second occurrence
+    // this daemon restarted onto (one already open on the pane) is restored only against the
+    // screen that actually shows it, and never renumbers a card under another reader's feet. The
+    // id it returns is still just the `prompt.id` wire field.
+    //
+    // A failed lookup is the route's answer, not a card with a guessed id: two occurrences that
+    // both claim this pane, card and revision cannot be told apart, so the read refuses typed
+    // before it records or settles either durable row. A screen whose text is empty never reaches
+    // this call: `is_answerable` already refused it above, because an unreadable screen cannot
+    // carry a revision an answer is checked against. A gateway with no journal is not a null
+    // prompt either: the lookup then answers from this process's own occurrence ledger, so a
+    // usable screen still reports the ordinary card.
+    let prompt = match reference_prompts::reference_prompt_occurrence_after_restart(
+        &state,
         &read.target.target.backend_session_id,
         prompt,
         &snapshot.revision,
-    );
+    )
+    .await
+    {
+        Ok(prompt) => prompt,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    // The card this read found is recorded on the daemon's answer journal before it is returned,
+    // so an answer that follows immediately (the phone's) claims the same row the desktop and the
+    // generic agent-control path claim: one card is one at-most-once decision on every surface,
+    // and a retry replays the receipt its first delivery produced instead of typing the answer
+    // twice. A journal write never fails the read - a card it could not record is refused by the
+    // answer path rather than typed unrecorded.
+    agent_control_service::record_reference_card(
+        &state,
+        &session_id,
+        &snapshot.revision,
+        prompt.as_ref(),
+    )
+    .await;
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({
@@ -8849,9 +8910,13 @@ async fn reference_chat_stop(
 
 /// POST /api/v1/reference-chat/{sessionId}/answer
 ///
-/// The answer runs inside the SAME per-target step as submit and Stop, through the one shared
-/// queue: the fresh screen read, the card's re-detection and every key are one operation, which
-/// is what keeps a Stop from landing between them.
+/// The answer is delivered through the daemon's durable answer journal, by the same service the
+/// desktop and the generic agent-control op answer through: the claim decides before a key is
+/// typed, so an identical retry replays the receipt its first delivery produced and a different
+/// answer to the same card is refused with nothing typed. The typing itself still runs inside the
+/// SAME per-target step as submit and Stop, through the one shared queue: the fresh screen read,
+/// the card's re-detection and every key are one operation, which is what keeps a Stop from
+/// landing between them.
 pub(crate) async fn reference_chat_answer(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
@@ -8876,41 +8941,35 @@ pub(crate) async fn reference_chat_answer(
             "a view-only device cannot answer a prompt",
         );
     }
-    let runtime = reference_chat_runtime();
-    let identity = reference_chat_identity(&state, &target, body.registry_id.as_deref()).await;
-    let prompt_session = reference_chat_prompt_session(&state, &identity).await;
+    // The answer is delivered by the shared service every other surface answers through, so the
+    // claim that decides it is the journal's: this route no longer types through the process-local
+    // answer runtime, and a card already answered here (or on the desktop, or by the generic
+    // agent-control op) replays that receipt instead of typing a second time.
     let authorize = reference_chat_authorize(&state, &headers, &target);
     let request_id = body.request_id.clone();
-    let agent = identity.registry_id.clone();
     // Owned by its own task, like a submit: a caller that disconnects must not leave a menu moved
     // but unconfirmed, or custom text typed without its Enter.
     let transaction = tokio::spawn(async move {
-        let alive = || true;
-        let answer = reference_prompts::ReferenceAnswerRequest {
-            target: &target,
-            request_id: &body.request_id,
-            payload: &body.params,
-            session: prompt_session.borrow(),
-            agent: agent.as_str(),
-            authorize: &*authorize,
-            alive: &alive,
-        };
-        let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
-        let screen = ReferenceGatewayScreenReader {
-            backend: Arc::clone(&state.session_backend),
-        };
-        let writer = reference_input::ReferenceSessionWriter::new(
-            state.session_backend.as_ref(),
-            &state.agent_events,
-            &body.request_id,
-        );
-        let clock = reference_input::SystemReferenceClock;
-        runtime
-            .answers
-            .answer(&answer, &step, &screen, &writer, &clock)
-            .await
+        agent_control_service::answer_reference_card(
+            &state,
+            target,
+            body.registry_id,
+            body.request_id,
+            body.params,
+            authorize,
+        )
+        .await
     });
-    reference_chat_transaction_response(&request_id, transaction.await)
+    let answered = transaction.await.map_err(|error| {
+        reference_chat_scope(
+            ScopeErrorCode::OperationOutcomeUnknown,
+            format!("the answer transaction did not finish; its outcome is unknown: {error}"),
+        )
+    });
+    match answered.and_then(|result| result) {
+        Ok(outcome) => reference_chat_input_response(&request_id, outcome),
+        Err(error) => reference_chat_result_failure(&request_id, &error),
+    }
 }
 
 /// POST /api/v1/reference-chat/{sessionId}/files

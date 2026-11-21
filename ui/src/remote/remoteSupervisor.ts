@@ -329,10 +329,20 @@ export function isSupervisorChangedFrame(frame: unknown): boolean {
   return frameObject(frame)?.type === SUPERVISOR_CHANGED_FRAME;
 }
 
-/** A fresh subscribe or a lagged socket may have missed supervisor changes: refetch once. */
-function isResyncFrame(frame: unknown): boolean {
+/**
+ * Reasons that mean "you may have missed changes, re-read once". `restart` belongs here because a
+ * restarted daemon numbers its first boundary at the persisted head, which a mounted reader may
+ * already have seen, so no sequence comparison can notice it. `registration`, `filesystem`,
+ * `concurrentCommit` and `ownerUnavailable` carried their own change and stay out.
+ */
+const RESYNC_BOUNDARY_REASONS: readonly string[] = ["subscribe", "lag", "restart"];
+
+/** True for an `/api/v1/events` boundary asking every view of the machine to read once more. */
+export function isResyncBoundaryFrame(frame: unknown): boolean {
   const event = frameObject(frame);
-  return event?.type === "inventoryInvalidated" && (event.reason === "subscribe" || event.reason === "lag");
+  if (event?.type !== "inventoryInvalidated") return false;
+  const reason = event.reason;
+  return typeof reason === "string" && RESYNC_BOUNDARY_REASONS.includes(reason);
 }
 
 /**
@@ -424,7 +434,7 @@ export function useRemoteSupervisor({ machines }: { readonly machines: readonly 
         inFlight = false;
       };
       const unsubscribe = machine.subscribe((frame) => {
-        if (isSupervisorChangedFrame(frame) || isResyncFrame(frame)) void refetch();
+        if (isSupervisorChangedFrame(frame) || isResyncBoundaryFrame(frame)) void refetch();
       });
       void refetch();
       cleanups.push(() => {

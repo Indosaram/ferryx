@@ -230,6 +230,37 @@ struct ReplaceError {
     message: String,
 }
 
+/// The live half of the restore gate: what this machine's shipped provider manifests say about
+/// the provider the archive names.
+///
+/// The hub gate ([`ferryx_hub::checkpoint_import`]) judges only the archive's own declared facts,
+/// because `ferryx-hub` cannot see this crate's manifests. This layer can, so it refuses an id
+/// no shipped manifest answers to - a typo or a provider this build does not know is not
+/// evidence that a conversation can be rewound. A provider that *is* shipped still has to
+/// declare `rollbackConversation` for the restore to proceed, so today this refuses every
+/// restore: all 16 shipped manifests declare nothing, which is the correct value, not a gap.
+///
+/// An archive naming no provider (every checkpoint written before the field existed) is not
+/// refused here: there is no provider to judge, and `format_version` guards the shape instead.
+async fn refuse_unless_live_provider_rollback(archive: &std::path::Path) -> Result<(), ReplaceError> {
+    let archive = archive.to_owned();
+    let manifest = tokio::task::spawn_blocking(move || ferryx_hub::checkpoint::peek_manifest(&archive))
+        .await
+        .map_err(|error| ReplaceError { code: "INTERNAL_ERROR".into(), message: error.to_string() })?
+        .map_err(|error| ReplaceError {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+        })?;
+    let provider = manifest.and_then(|manifest| manifest.provider);
+    let Some(provider) = provider else { return Ok(()) };
+    crate::agent_control::policy::authorize_provider_rollback_by_id(&provider.id).map_err(|error| {
+        ReplaceError {
+            code: ferryx_hub::checkpoint::CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED.to_owned(),
+            message: error.message,
+        }
+    })
+}
+
 /// Todo 7's staged import into `hub_dir`. When this hub holds another supervisor (the import
 /// refuses `SUPERVISOR_IDENTITY_MISMATCH`), that refusal stands unless `replace_local` (the
 /// owner's explicit `--replace-local`, plan todo 13): then the local database is first
@@ -248,6 +279,7 @@ async fn stage_import(
         code: error.code().to_owned(),
         message: error.to_string(),
     };
+    refuse_unless_live_provider_rollback(archive).await?;
     let refused = match import(archive, hub_dir, machine_id, paired, options()).await {
         Ok(_) => return Ok(()),
         Err(error) if replace_local && error.code() == ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH => error,
@@ -938,5 +970,167 @@ mod tests {
             .await
             .expect("bounded");
         assert!(!overlapped.load(Ordering::SeqCst), "the pulls overlapped");
+    }
+
+    // ---- the provider a checkpoint names (T4's gate, fed by a real writer) ----
+
+    /// The production writer resolves the supervisor conversation's provider from the shipped
+    /// manifests, and that provider is one the restore gates can actually judge.
+    ///
+    /// This is the fact the audit found missing: `manifest.provider` used to have no production
+    /// writer, so both gates only ever saw `None` from a real archive. An id, a declared
+    /// capability and an id the gate resolves (rather than refusing as unknown) are what make the
+    /// refusal reachable.
+    #[test]
+    fn the_exporter_names_a_provider_the_gates_can_judge() {
+        // The supervisor's own turns run on the retained `mhc` engine, which the registry files
+        // as `maho` (its command name), not as omo.
+        assert_eq!(
+            crate::agent_detect::registry::resolve("mhc").map(|spec| spec.id),
+            Some("maho"),
+            "the supervisor engine is maho's binary"
+        );
+        let provider = crate::supervisor_checkpoint::supervisor_conversation_provider()
+            .expect("the supervisor conversation has a provider");
+        // `maho` has no manifest of its own: it runs omo's TUI, so omo.toml describes those
+        // screens. Both gates resolve ids against the manifests, so the archive must name the
+        // manifest id; recording the registry id would name a provider no manifest answers to.
+        assert_eq!(
+            provider.id, "omo",
+            "maho runs omo's TUI, so omo's manifest is the one that answers for it"
+        );
+        assert!(
+            crate::agent_detect::registry::launch_binary("omo", "mhc").is_some(),
+            "mhc is omo's launcher variant too, which is why omo's manifest covers the pane"
+        );
+        assert!(
+            crate::agent_detect::provider_adapter(&provider.id).is_some(),
+            "the recorded id is one the shipped manifests answer to, so the gate can judge it"
+        );
+        // T3: every shipped manifest declares nothing, so the honest value today is `false`. When
+        // a provider measures rollback this assertion flips with it, which is the signal that the
+        // refusal below stops firing - never a silent change.
+        assert!(
+            !provider.rollback_conversation,
+            "no shipped manifest declares rollbackConversation yet"
+        );
+    }
+
+    /// The whole chain on a real archive: export through the same writer the checkpoint publisher
+    /// uses, read the manifest back with the reader the gate uses, refuse it. Nothing here edits
+    /// archive bytes.
+    #[tokio::test]
+    async fn a_real_export_names_its_provider_and_the_live_gate_refuses_the_restore() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let pool = hub_with_owner(&source, "owner:u1").await;
+        let archive = root.path().join("checkpoint.tar.zst");
+        let mut request = ferryx_hub::checkpoint::ExportRequest::new(
+            source.clone(),
+            "machine-a".into(),
+            archive.clone(),
+            ferryx_hub::checkpoint_import::default_private_writer(),
+        );
+        // Exactly what `publish_checkpoint_naming` does.
+        request.provider = crate::supervisor_checkpoint::supervisor_conversation_provider();
+        let exported = ferryx_hub::checkpoint::export(&pool, &request).await.unwrap();
+        pool.close().await;
+
+        let written = exported
+            .manifest
+            .provider
+            .clone()
+            .expect("the exported manifest names a provider");
+        let read = ferryx_hub::checkpoint::peek_manifest(&archive)
+            .unwrap()
+            .and_then(|manifest| manifest.provider)
+            .expect("the reader the gate uses sees the same provider");
+        assert_eq!(read, written, "writer and reader agree on the archive's provider");
+
+        // The live half refuses, naming the provider: it calls
+        // `authorize_provider_rollback_by_id` on the id a real archive now carries.
+        let error = refuse_unless_live_provider_rollback(&archive)
+            .await
+            .expect_err("a provider that declared no rollback is refused");
+        assert_eq!(error.code, ferryx_hub::checkpoint::CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED);
+        assert!(
+            error.message.contains(&format!("provider '{}'", written.id)),
+            "the refusal names the provider: {}",
+            error.message
+        );
+
+        // And the hub half refuses the same archive before it stages anything.
+        let target = root.path().join("target");
+        let refused = ferryx_hub::checkpoint_import::import(
+            &archive,
+            &target,
+            "machine-b",
+            &[],
+            ferryx_hub::checkpoint_import::ImportOptions {
+                memory_root: root.path().join("memory-agents"),
+                env_file: target.join("env"),
+                profile_omo_jsonc: None,
+                now_ts: NOW,
+                write_private: ferryx_hub::checkpoint_import::default_private_writer(),
+            },
+        )
+        .await
+        .expect_err("the archive-side gate refuses it too");
+        assert_eq!(
+            refused.code(),
+            ferryx_hub::checkpoint::CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED
+        );
+        assert!(!target.exists(), "the refusal wrote nothing");
+    }
+
+    /// A `provider: null` archive - what every checkpoint written before this field had a writer
+    /// carries, and what a hub with no provider knowledge still records - imports through both
+    /// gates.
+    #[tokio::test]
+    async fn a_legacy_null_provider_archive_passes_both_gates() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let pool = hub_with_owner(&source, "owner:u1").await;
+        let archive = root.path().join("checkpoint.tar.zst");
+        // `ExportRequest::new` leaves `provider` as `None`: the exact pre-writer shape.
+        let exported = ferryx_hub::checkpoint::export(
+            &pool,
+            &ferryx_hub::checkpoint::ExportRequest::new(
+                source.clone(),
+                "machine-a".into(),
+                archive.clone(),
+                ferryx_hub::checkpoint_import::default_private_writer(),
+            ),
+        )
+        .await
+        .unwrap();
+        pool.close().await;
+        assert_eq!(exported.manifest.provider, None);
+
+        refuse_unless_live_provider_rollback(&archive)
+            .await
+            .expect("an archive naming no provider has nothing to refuse");
+
+        let target = root.path().join("target");
+        stage_import(
+            &archive,
+            &target,
+            "machine-b",
+            &[],
+            false,
+            || ferryx_hub::checkpoint_import::ImportOptions {
+                memory_root: root.path().join("memory-agents"),
+                env_file: target.join("env"),
+                profile_omo_jsonc: None,
+                now_ts: NOW,
+                write_private: ferryx_hub::checkpoint_import::default_private_writer(),
+            },
+        )
+        .await
+        .expect("a legacy archive still imports");
+        assert!(
+            target.join(ferryx_hub::checkpoint_import::INCOMING_DB).exists(),
+            "the legacy archive is staged"
+        );
     }
 }

@@ -20,6 +20,9 @@ use crate::remote::auth::{DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::scoped_contracts::{ScopeError, ScopeErrorCode};
 
 use super::AgentControlOp;
+use crate::agent_detect::{
+    refuse_unless_rollback_for, ProviderAdapter, ProviderCapability, ProviderRefusal,
+};
 
 /// The largest JSON body an agent-control mutation route accepts.
 pub const AGENT_CONTROL_HTTP_BODY_MAX: usize = 64 * 1024;
@@ -277,6 +280,51 @@ pub fn refusal(code: ScopeErrorCode, message: impl Into<String>) -> ScopeError {
         message: message.into(),
         retryable: false,
         details: serde_json::Value::Null,
+    }
+}
+
+/// The provider gate a checkpoint restore runs before it touches a single byte on disk.
+///
+/// A restore that puts the filesystem back without rewinding the provider's conversation leaves
+/// the two out of step, and nothing downstream can repair that. So the answer has to come from
+/// the provider's declared capabilities (`agent_detect::adapter`), not from the fact that agent
+/// control can type into the pane: control of a pane is not control of a conversation.
+///
+/// Refusals are typed and non-retryable: a provider that did not declare rollback will not
+/// declare it on the next attempt. An unknown provider is refused as well - a missing manifest is
+/// not evidence that a conversation can be rewound.
+pub fn authorize_provider_rollback(provider: &ProviderAdapter) -> Result<(), ScopeError> {
+    provider
+        .require(ProviderCapability::RollbackConversation)
+        .map_err(provider_refusal)
+}
+
+/// [`authorize_provider_rollback`] for a provider named by id or alias, resolved against the
+/// shipped manifests.
+pub fn authorize_provider_rollback_by_id(provider: &str) -> Result<(), ScopeError> {
+    refuse_unless_rollback_for(provider).map_err(provider_refusal)
+}
+
+/// The wire error a [`ProviderRefusal`] becomes. Kept beside the device checks above so a caller
+/// has one refusal vocabulary, not two.
+fn provider_refusal(reason: ProviderRefusal) -> ScopeError {
+    match reason {
+        // No manifest answers to the id: the restore cannot be evaluated at all.
+        ProviderRefusal::UnknownProvider(provider) => refusal(
+            ScopeErrorCode::NotFound,
+            format!("unknown provider '{provider}': a restore cannot be planned for it"),
+        ),
+        // Known provider, declared no rollback: a typed "this provider cannot rewind".
+        ProviderRefusal::MissingCapability {
+            provider,
+            capability,
+        } => refusal(
+            ScopeErrorCode::Unsupported,
+            format!(
+                "provider '{provider}' does not declare {}: restart the session instead of restoring it",
+                capability.as_str()
+            ),
+        ),
     }
 }
 
@@ -560,6 +608,32 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"enabled\": tru", "the file is left for the owner");
         std::fs::write(&path, b"{\"excludedDeviceIds\": []}").expect("write file without enabled");
         assert!(!AgentControlPolicy::load(Some(&path), || true).permits("dev-1"));
+    }
+
+    #[test]
+    fn a_provider_without_rollback_is_refused_before_any_restore_touches_the_tree() {
+        // The refusal is the gate T4 calls first. Every shipped provider declares nothing, so
+        // every one of them must be refused; the code is `Unsupported`, not a retryable failure.
+        for adapter in crate::agent_detect::shipped_adapters() {
+            let error = authorize_provider_rollback(adapter)
+                .expect_err("a provider that declares no rollback must be refused");
+            assert_eq!(error.code, ScopeErrorCode::Unsupported);
+            assert!(!error.retryable, "waiting does not make a conversation rewindable");
+            assert!(
+                error.message.contains(&adapter.id),
+                "the refusal names the provider: {}",
+                error.message
+            );
+        }
+        // By id, through the same shipped-manifest lookup a restore would use.
+        let by_id = authorize_provider_rollback_by_id("claude")
+            .expect_err("claude declares no rollback");
+        assert_eq!(by_id.code, ScopeErrorCode::Unsupported);
+        // An id no manifest answers to is refused as unknown rather than assumed capable.
+        let unknown = authorize_provider_rollback_by_id("no-such-agent")
+            .expect_err("an unknown provider cannot be restored");
+        assert_eq!(unknown.code, ScopeErrorCode::NotFound);
+        assert!(!unknown.retryable);
     }
 
     #[test]

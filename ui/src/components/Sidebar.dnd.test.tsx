@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
+import { LANE_LIFECYCLE_IMPORT_STORAGE_KEY, setLaneLifecycleTransport, type LaneLifecycleTransport, type LaneLifecycleView } from "../lib/sidebarPersistence";
+import { useWorkspaceStore, type WorkspaceServices } from "../state/workspaceStore";
 import { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, SIDEBAR_WORKTREE_ORDER_STORAGE_KEY } from "./Sidebar";
 
 type DragData =
@@ -114,6 +116,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  setLaneLifecycleTransport(null);
   dndHarness.props = null;
 });
 
@@ -179,6 +182,236 @@ describe("Sidebar drag reorder", () => {
     unmount();
     renderSidebar();
     expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+  });
+
+  it("refreshes the authoritative store order after a saved drag and retains it on rerender", async () => {
+    localStorage.setItem(LANE_LIFECYCLE_IMPORT_STORAGE_KEY, "imported");
+    const keys = ["w:alpha/first", "w:alpha/second"];
+    let serverOrder = [...keys];
+    let finishSave!: () => void;
+    const save = new Promise<void>((resolve) => { finishSave = resolve; });
+    const rows = new Map(keys.map((key, index) => [key, {
+      worktreeKey: key, workspaceId: "alpha", worktreePath: [first, second][index]!.path,
+      state: "active", effectiveState: "active", pinnedTabs: [], snoozedUntil: null,
+      position: index, revision: 1, updatedAt: "2026-11-15T00:00:00Z",
+    } satisfies LaneLifecycleView]));
+    const read = vi.fn(async () => ({
+      sections: [{ workspaceId: "alpha", rows: serverOrder.map((key) => rows.get(key)!) }], revision: 1,
+    }));
+    const reorder = vi.fn(async (_workspaceId: string, identifiers: readonly string[]) => {
+      await save;
+      serverOrder = [...identifiers];
+    });
+    const api: LaneLifecycleTransport = {
+      read, reorder, importOrder: vi.fn(async () => false),
+      write: vi.fn(async () => { throw new Error("Unexpected lifecycle write"); }),
+      writePinTabs: vi.fn(async () => { throw new Error("Unexpected pin write"); }),
+    };
+    setLaneLifecycleTransport(api);
+    const services: WorkspaceServices = {
+      ensureTerminalEvents: vi.fn(async () => undefined), spawnTerminal: vi.fn(async () => "unused"),
+      getTerminalCwd: vi.fn(async () => null), closeTerminal: vi.fn(async () => undefined),
+      waitForTerminalExit: vi.fn(async () => undefined),
+    };
+    function Harness({ activePath = "" }: { activePath?: string }) {
+      const store = useWorkspaceStore({ workspaceId: "alpha", initialWorktrees: [first, second], services });
+      return <Sidebar projects={projects} activeProjectId="alpha" worktrees={store.state.worktrees}
+        agents={[]} activePath={activePath} laneOrder={store.state.laneOrder}
+        onRefreshLaneOrder={store.refreshLaneLifecycles} onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />;
+    }
+    let view!: ReturnType<typeof render>;
+    await act(async () => { view = render(<Harness />); });
+    expect(visibleWorktreeNames()).toEqual(["first", "second"]);
+    const readsBeforeSave = read.mock.calls.length;
+    drag(
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: first.path },
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: second.path },
+    );
+    expect(reorder).toHaveBeenCalledExactlyOnceWith("alpha", [keys[1], keys[0]]);
+    expect(read).toHaveBeenCalledTimes(readsBeforeSave);
+    await act(async () => { finishSave(); await save; });
+    expect(read).toHaveBeenCalledTimes(readsBeforeSave + 1);
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+    view.rerender(<Harness activePath={second.path} />);
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+  });
+
+  it("keeps an optimistic server-owned drag visible and reports a rejected save", async () => {
+    localStorage.setItem(LANE_LIFECYCLE_IMPORT_STORAGE_KEY, "imported");
+    const reorder = vi.fn(async () => { throw new Error("offline"); });
+    setLaneLifecycleTransport({
+      read: vi.fn(async () => ({ sections: [], revision: 1 })), reorder,
+      importOrder: vi.fn(async () => false),
+      write: vi.fn(async () => { throw new Error("Unexpected lifecycle write"); }),
+      writePinTabs: vi.fn(async () => { throw new Error("Unexpected pin write"); }),
+    });
+    const keys = ["w:alpha/first", "w:alpha/second"];
+    const lifecycleRows: Record<string, LaneLifecycleView> = Object.fromEntries(keys.map((worktreeKey, index) => [worktreeKey, {
+      worktreeKey, workspaceId: "alpha", worktreePath: [first, second][index]!.path,
+      state: "active", effectiveState: "active", pinnedTabs: [], snoozedUntil: null,
+      position: index, revision: 1, updatedAt: "2026-11-15T00:00:00Z",
+    }]));
+    renderSidebar({ laneOrder: { alpha: keys }, laneLifecycles: lifecycleRows });
+
+    drag(
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: first.path },
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: second.path },
+    );
+
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not save worktree order");
+    expect(reorder).toHaveBeenCalledExactlyOnceWith("alpha", ["w:alpha/second", "w:alpha/first"]);
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+  });
+
+  it("serializes same-workspace saves and does not let an older completion clear a newer drag", async () => {
+    localStorage.setItem(LANE_LIFECYCLE_IMPORT_STORAGE_KEY, "imported");
+    const keys = ["w:alpha/first", "w:alpha/second"];
+    const resolvers: Array<() => void> = [];
+    const reorder = vi.fn((_workspaceId: string, _identifiers: readonly string[]) => new Promise<void>((resolve) => {
+      resolvers.push(resolve);
+    }));
+    const rows: Record<string, LaneLifecycleView> = Object.fromEntries(keys.map((worktreeKey, index) => [worktreeKey, {
+      worktreeKey, workspaceId: "alpha", worktreePath: [first, second][index]!.path,
+      state: "active", effectiveState: "active", pinnedTabs: [], snoozedUntil: null,
+      position: index, revision: 1, updatedAt: "2026-11-15T00:00:00Z",
+    }]));
+    setLaneLifecycleTransport({
+      read: vi.fn(async () => ({ sections: [{ workspaceId: "alpha", rows: [rows[keys[0]!]!, rows[keys[1]!]!] }], revision: 1 })),
+      reorder, importOrder: vi.fn(async () => false),
+      write: vi.fn(async () => { throw new Error("Unexpected lifecycle write"); }),
+      writePinTabs: vi.fn(async () => { throw new Error("Unexpected pin write"); }),
+    });
+    const onRefreshLaneOrder = vi.fn(async () => undefined);
+    const view = renderSidebar({ laneOrder: { alpha: keys }, laneLifecycles: rows, onRefreshLaneOrder });
+
+    drag(
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: first.path },
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: second.path },
+    );
+    // The first save leaves inside the drop handler, so the drop itself already issued it once.
+    expect(reorder).toHaveBeenCalledExactlyOnceWith("alpha", [keys[1], keys[0]]);
+    await act(async () => { await Promise.resolve(); });
+    expect(reorder).toHaveBeenCalledTimes(1);
+
+    drag(
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: second.path },
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: first.path },
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(reorder).toHaveBeenCalledTimes(1);
+    expect(visibleWorktreeNames()).toEqual(["first", "second"]);
+
+    view.rerender(<Sidebar projects={projects} activeProjectId="alpha" worktrees={[first, second]} agents={[]}
+      activePath="" laneOrder={{ alpha: [keys[1]!, keys[0]!] }} laneLifecycles={rows}
+      onRefreshLaneOrder={onRefreshLaneOrder} onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />);
+    expect(visibleWorktreeNames()).toEqual(["first", "second"]);
+
+    await act(async () => { resolvers[0]!(); await Promise.resolve(); });
+    expect(reorder).toHaveBeenCalledTimes(2);
+    expect(onRefreshLaneOrder).not.toHaveBeenCalled();
+    await act(async () => { resolvers[1]!(); await Promise.resolve(); });
+    expect(onRefreshLaneOrder).toHaveBeenCalledTimes(1);
+    expect(visibleWorktreeNames()).toEqual(["first", "second"]);
+    view.unmount();
+  });
+
+  it("retains a successful optimistic order when no refresh callback can publish server state", async () => {
+    localStorage.setItem(LANE_LIFECYCLE_IMPORT_STORAGE_KEY, "imported");
+    const keys = ["w:alpha/first", "w:alpha/second"];
+    let finishWrite!: () => void;
+    const save = new Promise<void>((resolve) => { finishWrite = resolve; });
+    const reorder = vi.fn(async () => save);
+    const rows: Record<string, LaneLifecycleView> = Object.fromEntries(keys.map((worktreeKey, index) => [worktreeKey, {
+      worktreeKey, workspaceId: "alpha", worktreePath: [first, second][index]!.path,
+      state: "active", effectiveState: "active", pinnedTabs: [], snoozedUntil: null,
+      position: index, revision: 1, updatedAt: "2026-11-15T00:00:00Z",
+    }]));
+    setLaneLifecycleTransport({
+      read: vi.fn(async () => ({ sections: [], revision: 1 })), reorder,
+      importOrder: vi.fn(async () => false),
+      write: vi.fn(async () => { throw new Error("Unexpected lifecycle write"); }),
+      writePinTabs: vi.fn(async () => { throw new Error("Unexpected pin write"); }),
+    });
+    const view = renderSidebar({ laneOrder: { alpha: keys }, laneLifecycles: rows });
+    drag(
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: first.path },
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: second.path },
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(reorder).toHaveBeenCalledExactlyOnceWith("alpha", [keys[1], keys[0]]);
+    await act(async () => { finishWrite(); await save; });
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+    view.rerender(<Sidebar projects={projects} activeProjectId="alpha" worktrees={[first, second]} agents={[]}
+      activePath="" laneOrder={{ alpha: keys }} laneLifecycles={rows}
+      onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />);
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+  });
+
+  it("keeps optimistic order until the refreshed authoritative props commit", async () => {
+    localStorage.setItem(LANE_LIFECYCLE_IMPORT_STORAGE_KEY, "imported");
+    const keys = ["w:alpha/first", "w:alpha/second"];
+    const reorder = vi.fn(async () => undefined);
+    const rows: Record<string, LaneLifecycleView> = Object.fromEntries(keys.map((worktreeKey, index) => [worktreeKey, {
+      worktreeKey, workspaceId: "alpha", worktreePath: [first, second][index]!.path,
+      state: "active", effectiveState: "active", pinnedTabs: [], snoozedUntil: null,
+      position: index, revision: 1, updatedAt: "2026-11-15T00:00:00Z",
+    }]));
+    setLaneLifecycleTransport({
+      read: vi.fn(async () => ({ sections: [], revision: 1 })), reorder,
+      importOrder: vi.fn(async () => false),
+      write: vi.fn(async () => { throw new Error("Unexpected lifecycle write"); }),
+      writePinTabs: vi.fn(async () => { throw new Error("Unexpected pin write"); }),
+    });
+    const onRefreshLaneOrder = vi.fn(async () => undefined);
+    const view = renderSidebar({ laneOrder: { alpha: keys }, laneLifecycles: rows, onRefreshLaneOrder });
+    drag(
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: first.path },
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: second.path },
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(reorder).toHaveBeenCalledExactlyOnceWith("alpha", [keys[1], keys[0]]);
+    expect(onRefreshLaneOrder).toHaveBeenCalledExactlyOnceWith();
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+
+    view.rerender(<Sidebar projects={projects} activeProjectId="alpha" worktrees={[first, second]} agents={[]}
+      activePath="" laneOrder={{ alpha: keys }} laneLifecycles={rows}
+      onRefreshLaneOrder={onRefreshLaneOrder} onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />);
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+
+    view.rerender(<Sidebar projects={projects} activeProjectId="alpha" worktrees={[first, second]} agents={[]}
+      activePath="" laneOrder={{ alpha: [keys[1]!, keys[0]!] }} laneLifecycles={rows}
+      onRefreshLaneOrder={onRefreshLaneOrder} onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />);
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+  });
+
+  it("drops a failed optimistic order when a newer external server order arrives", async () => {
+    localStorage.setItem(LANE_LIFECYCLE_IMPORT_STORAGE_KEY, "imported");
+    const keys = ["w:alpha/first", "w:alpha/second"];
+    const reorder = vi.fn(async () => { throw new Error("offline"); });
+    const rows: Record<string, LaneLifecycleView> = Object.fromEntries(keys.map((worktreeKey, index) => [worktreeKey, {
+      worktreeKey, workspaceId: "alpha", worktreePath: [first, second][index]!.path,
+      state: "active", effectiveState: "active", pinnedTabs: [], snoozedUntil: null,
+      position: index, revision: 1, updatedAt: "2026-11-15T00:00:00Z",
+    }]));
+    setLaneLifecycleTransport({
+      read: vi.fn(async () => ({ sections: [], revision: 1 })), reorder,
+      importOrder: vi.fn(async () => false),
+      write: vi.fn(async () => { throw new Error("Unexpected lifecycle write"); }),
+      writePinTabs: vi.fn(async () => { throw new Error("Unexpected pin write"); }),
+    });
+    const view = renderSidebar({ laneOrder: { alpha: keys }, laneLifecycles: rows });
+    drag(
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: first.path },
+      { type: "sidebar-worktree", workspaceId: "alpha", worktreePath: second.path },
+    );
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(visibleWorktreeNames()).toEqual(["second", "first"]);
+
+    view.rerender(<Sidebar projects={projects} activeProjectId="alpha" worktrees={[first, second]} agents={[]}
+      activePath="" laneOrder={{ alpha: [keys[0]!, keys[1]!] }} laneLifecycles={rows}
+      onSelectWorktree={vi.fn()} onCreateWorktree={vi.fn()} />);
+    expect(visibleWorktreeNames()).toEqual(["first", "second"]);
   });
 
   it("appends a newly appearing worktree after the stored paths in incoming order", () => {

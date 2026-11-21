@@ -34,6 +34,9 @@ import {
   persistCollapsedProjects,
   persistSidebarWidth,
   persistWorktreeOrder,
+  persistLaneOrder,
+  localWorktreeOrderImported,
+  type SidebarLaneLifecycle,
   type WorktreeOrder,
 } from "../lib/sidebarPersistence";
 import {
@@ -43,12 +46,13 @@ import {
 } from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
 import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
+import type { LaneLifecycleAction } from "../state/workspaceStore";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type SidebarDragData } from "./sidebar-dnd/sidebarDragData";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { SupervisorPanelHost } from "./supervisorPanel/SupervisorPanelHost";
 import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
-import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
+import { worktreeLifecycleKey, sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
 import { SidebarProjectHeader } from "./sidebar/SidebarProjectHeader";
 import { agentStatesByPath, useSidebarModel } from "./sidebar/useSidebarModel";
@@ -85,6 +89,20 @@ type SidebarProps = {
   statuses?: Record<string, DirtyState | undefined>;
   unreadWorktreePaths?: Record<string, boolean>;
   activityByWorktreePath?: Record<string, ActivitySummary | undefined>;
+  /**
+   * The server-owned section order (`workspaceId -> lifecycle keys`). A workspace it names is
+   * ordered by the server and never by `localStorage` again, so a drag survives a restart.
+   */
+  laneOrder?: Readonly<Record<string, readonly string[]>>;
+  /** Reload the store-owned order after a drag write finishes, including a refused write. */
+  onRefreshLaneOrder?: () => Promise<void>;
+  /** Each row's server state and folded pin set, keyed by lifecycle key. */
+  laneLifecycles?: Readonly<Record<string, SidebarLaneLifecycle>>;
+  /**
+   * Pin / settle / snooze / archive one row. The Sidebar names the action; the 5 s undo window
+   * and the server write live in the store, so a cancelled action never reaches this call.
+   */
+  onLaneAction?: (worktree: Worktree, action: LaneLifecycleAction) => void;
   onSelectProject?: (project: RegisteredProject) => void;
   onReorderProjects?: (orderedWorkspaceIds: string[]) => void;
   onAddProject?: () => void;
@@ -127,6 +145,10 @@ export function Sidebar({
   statuses = {},
   unreadWorktreePaths,
   activityByWorktreePath,
+  laneOrder,
+  onRefreshLaneOrder,
+  laneLifecycles,
+  onLaneAction,
   onSelectProject = noop,
   onReorderProjects = noop,
   onAddProject = noop,
@@ -159,6 +181,20 @@ export function Sidebar({
   const worktreeOrderRef = useRef(worktreeOrder);
   worktreeOrderRef.current = worktreeOrder;
   const [activeDrag, setActiveDrag] = useState<SidebarDragData | null>(null);
+  const [laneOrderError, setLaneOrderError] = useState<string | null>(null);
+  const [optimisticLaneOrder, setOptimisticLaneOrder] = useState<Record<string, readonly string[]>>({});
+  const laneOrderGeneration = useRef(new Map<string, number>());
+  const laneOrderWrites = useRef(new Map<string, Promise<void>>());
+  const previousLaneOrder = useRef(laneOrder);
+  // The latest server order prop. A save settles in an async continuation, and a closure over the
+  // prop freezes the order as it was at drop time; comparing against that stale value let an older
+  // completion clear a newer drag.
+  const laneOrderRef = useRef(laneOrder);
+  laneOrderRef.current = laneOrder;
+  const refreshedLaneOrder = useRef(new Map<string, { generation: number; keys: readonly string[] }>());
+  // Workspaces whose last lane-order save was rejected. The optimistic order stays visible until
+  // the server's own order arrives; then the drag is over and the server wins.
+  const failedLaneOrder = useRef(new Set<string>());
   const menuAbortRef = useRef<AbortController | null>(null);
   useEffect(() => () => menuAbortRef.current?.abort(), []);
   const sensors = useSensors(
@@ -222,15 +258,76 @@ export function Sidebar({
 
   const { hosts } = useSshHosts();
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const renderedLaneOrder = useMemo(
+    () => (Object.keys(optimisticLaneOrder).length === 0 ? laneOrder : { ...laneOrder, ...optimisticLaneOrder }),
+    [laneOrder, optimisticLaneOrder],
+  );
   const { model, rowsInput } = useSidebarModel(
     { projects, activeProjectId, worktrees, inactiveProjectWorktrees },
-    { worktreeOrder, collapsedGroupIds: collapsedProjects },
+    {
+      worktreeOrder: renderedLaneOrder
+        ? Object.fromEntries(Object.entries(worktreeOrder).filter(([workspaceId]) => !renderedLaneOrder[workspaceId]))
+        : worktreeOrder,
+      collapsedGroupIds: collapsedProjects,
+      ...(renderedLaneOrder ? { laneOrder: renderedLaneOrder } : {}),
+      ...(laneLifecycles ? { laneLifecycles } : {}),
+    },
   );
   const naturalWorktreesByProject = useMemo(() => groupWorktreesByProject(rowsInput), [rowsInput]);
-  const worktreesByProject = useMemo(
-    () => applyWorktreeOrder(naturalWorktreesByProject, worktreeOrder),
-    [naturalWorktreesByProject, worktreeOrder],
-  );
+  // `model.worktrees` is the rendered order, so the drag list must match it or a drag lands a row
+  // at an index the user did not drop it on. `renderedLaneOrder` is the order the model renders:
+  // `laneOrder` (server) wins where it has an answer for the workspace, and the optimistic order
+  // overrides it while a drag write is pending or rejected.
+  const worktreesByProject = useMemo(() => {
+    const localOrder = renderedLaneOrder
+      ? Object.fromEntries(Object.entries(worktreeOrder).filter(([workspaceId]) => !renderedLaneOrder[workspaceId]))
+      : worktreeOrder;
+    const local = applyWorktreeOrder(naturalWorktreesByProject, localOrder);
+    if (!renderedLaneOrder || Object.keys(renderedLaneOrder).length === 0) return local;
+    const ordered = new Map<string, Worktree[]>();
+    for (const [workspaceId, rows] of local) {
+      const keys = renderedLaneOrder[workspaceId];
+      if (!keys || keys.length === 0) {
+        ordered.set(workspaceId, rows);
+        continue;
+      }
+      const rank = new Map(keys.map((key, index) => [key, index] as const));
+      ordered.set(workspaceId, [...rows].sort((left, right) =>
+        (rank.get(worktreeLifecycleKey(left, workspaceId)) ?? Number.MAX_SAFE_INTEGER) -
+        (rank.get(worktreeLifecycleKey(right, workspaceId)) ?? Number.MAX_SAFE_INTEGER)));
+    }
+    return ordered;
+  }, [naturalWorktreesByProject, renderedLaneOrder, worktreeOrder]);
+
+  useEffect(() => {
+    if (previousLaneOrder.current === laneOrder) return;
+    const previous = previousLaneOrder.current;
+    previousLaneOrder.current = laneOrder;
+    const changedWorkspaces = Object.keys(optimisticLaneOrder).filter((workspaceId) => {
+      const refreshed = refreshedLaneOrder.current.get(workspaceId);
+      if (refreshed && laneOrder?.[workspaceId]?.join("\u0000") === refreshed.keys.join("\u0000")) {
+        refreshedLaneOrder.current.delete(workspaceId);
+        return true;
+      }
+      if (refreshed) return false;
+      if (laneOrderWrites.current.has(workspaceId)) return false;
+      // A newer server order supersedes a rejected drag: that drag is over, the server wins.
+      if (failedLaneOrder.current.has(workspaceId)) return true;
+      return previous?.[workspaceId]?.join("\u0000") !== laneOrder?.[workspaceId]?.join("\u0000");
+    });
+    for (const workspaceId of changedWorkspaces) {
+      failedLaneOrder.current.delete(workspaceId);
+      laneOrderGeneration.current.set(workspaceId, (laneOrderGeneration.current.get(workspaceId) ?? 0) + 1);
+    }
+    setOptimisticLaneOrder((current) => {
+      if (changedWorkspaces.length === 0) return current;
+      const next = { ...current };
+      for (const workspaceId of changedWorkspaces) {
+        delete next[workspaceId];
+      }
+      return next;
+    });
+  }, [laneOrder, optimisticLaneOrder]);
   const projectById = useMemo(() => new Map(projects.map((project) => [project.workspaceId, project])), [projects]);
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.groupId, group])), [projectGroups]);
   const worktreeByKey = useMemo(() => {
@@ -340,6 +437,8 @@ export function Sidebar({
           onShowChanges,
           sortableWorkspaceId: node.groupId,
           agentsByPath,
+          laneState: row.lifecycle,
+          ...(onLaneAction ? { onLaneAction } : {}),
         })}
         live={rowLive}
       />
@@ -454,6 +553,54 @@ export function Sidebar({
     );
     worktreeOrderRef.current = nextOrder;
     setWorktreeOrder(nextOrder);
+    setLaneOrderError(null);
+    // After the one-time import the order is server-owned: the write goes to the server in
+    // lifecycle keys and `localStorage` is left alone. Before it, the local copy still stands and
+    // the next start's import hands this order over.
+    if (localWorktreeOrderImported()) {
+      const nextLaneOrder = (nextOrder[active.workspaceId] ?? []).map((id) => {
+        const row = rows.find((worktree) =>
+          worktreeSortableId(active.workspaceId, worktree.path, worktree.workspaceId) === id);
+        return row ? worktreeLifecycleKey(row, active.workspaceId) : id;
+      });
+      const workspaceId = active.workspaceId;
+      const generation = (laneOrderGeneration.current.get(workspaceId) ?? 0) + 1;
+      laneOrderGeneration.current.set(workspaceId, generation);
+      setOptimisticLaneOrder((current) => ({ ...current, [workspaceId]: nextLaneOrder }));
+      const writeOrder = async () => {
+        await persistLaneOrder(workspaceId, nextLaneOrder);
+        failedLaneOrder.current.delete(workspaceId);
+        if (laneOrderGeneration.current.get(workspaceId) !== generation) return;
+        if (!onRefreshLaneOrder) return;
+        await onRefreshLaneOrder();
+        if (laneOrderGeneration.current.get(workspaceId) !== generation) return;
+        refreshedLaneOrder.current.set(workspaceId, { generation, keys: nextLaneOrder });
+        if (laneOrderRef.current?.[workspaceId]?.join("\u0000") === nextLaneOrder.join("\u0000")) {
+          refreshedLaneOrder.current.delete(workspaceId);
+          setOptimisticLaneOrder((current) => {
+            if (laneOrderGeneration.current.get(workspaceId) !== generation) return current;
+            const { [workspaceId]: _saved, ...remaining } = current;
+            return remaining;
+          });
+        }
+      };
+      // Writes to one workspace stay ordered: each save waits for the one before it, so an older
+      // completion can never clear a newer drag. The first save starts inside the drop handler, so
+      // an idle workspace pays no microtask before its write leaves.
+      const previousWrite = laneOrderWrites.current.get(workspaceId);
+      const write = previousWrite
+        ? previousWrite.catch(() => undefined).then(writeOrder)
+        : writeOrder();
+      laneOrderWrites.current.set(workspaceId, write);
+      void write.catch((error: unknown) => {
+        if (laneOrderGeneration.current.get(workspaceId) !== generation) return;
+        failedLaneOrder.current.add(workspaceId);
+        console.error("Lane order write failed; keeping the dragged order visible.", error);
+        setLaneOrderError("Could not save worktree order. The displayed order is temporary.");
+      }).finally(() => {
+        if (laneOrderWrites.current.get(workspaceId) === write) laneOrderWrites.current.delete(workspaceId);
+      });
+    }
     persistWorktreeOrder(nextOrder);
   };
 
@@ -478,6 +625,7 @@ export function Sidebar({
         className="relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
         style={{ width: `${width}px`, minWidth: `${widthRange.min}px`, maxWidth: `${widthRange.max}px` }}
       >
+        {laneOrderError && <div role="alert" className="px-3 py-2 text-xs text-destructive">{laneOrderError}</div>}
         <SidebarView
           model={model}
           live={live}

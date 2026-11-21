@@ -7366,6 +7366,14 @@ impl DaemonServer {
                         Err(error) => crate::remote::server::agent_control_service::error_response(error),
                     }
                 }
+                Ok(DaemonRequest::AgentPromptResolveAmbiguous { session_id, prompt_id, screen_revision }) => {
+                    match crate::remote::server::agent_control_service::prompt_resolve_ambiguous(
+                        &self.remote_state, session_id, prompt_id, screen_revision,
+                    ).await {
+                        Ok(()) => DaemonResponse::AgentPromptResolveAmbiguousOk,
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
                 Ok(DaemonRequest::ReferenceChatIdentity) => DaemonResponse::ReferenceChatIdentityOk {
                     identity: crate::remote::server::desktop_reference_chat_identity(&self.remote_state),
                 },
@@ -8722,6 +8730,7 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY.into());
@@ -8729,12 +8738,14 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::LANE_LIFECYCLE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_CONVERSE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_PROMPT_RESOLVE_AMBIGUOUS_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_MEMORY_BLOCK_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY.into());
@@ -8936,6 +8947,16 @@ impl DaemonServer {
                     };
                     match crate::hub_runtime::supervisor_request(self.remote_state(), caller, envelope).await {
                         Ok(receipt) => DaemonResponse::SupervisorRequestV1Ok { receipt },
+                        Err(failure) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
+                    }
+                }
+                Ok(DaemonRequest::LaneLifecycle { operation, body }) => {
+                    match crate::hub_runtime::lane_lifecycle(&operation, body).await {
+                        Ok((status, value)) => DaemonResponse::LaneLifecycleOk { status, value },
                         Err(failure) => DaemonResponse::Error {
                             message: failure.message.clone(),
                             code: Some(failure.code.clone()),
@@ -10883,7 +10904,7 @@ impl DaemonServer {
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // Re-subscribe with sequence after last_seen_sequence to recover replay gap
-                    if let Some((mut att, history_ranges)) =
+                    if let Some((att, history_ranges)) =
                         hub.subscribe_with_sequence_ranges(&session_id, last_seen_sequence)
                     {
                         rx = att.receiver;
@@ -10903,7 +10924,7 @@ impl DaemonServer {
                             .map(|gap| gap.available_from_sequence)
                             .or(att.snapshot.history_start_sequence)
                             .unwrap_or_else(|| requested_after_sequence.saturating_add(1));
-                        let lag_history = Bytes::from(std::mem::take(&mut att.snapshot.history));
+                        let lag_history = Bytes::from(att.snapshot.history);
                         let segments = history_ranges
                             .iter()
                             .map(|r| HistorySegmentWire {

@@ -200,11 +200,14 @@ export function usePageActive(graceMs: number): boolean {
  * relays its frames to the bus. Without it a signed-in account that has not opened a worktree
  * (the phone home, the wide Supervisor tab) never hears `supervisorChanged`: a goal another
  * surface admitted, or the dispatcher moved, would stay stale until the next manual action.
- * The daemon opens each subscription with an `inventoryInvalidated {reason: subscribe}`
- * boundary, which makes every view refetch once. A suspension or plan limit stops the retries
- * and is reported through `onPlanLimit`, like the active connection's socket does. While the
- * page stays hidden past MACHINE_EVENTS_HIDDEN_GRACE_MS the sockets close; showing it again
- * reopens them, and the subscribe boundary refetches what changed meanwhile.
+ * The daemon opens each subscription with an `inventoryInvalidated` boundary, which makes every
+ * view refetch once. Its reason is `restart` for the one subscriber that arrives after the
+ * daemon raised the stream's numeric floor above rows restored from its journal, and `subscribe`
+ * for every later one: after a restart the boundary can be numbered at a reading the client
+ * already saw, and the reason is the only mark that it must re-read. A suspension or plan limit
+ * stops the retries and is reported through `onPlanLimit`, like the active connection's socket
+ * does. While the page stays hidden past MACHINE_EVENTS_HIDDEN_GRACE_MS the sockets close;
+ * showing it again reopens them, and that opening boundary refetches what changed meanwhile.
  */
 export function useMachineEventSockets({ enabled, machines, linkFor, skip, open, bus, onPlanLimit }: MachineEventSocketsInput): void {
   const pageActive = usePageActive(MACHINE_EVENTS_HIDDEN_GRACE_MS);

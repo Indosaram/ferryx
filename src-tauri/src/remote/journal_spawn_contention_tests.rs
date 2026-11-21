@@ -109,7 +109,14 @@ async fn spawn_contention(expire: bool) {
         *service.journal.probe.write() = Some(Arc::new(move |phase| match phase {
             "persist" => if let Some(tx) = held_tx.lock().unwrap().take() {
                 let _ = tx.send(());
-                release_rx.lock().unwrap().recv_timeout(Duration::from_secs(60)).unwrap();
+                let parked = started.elapsed().as_millis();
+                let released = release_rx.lock().unwrap().recv_timeout(Duration::from_secs(60));
+                eprintln!(
+                    "A09_PHASE expire={expire} phase=release parked_ms={parked} ms={} released={}",
+                    started.elapsed().as_millis(),
+                    released.is_ok()
+                );
+                released.unwrap();
             },
             "reconcile" => if let Some(tx) = read_tx.lock().unwrap().take() { let _ = tx.send(()); },
             _ => {}
@@ -126,7 +133,19 @@ async fn spawn_contention(expire: bool) {
             let auth = state.auth_manager.clone(); let device = device.clone();
             crate::ipc::run_blocking(move || Ok(auth.revoke_device(&device).unwrap())).await.unwrap();
         }
-        let result = tokio::time::timeout(Duration::from_secs(45), response.as_mut().unwrap()).await.unwrap().unwrap().unwrap();
+        eprintln!("A09_PHASE expire={expire} phase=observe ms={}", started.elapsed().as_millis());
+        let observed = tokio::time::timeout(Duration::from_secs(45), response.as_mut().unwrap()).await;
+        let observed_kind = match &observed {
+            Err(_) => "window_expired".to_string(),
+            Ok(Err(_)) => "join_failed".to_string(),
+            Ok(Ok(Err(_))) => "request_failed".to_string(),
+            Ok(Ok(Ok(result))) => format!("http_status={}", result.status().as_u16()),
+        };
+        eprintln!(
+            "A09_PHASE expire={expire} phase=response ms={} observed={observed_kind}",
+            started.elapsed().as_millis()
+        );
+        let result = observed.unwrap().unwrap().unwrap();
         response.take();
         assert_eq!(result.status().as_u16(), if expire { 504 } else { 401 });
         if expire { assert!(started.elapsed() >= Duration::from_secs(40)); }
@@ -142,9 +161,7 @@ async fn spawn_contention(expire: bool) {
         .unwrap();
     drop(gate.take());
     let _ = release_tx.send(());
-    if let Some(writer) = writer {
-        writer.join().unwrap();
-    }
+    let writer_panic = writer.and_then(|handle| handle.join().err());
     if let Some(response) = response {
         let _ = tokio::time::timeout(Duration::from_secs(10), response)
             .await
@@ -190,8 +207,13 @@ async fn spawn_contention(expire: bool) {
     .unwrap();
     eprintln!("A09_FINAL pid={} cleanup writer_joined=true gateway_joined=true listener_refused=true root_removed=true no_pty={no_pty} no_intent={no_intent}", std::process::id());
     assert!(no_pty && no_intent);
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic);
+    match outcome {
+        Err(panic) => std::panic::resume_unwind(panic),
+        Ok(()) => {
+            if let Some(panic) = writer_panic {
+                std::panic::resume_unwind(panic);
+            }
+        }
     }
 }
 

@@ -350,6 +350,55 @@ impl MachineTestFixture {
     }
 }
 
+#[tokio::test]
+async fn machine_socket_full_replay_strips_queries_but_preserves_cursor_requests() {
+    let fixture = MachineTestFixture::new().await;
+    let raw = b"T8_FULL_START\x1b[5n\x1b[c\x1b]11;?\x07\x1b[6n\x1b[?6n\x1b[1;1RT8_FULL_END";
+    fixture.owner.terminal_service().output_hub()
+        .publish(&fixture.session_id, raw.to_vec()).expect("publish full replay");
+    let mut socket = open_ws(
+        fixture.server.addr,
+        &format!("/api/v1/terminal/{}?daemonEpoch={}", fixture.session_id, fixture.epoch),
+        Some(&fixture.token),
+    ).await;
+    let _ = read_attached_frame(&mut socket).await;
+    let replay = read_binary_frame_matching(&mut socket, |bytes| {
+        bytes.windows(b"T8_FULL_END".len()).any(|part| part == b"T8_FULL_END")
+    }).await;
+    let expected = b"T8_FULL_START\x1b[6n\x1b[?6n\x1b[1;1RT8_FULL_END";
+    assert!(replay.windows(expected.len()).any(|part| part == expected));
+    for query in [b"\x1b[5n".as_slice(), b"\x1b[c", b"\x1b]11;?\x07"] {
+        assert!(!replay.windows(query.len()).any(|part| part == query));
+    }
+    socket.close(None).await.expect("close socket");
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn machine_socket_delta_replay_preserves_split_utf8_and_device_queries() {
+    let fixture = MachineTestFixture::new().await;
+    let hub = fixture.owner.terminal_service().output_hub();
+    let lead = hub.publish(&fixture.session_id, vec![0xe2]).expect("publish lead").sequence;
+    let tail = b"\x82\xac\x1b[5nT8_DELTA_END";
+    hub.publish(&fixture.session_id, tail.to_vec()).expect("publish tail");
+    let mut socket = open_ws(
+        fixture.server.addr,
+        &format!("/api/v1/terminal/{}?daemonEpoch={}&afterSequence={lead}", fixture.session_id, fixture.epoch),
+        Some(&fixture.token),
+    ).await;
+    let _ = read_attached_frame(&mut socket).await;
+    let replay = read_binary_frame_matching(&mut socket, |bytes| {
+        bytes.windows(b"T8_DELTA_END".len()).any(|part| part == b"T8_DELTA_END")
+    }).await;
+    assert!(replay.windows(tail.len()).any(|part| part == tail));
+    let position = replay.windows(tail.len()).position(|part| part == tail).expect("tail present");
+    let mut character = vec![0xe2];
+    character.extend_from_slice(&replay[position..position + 2]);
+    assert_eq!(String::from_utf8(character).expect("valid UTF-8"), "\u{20ac}");
+    socket.close(None).await.expect("close socket");
+    fixture.stop().await;
+}
+
 fn frame_contains_text(frame: &RemoteGridFrame, expected: &str) -> bool {
     let lines = match frame {
         RemoteGridFrame::Grid { lines, .. } | RemoteGridFrame::GridDiff { lines, .. } => lines,

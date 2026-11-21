@@ -22,8 +22,17 @@ pub const SSH_TUNNEL_CAPABILITY: &str = "sshTunnelV1";
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `PasteWrite`/`CancelPaste`.
 pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
+/// Optional desktop lifecycle operations; never send them without negotiating this capability.
+pub const LANE_LIFECYCLE_CAPABILITY: &str = "laneLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `AgentPromptGet`/`AgentPromptAnswer`.
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
+/// Advertised in `GetCapabilities` by a daemon that serves `AgentPromptResolveAmbiguous`.
+///
+/// Additive to [`AGENT_PROMPT_CAPABILITY`], not a bump of it: a predecessor advertises
+/// `agentPromptV1` and answers prompt reads and answers, but it cannot decode this request at
+/// all. The caller therefore negotiates this name on the very connection that would carry the
+/// request, instead of inferring support from the older name.
+pub const AGENT_PROMPT_RESOLVE_AMBIGUOUS_CAPABILITY: &str = "agentPromptResolveAmbiguousV1";
 /// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
 pub const AGENT_LAUNCH_CAPABILITY: &str = "agentLaunchV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `AgentMemoryBlock`.
@@ -1527,6 +1536,9 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         mcp: bool,
     },
+    /// Desktop lane lifecycle surface, using the hub's shared wire contract.
+    #[serde(rename_all = "camelCase")]
+    LaneLifecycle { operation: String, body: serde_json::Value },
     /// A read-only unified supervisor view (conversation page or memory receipts), served by
     /// the same hub service as the remote `GET /api/v1/supervisor/*` routes.
     #[serde(rename = "supervisorReadV1", rename_all = "camelCase")]
@@ -1574,6 +1586,12 @@ pub enum DaemonRequest {
         answer: AgentPromptAnswerInput,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         registry_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentPromptResolveAmbiguous {
+        session_id: String,
+        prompt_id: String,
+        screen_revision: String,
     },
     PairedHostList,
     /// Gated by `pairedHostReachabilityV1`; an older daemon never receives it.
@@ -1989,6 +2007,8 @@ pub struct AgentPromptView {
     /// Picking an option must be confirmed first (approval, plan and menu prompts), by the same
     /// rule the remote chat applies.
     pub needs_confirmation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_status: Option<String>,
 }
 
 /// Authenticated identity of a paired DAG subscription. The desktop names the host
@@ -2165,6 +2185,8 @@ pub enum DaemonResponse {
     AgentPromptAnswerOk {
         receipt: crate::scoped_contracts::DeliveryReceipt,
     },
+    #[serde(rename_all = "camelCase")]
+    AgentPromptResolveAmbiguousOk,
     #[serde(rename_all = "camelCase")]
     ProtocolMismatch {
         expected_version: u32,
@@ -2387,6 +2409,9 @@ pub enum DaemonResponse {
     SupervisorRequestV1Ok {
         receipt: serde_json::Value,
     },
+    /// Status and JSON body of the hub lifecycle handler.
+    #[serde(rename_all = "camelCase")]
+    LaneLifecycleOk { status: u16, value: serde_json::Value },
     /// The view a `SupervisorReadV1` asked for.
     #[serde(rename = "supervisorReadV1Ok", rename_all = "camelCase")]
     SupervisorReadV1Ok {
@@ -4299,6 +4324,7 @@ mod tests {
                 .expect("deserialize legacy handshake");
         match legacy {
             DaemonRequest::Handshake { version, token } => {
+                // A legacy frame decodes with its own version; negotiation rejects it later.
                 assert_eq!(version, 5);
                 assert_eq!(token, None);
             }

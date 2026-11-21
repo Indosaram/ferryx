@@ -230,7 +230,7 @@ import { App } from "./App";
 import { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY } from "./lib/storageKeys";
 import { remoteHostStore } from "./state/remoteHostStore";
 import { resetWorkspaceRestore } from "./state/workspaceRestore";
-import { clearWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
+import { clearWorkspaceSnapshot, getWorkspaceSnapshot, setWorkspaceSnapshot, subscribeWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { clearHmrWorkspaceState } from "./state/hmrWorkspaceState";
 import { setLocalRecoveryPersistence } from "./state/workspaceStore";
 
@@ -1037,6 +1037,67 @@ describe("App paired recovery boundary", () => {
     expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
     unsubscribe();
   }, 1000);
+
+  it("cancels a local recovery admission when an external daemon epoch replaces the captured epoch", async () => {
+    const localProject: RegisteredProject = { workspaceId: "local", repoRoot: "/local", gitRoot: null };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([localProject]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "local");
+    const retained: PersistedWorkspaceSession = {
+      version: 2, timestamp: Date.now(), activeWorkspaceId: "local",
+      workspaces: { local: {
+        activeWorktreePath: "/local", workspaceId: "local", repoRoot: "/local",
+        worktrees: [{ path: "/local", branch: "", head: "", isMain: true, isLocked: false }],
+        terminalSessions: { "local-session": {
+          localSessionId: "local-session", backendSessionId: "backend-local", worktreePath: "/local",
+          cwd: "/local", createdAt: Date.now(), daemonEpoch: "epoch-before", incarnation: "inc-local",
+        } },
+        layout: { splitMode: "none", primaryTabId: "local-tab", secondaryTabId: null, activeTabId: "local-tab",
+          tabs: [{ id: "local-tab", label: "local terminal", sessionId: "local-session", kind: "terminal" }] },
+      } },
+    };
+    native.loadSession.mockResolvedValue(retained);
+    let resolveDescribe!: (value: { sessionId: string; daemonEpoch: string; incarnation: string; running: boolean;
+      recoveryAuthority: { status: "running"; daemonEpoch: string; incarnation: string } }) => void;
+    const describeStarted = new Promise<void>((resolve) => {
+      native.describeTerminal.mockImplementationOnce(() => new Promise((resolveResult) => {
+        resolveDescribe = resolveResult;
+        resolve();
+      }));
+    });
+    await renderRestoredApp();
+    const results: import("./state/workspaceStore").LocalRecoveryAdmissionResult[] = [];
+    let resolveCancelled!: (result: import("./state/workspaceStore").LocalRecoveryAdmissionResult) => void;
+    const cancelled = new Promise<import("./state/workspaceStore").LocalRecoveryAdmissionResult>((resolve) => {
+      resolveCancelled = resolve;
+    });
+    let sawExternalEpoch = false;
+    const unsubscribeSnapshots = subscribeWorkspaceSnapshots(() => {
+      if (getWorkspaceSnapshot("local")?.sessions["local-session"]?.daemonEpoch === "epoch-external") sawExternalEpoch = true;
+    });
+    await act(async () => {
+      requestRecoveryAdmission!("local-session", (result) => {
+        results.push(result);
+        if (result.kind === "cancelled") resolveCancelled(result);
+      });
+      await describeStarted;
+    });
+    await act(async () => {
+      const snapshot = getWorkspaceSnapshot("local");
+      expect(snapshot?.sessions["local-session"]?.daemonEpoch).toBe("epoch-before");
+      setWorkspaceSnapshot("local", { ...snapshot!, sessions: { ...snapshot!.sessions,
+        "local-session": { ...snapshot!.sessions["local-session"], daemonEpoch: "epoch-external" } } });
+    });
+    await act(async () => {
+      resolveDescribe({ sessionId: "backend-local", daemonEpoch: "epoch-after", incarnation: "inc-local", running: true,
+        recoveryAuthority: { status: "running", daemonEpoch: "epoch-after", incarnation: "inc-local" } });
+      await cancelled;
+    });
+    unsubscribeSnapshots();
+    expect(sawExternalEpoch).toBe(true);
+    expect(results).toContainEqual({ kind: "cancelled" });
+    expect(native.saveSession.mock.calls.every((call) =>
+      call[0].workspaces.local.terminalSessions["local-session"]?.daemonEpoch !== "epoch-after")).toBe(true);
+  });
 
   it("cancels cleanly without fake exit when terminal status registration rejects", async () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([pairedProject]));

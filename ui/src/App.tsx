@@ -205,6 +205,8 @@ import { assessClose, reassessConfirmedClose, type CloseTarget } from "./lib/clo
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import { useDesktopSidebarPublisher } from "./lib/desktopSidebarSync";
+import type { LaneLifecycleState, LanePullRequestView, SidebarLaneLifecycle } from "./lib/sidebarPersistence";
+import { worktreeLifecycleIdentity } from "./lib/sidebarPersistence";
 import {
   isTerminalTab,
   worktreeIdentity,
@@ -229,7 +231,7 @@ import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { layoutSyncHostTransport, useLayoutSync, usePairedLayoutAdapter } from "./state/useLayoutSync";
 import { publishPersistedLayouts } from "./state/layoutSync";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
-import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, LANE_LIFECYCLE_UNDO_MS, type LaneLifecycleAction, type WorkspaceState } from "./state/workspaceStore";
 import { activityStateOfGroup, groupOf, type AttentionBySessionId } from "./lib/attentionGroup";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
@@ -497,6 +499,73 @@ function pairedHostMachineId(hostId: string): string {
   const marker = hostId.lastIndexOf("/host/");
   return marker < 0 ? hostId : decodeURIComponent(hostId.slice(marker + "/host/".length));
 }
+
+/**
+ * The server-owned sidebar order and per-row lifecycle state, shaped for `buildSidebarModel`.
+ *
+ * It is a pure derivation of the store (`laneOrder` / `laneLifecycle` / `lanePinnedTabs`), so the
+ * sidebar and the publisher cannot disagree about a row's state, and nothing here re-reads the
+ * server: `workspaceStore` owns that read and its 5 s undo window.
+ */
+function useLaneLifecycleModel(
+  order: Readonly<Record<string, readonly string[]>> | undefined,
+  lifecycle: Readonly<Record<string, LaneLifecycleState>> | undefined,
+  pinnedTabs: Readonly<Record<string, readonly string[]>> | undefined,
+  pullRequests: Readonly<Record<string, LanePullRequestView | null>> | undefined,
+): {
+  laneOrder: Record<string, string[]>;
+  laneLifecycles: Record<string, SidebarLaneLifecycle>;
+} {
+  return useMemo(() => {
+    const rows: Record<string, SidebarLaneLifecycle> = {};
+    for (const [key, state] of Object.entries(lifecycle ?? {})) {
+      const pins = pinnedTabs?.[key];
+      rows[key] = { state, ...(pins && pins.length > 0 ? { pinnedTabs: pins } : {}), pullRequest: pullRequests?.[key] ?? null };
+    }
+    const sections: Record<string, string[]> = {};
+    for (const [workspaceId, keys] of Object.entries(order ?? {})) {
+      if (keys.length > 0) sections[workspaceId] = [...keys];
+    }
+    return { laneOrder: sections, laneLifecycles: rows };
+  }, [order, lifecycle, pinnedTabs, pullRequests]);
+}
+
+/**
+ * Names the row a lifecycle action applies to and shows the undo affordance.
+ *
+ * The store holds the 5 s timer and auto-commits on expiry (`beginLaneLifecycle`); nothing here
+ * schedules anything. The toast's Undo is the ONLY caller of `cancelLaneLifecycle`, which clears
+ * that timer and removes the pending entry, so a cancel inside the window means the transport is
+ * never called and no row can have changed.
+ */
+function useLaneActionHandler(
+  projectWorkspaceId: string,
+  begin: (request: { worktreeKey: string; workspaceId: string; path: string; action: LaneLifecycleAction; until?: string | null }) => void,
+  cancel: (worktreeKey: string) => void,
+): (worktree: Worktree, action: LaneLifecycleAction) => void {
+  return useCallback((worktree: Worktree, action: LaneLifecycleAction) => {
+    if (!worktree.path) return;
+    const identity = worktreeIdentity(worktree);
+    const { workspaceId, worktreeKey } = worktreeLifecycleIdentity(worktree, projectWorkspaceId);
+    begin({ worktreeKey, workspaceId, path: worktree.path, action });
+    // The row's own name, without the sidebar's label helper: App already binds a local
+    // `worktreeLabel` (line ~783) and importing that name here would shadow it.
+    const name = identity?.slug ?? worktree.branch?.replace(/^refs\/heads\//, "") ?? worktree.path;
+    toast(`${LANE_ACTION_LABELS[action]} ${name}`, {
+      // Exactly the window the store holds, so the button is gone when the write lands.
+      duration: LANE_LIFECYCLE_UNDO_MS,
+      action: { label: "Undo", onClick: () => cancel(worktreeKey) },
+    });
+  }, [begin, cancel, projectWorkspaceId]);
+}
+
+const LANE_ACTION_LABELS: Record<LaneLifecycleAction, string> = {
+  pin: "Pinned",
+  settle: "Settled",
+  snooze: "Snoozed",
+  archive: "Archived",
+  activate: "Reactivated",
+};
 
 export function App() {
   useApplyAppearanceSettings();
@@ -1047,7 +1116,12 @@ function WorkspaceApp({
     ensureSessionBackends,
     dispatchWorkspaceAction,
     markBackendSessionUnavailable,
+    beginLaneLifecycle,
+    cancelLaneLifecycle,
+    refreshLaneLifecycles,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
+  const { laneOrder, laneLifecycles } = useLaneLifecycleModel(state.laneOrder, state.laneLifecycle, state.lanePinnedTabs, state.lanePullRequests);
+  const handleLaneAction = useLaneActionHandler(activeProject.workspaceId, beginLaneLifecycle, cancelLaneLifecycle);
   useBrowserSessionHydration(state, activeProject.workspaceId);
 
   const stateRef = useRef(state);
@@ -2429,6 +2503,8 @@ function WorkspaceApp({
     activityByWorktreePath: worktreeActivity,
     unreadWorktreePaths: state.unreadWorktreePaths,
     agents,
+    ...(laneOrder ? { laneOrder } : {}),
+    ...(laneLifecycles ? { laneLifecycles } : {}),
   });
   const [pendingClose, setPendingClose] = useState<{
     target: CloseTarget;
@@ -4876,6 +4952,10 @@ function WorkspaceApp({
           statuses={worktreeStatuses}
           unreadWorktreePaths={state.unreadWorktreePaths}
           activityByWorktreePath={worktreeActivity}
+          {...(laneOrder ? { laneOrder } : {})}
+          {...(laneLifecycles ? { laneLifecycles } : {})}
+          onLaneAction={handleLaneAction}
+          onRefreshLaneOrder={refreshLaneLifecycles}
           onSelectProject={handleExplicitSelectProject}
           onReorderProjects={handleReorderProjects}
           onAddProject={handleOpenAddProject}

@@ -158,6 +158,8 @@ fn coded(code: ScopeErrorCode, wire: &str, message: impl Into<String>) -> ScopeE
 struct Observed {
     entry: serde_json::Value,
     screen: Option<reference_types::ReferenceScreenSnapshot>,
+    /// Beside the entry because a read records it in the journal; `entry["pending"]` only borrows.
+    pending: Option<reference_types::ReferencePrompt>,
 }
 
 /// One session's status without its last assistant line. Every mutation path (send, answer,
@@ -202,11 +204,17 @@ async fn observe_entry(
         {
             let identity = reference_chat_identity(state, &target, Some(agent)).await;
             let session = reference_chat_prompt_session(state, &identity).await;
-            reference_prompts::reference_prompt_occurrence(
+            let detected =
+                reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow());
+            // Two occurrences that both claim this pane, card and revision cannot be told apart, so
+            // the read fails typed here rather than recording or settling either durable row.
+            reference_prompts::reference_prompt_occurrence_after_restart(
+                state,
                 session_id,
-                reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow()),
+                detected,
                 &snapshot.revision,
             )
+            .await?
         }
         _ => None,
     };
@@ -311,7 +319,7 @@ async fn observe_entry(
         ownership_for(lineage.is_some()),
     );
     entry["attention"] = serde_json::json!(ferryx_hub::supervisor::panel_contract::Attention::of(axes));
-    Ok(Observed { entry, screen })
+    Ok(Observed { entry, screen, pending })
 }
 
 /// Why the session stopped, in one line: the pending prompt's question, else the agent's last
@@ -631,8 +639,8 @@ fn registry_agent(observed: &Observed) -> Option<String> {
     observed.entry.get("agent").and_then(serde_json::Value::as_str).map(str::to_string)
 }
 
-fn replay_value(replay: events::AgentReplay) -> serde_json::Value {
-    match replay {
+fn replay_value(replay: events::AgentReplay, instance: &str) -> serde_json::Value {
+    let mut value = match replay {
         events::AgentReplay::Events {
             events,
             after_sequence,
@@ -649,7 +657,9 @@ fn replay_value(replay: events::AgentReplay) -> serde_json::Value {
             "snapshot": snapshot.iter().map(|event| event.sequenced()).collect::<Vec<_>>(),
             "afterSequence": after_sequence,
         }),
-    }
+    };
+    value["instance"] = serde_json::json!(instance);
+    value
 }
 
 /// A wait's reply. `instance` is the observer epoch its sequences belong to: a caller holding a
@@ -816,6 +826,15 @@ async fn dispatch(
     op: AgentControlOp,
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
 ) -> Result<serde_json::Value, ScopeError> {
+    dispatch_with_runtime(state, op, authorize, reference_chat_runtime()).await
+}
+
+async fn dispatch_with_runtime(
+    state: &Arc<RemoteGatewayState>,
+    op: AgentControlOp,
+    authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+    runtime: &'static ReferenceChatRuntime,
+) -> Result<serde_json::Value, ScopeError> {
     match op {
         AgentControlOp::List => {
             let ids = state.session_backend.list_sessions().await;
@@ -842,6 +861,7 @@ async fn dispatch(
         AgentControlOp::Read { session_id } => {
             live(state, &session_id).await?;
             let observed = observe_with_line(state, &session_id).await?;
+            admit_read_card(state, &session_id, &observed).await;
             let mut entry = observed.entry;
             entry["screen"] = match observed.screen {
                 Some(snapshot) => serde_json::json!({
@@ -861,46 +881,26 @@ async fn dispatch(
             live(state, &session_id).await?;
             refuse_if_human_typing(&session_id)?;
             let observed = observe(state, &session_id).await?;
-            let Some(agent) = registry_agent(&observed) else {
-                return Err(reference_chat_scope(
-                    ScopeErrorCode::Unsupported,
-                    "no prompt reader knows the agent in this pane, so a prompt cannot be answered",
-                ));
-            };
-            let target = control_target(state, &session_id);
             let request_id = request_id_or_new(request_id);
             let authorize = mutation_authorize(session_id.clone(), authorize);
-            let state = Arc::clone(state);
-            let transaction = tokio::spawn(async move {
-                let identity = reference_chat_identity(&state, &target, Some(&agent)).await;
-                let prompt_session = reference_chat_prompt_session(&state, &identity).await;
-                let payload = reference_types::ReferencePromptAnswerPayload {
-                    prompt_id,
-                    screen_revision,
-                    answer,
-                };
-                let alive = || true;
-                let request = reference_prompts::ReferenceAnswerRequest {
-                    target: &target,
-                    request_id: &request_id,
-                    payload: &payload,
-                    session: prompt_session.borrow(),
-                    agent: agent.as_str(),
-                    authorize: &*authorize,
-                    alive: &alive,
-                };
-                let runtime = reference_chat_runtime();
-                let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
-                let screen = ReferenceGatewayScreenReader { backend: Arc::clone(&state.session_backend) };
-                let writer = reference_input::ReferenceSessionWriter::new(
-                    state.session_backend.as_ref(),
-                    &state.agent_events,
-                    &request_id,
-                );
-                let clock = reference_input::SystemReferenceClock;
-                runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
-            });
-            joined(transaction.await)
+            admit_answer_card(state, &session_id, &observed, &prompt_id).await?;
+            let target = control_target(state, &session_id);
+            outcome_result(
+                deliver_durable_answer(
+                    state,
+                    DurableAnswer {
+                        target,
+                        prompt_id,
+                        screen_revision,
+                        answer,
+                        request_id,
+                        agent: registry_agent(&observed),
+                        authorize,
+                    },
+                    runtime,
+                )
+                .await?,
+            )
         }
         AgentControlOp::Stop { session_id, request_id } => {
             live(state, &session_id).await?;
@@ -943,6 +943,7 @@ async fn dispatch(
         AgentControlOp::Wait {
             session_id,
             until,
+            instance,
             after_revision,
             after,
             timeout_ms,
@@ -955,6 +956,15 @@ async fn dispatch(
             }
             let timeout_ms = policy::clamp_wait_timeout(timeout_ms)?;
             live(state, &session_id).await?;
+            if instance.as_deref() != Some(state.agent_events.instance()) {
+                return Ok(wait_value(
+                    WaitHit::Gap {
+                        snapshot: state.agent_events.snapshot(),
+                        after_sequence: state.agent_events.revision(),
+                    },
+                    state.agent_events.instance(),
+                ));
+            }
             let hit = events::wait_for(
                 &state.agent_events,
                 &session_id,
@@ -972,7 +982,10 @@ async fn dispatch(
                 )),
             }
         }
-        AgentControlOp::Events { after } => Ok(replay_value(state.agent_events.replay(after))),
+        AgentControlOp::Events { instance, after } => Ok(replay_value(
+            state.agent_events.replay_in_instance(after, instance.as_deref()),
+            state.agent_events.instance(),
+        )),
         AgentControlOp::Acknowledge { session_id } => {
             live(state, &session_id).await?;
             if crate::terminal::paired_runtime::Runtime::owns(&session_id) {
@@ -1389,12 +1402,428 @@ fn prompt_view(
         options,
         kind,
         needs_confirmation,
+        answer_status: None,
     })
+}
+
+fn pending_open_error(error: String) -> ScopeError {
+    reference_chat_scope(
+        ScopeErrorCode::OperationOutcomeUnknown,
+        format!("the pending input could not be recorded, so the answer was not attempted: {error}"),
+    )
+}
+
+/// The durable record a detected card leaves: its wire id, the screen read and the card's view.
+fn pending_input_of(
+    session_id: &str,
+    view: &crate::daemon::protocol::AgentPromptView,
+) -> crate::agent_control::pending_input::NewPendingInput {
+    crate::agent_control::pending_input::NewPendingInput {
+        prompt_id: view.prompt_id.clone(),
+        session_id: session_id.to_string(),
+        screen_revision: view.screen_revision.clone(),
+        question: view.question.clone(),
+        options: view
+            .options
+            .iter()
+            .map(|option| crate::agent_control::pending_input::PendingInputOption {
+                key: option.key.clone(),
+                label: option.label.clone(),
+            })
+            .collect(),
+        kind: serde_json::to_value(view.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "choice".into()),
+        needs_confirmation: view.needs_confirmation,
+    }
+}
+
+fn pending_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// Run one pending-input journal transition off the runtime, on the machine services this gateway
+/// owns. `None` when the gateway has no machine journal (a bare gateway in a test): the prompt
+/// routes then behave exactly as they did before this table existed - they read and answer the
+/// pane, and nothing is recorded.
+///
+/// The journal's methods are blocking file I/O with a file lock and an fsync, so they must not run
+/// on a tokio worker (`machine_operation_journal` says so at its head).
+async fn on_pending_journal<T, F>(state: &Arc<RemoteGatewayState>, step: F) -> Option<Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::agent_control::pending_input::Journal) -> Result<T, String> + Send + 'static,
+{
+    let services = Arc::clone(state.machine_services.as_ref()?);
+    let joined = tokio::task::spawn_blocking(move || step(&services.workspaces.journal)).await;
+    Some(match joined {
+        Ok(result) => result,
+        Err(error) => Err(format!("the pending-input task did not finish: {error}")),
+    })
+}
+
+/// Record what one whole, answerable screen showed `session_id`: `prompt` is the card that reading
+/// detected, or `None` for a whole screen holding no card. Everything else this pane left open is
+/// settled as gone, so a card the read found keeps its own row and a vanished one stops being
+/// offered. Only a caller that really read the whole screen may call this - an unreadable or gapped
+/// screen is not evidence and must not settle anything.
+///
+/// A journal write that fails never fails the read: the answer path refuses a card it cannot find
+/// recorded instead of typing it twice.
+pub(super) async fn record_reference_card(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    screen_revision: &str,
+    prompt: Option<&reference_types::ReferencePrompt>,
+) {
+    let found = prompt
+        .and_then(|prompt| prompt_view(prompt, screen_revision.to_string()))
+        .map(|view| pending_input_of(session_id, &view));
+    let session_owned = session_id.to_string();
+    let now = pending_now_secs();
+    if let Some(Err(error)) = on_pending_journal(state, move |journal| {
+        crate::agent_control::pending_input::reconcile(journal, found, &session_owned, now)
+    })
+    .await
+    {
+        tracing::warn!(%error, session_id, "the read's card was not recorded");
+    }
+}
+
+/// [`record_reference_card`] for a generic read. A pane showing no card takes no journal lock and
+/// writes nothing: every panel snapshot reads every pane, so the common answer must stay free.
+async fn admit_read_card(state: &Arc<RemoteGatewayState>, session_id: &str, observed: &Observed) {
+    let Some(snapshot) = observed.screen.as_ref().filter(|snapshot| snapshot.is_answerable()) else {
+        return;
+    };
+    let Some(prompt) = observed.pending.as_ref() else {
+        return;
+    };
+    record_reference_card(state, session_id, &snapshot.revision, Some(prompt)).await;
+}
+
+/// Record the card an answer names, when the pane is showing exactly that card. Recording it lets
+/// the claim decide, so an answer that arrives before any read (the phone, Slack, an MCP caller) is
+/// durable from its first attempt. A card the pane no longer shows is not recorded, and the claim
+/// then refuses the answer rather than typing it.
+async fn admit_answer_card(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    observed: &Observed,
+    prompt_id: &str,
+) -> Result<(), ScopeError> {
+    let Some(snapshot) = observed.screen.as_ref().filter(|snapshot| snapshot.is_answerable()) else {
+        return Ok(());
+    };
+    let Some(view) = observed
+        .pending
+        .as_ref()
+        .filter(|prompt| prompt.id == prompt_id)
+        .and_then(|prompt| prompt_view(prompt, snapshot.revision.clone()))
+    else {
+        return Ok(());
+    };
+    let input = pending_input_of(session_id, &view);
+    let now = pending_now_secs();
+    match on_pending_journal(state, move |journal| {
+        crate::agent_control::pending_input::open_observed(journal, input, now).map(|_| ())
+    })
+    .await
+    {
+        None | Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(pending_open_error(error)),
+    }
+}
+
+/// The card `session_id`'s own screen shows a caller's reader, and the agent that reader answers as.
+///
+/// A route that knows the reader it is serving - the phone's authenticated `registryId`, provider
+/// session included - must detect with exactly that reader, or its admission and its live write
+/// can disagree about which card the pane shows. The generic [`observe`] guesses the reader from the
+/// pane's reported agent and the screen detection, which is right for a caller with no reader of its
+/// own; it is wrong here, because an empty `registryId` is a reader every one of the OmO arms
+/// supports (`detect_card`'s `agent.is_empty()` arm, and `of_agent("")`), while the guessed agent
+/// may be a different family or none. Detection is the GET's own: same identity, same session
+/// read, same occurrence resolution, so a card admitted here is the card the read returned.
+async fn card_for_reader(
+    state: &Arc<RemoteGatewayState>,
+    target: &reference_types::ReferenceTargetRef,
+    agent: &str,
+    screen: &reference_types::ReferenceScreenSnapshot,
+) -> Result<Option<reference_types::ReferencePrompt>, ScopeError> {
+    let session_id = target.target.backend_session_id.as_str();
+    let identity = reference_chat_identity(state, target, Some(agent)).await;
+    let session =
+        reference_chat_prompt_session_for_screen(state, &identity, agent, &screen.text).await;
+    let detected = reference_prompts::detect_reference_prompt_in_session(
+        agent,
+        &screen.text,
+        &session.borrow(),
+    );
+    reference_prompts::reference_prompt_occurrence_after_restart(
+        state,
+        session_id,
+        detected,
+        &screen.revision,
+    )
+    .await
+}
+
+/// [`admit_answer_card`] for a caller that named its own reader.
+///
+/// The row recorded is the card this reader detects on the pane as it stands, never one read off
+/// the payload: an answer without a preceding read is durable only for a card the screen really
+/// shows, bound to the revision this reading produced. A pane whose screen cannot be read whole
+/// records nothing, and the claim then refuses the answer rather than typing it.
+async fn admit_answer_card_for_reader(
+    state: &Arc<RemoteGatewayState>,
+    target: &reference_types::ReferenceTargetRef,
+    agent: &str,
+    prompt_id: &str,
+) -> Result<(), ScopeError> {
+    let snapshot = match reference_chat_snapshot_screen(state, target).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // The pane could not be read at all: nothing may be recorded, and the claim decides.
+            tracing::debug!(%error.message, "the pane's screen could not be read for admission");
+            return Ok(());
+        }
+    };
+    if !snapshot.is_answerable() {
+        return Ok(());
+    }
+    let found = card_for_reader(state, target, agent, &snapshot).await?;
+    let Some(view) = found
+        .as_ref()
+        .filter(|prompt| prompt.id == prompt_id)
+        .and_then(|prompt| prompt_view(prompt, snapshot.revision.clone()))
+    else {
+        return Ok(());
+    };
+    let input = pending_input_of(target.target.backend_session_id.as_str(), &view);
+    let now = pending_now_secs();
+    match on_pending_journal(state, move |journal| {
+        crate::agent_control::pending_input::open_observed(journal, input, now).map(|_| ())
+    })
+    .await
+    {
+        None | Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(pending_open_error(error)),
+    }
+}
+
+/// One answer, ready to deliver: every surface fills this in its own terms (the desktop as the
+/// owner, the generic answer and the phone route with the caller's own reauthorization) and one
+/// delivery path decides whether this caller may write. `target` is the caller's, provider session
+/// included, and reaches the writer unchanged.
+struct DurableAnswer {
+    target: reference_types::ReferenceTargetRef,
+    prompt_id: String,
+    screen_revision: String,
+    answer: reference_types::ReferencePromptAnswer,
+    request_id: String,
+    agent: Option<String>,
+    authorize: Box<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+}
+
+fn no_prompt_reader_scope() -> ScopeError {
+    reference_chat_scope(
+        ScopeErrorCode::Unsupported,
+        "no prompt reader knows the agent in this pane, so a prompt cannot be answered",
+    )
+}
+
+/// Store what one delivery did against the attempt its claim stamped. `Err` when the journal could
+/// not take it, which leaves the claim unresolved so the card refuses every further write.
+async fn record_delivery(
+    state: &Arc<RemoteGatewayState>,
+    prompt_id: &str,
+    session_id: &str,
+    request_id: &str,
+    outcome: &reference_input::ReferenceInputOutcome,
+) -> Result<(), String> {
+    use crate::agent_control::pending_input::DeliveryOutcome;
+    let recorded = match outcome {
+        reference_input::ReferenceInputOutcome::Accepted { receipt } => DeliveryOutcome::Accepted {
+            request_id: request_id.to_string(),
+            receipt: receipt.clone(),
+        },
+        reference_input::ReferenceInputOutcome::NotTyped { error } => DeliveryOutcome::NotTyped {
+            request_id: request_id.to_string(),
+            code: control_wire_code(error).to_string(),
+        },
+        reference_input::ReferenceInputOutcome::OutcomeUnknown { .. } => {
+            DeliveryOutcome::OutcomeUnknown {
+                request_id: request_id.to_string(),
+            }
+        }
+    };
+    let prompt_recorded = prompt_id.to_string();
+    let session_recorded = session_id.to_string();
+    let now = pending_now_secs();
+    match on_pending_journal(state, move |journal| {
+        crate::agent_control::pending_input::record_for_session(
+            journal,
+            &prompt_recorded,
+            &session_recorded,
+            recorded,
+            now,
+        )
+    })
+    .await
+    {
+        None => Ok(()),
+        Some(result) => result,
+    }
+}
+
+/// Deliver one answer at most once.
+///
+/// The claim commits the intent before a key is typed, so a process that dies after it leaves a
+/// claimed row: an identical retry returns the receipt the first delivery produced, a different
+/// answer to the same card is refused, and an unresolved attempt is never typed again. A card with
+/// no durable row is refused rather than typed unrecorded - [`admit_answer_card`] is what makes a
+/// row exist for a card the pane is really showing.
+///
+/// The claim comes before the pane's agent is resolved, so a duplicate replays its receipt even
+/// when the screen has since moved on to something no reader recognizes. Only a claim that may
+/// write needs an agent, and the caller's authorization is asked first: a revoked caller learns
+/// nothing from the durable row.
+///
+/// The outcome is recorded inside the owned transaction, not after it: the keys go out in a task a
+/// disconnecting caller cannot cancel, and a receipt recorded only by that caller would fall with
+/// its future, leaving bytes in the pane and no durable record of them.
+async fn deliver_durable_answer(
+    state: &Arc<RemoteGatewayState>,
+    delivery: DurableAnswer,
+    runtime: &'static ReferenceChatRuntime,
+) -> Result<reference_input::ReferenceInputOutcome, ScopeError> {
+    let DurableAnswer { target, prompt_id, screen_revision, answer, request_id, agent, authorize } =
+        delivery;
+    (authorize)()?;
+    let session_id = target.target.backend_session_id.clone();
+    let answer_json = serde_json::to_value(&answer).unwrap_or(serde_json::Value::Null);
+    {
+        let prompt_claimed = prompt_id.clone();
+        let session_claimed = session_id.clone();
+        let request_claimed = request_id.clone();
+        let now = pending_now_secs();
+        let claimed = on_pending_journal(state, move |journal| {
+            crate::agent_control::pending_input::claim_for_delivery(
+                journal,
+                &prompt_claimed,
+                &session_claimed,
+                &request_claimed,
+                &answer_json,
+                now,
+            )
+        })
+        .await;
+        use crate::agent_control::pending_input::Claim;
+        match claimed {
+            // This gateway has no journal: the answer runs exactly as it did before the table.
+            None => {}
+            Some(Ok(Claim::Claimed)) => {}
+            Some(Ok(Claim::Replayed(receipt))) => {
+                return Ok(reference_input::ReferenceInputOutcome::Accepted { receipt })
+            }
+            Some(Ok(Claim::AlreadyAnswered)) => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::RequestConflict,
+                    "this prompt was already answered with a different answer, so nothing was typed",
+                ))
+            }
+            Some(Ok(Claim::InFlight)) => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::ControlConflict,
+                    "another attempt to answer this prompt is unresolved, so nothing was typed",
+                ))
+            }
+            Some(Ok(Claim::Unrecorded)) => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::RequestConflict,
+                    "the pane's card is not recorded for an answer, so nothing was typed; read the pane again",
+                ))
+            }
+            Some(Err(error)) => return Err(pending_open_error(error)),
+        }
+    }
+    let Some(agent) = agent else {
+        let refused = reference_input::ReferenceInputOutcome::NotTyped {
+            error: no_prompt_reader_scope(),
+        };
+        if let Err(error) =
+            record_delivery(state, &prompt_id, &session_id, &request_id, &refused).await
+        {
+            tracing::warn!(%error, "a refused answer's attempt was not released");
+        }
+        return Err(no_prompt_reader_scope());
+    };
+    let state_owned = Arc::clone(state);
+    let transaction = tokio::spawn(async move {
+        let identity = reference_chat_identity(&state_owned, &target, Some(&agent)).await;
+        let prompt_session = reference_chat_prompt_session(&state_owned, &identity).await;
+        let payload = reference_types::ReferencePromptAnswerPayload {
+            prompt_id,
+            screen_revision,
+            answer,
+        };
+        let alive = || true;
+        let request = reference_prompts::ReferenceAnswerRequest {
+            target: &target,
+            request_id: &request_id,
+            payload: &payload,
+            session: prompt_session.borrow(),
+            agent: agent.as_str(),
+            authorize: &*authorize,
+            alive: &alive,
+        };
+        let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
+        let screen = ReferenceGatewayScreenReader { backend: Arc::clone(&state_owned.session_backend) };
+        let writer = reference_input::ReferenceSessionWriter::new(
+            state_owned.session_backend.as_ref(),
+            &state_owned.agent_events,
+            &request_id,
+        );
+        let clock = reference_input::SystemReferenceClock;
+        let outcome = runtime.answers.answer(&request, &step, &screen, &writer, &clock).await;
+        let card = payload.prompt_id;
+        let session = target.target.backend_session_id.clone();
+        let recorded = record_delivery(&state_owned, &card, &session, &request_id, &outcome).await;
+        (outcome, recorded)
+    });
+    let (outcome, recorded) = match transaction.await {
+        Ok(delivered) => delivered,
+        Err(error) => {
+            return Err(reference_chat_scope(
+                ScopeErrorCode::OperationOutcomeUnknown,
+                format!("the input transaction did not finish; its outcome is unknown: {error}"),
+            ))
+        }
+    };
+    match recorded {
+        Ok(()) => Ok(outcome),
+        Err(error) => {
+            tracing::warn!(%error, "the pending input's delivery was not recorded");
+            Err(reference_chat_scope(
+                ScopeErrorCode::OperationOutcomeUnknown,
+                format!(
+                    "the answer ran but what it did could not be recorded, so it cannot be \
+                     certified as typed once: {error}"
+                ),
+            ))
+        }
+    }
 }
 
 /// `AgentPromptGet`: the card the pane's screen holds now, through the same detectors the
 /// reference-chat prompt route runs. A screen that cannot be read whole is refused rather than
-/// reported as holding no prompt.
+/// reported as holding no prompt. Live detection wins; when it finds nothing, the durable card for
+/// this exact screen revision is returned before reconciliation can settle it as gone.
 pub(crate) async fn prompt_get(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
@@ -1410,15 +1839,122 @@ pub(crate) async fn prompt_get(
             "the pane's screen could not be reconstructed, so no card may be answered from it",
         ));
     }
-    let Some(agent) = agent.filter(|agent| reference_prompts::ReferencePromptFamily::of_agent(agent).is_some())
-    else {
-        return Ok(None);
+    let mut view = if let Some(agent) =
+        agent.filter(|agent| reference_prompts::ReferencePromptFamily::of_agent(agent).is_some())
+    {
+        let identity = reference_chat_identity(state, &target, Some(&agent)).await;
+        let session = reference_chat_prompt_session_for_screen(state, &identity, &agent, &snapshot.text).await;
+        let prompt = reference_prompts::detect_reference_prompt_in_session(&agent, &snapshot.text, &session.borrow());
+        let prompt = reference_prompts::reference_prompt_occurrence_after_restart(
+            state,
+            session_id,
+            prompt,
+            &snapshot.revision,
+        )
+        .await?;
+        prompt.as_ref().and_then(|prompt| prompt_view(prompt, snapshot.revision.clone()))
+    } else {
+        None
     };
-    let identity = reference_chat_identity(state, &target, Some(&agent)).await;
-    let session = reference_chat_prompt_session_for_screen(state, &identity, &agent, &snapshot.text).await;
-    let prompt = reference_prompts::detect_reference_prompt_in_session(&agent, &snapshot.text, &session.borrow());
-    let prompt = reference_prompts::reference_prompt_occurrence(session_id, prompt, &snapshot.revision);
-    Ok(prompt.and_then(|prompt| prompt_view(&prompt, snapshot.revision)))
+    if state.machine_services.is_none() {
+        return Ok(view);
+    }
+    let found = view.as_ref().map(|view| pending_input_of(session_id, view));
+    // Use the revision prompt_view hands to pending_input_of, never a second digest. The screen
+    // read has finished, so no journal lock spans it. A live card needs no durable lookup.
+    let screen_revision = snapshot.revision;
+    let session_owned = session_id.to_string();
+    let ambiguous = {
+        let lookup_session = session_owned.clone();
+        on_pending_journal(state, move |journal| {
+            crate::agent_control::pending_input::unresolved_ambiguous_for_session(journal, &lookup_session)
+        }).await
+    };
+    let mut ambiguous_prompt_selected = false;
+    let stored = match ambiguous {
+        Some(Ok(Some(input))) => {
+            ambiguous_prompt_selected = true;
+            Some(Ok(Some(input)))
+        }
+        Some(Err(error)) => Some(Err(error)),
+        _ if found.is_none() => {
+        let lookup_session = session_owned.clone();
+        let lookup = on_pending_journal(state, move |journal| {
+            let exact = crate::agent_control::pending_input::open_for_screen(
+                journal, &lookup_session, &screen_revision,
+            )?;
+            match exact {
+                Some(input) => Ok(Some(input)),
+                None => crate::agent_control::pending_input::unresolved_ambiguous_for_session(
+                    journal, &lookup_session,
+                ),
+            }
+        })
+        .await;
+        lookup
+        }
+        _ => None,
+    };
+    let reconciled = match stored {
+        Some(Ok(Some(stored))) => Some(Ok(Some(stored))),
+        Some(Err(error)) => Some(Err(error)),
+        _ => {
+            let now = pending_now_secs();
+            let to_record = found.clone();
+            let reconciliation = on_pending_journal(state, move |journal| {
+                let result = crate::agent_control::pending_input::reconcile(journal, to_record, &session_owned, now);
+                result
+            })
+            .await;
+            reconciliation
+        }
+    };
+    if view.is_none() || ambiguous_prompt_selected {
+        return match reconciled {
+            Some(Ok(Some(stored))) => {
+                let kind = serde_json::from_value(serde_json::Value::String(stored.kind))
+                    .map_err(|error| reference_chat_scope(
+                        ScopeErrorCode::OperationOutcomeUnknown,
+                        format!("the stored pending input has an invalid kind: {error}"),
+                    ))?;
+                Ok(Some(crate::daemon::protocol::AgentPromptView {
+                    prompt_id: stored.prompt_id,
+                    screen_revision: stored.screen_revision,
+                    question: stored.question,
+                    options: stored.options.into_iter().map(|option| {
+                        crate::daemon::protocol::AgentPromptViewOption { key: option.key, label: option.label }
+                    }).collect(),
+                    kind,
+                    needs_confirmation: stored.needs_confirmation,
+                    answer_status: stored.attempt.as_ref().and_then(|attempt| {
+                        (attempt.outcome.is_none() || attempt.outcome.as_deref() == Some("outcomeUnknown"))
+                            .then(|| "outcomeUnknown".to_string())
+                    }),
+                }))
+            }
+            Some(Err(error)) => Err(reference_chat_scope(
+                ScopeErrorCode::OperationOutcomeUnknown,
+                format!("the pending input could not be read: {error}"),
+            )),
+            _ => Ok(None),
+        };
+    }
+    // A journal write failure must not hide a fresher live card.
+    match reconciled {
+        Some(Ok(Some(stored))) if found.as_ref().is_some_and(|found| found.prompt_id == stored.prompt_id) => {
+            if let Some(view) = view.as_mut() {
+                view.answer_status = stored.attempt.as_ref().and_then(|attempt| {
+                    (attempt.outcome.is_none() || attempt.outcome.as_deref() == Some("outcomeUnknown"))
+                        .then(|| "outcomeUnknown".to_string())
+                });
+            }
+        }
+        Some(Err(error)) => {
+            tracing::warn!(%error, session_id, "the pending input was not recorded for this read");
+        }
+        _ => {}
+    }
+    Ok(view)
 }
 
 /// The reference answer an `AgentPromptAnswerInput` names, after the daemon boundary's length
@@ -1450,7 +1986,8 @@ fn reference_answer(
 
 /// `AgentPromptAnswer`: the person at the desktop answers the card they were shown. The answer
 /// runs through the shared answer path inside the pane's one input queue, so a changed screen,
-/// a replaced card or a replayed answer is refused with nothing typed, as on the phone.
+/// a replaced card or a conflicting answer is refused with nothing typed, and an identical retry
+/// replays the receipt the first delivery produced, as on the phone.
 pub(crate) async fn prompt_answer(
     state: &Arc<RemoteGatewayState>,
     session_id: String,
@@ -1459,49 +1996,116 @@ pub(crate) async fn prompt_answer(
     answer: crate::daemon::protocol::AgentPromptAnswerInput,
     registry_id: Option<String>,
 ) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
+    prompt_answer_under(state, session_id, prompt_id, screen_revision, answer, registry_id, None).await
+}
+
+pub(crate) async fn prompt_resolve_ambiguous(
+    state: &Arc<RemoteGatewayState>,
+    session_id: String,
+    prompt_id: String,
+    screen_revision: String,
+) -> Result<(), ScopeError> {
+    let Some(result) = on_pending_journal(state, move |journal| {
+        crate::agent_control::pending_input::dismiss_ambiguous_for_screen(
+            journal, &prompt_id, &session_id, &screen_revision, pending_now_secs(),
+        )
+    }).await else {
+        return Err(reference_chat_scope(ScopeErrorCode::Unsupported, "ambiguous prompt resolution requires the daemon journal"));
+    };
+    result.map_err(|error| reference_chat_scope(ScopeErrorCode::RequestConflict, error))
+}
+
+/// The phone route's answer, on the same strict delivery the desktop and the generic answer op use.
+///
+/// `target` is the route's own, provider session included: it names the pane the answer is typed
+/// into and the receipt comes back stamped with it. `authorize` is the route's per-request
+/// reauthorization and is asked before the claim, so a revoked device neither types nor learns
+/// whether the card was already answered.
+///
+/// The card is recorded from this call's own reading of the pane, never from the payload: an answer
+/// that arrives without a preceding read gets a durable row only for a card the screen really
+/// shows, bound to the revision that reading produced. The payload's `screenRevision` is checked by
+/// the shared answer path against that same fresh read, so a stale card is still refused.
+///
+/// The reader is the route's own, not one guessed from the pane: `registry_id` is what the caller
+/// authenticated for this pane, so admission records the card that reader sees and the live write
+/// re-detects under the same reader. An empty `registryId` stays a reader - the OmO arms support it
+/// (`detect_card`, `of_agent("")`) - and is never replaced by a guessed agent, so a read and the
+/// first answer to it can never resolve different readers for one card.
+pub(super) async fn answer_reference_card(
+    state: &Arc<RemoteGatewayState>,
+    target: reference_types::ReferenceTargetRef,
+    registry_id: Option<String>,
+    request_id: String,
+    payload: reference_types::ReferencePromptAnswerPayload,
+    authorize: Box<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+) -> Result<reference_input::ReferenceInputOutcome, ScopeError> {
+    // A pane that is gone is refused before anything is read or claimed, as the observation this
+    // route used to make refused it: the reader below is the caller's, so nothing else would ask.
+    let session_id = target.target.backend_session_id.clone();
+    live(state, &session_id).await?;
+    // The reader this caller answers as, exactly as the read resolved it: never guessed from the
+    // pane. A caller that named no registry id answers as the empty reader - the value the GET
+    // and the old writer both used, which the OmO arms read (`detect_card`, `of_agent("")`) - and
+    // an empty reader is carried through the write rather than replaced by a guessed family.
+    let agent = registry_id.unwrap_or_default().trim().to_string();
+    admit_answer_card_for_reader(state, &target, &agent, &payload.prompt_id).await?;
+    deliver_durable_answer(
+        state,
+        DurableAnswer {
+            target,
+            prompt_id: payload.prompt_id,
+            screen_revision: payload.screen_revision,
+            answer: payload.answer,
+            request_id,
+            agent: Some(agent),
+            authorize,
+        },
+        reference_chat_runtime(),
+    )
+    .await
+}
+
+/// [`prompt_answer`], delivering under `request_id` when the caller already committed one.
+///
+/// The desktop answers as the owner of this computer; the durable claim is the same one the generic
+/// answer op takes, so both surfaces share one at-most-once decision per card.
+pub(crate) async fn prompt_answer_under(
+    state: &Arc<RemoteGatewayState>,
+    session_id: String,
+    prompt_id: String,
+    screen_revision: String,
+    answer: crate::daemon::protocol::AgentPromptAnswerInput,
+    registry_id: Option<String>,
+    claimed_request_id: Option<String>,
+) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
     let owner_answer =
         crate::hub_runtime::panel_autonomy::owner_prompt_answer_of(&session_id, &prompt_id, answer.key.as_deref());
     let answer = reference_answer(answer)?;
     live(state, &session_id).await?;
-    let Some(agent) = prompt_agent(state, &session_id, registry_id).await? else {
-        return Err(reference_chat_scope(
-            ScopeErrorCode::Unsupported,
-            "no prompt reader knows the agent in this pane, so a prompt cannot be answered",
-        ));
-    };
+    let observed = observe(state, &session_id).await?;
+    let agent = registry_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .or_else(|| registry_agent(&observed));
+    admit_answer_card(state, &session_id, &observed, &prompt_id).await?;
+    let request_id = claimed_request_id.unwrap_or_else(|| format!("agent-prompt-{}", uuid::Uuid::new_v4()));
     let target = control_target(state, &session_id);
-    let request_id = format!("agent-prompt-{}", uuid::Uuid::new_v4());
-    let state = Arc::clone(state);
-    // Owned by its own task, like every answer: a caller that disconnects must not leave a menu
-    // moved but unconfirmed.
-    let transaction = tokio::spawn(async move {
-        let identity = reference_chat_identity(&state, &target, Some(&agent)).await;
-        let prompt_session = reference_chat_prompt_session(&state, &identity).await;
-        let payload = reference_types::ReferencePromptAnswerPayload { prompt_id, screen_revision, answer };
-        // The owner socket's uid check on connect is the authorization.
-        let authorize = owner_authorized();
-        let alive = || true;
-        let request = reference_prompts::ReferenceAnswerRequest {
-            target: &target,
-            request_id: &request_id,
-            payload: &payload,
-            session: prompt_session.borrow(),
-            agent: agent.as_str(),
-            authorize: &*authorize,
-            alive: &alive,
-        };
-        let runtime = reference_chat_runtime();
-        let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
-        let screen = ReferenceGatewayScreenReader { backend: Arc::clone(&state.session_backend) };
-        let writer = reference_input::ReferenceSessionWriter::new(
-            state.session_backend.as_ref(),
-            &state.agent_events,
-            &request_id,
-        );
-        let clock = reference_input::SystemReferenceClock;
-        runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
-    });
-    match transaction.await {
+    let delivered = deliver_durable_answer(
+        state,
+        DurableAnswer {
+            target,
+            prompt_id,
+            screen_revision,
+            answer,
+            request_id,
+            agent,
+            authorize: owner_authorized(),
+        },
+        reference_chat_runtime(),
+    )
+    .await;
+    match delivered {
         Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => {
             if let Some(answer) = owner_answer {
                 tokio::spawn(answer.recorded());
@@ -1512,10 +2116,7 @@ pub(crate) async fn prompt_answer(
         Ok(reference_input::ReferenceInputOutcome::OutcomeUnknown { message, .. }) => {
             Err(reference_chat_scope(ScopeErrorCode::OperationOutcomeUnknown, message))
         }
-        Err(error) => Err(reference_chat_scope(
-            ScopeErrorCode::OperationOutcomeUnknown,
-            format!("the input transaction did not finish; its outcome is unknown: {error}"),
-        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -1834,6 +2435,8 @@ fn http_reauthorize(
 pub(crate) struct EventsQuery {
     #[serde(default)]
     after: u64,
+    #[serde(default)]
+    instance: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1842,6 +2445,8 @@ pub(crate) struct WaitQuery {
     until: String,
     #[serde(default)]
     after: u64,
+    #[serde(default)]
+    instance: Option<String>,
     timeout_ms: u64,
     #[serde(default)]
     revision: Option<String>,
@@ -1928,7 +2533,16 @@ pub(crate) async fn http_events(
         Ok(Query(query)) => query,
         Err(rejection) => return query_error(rejection),
     };
-    control_finish(handle(&state, AgentControlOp::Events { after: query.after }).await)
+    control_finish(
+        handle(
+            &state,
+            AgentControlOp::Events {
+                instance: query.instance,
+                after: query.after,
+            },
+        )
+        .await,
+    )
 }
 
 pub(crate) async fn http_ack(
@@ -1962,6 +2576,7 @@ pub(crate) async fn http_wait(
             AgentControlOp::Wait {
                 session_id,
                 until: query.until,
+                instance: query.instance,
                 after_revision: query.revision,
                 after: query.after,
                 timeout_ms: query.timeout_ms,
@@ -2401,6 +3016,7 @@ pub(crate) async fn http_decision_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("agent_control_service_durable_tests.rs");
     use crate::remote::backend::RemoteSessionBackend as _;
     use crate::remote::reference_chat::types::ReferencePromptAnswer;
 
@@ -3422,6 +4038,8 @@ mod tests {
         session_id: String,
         screen: Vec<u8>,
         writes: std::sync::Mutex<Vec<Vec<u8>>>,
+        /// Every write as it is handed over, so a test can wait on a specific one.
+        written: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
         signals: std::sync::Mutex<Vec<crate::terminal::TerminalSignal>>,
         fail_writes: std::sync::atomic::AtomicBool,
         write_attempts: std::sync::atomic::AtomicUsize,
@@ -3487,6 +4105,9 @@ mod tests {
                 return Box::pin(async { Err("the write failed".to_string()) });
             }
             self.writes.lock().expect("writes").push(data.to_vec());
+            if let Some(written) = &self.written {
+                let _ = written.send(data.to_vec());
+            }
             Box::pin(async { Ok(()) })
         }
         fn resize<'a>(&'a self, _session_id: &'a str, _cols: u16, _rows: u16) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
@@ -3502,19 +4123,38 @@ mod tests {
         }
     }
 
-    fn pane(session_id: &str, screen: &str) -> (Arc<FixedPane>, Arc<RemoteGatewayState>) {
+    fn pane_backend(
+        session_id: &str,
+        screen: &str,
+    ) -> (Arc<FixedPane>, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (written, writes) = tokio::sync::mpsc::unbounded_channel();
         let backend = Arc::new(FixedPane {
             session_id: session_id.to_string(),
             screen: screen.trim_end().replace('\n', "\r\n").into_bytes(),
             writes: std::sync::Mutex::new(Vec::new()),
+            written: Some(written),
             signals: std::sync::Mutex::new(Vec::new()),
             fail_writes: std::sync::atomic::AtomicBool::new(false),
             write_attempts: std::sync::atomic::AtomicUsize::new(0),
         });
-        let state = Arc::new(RemoteGatewayState::new_with_backend(
+        (backend, writes)
+    }
+
+    fn gateway_over(
+        backend: &Arc<FixedPane>,
+        services: Option<Arc<crate::daemon::MachineServices>>,
+    ) -> Arc<RemoteGatewayState> {
+        let mut state = RemoteGatewayState::new_with_backend(
             Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
             crate::worktree::registry::WorkspaceRegistry::new(),
-        ));
+        );
+        state.machine_services = services;
+        Arc::new(state)
+    }
+
+    fn pane(session_id: &str, screen: &str) -> (Arc<FixedPane>, Arc<RemoteGatewayState>) {
+        let (backend, _writes) = pane_backend(session_id, screen);
+        let state = gateway_over(&backend, None);
         (backend, state)
     }
 
@@ -3984,7 +4624,7 @@ mod tests {
             });
         }
 
-        let gapped = handle(&state, AgentControlOp::Events { after: 0 })
+        let gapped = handle(&state, AgentControlOp::Events { instance: None, after: 0 })
             .await
             .expect("a fallen cursor is still a successful replay");
         assert_eq!(gapped["gap"], true, "{gapped}");
@@ -3995,6 +4635,7 @@ mod tests {
             AgentControlOp::Wait {
                 session_id: session_id.to_string(),
                 until: "any".into(),
+                instance: None,
                 after_revision: None,
                 after: 0,
                 timeout_ms: 1_000,
@@ -4008,6 +4649,7 @@ mod tests {
         let tail = handle(
             &state,
             AgentControlOp::Events {
+                instance: Some(state.agent_events.instance().to_owned()),
                 after: latest.sequence.saturating_sub(1),
             },
         )
@@ -4064,6 +4706,300 @@ mod tests {
             .await
             .expect("the screen is readable")
             .expect("the menu is a prompt")
+    }
+
+    /// Keep the real daemon journal, but use the deterministic screen backend for prompt reads.
+    async fn durable_prompt_pane(
+        session_id: &str,
+        screen: &str,
+    ) -> (tempfile::TempDir, Arc<FixedPane>, Arc<RemoteGatewayState>) {
+        let (root, services) = crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().expect("temporary daemon root");
+            let server = crate::daemon::server::DaemonServer::new_with_paths(
+                Some(root.path().join("config")),
+                Some(root.path().join("auth")),
+            );
+            let services = server.remote_state().machine_services.clone().expect("daemon services");
+            Ok((root, services))
+        }).await.expect("daemon journal");
+        let (backend, mut state) = pane(session_id, screen);
+        Arc::get_mut(&mut state).expect("unpublished gateway").machine_services = Some(services);
+        (root, backend, state)
+    }
+
+    fn stored_prompt(revision: String) -> crate::daemon::protocol::AgentPromptView {
+        crate::daemon::protocol::AgentPromptView {
+            prompt_id: "durable-card".into(),
+            screen_revision: revision,
+            question: "Resume the pending operation?".into(),
+            options: vec![crate::daemon::protocol::AgentPromptViewOption {
+                key: "0".into(), label: "Resume".into(),
+            }],
+            kind: crate::daemon::protocol::AgentPromptViewKind::Approval,
+            needs_confirmation: true,
+            answer_status: None,
+        }
+    }
+
+    async fn store_prompt(
+        state: &Arc<RemoteGatewayState>,
+        session_id: &str,
+        view: &crate::daemon::protocol::AgentPromptView,
+    ) {
+        let input = pending_input_of(session_id, view);
+        on_pending_journal(state, move |journal| {
+            crate::agent_control::pending_input::open(journal, input, pending_now_secs())
+        }).await.expect("journal installed").expect("card persisted");
+    }
+
+    /// A gateway over `screen` whose journal lives in `root`, as a daemon (re)started on that root
+    /// would open it. Two calls with one root are two incarnations of one journal.
+    async fn durable_pane_at(
+        root: &std::path::Path,
+        session_id: &str,
+        screen: &str,
+    ) -> (Arc<FixedPane>, Arc<RemoteGatewayState>) {
+        let root = root.to_path_buf();
+        let services = crate::ipc::run_blocking(move || {
+            let server = crate::daemon::server::DaemonServer::new_with_paths(
+                Some(root.join("config")),
+                Some(root.join("auth")),
+            );
+            Ok(server.remote_state().machine_services.clone().expect("daemon services"))
+        })
+        .await
+        .expect("daemon journal");
+        let (backend, mut state) = pane(session_id, screen);
+        Arc::get_mut(&mut state).expect("unpublished gateway").machine_services = Some(services);
+        (backend, state)
+    }
+
+    fn recorded_card(
+        state: &Arc<RemoteGatewayState>,
+        prompt_id: &str,
+    ) -> crate::agent_control::pending_input::PendingInput {
+        crate::agent_control::pending_input::get(
+            &state.machine_services.as_ref().expect("daemon journal").workspaces.journal,
+            prompt_id,
+        )
+        .expect("journal readable")
+        .expect("the read recorded the card")
+    }
+
+    #[tokio::test]
+    async fn a_generic_read_records_the_card_and_types_nothing() {
+        let root = tempfile::tempdir().expect("root");
+        let session_id = "agent-control-durable-read";
+        let (backend, state) = durable_pane_at(root.path(), session_id, CLAUDE_APPROVAL).await;
+
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.into() }).await.expect("read");
+        let prompt_id = read["session"]["pending"]["id"].as_str().expect("a card").to_string();
+        let revision = read["session"]["screenRevision"].as_str().expect("a revision").to_string();
+
+        let stored = recorded_card(&state, &prompt_id);
+        assert!(stored.is_open(), "the read leaves the card answerable");
+        assert_eq!(stored.session_id, session_id);
+        assert_eq!(stored.screen_revision, revision, "bound to the screen the read reported");
+        assert!(stored.attempt.is_none(), "a read only records the card");
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_identical_retry_after_a_restart_returns_the_first_receipt_and_types_nothing() {
+        let root = tempfile::tempdir().expect("root");
+        let session_id = "agent-control-durable-restart";
+
+        let (typed, state) = durable_pane_at(root.path(), session_id, CLAUDE_APPROVAL).await;
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.into() }).await.expect("read");
+        let prompt_id = read["session"]["pending"]["id"].as_str().expect("a card").to_string();
+        let revision = read["session"]["screenRevision"].as_str().expect("a revision").to_string();
+
+        let accepted = handle(&state, answer(session_id, &prompt_id, &revision, Some("r1")))
+            .await
+            .expect("the answered card is typed");
+        assert_eq!(accepted["receipt"]["stage"], "accepted", "{accepted}");
+        assert_eq!(accepted["receipt"]["requestId"], "r1", "{accepted}");
+        assert!(!typed.writes.lock().expect("writes").is_empty(), "the first answer typed");
+        assert!(recorded_card(&state, &prompt_id).resolution.is_some(), "the delivery is resolved");
+        drop(state);
+
+        let (restarted, next) = durable_pane_at(root.path(), session_id, CLAUDE_APPROVAL).await;
+        let retried = handle(&next, answer(session_id, &prompt_id, &revision, Some("r2")))
+            .await
+            .expect("an identical retry is answered from the journal");
+
+        assert_eq!(retried["receipt"]["requestId"], "r1", "the first attempt's id, not the retry's: {retried}");
+        assert_eq!(retried, accepted, "a retry replays the receipt the delivery produced");
+        assert_eq!(restarted.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(restarted.writes.lock().expect("writes").is_empty(), "a replayed answer types nothing");
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_answer_after_a_restart_is_refused_and_types_nothing() {
+        let root = tempfile::tempdir().expect("root");
+        let session_id = "agent-control-durable-conflict";
+
+        let (typed, state) = durable_pane_at(root.path(), session_id, CLAUDE_APPROVAL).await;
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.into() }).await.expect("read");
+        let prompt_id = read["session"]["pending"]["id"].as_str().expect("a card").to_string();
+        let revision = read["session"]["screenRevision"].as_str().expect("a revision").to_string();
+        handle(&state, answer(session_id, &prompt_id, &revision, Some("r1")))
+            .await
+            .expect("the answered card is typed");
+        assert!(!typed.writes.lock().expect("writes").is_empty(), "the first answer typed");
+        drop(state);
+
+        let (restarted, next) = durable_pane_at(root.path(), session_id, CLAUDE_APPROVAL).await;
+        let other = AgentControlOp::Answer {
+            session_id: session_id.into(),
+            prompt_id: prompt_id.clone(),
+            screen_revision: revision,
+            answer: ReferencePromptAnswer { option_index: Some(1), ..Default::default() },
+            request_id: Some("r2".into()),
+        };
+        let error = handle(&next, other).await.expect_err("a second, different answer is refused");
+
+        assert_eq!(error.code, ScopeErrorCode::RequestConflict, "{}", error.message);
+        assert_eq!(restarted.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(restarted.writes.lock().expect("writes").is_empty(), "the refused answer typed nothing");
+        let settled = recorded_card(&next, &prompt_id);
+        assert_eq!(settled.attempt.and_then(|attempt| attempt.outcome), Some("accepted".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_definitely_untyped_answer_leaves_the_card_answerable() {
+        let root = tempfile::tempdir().expect("root");
+        let session_id = "agent-control-durable-not-typed";
+        let (backend, state) = durable_pane_at(root.path(), session_id, CLAUDE_APPROVAL).await;
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.into() }).await.expect("read");
+        let prompt_id = read["session"]["pending"]["id"].as_str().expect("a card").to_string();
+        let revision = read["session"]["screenRevision"].as_str().expect("a revision").to_string();
+
+        let refused = handle(&state, answer(session_id, &prompt_id, "a-revision-the-pane-moved-past", Some("r1")))
+            .await
+            .expect_err("a stale revision is refused before a key");
+        assert_eq!(refused.code, ScopeErrorCode::RequestConflict, "{}", refused.message);
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let stored = recorded_card(&state, &prompt_id);
+        assert!(stored.is_open(), "a refusal before the write leaves the question open");
+        assert!(stored.attempt.is_none(), "an untyped attempt is cleared, so anyone may claim again");
+
+        let accepted = handle(&state, answer(session_id, &prompt_id, &revision, Some("r2")))
+            .await
+            .expect("the corrected retry is typed");
+        assert_eq!(accepted["receipt"]["stage"], "accepted", "{accepted}");
+        assert_eq!(accepted["receipt"]["requestId"], "r2", "{accepted}");
+        assert!(!backend.writes.lock().expect("writes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_attempt_is_never_typed_again_under_another_request_id() {
+        let root = tempfile::tempdir().expect("root");
+        let session_id = "agent-control-durable-ambiguous";
+        let (backend, state) = durable_pane_at(root.path(), session_id, CLAUDE_APPROVAL).await;
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.into() }).await.expect("read");
+        let prompt_id = read["session"]["pending"]["id"].as_str().expect("a card").to_string();
+        let revision = read["session"]["screenRevision"].as_str().expect("a revision").to_string();
+        let claimed = crate::agent_control::pending_input::claim_for_delivery(
+            &state.machine_services.as_ref().expect("journal").workspaces.journal,
+            &prompt_id,
+            session_id,
+            "the-attempt-that-died",
+            &serde_json::json!({ "optionIndex": 0 }),
+            pending_now_secs(),
+        )
+        .expect("claim");
+        assert_eq!(claimed, crate::agent_control::pending_input::Claim::Claimed);
+
+        let error = handle(&state, answer(session_id, &prompt_id, &revision, Some("r2")))
+            .await
+            .expect_err("an unresolved attempt is not permission to type again");
+
+        assert_eq!(error.code, ScopeErrorCode::ControlConflict, "{}", error.message);
+        let same_id = handle(&state, answer(session_id, &prompt_id, &revision, Some("the-attempt-that-died")))
+            .await
+            .expect_err("reusing the unresolved attempt's own id is not a second write either");
+        assert_eq!(same_id.code, ScopeErrorCode::ControlConflict, "{}", same_id.message);
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "nothing was typed");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_get_returns_the_stored_card_when_live_detection_finds_nothing() {
+        let session_id = "agent-prompt-durable-fallback";
+        let (_root, backend, state) = durable_prompt_pane(session_id, "$ ").await;
+        let snapshot = reference_chat_snapshot_screen(&state, &control_target(&state, session_id))
+            .await.expect("screen snapshot");
+        let stored = stored_prompt(snapshot.revision);
+        store_prompt(&state, session_id, &stored).await;
+
+        let actual = prompt_get(&state, session_id, Some("codex".into()))
+            .await.expect("readable journal").expect("stored card");
+
+        assert_eq!(actual, stored, "every existing wire field survives the fallback");
+        // A second read must not lose the row to the no-live-card reconciliation.
+        assert_eq!(prompt_get(&state, session_id, None).await.expect("readable"), Some(stored));
+        assert!(backend.writes.lock().expect("writes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_get_prioritizes_ambiguous_card_then_reveals_live_card_after_dismissal() {
+        let session_id = "agent-prompt-live-wins";
+        let (_root, backend, state) = durable_prompt_pane(session_id, CODEX_MENU).await;
+        let live = desktop_prompt(&state, session_id).await;
+        let stored = stored_prompt(live.screen_revision.clone());
+        assert_ne!(stored.prompt_id, live.prompt_id);
+        store_prompt(&state, session_id, &stored).await;
+        let journal = &state.machine_services.as_ref().unwrap().workspaces.journal;
+        crate::agent_control::pending_input::claim(
+            journal,
+            &stored.prompt_id,
+            session_id,
+            "request-ambiguous-live",
+            &serde_json::json!({"optionIndex": 0}),
+            pending_now_secs(),
+        ).unwrap();
+
+        let first = desktop_prompt(&state, session_id).await;
+        assert_eq!(first.prompt_id, stored.prompt_id);
+        assert_eq!(first.screen_revision, stored.screen_revision);
+        assert_eq!(first.answer_status.as_deref(), Some("outcomeUnknown"));
+        crate::agent_control::pending_input::dismiss_ambiguous_for_screen(
+            journal, &stored.prompt_id, session_id, &stored.screen_revision, pending_now_secs(),
+        ).unwrap();
+        let next = desktop_prompt(&state, session_id).await;
+        assert_eq!(next.prompt_id, live.prompt_id);
+        assert_eq!(next.screen_revision, live.screen_revision);
+        assert_eq!(next.answer_status, None);
+        assert!(backend.writes.lock().expect("writes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_get_returns_an_ambiguous_card_when_the_screen_revision_changes() {
+        let session_id = "agent-prompt-other-screen";
+        let (_root, _backend, state) = durable_prompt_pane(session_id, "$ ").await;
+        let snapshot = reference_chat_snapshot_screen(&state, &control_target(&state, session_id))
+            .await.expect("screen snapshot");
+        let stored = stored_prompt(format!("{}-different", snapshot.revision));
+        store_prompt(&state, session_id, &stored).await;
+        let input = crate::agent_control::pending_input::get(
+            &state.machine_services.as_ref().unwrap().workspaces.journal,
+            &stored.prompt_id,
+        ).unwrap().unwrap();
+        crate::agent_control::pending_input::claim(
+            &state.machine_services.as_ref().unwrap().workspaces.journal,
+            &stored.prompt_id,
+            session_id,
+            "request-ambiguous",
+            &serde_json::json!({"optionIndex": 0}),
+            input.opened_at + 1,
+        ).unwrap();
+
+        let visible = prompt_get(&state, session_id, Some("codex".into()))
+            .await.expect("readable").expect("ambiguous card remains visible");
+        assert_eq!(visible.prompt_id, stored.prompt_id);
+        assert_eq!(visible.screen_revision, stored.screen_revision, "never authorize against the changed screen");
+        assert_eq!(visible.answer_status.as_deref(), Some("outcomeUnknown"));
     }
 
     fn pick(key: &str) -> crate::daemon::protocol::AgentPromptAnswerInput {
@@ -4235,6 +5171,7 @@ mod tests {
             options: Vec::new(),
             kind: crate::daemon::protocol::AgentPromptViewKind::FreeText,
             needs_confirmation: false,
+            answer_status: None,
         };
         let wire = serde_json::to_value(&view).expect("wire");
         assert_eq!(wire["needsConfirmation"], false, "{wire}");
