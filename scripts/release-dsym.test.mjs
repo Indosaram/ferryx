@@ -310,7 +310,14 @@ test("a REAL dSYM pair with different UUIDs is refused by the real toolchain", (
     // Same binary, matching UUID -- and still refused, because a stripped system binary has no
     // DWARF to archive.
     refused(() => assertDsymGate({ binaryPath: ls, dsymDir }), "DSYM_EMPTY");
-    assert.deepEqual(symbolCounts(join(dsymDir, "ls.dSYM")), { x86_64: 0, arm64e: 0, "arm64e.x1": 0 });
+    // Host-independent: the slice set of /bin/ls varies by macOS release, so pin the invariant
+    // (at least one slice, no functions in any of them) rather than the exact architectures.
+    const counts = symbolCounts(join(dsymDir, "ls.dSYM"));
+    assert.ok(counts, "dwarfdump must report statistics for the archived dSYM");
+    assert.ok(Object.keys(counts).length >= 1, `expected at least one slice, got ${JSON.stringify(counts)}`);
+    for (const [arch, functions] of Object.entries(counts)) {
+      assert.equal(functions, 0, `${arch} must carry no functions`);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

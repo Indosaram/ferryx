@@ -1,0 +1,173 @@
+name: PTY crash survival macOS gate (temporary)
+
+on:
+  push:
+    branches:
+      - ci/pty-crash-mac-20261121
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+jobs:
+  phase0-symbolication:
+    name: Phase 0 - release SIGSEGV symbolicated through dSYM
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+          use-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare inputs
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun scripts/fetch-ffmpeg.mjs --target aarch64-apple-darwin
+          mkdir -p ui/dist && printf '<!doctype html><title>gate</title>\n' > ui/dist/index.html
+          xcode-select -p; df -h .
+      - name: Build release daemon with symbols
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: none
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --bin ferryx
+      - name: Archive dSYM, strip, package
+        run: |
+          set -eux
+          b="$RUNNER_TEMP/phase0/bin"
+          mkdir -p "$b/dsyms" "$b/pkg/Ferryx.app/Contents/MacOS"
+          cp src-tauri/target/release/ferryx "$b/ferryx"
+          dsymutil "$b/ferryx" -o "$b/dsyms/ferryx.dSYM"
+          strip "$b/ferryx"
+          cp "$b/ferryx" "$b/pkg/Ferryx.app/Contents/MacOS/ferryx"
+          tar -C "$b/pkg" -czf "$b/Ferryx.app.tar.gz" Ferryx.app
+          dwarfdump --uuid "$b/ferryx" "$b/dsyms/ferryx.dSYM"
+      - name: Phase 0 acceptance
+        run: |
+          set +e
+          b="$RUNNER_TEMP/phase0/bin"
+          bun scripts/qa/dsym-symbolication-acceptance.mjs \
+            --binary "$b/pkg/Ferryx.app/Contents/MacOS/ferryx" \
+            --dsym "$b/dsyms" \
+            --artifact "$b/Ferryx.app.tar.gz" \
+            --out "$RUNNER_TEMP/evidence/phase0" --json > "$RUNNER_TEMP/evidence-phase0.json"
+          rc=$?
+          head -c 4000 "$RUNNER_TEMP/evidence-phase0.json"; echo
+          echo "PHASE0 EXIT=$rc"
+          exit $rc
+      - name: Symbolication unit tests
+        run: bun test scripts/dsym-symbolication.test.mjs scripts/release-symbolication.test.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase0-evidence
+          path: |
+            ${{ runner.temp }}/evidence
+            ${{ runner.temp }}/evidence-phase0.json
+          if-no-files-found: warn
+
+  darwin-acceptance:
+    name: Darwin lint, launchd chain, keeper-owned Phase 3/4
+    runs-on: macos-15
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+          use-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Prepare inputs
+        run: |
+          git config --global user.name ferryx-ci
+          git config --global user.email ferryx-ci@users.noreply.github.com
+          bun install --frozen-lockfile || bun install
+          bun scripts/fetch-ffmpeg.mjs --target aarch64-apple-darwin
+          mkdir -p ui/dist && printf '<!doctype html><title>gate</title>\n' > ui/dist/index.html
+          mkdir -p "$RUNNER_TEMP/ev"
+          df -h .
+      - name: Run Darwin gate steps
+        shell: bash
+        run: |
+          set +e -u
+          ulimit -n 65536 2>/dev/null || true
+          ev="$RUNNER_TEMP/ev"
+          fails=0
+          step() { name=$1; shift; echo "::group::$name"; start=$(date +%s); "$@" > "$ev/$name.log" 2>&1; rc=$?; tail -25 "$ev/$name.log"; echo "::endgroup::"; echo "STEP $name EXIT=$rc ($(( $(date +%s) - start ))s)" | tee -a "$ev/steps.txt"; [ $rc -eq 0 ] || fails=$((fails+1)); }
+          T=src-tauri/target
+          step clippy-src-tauri cargo clippy --manifest-path src-tauri/Cargo.toml --lib --bins --tests --message-format=short
+          step clippy-keeper cargo clippy --manifest-path crates/ferryx-ptykeeper/Cargo.toml --all-targets --message-format=short
+          step test-keeper cargo test --manifest-path crates/ferryx-ptykeeper/Cargo.toml
+          step test-daemon-keeper cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::keeper
+          step test-daemon-launchd cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::launchd
+          step test-supervisor-lib cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::crash_supervisor
+          step test-rollback-lib cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::rollback
+          step test-scrollback-budget cargo test --manifest-path src-tauri/Cargo.toml --lib terminal::
+          step test-phase2-supervisor cargo test --manifest-path src-tauri/Cargo.toml --test daemon_crash_supervisor_acceptance -- --test-threads=1
+          step build-bins sh -c 'cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx --bin ferryx-cli && cargo build --manifest-path crates/ferryx-ptykeeper/Cargo.toml'
+          KB=$(ls -d crates/ferryx-ptykeeper/target/debug/ferryx-ptykeeper $T/debug/ferryx-ptykeeper 2>/dev/null | head -1)
+          # The daemon finds its keeper payload from current_exe() exactly as the shipped app does, so
+          # acceptance runs use byte copies laid out in the bundle shape.
+          B="$RUNNER_TEMP/bundle/Ferryx.app/Contents"
+          mkdir -p "$B/MacOS" "$B/Resources/keeper" "$RUNNER_TEMP/bin"
+          cp $T/debug/ferryx "$B/MacOS/ferryx"; cp "$KB" "$B/Resources/keeper/ferryx-ptykeeper"
+          cp "$KB" "$RUNNER_TEMP/bin/ferryx-ptykeeper"; cp $T/debug/ferryx-cli "$RUNNER_TEMP/bin/ferryx-cli"
+          KB="$RUNNER_TEMP/bin/ferryx-ptykeeper"; CLI="$RUNNER_TEMP/bin/ferryx-cli"; BD="$B/MacOS/ferryx"
+          shasum -a 256 "$BD" "$KB" "$CLI" | tee "$ev/binaries.sha256"
+          step test-phase2-real-launchd env FERRYX_REAL_LAUNCHD_SUPERVISOR=1 FERRYX_PTY_KEEPER_BIN="$KB" cargo test --manifest-path src-tauri/Cargo.toml --test daemon_crash_supervisor_real_keeper_acceptance -- --ignored --test-threads=1
+          step bun-release-keeper-all bun test scripts/release-keeper.test.mjs scripts/release-keeper-launchd.test.mjs scripts/release-keeper-ledger.test.mjs scripts/release-keeper-macho.test.mjs scripts/release-keeper-rollback-manifest.test.mjs scripts/release-dsym.test.mjs scripts/release-keeper-bundle.test.mjs
+          step bun-combined-gate bun test scripts/qa/combined-release-gate.test.mjs
+          # Older generation for the mixed-generation case: the base revision's daemon.
+          git worktree add --detach "$RUNNER_TEMP/base" 94fc99dfee5e158471a1daec7496310ea3513384 >/dev/null 2>&1
+          ( cd "$RUNNER_TEMP/base" && git submodule update --init --recursive src-tauri/vendor/ghostty >/dev/null 2>&1 )
+          cp -R src-tauri/resources/ffmpeg/sdk "$RUNNER_TEMP/base/src-tauri/resources/ffmpeg/sdk"
+          mkdir -p "$RUNNER_TEMP/base/ui/dist" && cp ui/dist/index.html "$RUNNER_TEMP/base/ui/dist/"
+          step build-base-daemon env CARGO_TARGET_DIR="$GITHUB_WORKSPACE/$T" cargo build --manifest-path "$RUNNER_TEMP/base/src-tauri/Cargo.toml" --bin ferryx
+          cp $T/debug/ferryx "$RUNNER_TEMP/bin/ferryx-base"
+          BASE="$RUNNER_TEMP/bin/ferryx-base"
+          step phase3-acceptance bun scripts/qa/phase3-pty-crash-survival.acceptance.mjs --keeper-binary "$KB" --daemon-binary "$BD" --cli-binary "$CLI" --daemon-generations "$BASE,$BD" --sessions 60 --json
+          step phase4-acceptance bun scripts/qa/phase4-handover-failure-injection.acceptance.mjs --daemon-binary "$BD" --keeper-binary "$KB" --json
+          for f in phase3-acceptance phase4-acceptance; do
+            python3 - "$ev/$f.log" <<'EOF' | tee -a "$ev/steps.txt"
+          import json, sys
+          t = open(sys.argv[1]).read()
+          i = t.find('{')
+          try:
+              d = json.loads(t[i:])
+          except Exception as e:
+              print(sys.argv[1], 'unparsable', e); sys.exit(0)
+          s = d.get('summary', d)
+          print(sys.argv[1].rsplit('/', 1)[-1], {k: s.get(k) for k in ('accepted', 'passed', 'failed', 'blocked', 'total')})
+          for c in d.get('cases', []):
+              if c.get('outcome') != 'pass':
+                  print('  ', c.get('id'), c.get('outcome'), str(c.get('gap') or c.get('detail') or '')[:300])
+          EOF
+          done
+          echo "== summary"; cat "$ev/steps.txt"
+          echo "FAILED_STEPS=$fails"
+          exit $fails
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-acceptance-evidence
+          path: ${{ runner.temp }}/ev
+          if-no-files-found: warn
