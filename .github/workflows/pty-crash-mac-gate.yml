@@ -3,7 +3,7 @@ name: PTY crash survival macOS gate (temporary)
 on:
   push:
     branches:
-      - ci/pty-crash-mac-20261121
+      - ci/pty-crash-merge-20261121
 
 permissions:
   contents: read
@@ -37,17 +37,17 @@ jobs:
           bun scripts/fetch-ffmpeg.mjs --target aarch64-apple-darwin
           mkdir -p ui/dist && printf '<!doctype html><title>gate</title>\n' > ui/dist/index.html
           xcode-select -p; df -h .
-      - name: Build release daemon with symbols
+      - name: Build daemon with line tables
         env:
-          CARGO_PROFILE_RELEASE_STRIP: none
-          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml --bin ferryx
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_DEV_STRIP: none
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx
       - name: Archive dSYM, strip, package
         run: |
           set -eux
           b="$RUNNER_TEMP/phase0/bin"
           mkdir -p "$b/dsyms" "$b/pkg/Ferryx.app/Contents/MacOS"
-          cp src-tauri/target/release/ferryx "$b/ferryx"
+          cp src-tauri/target/debug/ferryx "$b/ferryx"
           dsymutil "$b/ferryx" -o "$b/dsyms/ferryx.dSYM"
           strip "$b/ferryx"
           cp "$b/ferryx" "$b/pkg/Ferryx.app/Contents/MacOS/ferryx"
@@ -65,6 +65,7 @@ jobs:
           rc=$?
           head -c 4000 "$RUNNER_TEMP/evidence-phase0.json"; echo
           echo "PHASE0 EXIT=$rc"
+          if [ $rc -ne 0 ]; then find "$RUNNER_TEMP/evidence" -type f -exec sh -c 'echo "== $1"; tail -40 "$1"' _ {} \; ; fi
           exit $rc
       - name: Symbolication unit tests
         run: bun test scripts/dsym-symbolication.test.mjs scripts/release-symbolication.test.mjs
@@ -121,7 +122,7 @@ jobs:
           step test-daemon-launchd cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::launchd
           step test-supervisor-lib cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::crash_supervisor
           step test-rollback-lib cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::rollback
-          step test-scrollback-budget cargo test --manifest-path src-tauri/Cargo.toml --lib terminal::
+          step test-scrollback-budget cargo test --manifest-path src-tauri/Cargo.toml --lib terminal::scrollback_budget
           step test-phase2-supervisor cargo test --manifest-path src-tauri/Cargo.toml --test daemon_crash_supervisor_acceptance -- --test-threads=1
           step build-bins sh -c 'cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx --bin ferryx-cli && cargo build --manifest-path crates/ferryx-ptykeeper/Cargo.toml'
           KB=$(ls -d crates/ferryx-ptykeeper/target/debug/ferryx-ptykeeper $T/debug/ferryx-ptykeeper 2>/dev/null | head -1)
@@ -142,8 +143,9 @@ jobs:
           cp -R src-tauri/resources/ffmpeg/sdk "$RUNNER_TEMP/base/src-tauri/resources/ffmpeg/sdk"
           mkdir -p "$RUNNER_TEMP/base/ui/dist" && cp ui/dist/index.html "$RUNNER_TEMP/base/ui/dist/"
           step build-base-daemon env CARGO_TARGET_DIR="$GITHUB_WORKSPACE/$T" cargo build --manifest-path "$RUNNER_TEMP/base/src-tauri/Cargo.toml" --bin ferryx
-          cp $T/debug/ferryx "$RUNNER_TEMP/bin/ferryx-base"
-          BASE="$RUNNER_TEMP/bin/ferryx-base"
+          OB="$RUNNER_TEMP/base-bundle/Ferryx.app/Contents"; mkdir -p "$OB/MacOS" "$OB/Resources/keeper"
+          cp $T/debug/ferryx "$OB/MacOS/ferryx"; cp "$KB" "$OB/Resources/keeper/ferryx-ptykeeper"
+          BASE="$OB/MacOS/ferryx"
           step phase3-acceptance bun scripts/qa/phase3-pty-crash-survival.acceptance.mjs --keeper-binary "$KB" --daemon-binary "$BD" --cli-binary "$CLI" --daemon-generations "$BASE,$BD" --sessions 60 --json
           step phase4-acceptance bun scripts/qa/phase4-handover-failure-injection.acceptance.mjs --daemon-binary "$BD" --keeper-binary "$KB" --json
           for f in phase3-acceptance phase4-acceptance; do
