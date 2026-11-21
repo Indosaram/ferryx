@@ -1,9 +1,5 @@
 name: PTY crash survival macOS gate (temporary)
-          set +e
 
-# One-off verification of the Darwin-only acceptance steps for feat/pty-crash-survival-20261116.
-# Runs only on its own ci/* branch and is deleted with it. Builds nothing that ships: no bundle,
-# no signing, no publication.
 on:
   push:
     branches:
@@ -59,6 +55,7 @@ jobs:
           dwarfdump --uuid "$b/ferryx" "$b/dsyms/ferryx.dSYM"
       - name: Phase 0 acceptance
         run: |
+          set +e
           b="$RUNNER_TEMP/phase0/bin"
           bun scripts/qa/dsym-symbolication-acceptance.mjs \
             --binary "$b/pkg/Ferryx.app/Contents/MacOS/ferryx" \
