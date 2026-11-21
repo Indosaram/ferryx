@@ -1740,8 +1740,14 @@ test("verifyMacosFfmpegBundle: fails closed on missing dylib, absolute install n
  * `keeper.json` records the digest of the bytes on disk at install time. Code signing then appends a
  * signature blob, so the recorded digest describes a file that no longer exists unless something
  * re-derives it -- which is the defect these cases pin.
+ *
+ * The payload carries the fixture's `macho:` marker because the keeper really is a Mach-O and the
+ * fixture's `file` model classifies by that marker: it started reporting non-`macho:` files as
+ * "JSON data" when the helper `manifest.json` had to stay out of the signing passes. Payload bytes
+ * without the marker are invisible to the signing loop, so the keeper would never be signed and
+ * these cases would pass or fail for a reason that has nothing to do with finalize's ordering.
  */
-function installKeeperPayload(appPath, payload = "keeper-unsigned") {
+function installKeeperPayload(appPath, payload = "macho:keeper-unsigned") {
   const keeperDir = join(appPath, "Contents", "Resources", "keeper");
   mkdirSync(keeperDir, { recursive: true });
   const binary = join(keeperDir, "ferryx-ptykeeper");
@@ -1777,6 +1783,9 @@ test("finalizeMacosBundle: re-derives keeper.json from the bytes code signing pr
   try {
     const fixture = createMacFinalizeFixture(tmp);
     const payload = installKeeperPayload(fixture.appPath);
+    // The bytes as installed, so the precondition below compares against what this fixture wrote
+    // rather than restating its payload literal.
+    const unsignedBytes = readFileSync(payload.binary);
 
     const sealed = finalizeMacosBundle({
       appPath: fixture.appPath,
@@ -1791,7 +1800,7 @@ test("finalizeMacosBundle: re-derives keeper.json from the bytes code signing pr
     const signedBytes = readFileSync(payload.binary);
     assert.notEqual(
       createHash("sha256").update(signedBytes).digest("hex"),
-      createHash("sha256").update("keeper-unsigned").digest("hex"),
+      createHash("sha256").update(unsignedBytes).digest("hex"),
       "fixture precondition: model codesign appended a signature blob to the keeper",
     );
     const recorded = JSON.parse(readFileSync(payload.manifest, "utf8"));
