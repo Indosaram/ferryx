@@ -543,6 +543,13 @@ impl PtyReaderPhase {
     }
 }
 
+/// A PTY reader's completion: resolves when the reader thread returns.
+///
+/// The reader runs on a dedicated OS thread rather than on the runtime's blocking pool, so this is
+/// the signal a close awaits instead of a pool task handle. `Err` means the thread ended without
+/// publishing - a panic inside the loop - and is reported, not read as a completed read.
+pub(crate) type ReaderCompletion = tokio::sync::oneshot::Receiver<()>;
+
 pub struct PtySession {
     #[cfg(windows)]
     input: windows_input::WindowsInput,
@@ -566,7 +573,7 @@ pub struct PtySession {
     master_release: Arc<Mutex<Option<JoinHandle<()>>>>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     child: Arc<Mutex<Option<ProcessHandle>>>,
-    reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    reader_task: Arc<Mutex<Option<ReaderCompletion>>>,
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     worktree_path: Option<PathBuf>,
     reader_finished: Arc<AtomicBool>,
@@ -825,7 +832,13 @@ fn signal_for_frame(frame: &[u8], lflag: libc::tcflag_t, cc: &[libc::cc_t]) -> O
 }
 
 impl PtySession {
-    pub(crate) fn new(config: PtySessionConfig) -> Self {
+    /// Build a session and start its reader.
+    ///
+    /// Fallible because the reader is a dedicated OS thread: under descriptor or thread pressure
+    /// `pthread_create` fails with EAGAIN, and a session whose reader never started is one whose
+    /// output nobody can deliver. Reporting it here is what lets the spawn path fail cleanly instead
+    /// of panicking on a host that is already out of resources.
+    pub(crate) fn new(config: PtySessionConfig) -> Result<Self, PtyError> {
         let reader_interrupt = Arc::new(Mutex::new(config.reader_interrupt));
         let output_tx = Arc::new(Mutex::new(Some(config.tx)));
         let reader_tx = output_tx
@@ -874,7 +887,11 @@ impl PtySession {
         let reader_park_task = Arc::clone(&reader_park);
         let reader_phase = Arc::new(AtomicU64::new(PtyReaderPhase::Starting.as_raw()));
         let reader_phase_task = Arc::clone(&reader_phase);
-        let reader_task = tokio::task::spawn_blocking(move || {
+        // The reader owns its own OS thread, never a thread of the runtime's blocking pool: it parks
+        // in `read()` for the whole life of the session, and a pool thread held that way is one the
+        // close path's own blocking work - the master release above all - would queue behind.
+        let (reader_done_tx, reader_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let reader_loop = move || {
             let mut reader = reader;
             let mut buf = [0u8; 16 * 1024];
             loop {
@@ -965,9 +982,17 @@ impl PtySession {
             reader_finished_task.store(true, Ordering::Release);
             reader_finished_notify_task.notify_one();
             reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
-        });
+            let _ = reader_done_tx.send(());
+        };
+        std::thread::Builder::new()
+            .name("ferryx-pty-reader".into())
+            .spawn(reader_loop)
+            .map_err(|error| {
+                PtyError::IoError(format!("Failed to start the PTY reader: {error}"))
+            })?;
+        let reader_task = reader_done_rx;
 
-        Self {
+        Ok(Self {
             input: config.input,
             input_gate: tokio::sync::Mutex::new(()),
             id: config.id,
@@ -1003,7 +1028,7 @@ impl PtySession {
             pause_released,
             reader_park,
             close_grace: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     pub fn id(&self) -> &str {
@@ -1312,9 +1337,9 @@ impl PtySession {
     pub fn stop_reader(&self) {
         self.request_reader_stop();
         self.release_paused_reader();
-        if let Some(handle) = self.reader_task.lock().take() {
-            handle.abort();
-        }
+        // The completion is dropped rather than aborted: `abort()` never ended a blocking read that
+        // had already started, so the stop request above is what ends it, and the thread is its own.
+        self.reader_task.lock().take();
     }
 
     pub fn set_output_hub(&self, hub: Arc<TerminalOutputHub>) {
@@ -2123,7 +2148,7 @@ impl PtySession {
         }
     }
 
-    pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
+    pub(crate) fn take_reader_task(&self) -> Option<ReaderCompletion> {
         self.reader_task.lock().take()
     }
 
@@ -2290,7 +2315,10 @@ impl PtySession {
         let reader_phase = Arc::new(AtomicU64::new(PtyReaderPhase::Starting.as_raw()));
         let reader_phase_task = Arc::clone(&reader_phase);
 
-        let reader_task = tokio::task::spawn_blocking(move || {
+        // Dedicated thread, for the same reason the spawned reader has one: an adopted reader also
+        // parks in `read()` for the whole life of the session.
+        let (reader_done_tx, reader_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let reader_loop = move || {
             let mut reader = reader;
             let mut buf = [0u8; 16 * 1024];
             loop {
@@ -2367,7 +2395,15 @@ impl PtySession {
             reader_finished_task.store(true, Ordering::Release);
             reader_finished_notify_task.notify_one();
             reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
-        });
+            let _ = reader_done_tx.send(());
+        };
+        std::thread::Builder::new()
+            .name("ferryx-pty-reader-adopted".into())
+            .spawn(reader_loop)
+            .map_err(|error| {
+                PtyError::IoError(format!("Failed to start the adopted PTY reader: {error}"))
+            })?;
+        let reader_task = reader_done_rx;
 
         let child_handle = snapshot.pid.map(|pid| {
             ProcessHandle::Adopted(AdoptedProcess {
@@ -2430,9 +2466,7 @@ impl Drop for PtySession {
         self.release_master();
         self.release_paused_reader();
         self.output_tx.lock().take();
-        if let Some(handle) = self.reader_task.lock().take() {
-            handle.abort();
-        }
+        self.reader_task.lock().take();
     }
 }
 

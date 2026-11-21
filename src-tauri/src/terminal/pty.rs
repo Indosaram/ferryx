@@ -707,7 +707,7 @@ impl PtyManager {
             rows,
             tx,
             worktree_path,
-        }));
+        })?);
 
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         let created_identity = session.qa_owned_identity().ok();
@@ -840,10 +840,14 @@ impl PtyManager {
 
         match tokio::time::timeout(READER_SHUTDOWN_TIMEOUT, &mut reader_task).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(PtyError::Other(format!("PTY reader task failed: {error}"))),
+            // The reader thread ended without publishing its completion: it panicked, so the work it
+            // was doing never finished and the close must not read that as a reader that ended.
+            Ok(Err(error)) => Err(PtyError::Other(format!(
+                "PTY reader thread failed: {error}"
+            ))),
             Err(_) => {
-                // A queued blocking reader must still run its stop check and publish completion.
-                // Aborting it before the pool starts it leaves reader_finished false forever.
+                // The reader has its own thread, so it was running the whole time: it simply has not
+                // returned inside the bound, and the stop request the caller applied is what ends it.
                 Err(PtyError::Other(
                     "Timed out waiting for PTY reader shutdown".into(),
                 ))
@@ -2694,6 +2698,99 @@ mod tests {
     /// grace phase, the KILL+reap phase, the observed master release and the reader stages. A fence
     /// derived from the reader stages alone is shorter than the close it observes, so a second close
     /// reports a timeout against a close that is still legitimately in progress.
+    #[test]
+    fn a_close_does_not_queue_behind_the_readers_of_other_sessions() {
+        // A reader parks in `read()` for the whole life of its session. On the runtime's blocking pool
+        // each such reader holds one of the pool's threads for that whole time, so a pool smaller than
+        // the number of live sessions leaves nothing for the close of the next one: its master release
+        // and its reader both sit in the queue, and the close spends its release bound and its reader
+        // bounds waiting for a thread instead of for the host. This test fills the pool with readers
+        // ALONE - no artificial occupier, no delay - and requires the close of one more session to
+        // complete inside its own fence.
+        //
+        // It fails on a pool-run reader: the third session's reader never runs, so the close reports
+        // the master release the pool never ran. With the reader on a thread of its own the pool stays
+        // free, the release runs, and the close completes.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .expect("build the test runtime");
+
+        let verdict = rt.block_on(async {
+            let manager = PtyManager::new();
+            // The receivers are HELD, not dropped: a reader whose output receiver is gone ends on the
+            // failed send and frees the pool thread it was holding, so letting them go here would
+            // empty the pool on its own and the close below would have nothing to queue behind.
+            let mut live = Vec::new();
+            // Two sessions fill the whole pool with their readers. Each delivers one line, which is
+            // the reader's own act and the proof that the thread it holds is the one it parks in.
+            for probe in ["READER_ONE", "READER_TWO"] {
+                let (session_id, mut rx) = manager
+                    .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+                    .expect("spawn a PTY session");
+                manager
+                    .get_session(&session_id)
+                    .expect("session registered")
+                    .write_input(format!("echo {probe}\n").as_bytes())
+                    .expect("write to the shell");
+                let delivered = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+                    let mut seen = String::new();
+                    while let Some(chunk) = rx.recv().await {
+                        seen.push_str(&String::from_utf8_lossy(&chunk));
+                        if seen.contains(probe) {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .await;
+                assert_eq!(
+                    delivered,
+                    Ok(true),
+                    "the pool must be holding this session's reader"
+                );
+                live.push((session_id, rx));
+            }
+
+            // The pool has no free thread now, so this session's reader is the one a saturated pool
+            // leaves queued - which is exactly the state a close must not inherit.
+            let (session_id, rx) = manager
+                .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+                .expect("spawn the session under test");
+            let held_under_test = rx;
+
+            // Taken BEFORE the close: this is the state the close inherits. A reader that already
+            // ended has freed its pool thread, so the close would have nothing to queue behind and
+            // would prove nothing about the pool the readers share with it.
+            for (open, _) in live.iter() {
+                let session = manager.get_session(open).expect("session still registered");
+                assert!(
+                    !session.is_reader_finished(),
+                    "both pool readers must still be parked when the close starts"
+                );
+            }
+
+            let verdict = tokio::time::timeout(close_fence_for(TERM_GRACE_TIMEOUT), async {
+                manager.close_session(&session_id).await
+            })
+            .await
+            .expect("the close must not outlast its own fence");
+
+            drop(held_under_test);
+            for (open, _) in live {
+                let _ = manager.close_session(&open).await;
+            }
+            verdict
+        });
+
+        assert_close_completed(
+            verdict,
+            "a close must not queue behind other sessions' readers",
+        );
+    }
+
     #[tokio::test]
     async fn a_concurrent_close_waits_out_the_whole_reap_and_reader_path() {
         let manager = PtyManager::new();
@@ -2872,6 +2969,10 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         let marker_arg = marker.to_string_lossy().into_owned();
 
+        // A 6 s grace, not the 5 s machine one: the close has to outlive the PRE-V3 constant
+        // (10 s) on its pinned phases alone, and 6 s of grace plus the 2 s observed master release
+        // and the bounded reader stage is what does that.
+        let grace = Duration::from_secs(6);
         let (manager, session_id, session, child_pid, first, second, elapsed) = rt.block_on(async {
             let manager = PtyManager::new();
             let mut cmd = CommandBuilder::new("/bin/sh");
@@ -2895,10 +2996,6 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
 
-            // A 6 s grace, not the 5 s machine one: the close has to outlive the PRE-V3 constant
-            // (10 s) on its pinned phases alone, and 6 s of grace plus the 2 s observed master release
-            // and the two 2 s reader stages is what does that.
-            let grace = Duration::from_secs(6);
             let authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync> = Arc::new(|| Ok(()));
             let started = tokio::time::Instant::now();
             let (first, second) = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
@@ -2921,12 +3018,27 @@ mod tests {
             .recv_timeout(LOAD_TOLERANT_BOUND)
             .expect("the blocking thread must be released before the runtime is dropped");
 
-        // The close in flight cannot leave the registry before its pinned phases elapse: the TERM
-        // grace it was given, the observed master release and the two bounded reader stages. This
-        // lower bound is what makes the second close's `Ok` a statement about the fence rather than
-        // about how fast the host happens to be.
+        // The close in flight cannot leave the registry before the phases THIS SETUP forces to run to
+        // their bound elapse. This lower bound is what makes the second close's `Ok` a statement
+        // about the fence rather than about how fast the host happens to be. Each term has a line of
+        // the test above that pins it:
+        //
+        //   grace                  - the child runs `trap '' HUP TERM` and announces TRAP_READY, and
+        //                            the wait for that marker is what proves the trap is installed,
+        //                            so TERM cannot end it and the grace phase runs its full length.
+        //   MASTER_RELEASE_TIMEOUT - `rt.spawn_blocking` above occupies the pool's ONLY blocking
+        //                            thread (`max_blocking_threads(1)`) until `free_tx` is sent,
+        //                            which happens after this close returns: the release this close
+        //                            hands to that same pool cannot run, so the close waits its
+        //                            whole bound for it.
+        //
+        // The reader stage is deliberately NOT a term. It was one while the reader queued on that
+        // occupied pool, which is exactly what this change removes: the reader now has a thread of
+        // its own, so once the child is killed its read ends and it finishes within a poll interval.
+        // Asserting it here would pin a phase the setup no longer forces, and would fail for the
+        // right implementation. Measured on this host: grace 6 s + release 2 s + reader ~0.3 s.
         assert!(
-            elapsed >= Duration::from_secs(12),
+            elapsed >= grace + MASTER_RELEASE_TIMEOUT,
             "the close in flight must spend its whole bound, not {elapsed:?}"
         );
         // The saturated pool also leaves the release this close queued unrun, so that close reports
