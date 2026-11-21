@@ -143,6 +143,11 @@ pub struct SessionHubSnapshot {
     pub next_sequence: u64,
     pub bracketed_paste_enabled: bool,
     pub resize_ledger: Vec<ResizePoint>,
+    /// Carried across handover so a successor keeps naming the geometry the session was
+    /// created with. `resize_ledger` cannot stand in: it evicts its oldest point at capacity,
+    /// after which its first entry is an ordinary phone resize.
+    #[serde(default)]
+    pub initial_size: Option<(u16, u16)>,
     pub replay_gap: Option<ReplayGap>,
     #[serde(default)]
     pub gap_floor: u64,
@@ -757,6 +762,10 @@ pub struct SessionHub {
     pub(crate) sender: broadcast::Sender<OutputChunk>,
     pub(crate) raw_sender: broadcast::Sender<Vec<u8>>,
     pub(crate) resize_ledger: Vec<ResizePoint>,
+    /// The first size this session was ever seen at. Unlike `resize_ledger`, which evicts its
+    /// oldest boundary at capacity, this survives for the session's lifetime, so desktop
+    /// restoration still has a baseline after thousands of phone resizes.
+    pub(crate) initial_size: Option<(u16, u16)>,
     pub(crate) replay_gap: Option<ReplayGap>,
     /// Set by `publish_gap`; cleared only by output that redraws the whole screen. Unlike
     /// `replay_gap`, ordinary output after the gap does not clear it.
@@ -780,6 +789,7 @@ impl SessionHub {
             next_sequence: self.buffer.next_sequence,
             bracketed_paste_enabled: self.buffer.bracketed_paste_enabled,
             resize_ledger: self.resize_ledger.clone(),
+            initial_size: self.initial_size,
             replay_gap: self.replay_gap.clone(),
             gap_floor: self.buffer.gap_floor,
             transport_owner: false,
@@ -1076,6 +1086,7 @@ impl TerminalOutputHub {
             sender: tx,
             raw_sender: raw_tx,
             resize_ledger: Vec::new(),
+            initial_size: None,
             replay_gap: None,
             history_incomplete: false,
             subscribed: false,
@@ -1220,6 +1231,11 @@ impl TerminalOutputHub {
         };
 
         let mut hub = session_hub.write();
+        // Set once: a reconnect or phone resize reports a later size, and the baseline must
+        // keep naming the geometry the host session was created with.
+        if hub.initial_size.is_none() && cols > 0 && rows > 0 {
+            hub.initial_size = Some((cols, rows));
+        }
         if hub.resize_ledger.is_empty() {
             hub.resize_ledger.push(ResizePoint {
                 sequence: 0,
@@ -1230,6 +1246,16 @@ impl TerminalOutputHub {
                 screen.lock().resize(cols, rows);
             }
         }
+    }
+
+    /// The size this session was first seen at, surviving resize-ledger eviction.
+    pub fn initial_size(&self, session_id: &str) -> Option<(u16, u16)> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+        let initial_size = session_hub.read().initial_size;
+        initial_size
     }
 
     pub fn record_resize(&self, session_id: &str, cols: u16, rows: u16) -> Option<u64> {
@@ -1503,6 +1529,11 @@ impl TerminalOutputHub {
         buffer.gap_floor = snapshot.gap_floor;
 
         let is_transport_owner = snapshot.transport_owner;
+        // A predecessor that predates `initial_size` sends no value; its oldest ledger point is
+        // the best remaining evidence. Newer snapshots carry the real baseline and always win.
+        let initial_size = snapshot
+            .initial_size
+            .or_else(|| snapshot.resize_ledger.first().map(|point| (point.cols, point.rows)));
         // The predecessor's mirrored screen is the authoritative starting point; without one the
         // mirror is rebuilt from the retained bytes, as good as a raw replay and no worse.
         let screen = match snapshot.screen_seed.as_ref() {
@@ -1526,6 +1557,7 @@ impl TerminalOutputHub {
             sender: tx,
             raw_sender: raw_tx,
             resize_ledger: snapshot.resize_ledger,
+            initial_size,
             history_incomplete: snapshot.history_incomplete,
             replay_gap,
             subscribed: false,
@@ -2068,6 +2100,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_size_survives_resize_ledger_eviction_and_handover() {
+        let source = TerminalOutputHub::new(24);
+        let session_id = "initial-size-survives-eviction";
+        let _rx = source.register_session(session_id);
+        source.record_initial_size(session_id, 132, 43);
+
+        for _ in 0..=RESIZE_LEDGER_CAPACITY {
+            source.record_resize(session_id, 81, 25);
+        }
+        assert_eq!(
+            source.initial_size(session_id),
+            Some((132, 43)),
+            "the baseline must not be evicted with the ledger"
+        );
+        assert_ne!(
+            source
+                .export_session_state(session_id)
+                .and_then(|snapshot| snapshot.resize_ledger.first().map(|point| (point.cols, point.rows))),
+            Some((132, 43)),
+            "precondition: the ledger head has already moved off the baseline"
+        );
+
+        let snapshot = source.export_session_state(session_id).expect("snapshot");
+        assert_eq!(snapshot.initial_size, Some((132, 43)));
+        let successor = TerminalOutputHub::new(24);
+        successor.import_session_state(session_id, snapshot).unwrap();
+        assert_eq!(
+            successor.initial_size(session_id),
+            Some((132, 43)),
+            "a successor must inherit the baseline, not the evicted ledger head"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_without_initial_size_still_imports() {
+        let hub = TerminalOutputHub::new(24);
+        let session_id = "legacy-snapshot-without-baseline";
+        let _rx = hub.register_session(session_id);
+        hub.record_initial_size(session_id, 90, 30);
+        let mut snapshot = hub.export_session_state(session_id).expect("snapshot");
+        snapshot.initial_size = None;
+
+        let successor = TerminalOutputHub::new(24);
+        successor.import_session_state(session_id, snapshot).unwrap();
+        assert_eq!(
+            successor.initial_size(session_id),
+            Some((90, 30)),
+            "an older snapshot falls back to its oldest ledger point"
+        );
+    }
+
+    #[tokio::test]
     async fn test_output_hub_initial_size_and_eviction_segmented_snapshot() {
         let hub = TerminalOutputHub::new(24);
         let session_id = "initial-and-eviction-session";
@@ -2521,6 +2605,7 @@ mod tests {
           next_sequence: 0,
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
+          initial_size: None,
           replay_gap: None,
           gap_floor: 0,
           transport_owner: false,
@@ -2545,6 +2630,7 @@ mod tests {
           next_sequence: 5,
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
+          initial_size: None,
           replay_gap: None,
           gap_floor: 0,
           transport_owner: false,
@@ -2569,6 +2655,7 @@ mod tests {
           next_sequence: 5,
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
+          initial_size: None,
           replay_gap: None,
           gap_floor: 0,
           transport_owner: false,
@@ -2601,6 +2688,7 @@ mod tests {
           next_sequence: 10,
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
+          initial_size: None,
           replay_gap: None,
           gap_floor: 0,
           transport_owner: false,
@@ -2624,6 +2712,7 @@ mod tests {
               cols: 80,
               rows: 24,
           }],
+          initial_size: None,
           replay_gap: None,
           gap_floor: 0,
           transport_owner: false,
@@ -2654,6 +2743,7 @@ mod tests {
                   rows: 30,
               },
           ],
+          initial_size: None,
           replay_gap: None,
           gap_floor: 0,
           transport_owner: false,
@@ -2678,6 +2768,7 @@ mod tests {
           next_sequence: 2,
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
+          initial_size: None,
           replay_gap: None,
           gap_floor: 0,
           transport_owner: false,
@@ -2700,6 +2791,7 @@ mod tests {
           next_sequence: 10,
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
+          initial_size: None,
           replay_gap: Some(ReplayGap {
               requested_after_sequence: 5,
               available_from_sequence: 5,
@@ -2725,6 +2817,7 @@ mod tests {
           next_sequence: 10,
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
+          initial_size: None,
           replay_gap: Some(ReplayGap {
               requested_after_sequence: 8,
               available_from_sequence: 11,
@@ -2746,6 +2839,7 @@ mod tests {
             next_sequence: 10,
             bracketed_paste_enabled: false,
             resize_ledger: Vec::new(),
+            initial_size: None,
             replay_gap: None,
             gap_floor: 11,
             transport_owner: false,

@@ -26,7 +26,7 @@ async fn read_next_ws_json(ws: &mut TestWsStream) -> serde_json::Value {
     }
 }
 
-fn extract_grid_text(frame: &serde_json::Value) -> String {
+pub(super) fn extract_grid_text(frame: &serde_json::Value) -> String {
     let mut text = String::new();
     if let Some(lines) = frame.get("lines").and_then(|l| l.as_array()) {
         for line in lines {

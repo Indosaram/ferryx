@@ -43,6 +43,18 @@ type LegacyReadHalf = tokio::net::tcp::OwnedReadHalf;
 #[cfg(not(unix))]
 type LegacyWriteHalf = tokio::net::tcp::OwnedWriteHalf;
 
+/// Whether an SSH transport state still owns a live target, for the `running` flag this router
+/// projects. Mirrors daemon admission (`session_service::ssh_transport_is_live`): `Reconnecting`
+/// is the same target between redials, so a projection that called it not running would leave a
+/// restored session looking exited until its first redial succeeds.
+fn ssh_projection_running(state: crate::terminal::remote::RemoteConnectionState) -> bool {
+    matches!(
+        state,
+        crate::terminal::remote::RemoteConnectionState::Connected
+            | crate::terminal::remote::RemoteConnectionState::Reconnecting
+    )
+}
+
 impl LegacyPeer {
     pub fn new(socket_path: PathBuf, initial_sessions: Vec<String>) -> Self {
         Self {
@@ -1043,8 +1055,11 @@ impl RemoteSessionBackend for SessionRouter {
                     workspace_id: Some(details.descriptor.config.project_id),
                     worktree_label: None,
                     worktree_path: Some(PathBuf::from(details.descriptor.config.project_path)),
-                    running: details.state
-                        == crate::terminal::remote::RemoteConnectionState::Connected,
+                    // The projection must agree with admission: `Reconnecting` is the same
+                    // target between redials (the helper keeps the session and its output),
+                    // so reporting it as not running contradicts `ssh_transport_is_live`
+                    // and makes a restored session look exited until its first redial lands.
+                    running: ssh_projection_running(details.state),
                     cols: details.descriptor.cols,
                     rows: details.descriptor.rows,
                 });
@@ -1245,5 +1260,98 @@ mod route_absence_tests {
             assert!(!peer.contains_session("gone"));
             assert!(peer.contains_session("live"));
         }
+    }
+}
+
+/// The SSH `running` flag this router projects is a statement about a live target, so it must
+/// read the same transport predicate daemon admission uses
+/// (`session_service::ssh_transport_is_live`).
+#[cfg(test)]
+mod ssh_projection_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_projection_accepts_every_live_transport_state() {
+        use crate::terminal::remote::RemoteConnectionState as S;
+        for state in [S::Connected, S::Reconnecting] {
+            assert!(
+                ssh_projection_running(state),
+                "{state:?} still owns a live target and must project as running"
+            );
+        }
+        for state in [S::Disconnected, S::Expired] {
+            assert!(
+                !ssh_projection_running(state),
+                "{state:?} has no live target and must not project as running"
+            );
+        }
+    }
+
+    /// A restored descriptor parks in `Reconnecting` until a redial lands. Nothing dials here:
+    /// the connector never answers and its retry delay never elapses, so the state is stable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_reconnecting_ssh_session_describes_as_running() {
+        struct NeverAnswers;
+        impl crate::terminal::remote::Connector for NeverAnswers {
+            fn connect<'a>(
+                &'a self,
+                _: &'a crate::terminal::remote::RemoteSessionDescriptor,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                Arc<dyn crate::terminal::remote::Transport>,
+                                crate::ssh::bridge::BridgeError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(std::future::pending::<Result<
+                    Arc<dyn crate::terminal::remote::Transport>,
+                    crate::ssh::bridge::BridgeError,
+                >>())
+            }
+            fn delay(
+                &self,
+                _: u32,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                Box::pin(std::future::pending())
+            }
+        }
+
+        let terminals = Arc::new(TerminalService::with_remote_connector_for_test(Arc::new(
+            NeverAnswers,
+        )));
+        let descriptor: crate::terminal::remote::RemoteSessionDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "backendSessionId":"reconnecting-ssh",
+                "target":{"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"remote-target"},
+                "config":{
+                    "host":{"id":"host","label":"host","hostname":"example.invalid","source":"manual","authMethod":"agent"},
+                    "environment":{"platform":"posix","executor":"sh","version":"test","home":"/home","temp":"/tmp","git":true},
+                    "helper":{"executable":"/helper","root":"/root"},
+                    "projectId":"project","projectPath":"/project","worktree":null,"agentIdentity":null
+                },
+                "clientRequestId":"req","remoteCursor":"1","cols":80,"rows":24
+            }))
+            .unwrap();
+        terminals.remote().restore(descriptor).unwrap();
+        // `restore` publishes `Reconnecting` synchronously, and the unanswered dial can only
+        // leave it there.
+        assert_eq!(
+            terminals.remote().details("reconnecting-ssh").unwrap().state,
+            crate::terminal::remote::RemoteConnectionState::Reconnecting
+        );
+
+        let router = SessionRouter::new(terminals);
+        let details = router.describe_session("reconnecting-ssh").await.unwrap();
+        assert!(
+            details.running,
+            "a restored Reconnecting SSH session must project as running"
+        );
+        assert_eq!(details.workspace_id.as_deref(), Some("project"));
+        assert_eq!((details.cols, details.rows), (80, 24));
     }
 }

@@ -183,6 +183,19 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
           title="More keys"
           ariaLabel="More keys"
         />
+        {/* The mode toggle belongs to the always-visible row: in line mode the navigation row
+            collapses while the line input is focused, and a toggle that collapsed with it would
+            leave the user no way back to direct input. */}
+        {inputMode !== undefined && onInputModeChange ? (
+          <KeyButton
+            label="Line"
+            active={inputMode === "line"}
+            pressed={inputMode === "line"}
+            title={inputMode === "line" ? "Line input: edit a whole line, then send it" : "Direct input: every key goes straight to the terminal"}
+            testId="remote-terminal-input-mode-toggle"
+            onClick={() => onInputModeChange(inputMode === "line" ? "direct" : "line")}
+          />
+        ) : null}
       </div>
 
       {showNavigationRow ? (
@@ -198,16 +211,6 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
             onClick={() => triggerKey("enter")}
             className="col-span-2"
           />
-          {inputMode !== undefined && onInputModeChange ? (
-            <KeyButton
-              label="Line"
-              active={inputMode === "line"}
-              pressed={inputMode === "line"}
-              title={inputMode === "line" ? "Line input: edit a whole line, then send it" : "Direct input: every key goes straight to the terminal"}
-              testId="remote-terminal-input-mode-toggle"
-              onClick={() => onInputModeChange(inputMode === "line" ? "direct" : "line")}
-            />
-          ) : null}
         </div>
       ) : null}
       <div className="h-1.5" aria-hidden="true" />

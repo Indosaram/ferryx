@@ -32,6 +32,9 @@ const { capturedProps, socketOpenCalls, socketErrors, deferredSignal } = vi.hois
     capturedProps: [] as Array<{
       sessionId?: string;
       createWebSocket?: (path: string) => Promise<any>;
+      takeover?: boolean;
+      onTakeOver?: () => void;
+      onTakeoverConsumed?: () => void;
     }>,
     socketOpenCalls: [] as string[],
     socketErrors: [] as unknown[],
@@ -40,12 +43,9 @@ const { capturedProps, socketOpenCalls, socketErrors, deferredSignal } = vi.hois
 });
 
 vi.mock("./RemoteTerminal", () => ({
-  RemoteTerminal: (props: { sessionId?: string; createWebSocket?: (path: string) => Promise<any> }) => {
+  RemoteTerminal: (props: { sessionId?: string; createWebSocket?: (path: string) => Promise<any>; takeover?: boolean; onTakeOver?: () => void; onTakeoverConsumed?: () => void }) => {
     const { sessionId, createWebSocket } = props;
-    capturedProps.push({
-      sessionId,
-      createWebSocket,
-    });
+    capturedProps.push(props);
 
     useEffect(() => {
       if (createWebSocket) {
@@ -337,5 +337,34 @@ describe("RemoteApp createWebSocket factory stability regression", () => {
 
     expect(rerenderedProps.createWebSocket).toBe(initialProps.createWebSocket);
     expect(socketOpenCalls.length).toBe(initialSocketOpens);
+  });
+
+  it("retains takeover through batched retries until the mounted terminal consumes it", async () => {
+    render(<RemoteApp />);
+    const picker = await openWorkspacePicker();
+    const option = await within(picker).findByRole("button", { name: /main/i });
+    act(() => option.click());
+    const terminalMode = await screen.findByTestId("remote-view-mode-terminal");
+    act(() => terminalMode.click());
+    await screen.findByTestId("mock-remote-terminal");
+
+    const original = capturedProps[capturedProps.length - 1];
+    expect(original.onTakeOver).toBeTypeOf("function");
+    const opensBefore = socketOpenCalls.length;
+    act(() => {
+      original.onTakeOver!();
+      original.onTakeOver!();
+    });
+    const requested = capturedProps[capturedProps.length - 1];
+    expect(requested.takeover).toBe(true);
+    expect(socketOpenCalls.length).toBe(opensBefore + 1);
+    act(() => requested.onTakeoverConsumed!());
+    expect(capturedProps[capturedProps.length - 1].takeover).toBe(false);
+    expect(socketOpenCalls.length).toBe(opensBefore + 1);
+
+    act(() => capturedProps[capturedProps.length - 1].onTakeOver!());
+    expect(capturedProps[capturedProps.length - 1].takeover).toBe(true);
+    act(() => requested.onTakeoverConsumed!());
+    expect(capturedProps[capturedProps.length - 1].takeover).toBe(true);
   });
 });

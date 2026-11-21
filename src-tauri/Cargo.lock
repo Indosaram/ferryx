@@ -2499,6 +2499,8 @@ dependencies = [
  "futures-util",
  "gtk",
  "hmac 0.12.1",
+ "hyper",
+ "hyper-util",
  "image",
  "javascriptcore-rs",
  "jwt-simple",

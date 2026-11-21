@@ -174,6 +174,13 @@ const MobileChatWorkspace = lazy(() =>
 );
 import {
   getStoredAccountSessionToken,
+  getStoredAccountId,
+  resolveStoredAccountId,
+  ACCOUNT_SESSION_CHANGED_EVENT,
+  getAccountContinuity,
+  putAccountContinuity,
+  AccountSessionError,
+  type AccountContinuityPointer,
   getStoredAccountTokenOrigin,
   clearStoredAccountSessionToken,
   clearAccountPreferredSessions,
@@ -195,6 +202,8 @@ import {
   type AccountMachineView,
   type PlanLimitState,
 } from "./accountSession";
+import { canRestoreStoredTarget, resolveAccountContinuity, resolveWaitingLastTarget, continuityRestoreMessages, continuityRestoreFailureFor } from "./accountContinuityRestore";
+import { createPhoneContinuityPublisher, type PhoneContinuityPublication } from "./phoneContinuityPublication";
 import { PlanLimitNotice } from "./PlanLimitNotice";
 import { deleteAccount } from "./accountSession";
 import { paneSupervision } from "../lib/supervisorModel";
@@ -1789,7 +1798,9 @@ export const RemoteHostConnection: React.FC<{
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const activeHost = remoteHostState.hosts[hostId] ?? null;
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
-  const [terminalRetryGeneration, setTerminalRetryGeneration] = useState(0);
+  const [terminalRetry, setTerminalRetry] = useState<{ generation: number; takeoverSessionId: string | null }>({
+    generation: 0, takeoverSessionId: null,
+  });
   const pendingSelectionRef = useRef<RemoteContextOption | null>(null);
   const optimisticSocketSessionIdRef = useRef<string | null>(null);
   const optimisticSocketClosedRef = useRef(false);
@@ -1811,14 +1822,13 @@ export const RemoteHostConnection: React.FC<{
     workspaceId: string;
     worktreeSlug: string | null;
     worktreeLabel: string | null;
-    /* Ephemeral: the exact session the user picked. It is never persisted (the stored
-       last-selected target stays the canonical four fields), but it must survive the
-       acquire-connection hop so the issued selection attaches to that session instead
-       of the worktree's first one. */
+    /* Preserve exact identity through the acquire-connection hop. */
     sessionId?: string | null;
     daemonEpoch?: string | null;
     /** Ephemeral like sessionId: a published Inbox row opens only what already runs. */
     attachOnly?: boolean;
+    continuitySource?: "explicit" | "restore" | "follow";
+    continuityPublication?: PhoneContinuityPublication | null;
   } | null>(null);
   // Read by selection callbacks so their identities (and the event socket that depends
   // on them) do not churn every time the account target changes.
@@ -1829,6 +1839,7 @@ export const RemoteHostConnection: React.FC<{
     () => (initialMagicLinkRequested ? null : getStoredAccountSessionToken(relayUrl)),
   );
   const [activeTunnelConnection, setActiveTunnelConnection] = useState<AccountConnection | null>(null);
+  const resumeConnectionRef = useRef(activeTunnelConnection);
   // Account mode has no remoteHostStore record, so hostTransportUrl would leave this
   // pointing at the relay root. Every machine API then 404s there (the relay only serves
   // them under /host/<machineId>), which is why the remote chat view and workspace refresh
@@ -1844,8 +1855,11 @@ export const RemoteHostConnection: React.FC<{
   // The transferred tunnel is owned here: close it when it is replaced or on unmount.
   // AccountConnection.close is idempotent, so explicit closes elsewhere are safe.
   useEffect(() => {
-    if (!activeTunnelConnection) return;
-    return () => activeTunnelConnection.close();
+    resumeConnectionRef.current = activeTunnelConnection;
+    return () => {
+      resumeConnectionRef.current = null;
+      activeTunnelConnection?.close();
+    };
   }, [activeTunnelConnection]);
 
   // Relay traffic is end-to-end encrypted whenever this client can: account mode rides the
@@ -1960,11 +1974,31 @@ export const RemoteHostConnection: React.FC<{
     workspaceRefreshVersionRef.current += 1;
   }, [activeTunnelConnection, hostId]);
 
+  const [phonePublisher] = useState(createPhoneContinuityPublisher);
   const accountSelectionGenerationRef = useRef(0);
   const accountSessionTokenRef = useRef<string | null>(accountSessionToken);
   accountSessionTokenRef.current = accountSessionToken;
 
+  useEffect(() => {
+    const syncAccount = () => {
+      const current = getStoredAccountSessionToken(relayUrl);
+      if (current === accountSessionTokenRef.current) return;
+      phonePublisher.invalidate();
+      accountSelectionGenerationRef.current += 1;
+      accountSessionTokenRef.current = current;
+      disconnect();
+      setAccountSessionToken(current);
+    };
+    window.addEventListener(ACCOUNT_SESSION_CHANGED_EVENT, syncAccount);
+    window.addEventListener("storage", syncAccount);
+    return () => {
+      window.removeEventListener(ACCOUNT_SESSION_CHANGED_EVENT, syncAccount);
+      window.removeEventListener("storage", syncAccount);
+    };
+  }, [relayUrl, disconnect]);
+
   const handleLogout = useCallback(() => {
+    phonePublisher.invalidate();
     accountSelectionGenerationRef.current += 1;
     accountSessionTokenRef.current = null;
     clearStoredAccountSessionToken();
@@ -2021,12 +2055,99 @@ export const RemoteHostConnection: React.FC<{
   // follow attempt had to wait for an in-flight selection to settle.
   const [desktopFollowTick, setDesktopFollowTick] = useState(0);
   const desktopFollowDeferredRef = useRef(false);
-  const lastFollowedRef = useRef<{ connection: unknown; key: string } | null>(null);
-  // Set only by the automatic page-load restore: the desktop focus wins over the stored
-  // target. An explicit pick instead baselines the desktop focus it connected under.
-  const restoreFollowRef = useRef(false);
+  // A null key on a known connection means a desktop change is still owed,
+  // not that the phone is waiting to establish its initial focus baseline.
+  const lastFollowedRef = useRef<{ connection: AccountConnection; key: string | null } | null>(null);
+  const exactContinuityRestoreRef = useRef(false);
+  const restoredFocusBaseline = useRef<AccountConnection | null>(null);
+  /* The exact restore is a settle-scoped fence: it exists only while selectAccountOption is in
+     flight for an automatically restored session, and it must end with that attempt. A follow
+     that arrived during the window is remembered and replayed once the fence lifts. */
+  const releaseExactContinuityRestore = useCallback(() => {
+    exactContinuityRestoreRef.current = false;
+    // Refs do not re-render, so a follow or context sync that skipped its run inside the fence
+    // is re-armed here. Without this the phone silently stopped following the desktop until
+    // some unrelated dependency happened to change.
+    if (desktopFollowDeferredRef.current) {
+      desktopFollowDeferredRef.current = false;
+      setDesktopFollowTick((tick) => tick + 1);
+      setDesktopSyncTick((tick) => tick + 1);
+    }
+  }, []);
+  const continuityOriginRef = useRef(relayUrl);
+  continuityOriginRef.current = relayUrl;
+  const [continuityRead, setContinuityRead] = useState<{
+    token: string; origin: string; result: { kind: "ready"; pointer: AccountContinuityPointer | null } | { kind: "failed" };
+  } | null>(null);
+  const currentRead = continuityRead?.token === accountSessionToken && continuityRead?.origin === relayUrl
+    ? continuityRead.result : null;
+  const continuityLoaded = currentRead?.kind === "ready";
+  const continuityPointer = currentRead?.kind === "ready" ? currentRead.pointer : null;
+  const retryPointerRead = useRef<(() => void) | null>(null);
+  const [continuityNotice, setContinuityNotice] = useState<string | null>(null);
+
+  const beginContinuityPublication = useCallback((): PhoneContinuityPublication | null => {
+    const expectedToken = accountSessionTokenRef.current;
+    if (!expectedToken) return null;
+    const accountId = getStoredAccountId(relayUrl);
+    return phonePublisher.begin({ origin: relayUrl, token: expectedToken, accountId }, {
+      isCurrent: () => continuityOriginRef.current === relayUrl && accountSessionTokenRef.current === expectedToken &&
+        getStoredAccountSessionToken(relayUrl) === expectedToken &&
+        (accountId === null || getStoredAccountId(relayUrl) === accountId),
+      read: (signal) => getAccountContinuity(relayUrl, expectedToken, signal),
+      write: (target, revision, signal) => putAccountContinuity(relayUrl, expectedToken, revision, target, signal),
+    });
+  }, [phonePublisher, relayUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    phonePublisher.invalidate();
+    setContinuityRead(null);
+    restoreAttemptInFlightRef.current = false;
+    restoreAttemptedForTokenRef.current = null;
+    setContinuityNotice(null);
+    exactContinuityRestoreRef.current = false;
+    if (!accountSessionToken) return;
+    void resolveStoredAccountId(relayUrl, accountSessionToken, controller.signal).catch((error) => {
+      if (!cancelled) console.warn("[remote] account identity resolution failed", error);
+    });
+    let canRead = true;
+    const readPointer = () => {
+      if (cancelled || !canRead || restoreAttemptedForTokenRef.current === accountSessionToken) return;
+      canRead = false;
+      void getAccountContinuity(relayUrl, accountSessionToken, controller.signal).then((pointer) => {
+        if (cancelled) return;
+        setContinuityRead({ token: accountSessionToken, origin: relayUrl, result: { kind: "ready", pointer } });
+        setContinuityNotice((notice) => notice === continuityRestoreMessages["network-error"] ? null : notice);
+      }).catch((error: unknown) => {
+        if (cancelled) return;
+        canRead = true;
+        if (restoreAttemptedForTokenRef.current === accountSessionToken) return;
+        console.warn("[remote] continuity read failed", error);
+        setContinuityRead({ token: accountSessionToken, origin: relayUrl, result: { kind: "failed" } });
+        setContinuityNotice(continuityRestoreMessages["network-error"]);
+      });
+    };
+    retryPointerRead.current = readPointer;
+    window.addEventListener("online", readPointer);
+    readPointer();
+    return () => {
+      cancelled = true;
+      retryPointerRead.current = null;
+      window.removeEventListener("online", readPointer);
+      controller.abort();
+      phonePublisher.invalidate();
+    };
+  }, [accountSessionToken, relayUrl]);
+
+  useEffect(() => {
+    if (accountDiscovery.initialized && !accountDiscovery.loading && !accountDiscovery.error) retryPointerRead.current?.();
+  }, [accountDiscovery.initialized, accountDiscovery.loading, accountDiscovery.error]);
 
   // Auto-restore last explicitly selected account target upon page load / refresh
+  const retryableRestoreRef = useRef<{ target: NonNullable<typeof initialAccountTarget>;
+    inventory: (typeof accountDiscovery.sessionInventories)[string] | undefined; generation: number } | null>(null);
   const restoreAttemptInFlightRef = useRef(false);
   const restoreAttemptedForTokenRef = useRef<string | null>(null);
   useEffect(() => {
@@ -2038,57 +2159,70 @@ export const RemoteHostConnection: React.FC<{
     if (token || activeTunnelConnection || restoreAttemptInFlightRef.current) return;
     if (!accountDiscovery.initialized || accountDiscovery.loading || accountDiscovery.error) return;
 
-    const storedTarget = getAccountLastSelectedTarget(relayUrl);
-    if (!storedTarget) return;
-
-    // Check if machine is known
-    const targetMachine = accountDiscovery.machines.find((m) => m.machineId === storedTarget.machineId);
-    if (!targetMachine) {
-      // Complete successful authoritative inventory with zero error: target machine does not exist on this account
-      if (accountDiscovery.initialized && !accountDiscovery.loading && !accountDiscovery.error) {
+    if (!continuityLoaded || restoreAttemptedForTokenRef.current === accountSessionToken) return;
+    const result = resolveAccountContinuity(continuityPointer, accountDiscovery);
+    if (result.kind !== "session-alive") {
+      if (result.kind !== "absent") setContinuityNotice(continuityRestoreMessages[result.kind]);
+      /* Only a pointer that names a target this account can no longer reach justifies spending
+         the attempt on the device-local target. A listing that is still in flight, a partial
+         listing, or a transport error says nothing about the target being gone: falling back
+         there would contradict the notice ("it will open as soon as...") and, for a gone
+         session, attach the phone to a different session in the same worktree. Leave the
+         attempt unspent so the next discovery change retries the exact restore. */
+      if (!canRestoreStoredTarget(result.kind)) return;
+      /* No live account session to resume, so fall back to the target this device stored from
+         its last accepted selection. The account-wide pointer answers "what did any device pick
+         most recently" and is frequently empty; the device-local target is what makes a reload
+         land back on the same worktree. HEAD's page-load restore carries over unchanged below,
+         sharing the same once-per-token attempt marker as the exact continuity restore. */
+      const storedTarget = getAccountLastSelectedTarget(relayUrl);
+      if (!storedTarget) return;
+      const targetMachine = accountDiscovery.machines.find((m) => m.machineId === storedTarget.machineId);
+      if (!targetMachine) {
+        // A complete, error-free discovery that no longer lists the machine is authoritative:
+        // this account cannot restore that target any more, so the key would only mislead.
         clearAccountLastSelectedTarget(relayUrl);
+        return;
       }
-      return;
-    }
-
-    // If target machine is currently offline, preserve target without clearing
-    if (targetMachine.online === false) {
-      return;
-    }
-
-    const machineStatus = accountDiscovery.machineStatuses[storedTarget.machineId];
-    // If still probing/tunneling/idle, wait for completion
-    if (!machineStatus || machineStatus.status === "tunneling" || machineStatus.status === "idle") {
-      return;
-    }
-
-    // If machine probe failed transiently (error / offline), preserve target without clearing
-    if (machineStatus.status === "error" || machineStatus.status === "offline") {
-      return;
-    }
-
-    // Machine probe succeeded ("ready"): check for matching worktree option
-    if (machineStatus.status === "ready") {
-      const matchingOpt = accountDiscovery.accountOptions.find(
+      // An offline machine may come back; keep the target so the next load restores it.
+      if (targetMachine.online === false) return;
+      const storedMachineStatus = accountDiscovery.machineStatuses[storedTarget.machineId];
+      // Still probing: the answer is not in yet, so neither restore nor clear.
+      if (!storedMachineStatus || storedMachineStatus.status === "tunneling" || storedMachineStatus.status === "idle") return;
+      // A transient probe failure says nothing about the target's validity.
+      if (storedMachineStatus.status === "error" || storedMachineStatus.status === "offline") return;
+      if (storedMachineStatus.status !== "ready") return;
+      const matchingOption = accountDiscovery.accountOptions.find(
         (opt) =>
           opt.machineId === storedTarget.machineId &&
           opt.workspaceId === storedTarget.workspaceId &&
           (opt.worktreeSlug ?? null) === (storedTarget.worktreeSlug ?? null),
       );
-
-      if (matchingOpt) {
-        if (restoreAttemptedForTokenRef.current !== accountSessionToken) {
-          restoreAttemptInFlightRef.current = true;
-          restoreFollowRef.current = true;
-          void selectAccountOption(matchingOpt).then((ok) => {
-            restoreAttemptInFlightRef.current = false;
-            if (ok) {
-              restoreAttemptedForTokenRef.current = accountSessionToken;
-            }
-          });
-        }
-      }
+      if (!matchingOption) return;
+      restoreAttemptInFlightRef.current = true;
+      setContinuityNotice(null);
+      const attempt = selectAccountOption(matchingOption, "restore");
+      const generation = accountSelectionGenerationRef.current;
+      const failedToStart = () => {
+        if (generation !== accountSelectionGenerationRef.current || accountSessionTokenRef.current !== accountSessionToken) return;
+        restoreAttemptInFlightRef.current = false;
+        setContinuityNotice(continuityRestoreMessages["network-error"]);
+      };
+      void attempt.then((queued) => { if (!queued) failedToStart(); }, failedToStart);
+      return;
     }
+    restoreAttemptInFlightRef.current = true;
+    exactContinuityRestoreRef.current = true;
+    setContinuityNotice(null);
+    const attempt = selectAccountOption(result.option, "restore");
+    const generation = accountSelectionGenerationRef.current;
+    const failedToStart = () => {
+      if (accountSelectionGenerationRef.current !== generation || accountSessionTokenRef.current !== accountSessionToken) return;
+      restoreAttemptInFlightRef.current = false;
+      releaseExactContinuityRestore();
+      setContinuityNotice(continuityRestoreMessages["network-error"]);
+    };
+    void attempt.then((queued) => { if (!queued) failedToStart(); }, failedToStart);
   }, [
     accountSessionToken,
     token,
@@ -2100,6 +2234,10 @@ export const RemoteHostConnection: React.FC<{
     accountDiscovery.machineStatuses,
     accountDiscovery.accountOptions,
     relayUrl,
+    continuityLoaded,
+    continuityPointer,
+    accountDiscovery.sessionInventories,
+    releaseExactContinuityRestore,
   ]);
 
   const sessionEpochsRef = useRef<Map<string, string>>(new Map());
@@ -2164,6 +2302,12 @@ export const RemoteHostConnection: React.FC<{
   // a stored target in flight, or an independently chosen session always wins.
   useEffect(() => {
     if (!token || !activeTunnelConnection) return;
+    // The exact restore owns this connection until it settles; replay the sync afterwards
+    // instead of dropping it.
+    if (exactContinuityRestoreRef.current) {
+      desktopFollowDeferredRef.current = true;
+      return;
+    }
     const machineId = activeTunnelConnection.machine.machineId;
     const chosenWorkspace = model.context.workspaceId;
     const chosenWorktree = model.context.worktreeSlug;
@@ -2620,7 +2764,7 @@ export const RemoteHostConnection: React.FC<{
     setPending(null);
     setOptimisticSessionId(null);
     if (retryFailedSocket && optimisticSocketClosedRef.current) {
-      setTerminalRetryGeneration((generation) => generation + 1);
+      setTerminalRetry((current) => ({ generation: current.generation + 1, takeoverSessionId: null }));
     }
     if (!retryFailedSocket) optimisticSocketSessionIdRef.current = null;
     optimisticSocketClosedRef.current = false;
@@ -2750,6 +2894,11 @@ export const RemoteHostConnection: React.FC<{
           scheduleInventoryRefreshRef.current();
         }
         if (inventoryEvent.kind === "ignored" && inventoryEvent.type === "desktopSelectionChanged") {
+          if (restoredFocusBaseline.current === activeTunnelConnection) {
+            // This event supersedes even an unread baseline. Re-read the actual target below.
+            restoredFocusBaseline.current = null;
+            lastFollowedRef.current = { connection: activeTunnelConnection, key: null };
+          }
           setDesktopFollowTick((tick) => tick + 1);
           return;
         }
@@ -2912,12 +3061,18 @@ export const RemoteHostConnection: React.FC<{
     }, CONFIRMATION_TIMEOUT_MS);
   }, [clearPendingSelection]);
 
-  const selectContext = useCallback(async (requestedOption: RemoteContextOption, createTerminal = false): Promise<boolean> => {
+  const selectContext = useCallback(async (requestedOption: RemoteContextOption, createTerminal = false, source: "explicit" | "restore" | "follow" = "explicit", capturedPublication?: PhoneContinuityPublication | null): Promise<boolean> => {
+    if (!token || pendingSelectionRef.current) return false;
+    const publication = source === "explicit" ? (capturedPublication === undefined ? beginContinuityPublication() : capturedPublication) : null;
+    if (source === "explicit") {
+      exactContinuityRestoreRef.current = false;
+      restoreAttemptedForTokenRef.current = accountSessionTokenRef.current;
+      setContinuityNotice(null);
+    }
     // A user selection naming a session (or an explicit tab) is an independent choice:
     // the read-only desktop-context sync must never replace it afterwards.
     independentSessionRef.current = Boolean(requestedOption.sessionId || requestedOption.tabId);
     localSessionRef.current = null;
-    if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
     lateSelectionRef.current = null;
@@ -2984,40 +3139,26 @@ export const RemoteHostConnection: React.FC<{
 
         if (!createTerminal) {
           if (option.sessionId) {
-            const chosen = inventory
-              ? selectInventorySession(inventory, {
-                  workspaceId: option.workspaceId,
-                  worktreeSlug: option.worktreeSlug ?? null,
-                  sessionId: option.sessionId,
-                  daemonEpoch: sessionEpochsRef.current.get(option.sessionId) ?? null,
-                })
-              : null;
-            const exact = chosen
-              ? rows.find((r) => (r.target?.sessionId ?? r.sessionId) === chosen.entry.sessionId) ?? null
-              : rows.find((r) => {
-                  if (r.running === false) return false;
-                  const targetSid = r.target?.sessionId ?? r.sessionId;
-                  if (targetSid !== option.sessionId) return false;
-                  if (r.workspaceId !== option.workspaceId) return false;
-                  const slug = r.worktree?.slug ?? null;
-                  return slug === (option.worktreeSlug || null);
-                }) ?? null;
-            /* A daemon epoch the client already knows and that disagrees with the machine's
-               answer means the cached terminal is gone; attaching anyway would type into a
-               different process. */
-            const expectedEpoch =
-              (option as { daemonEpoch?: string | null }).daemonEpoch ??
-              sessionEpochsRef.current.get(option.sessionId) ??
-              null;
-            const rowEpoch = exact?.target?.daemonEpoch ?? exact?.daemonEpoch ?? null;
-            if (exact && expectedEpoch && rowEpoch !== null && rowEpoch !== undefined && String(rowEpoch) !== expectedEpoch) {
-              throw new SelectionFailure("EPOCH_CHANGED");
-            }
-            if (exact) {
-              targetSession = exact;
-            } else {
+            // Only this response can confirm an attach. A merged cache is useful for
+            // displaying tabs, but must not authenticate an absent or rejected row.
+            if (!parsedListing.ok) throw new SelectionFailure("LIST_FAILED");
+            const lookup = { workspaceId: option.workspaceId, worktreeSlug: option.worktreeSlug ?? null,
+              sessionId: option.sessionId };
+            const expectedEpoch = (option as { daemonEpoch?: string | null }).daemonEpoch ??
+              sessionEpochsRef.current.get(option.sessionId) ?? null;
+            const current = selectInventorySession(parsedListing.inventory, { ...lookup, daemonEpoch: expectedEpoch });
+            if (!current) {
+              if (expectedEpoch && selectInventorySession(parsedListing.inventory, lookup)) {
+                throw new SelectionFailure("EPOCH_CHANGED");
+              }
+              if (parsedListing.inventory.completeness !== "complete") throw new SelectionFailure("INVENTORY_INCOMPLETE");
               throw new SelectionFailure("SESSION_GONE");
             }
+            if (expectedEpoch && !current.epochVerified) throw new SelectionFailure("EPOCH_UNKNOWN");
+            const entry = current.entry;
+            targetSession = { sessionId: entry.sessionId, daemonEpoch: entry.daemonEpoch,
+              workspaceId: entry.workspaceId, running: entry.running, title: entry.title,
+              worktree: entry.worktreeSlug === null ? null : { wsId: entry.workspaceId, slug: entry.worktreeSlug } };
           } else {
             const cachedId = getAccountPreferredSessionId(relayUrl, machineId, option.workspaceId, option.worktreeSlug);
             const deterministic = inventory
@@ -3106,6 +3247,27 @@ export const RemoteHostConnection: React.FC<{
         if (targetSession) {
           ok = true;
           const sid = targetSession.target?.sessionId ?? targetSession.sessionId;
+          if (sid && publication?.isCurrent()) {
+            const target = { machineId: activeTunnelConnection.machine.machineId, workspaceId: option.workspaceId, worktreeSlug: option.worktreeSlug ?? null, sessionId: sid };
+            setAccountLastSelectedTarget(relayUrl, { ...target, worktreeLabel: option.worktreeLabel });
+            void Promise.resolve().then(async () => {
+              try {
+                await publication.publish(target);
+              } catch (error) {
+                if (!publication.isCurrent()) return;
+                if (error instanceof AccountSessionError && error.status === 409 && error.code === "CONTINUITY_CONFLICT") {
+                  // A failed pointer CAS does not revoke the already-attached session.
+                  setContinuityNotice("Another device selected a newer session. Choose a session to publish fresh intent.");
+                } else if (error instanceof AccountSessionError && error.code === "CONTINUITY_UNSUPPORTED" && error.status === 404) {
+                  // The local pick already succeeded. Older account servers do not store a pointer.
+                  console.warn("[remote] account server does not support continuity", error);
+                } else {
+                  console.warn("[remote] continuity publication failed", error);
+                  setContinuityNotice("Couldn't save this selection to your account.");
+                }
+              }
+            });
+          }
           const epoch = targetSession.target?.daemonEpoch ?? targetSession.daemonEpoch;
           if (sid && epoch !== undefined && epoch !== null) {
             sessionEpochsRef.current.set(sid, String(epoch));
@@ -3189,21 +3351,62 @@ export const RemoteHostConnection: React.FC<{
       console.warn("Selection failed", error);
       setCreationError(selectionErrorMessage(error));
       clearPendingSelection();
+      if (source === "restore") {
+        const failure = continuityRestoreFailureFor(error instanceof SelectionFailure ? error : null);
+        setContinuityNotice(continuityRestoreMessages[failure]);
+        // Only "the session this machine no longer lists" revokes the connection; a transient
+        // refusal leaves it in place so the released marker can retry on the next change.
+        if (failure === "session-gone") {
+          // A definitive refusal ends this automatic attempt without creating or substituting a pane.
+          restoreAttemptedForTokenRef.current = accountSessionTokenRef.current;
+          retryableRestoreRef.current = null;
+          disconnect();
+        } else {
+          const target = initialAccountTargetRef.current;
+          if (target?.continuitySource === "restore") retryableRestoreRef.current = {
+            target, inventory: accountDiscoveryRef.current.sessionInventories[target.machineId],
+            generation: accountSelectionGenerationRef.current,
+          };
+        }
+      }
       return false;
     }
-  }, [activeTunnelConnection, armConfirmationTimeout, clearPendingSelection, confirmSelection, model, token, transportBaseUrl]);
+  }, [activeTunnelConnection, armConfirmationTimeout, clearPendingSelection, confirmSelection, model, token, transportBaseUrl, relayUrl, disconnect, beginContinuityPublication]);
 
   // Account picker choices only record the target; the selection is issued here once the
   // committed token/connection for the chosen machine are visible to selectContext.
   const initialAccountSelectionAttemptedRef = useRef(false);
+  const [initialRetry, setInitialRetry] = useState(0);
+  const retryInitialSelection = useCallback(() => {
+    if (!initialAccountTargetRef.current || pendingSelectionRef.current) return;
+    retryableRestoreRef.current = null;
+    initialAccountSelectionAttemptedRef.current = false;
+    setInitialRetry((attempt) => attempt + 1);
+  }, []);
+  useEffect(() => {
+    const retryAfterFailure = () => {
+      const failure = retryableRestoreRef.current;
+      if (failure && failure.target === initialAccountTargetRef.current &&
+        failure.generation === accountSelectionGenerationRef.current) retryInitialSelection();
+    };
+    const failure = retryableRestoreRef.current;
+    if (failure && accountDiscovery.sessionInventories[failure.target.machineId] !== failure.inventory) retryAfterFailure();
+    window.addEventListener("online", retryAfterFailure);
+    return () => window.removeEventListener("online", retryAfterFailure);
+  }, [accountDiscovery.sessionInventories, retryInitialSelection]);
   const accountAcquireInFlightRef = useRef(false);
   useEffect(() => {
     if (!token || !activeTunnelConnection || !initialAccountTarget) return;
     if (activeTunnelConnection.machine.machineId !== initialAccountTarget.machineId) return;
     if (initialAccountSelectionAttemptedRef.current) return;
     initialAccountSelectionAttemptedRef.current = true;
-
     const target = initialAccountTarget;
+    const generation = accountSelectionGenerationRef.current;
+    const account = accountSessionTokenRef.current;
+    if (target.continuitySource === "restore") {
+      restoreAttemptInFlightRef.current = true;
+      exactContinuityRestoreRef.current = Boolean(target.sessionId && target.attachOnly);
+    }
     void selectContext({
       machineId: target.machineId,
       workspaceId: target.workspaceId,
@@ -3212,8 +3415,24 @@ export const RemoteHostConnection: React.FC<{
       ...(target.sessionId ? { sessionId: target.sessionId } : {}),
       ...(target.daemonEpoch ? { daemonEpoch: target.daemonEpoch } : {}),
       ...(target.attachOnly ? { attachOnly: true } : {}),
+    }, false, target.continuitySource ?? "explicit", target.continuityPublication).then((confirmed) => {
+      if (target.continuitySource !== "restore" || generation !== accountSelectionGenerationRef.current ||
+        account !== accountSessionTokenRef.current) return;
+      restoreAttemptInFlightRef.current = false;
+      if (confirmed && target.attachOnly && target.sessionId) {
+        restoredFocusBaseline.current = activeTunnelConnection;
+        // A retry on an existing connection need not have deferred a follow. Read its
+        // baseline now rather than consuming the next desktop change as the baseline.
+        desktopFollowDeferredRef.current = true;
+      }
+      releaseExactContinuityRestore();
+      if (confirmed) {
+        retryableRestoreRef.current = null;
+        restoreAttemptedForTokenRef.current = account;
+        setContinuityNotice(null);
+      }
     });
-  }, [token, activeTunnelConnection, initialAccountTarget, selectContext]);
+  }, [token, activeTunnelConnection, initialAccountTarget, selectContext, initialRetry, releaseExactContinuityRestore]);
 
   /* Always-follow (account route): the machine's published desktop focus is the view.
      After a connection is established and whenever the desktop publishes a focus change,
@@ -3232,12 +3451,16 @@ export const RemoteHostConnection: React.FC<{
   }, [initialAccountTarget, pending]);
   useEffect(() => {
     if (!token || !activeTunnelConnection) return;
+    if (exactContinuityRestoreRef.current) {
+      desktopFollowDeferredRef.current = true;
+      return;
+    }
     const connection = activeTunnelConnection;
     const machineId = connection.machine.machineId;
     // Decided before any await: a pick that is still settling when this connection comes
     // up is an explicit choice, and only a later desktop focus change may replace it.
-    const explicitPick = Boolean(initialAccountTargetRef.current || pendingSelectionRef.current)
-      && !restoreFollowRef.current;
+    const explicitPick = Boolean(initialAccountTargetRef.current || pendingSelectionRef.current);
+    const readingBaseline = restoredFocusBaseline.current === connection;
     let cancelled = false;
     void (async () => {
       try {
@@ -3245,14 +3468,21 @@ export const RemoteHostConnection: React.FC<{
           headers: { Authorization: `Bearer ${token}` },
         });
         if (cancelled || res.status < 200 || res.status >= 300) return;
+        // A focus event invalidated this baseline while its request was in flight.
+        if (readingBaseline && restoredFocusBaseline.current !== connection) return;
         const state = normalizeRemoteWorkspaceState(JSON.parse(new TextDecoder().decode(res.body)));
         const workspaceId = state.context.workspaceId;
         const worktreeSlug = state.context.worktreeSlug ?? null;
         const active = state.context.activeTerminal;
         const sessionId = active?.sessionId ?? null;
-        // No exact session means no desktop view to follow.
-        if (!workspaceId || !sessionId) return;
         const key = `${machineId}\u0000${workspaceId}\u0000${worktreeSlug ?? ""}\u0000${sessionId}`;
+        // The desktop focus observed after restoring the phone is a baseline, not a new selection.
+        if (restoredFocusBaseline.current === connection) {
+          restoredFocusBaseline.current = null;
+          lastFollowedRef.current = { connection, key: workspaceId && sessionId ? key : null };
+          return;
+        }
+        if (!workspaceId || !sessionId) return;
         const last = lastFollowedRef.current;
         if (last && last.connection === connection && last.key === key) return;
         const sessRes = await connection.transport.fetchLike("/api/v1/sessions", {
@@ -3272,6 +3502,11 @@ export const RemoteHostConnection: React.FC<{
             row.running,
         );
         if (!entry || cancelled) return;
+        if (exactContinuityRestoreRef.current) {
+          // The restore claimed the pane while these reads were in flight; replay, don't drop.
+          desktopFollowDeferredRef.current = true;
+          return;
+        }
         const epoch = entry.daemonEpoch;
         if (explicitPick) {
           lastFollowedRef.current = { connection, key };
@@ -3282,7 +3517,6 @@ export const RemoteHostConnection: React.FC<{
           desktopFollowDeferredRef.current = true;
           return;
         }
-        restoreFollowRef.current = false;
         accountDiscovery.noteContextTabs(machineId, state.context.terminalTabs);
         const current = modelRef.current.context;
         const alreadyShown =
@@ -3300,9 +3534,9 @@ export const RemoteHostConnection: React.FC<{
           worktreeLabel: state.context.worktreeLabel ?? worktreeSlug,
           sessionId,
           ...(epoch ? { daemonEpoch: epoch } : {}),
-        } as RemoteContextOption);
+        } as RemoteContextOption, false, "follow");
         // A refused or failed apply is retried on the next focus change or reconnect.
-        if (!applied && !cancelled) lastFollowedRef.current = null;
+        if (!applied && !cancelled) lastFollowedRef.current = { connection, key: null };
       } catch (error) {
         console.warn("[remote] desktop follow skipped", error);
       }
@@ -3338,6 +3572,12 @@ export const RemoteHostConnection: React.FC<{
     }
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, swipePanes]);
 
+  const handleTakeOverTerminal = useCallback((sessionId: string) => {
+    // Keep the remount and its authority atomic even when React batches retry updates.
+    // RemoteTerminal consumes the authority on its first dial, including a lazy mount.
+    setTerminalRetry((current) => ({ generation: current.generation + 1, takeoverSessionId: sessionId }));
+  }, []);
+
   const handleSwipeNextTab = useCallback(() => {
     if (swipePanes.length <= 1 || currentIndex >= swipePanes.length - 1 || !model.context.workspaceId) return;
     const nextTab = swipePanes[currentIndex + 1];
@@ -3356,6 +3596,16 @@ export const RemoteHostConnection: React.FC<{
   const effectiveSessionId = initialAccountTarget
     ? null
     : (optimisticSessionId ?? activeTerminal?.sessionId ?? null);
+
+  /* Takeover authority belongs to the session it was granted for. If the user navigates away
+     before the lazy mount dials, that authority must not survive and displace another holder
+     the next time this session is mounted: only a fresh tap may steal it. */
+  useEffect(() => {
+    setTerminalRetry((current) =>
+      current.takeoverSessionId !== null && current.takeoverSessionId !== effectiveSessionId
+        ? { ...current, takeoverSessionId: null }
+        : current);
+  }, [effectiveSessionId]);
 
 
 
@@ -3476,6 +3726,10 @@ export const RemoteHostConnection: React.FC<{
     const current = activeTunnelConnection;
     if (!current || !accountSessionToken || tunnelResumeInFlightRef.current) return;
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    const selection = accountSelectionGenerationRef.current;
+    const stillCurrent = () => resumeConnectionRef.current === current &&
+      accountSelectionGenerationRef.current === selection && continuityOriginRef.current === relayUrl &&
+      accountSessionTokenRef.current === accountSessionToken;
     tunnelResumeInFlightRef.current = true;
     try {
       let alive = !current.isClosed;
@@ -3487,28 +3741,38 @@ export const RemoteHostConnection: React.FC<{
           new Promise<boolean>((resolve) => setTimeout(() => resolve(false), TUNNEL_PROBE_TIMEOUT_MS)),
         ]);
       }
-      if (alive && !force) return;
+      if (!stillCurrent() || (alive && !force)) return;
       setTunnelResume("reconnecting");
       const machineId = current.machine.machineId;
       const conn = await accountDiscoveryRef.current.acquireConnection(machineId);
-      if (accountSessionTokenRef.current !== accountSessionToken) {
+      if (!stillCurrent()) {
         conn?.close();
+        setTunnelResume("idle");
         return;
       }
-      if (!conn) {
+      if (!conn || conn.machine.machineId !== machineId) {
+        conn?.close();
         setTunnelResume("failed");
         return;
       }
-      setActiveTunnelConnection(createAccountConnection({
+      const replacement = createAccountConnection({
         relayUrl,
         accountSessionToken,
         machine: conn.machine,
         deviceToken: conn.deviceToken,
         httpTransport: conn.transport,
         httpClose: conn.close,
-      }));
+      });
+      // Replacing this transport is not a desktop focus change. Compare the new
+      // machine snapshot with the last desktop focus seen on this same login.
+      const last = lastFollowedRef.current;
+      if (last?.connection === current) lastFollowedRef.current = { connection: replacement, key: last.key };
+      if (restoredFocusBaseline.current === current || (last?.connection !== current && independentSessionRef.current)) {
+        restoredFocusBaseline.current = replacement;
+      }
+      setActiveTunnelConnection(replacement);
       setToken(conn.deviceToken);
-      setTerminalRetryGeneration((generation) => generation + 1);
+      setTerminalRetry((current) => ({ generation: current.generation + 1, takeoverSessionId: null }));
       setTunnelResume("idle");
     } finally {
       tunnelResumeInFlightRef.current = false;
@@ -5885,8 +6149,13 @@ export const RemoteHostConnection: React.FC<{
         : null;
   const accountPickerStatus =
     isAccountMode &&
-    (accountInventoryLoading || accountDiscovery.error || failedMachineIds.length > 0 || accountEmptyReason) ? (
+    (accountInventoryLoading || accountDiscovery.error || failedMachineIds.length > 0 || accountEmptyReason || continuityNotice || !continuityLoaded) ? (
     <div data-testid="remote-account-inventory-status" className="space-y-1 pb-1">
+      {continuityNotice || !continuityLoaded ? <p role="status" className="px-2 py-1 text-sm text-chat-foreground">{continuityNotice ?? continuityRestoreMessages.loading}</p> : null}
+      {currentRead?.kind === "failed" ? (
+        <button type="button" aria-label="Retry session restore" onClick={() => retryPointerRead.current?.()}
+          className="h-11 px-3 text-sm font-medium">Retry session restore</button>
+      ) : null}
       {accountInventoryLoading ? (
         <div role="status" aria-label="Loading worktrees" className="space-y-1.5 px-2 py-1">
           {[0, 1, 2].map((row) => (
@@ -5920,9 +6189,15 @@ export const RemoteHostConnection: React.FC<{
     </div>
   ) : null;
 
-  const selectAccountOption = async (accountOpt: AccountWorktreeOption): Promise<boolean> => {
+  const selectAccountOption = async (accountOpt: AccountWorktreeOption, source: "explicit" | "restore" = "explicit"): Promise<boolean> => {
     if (accountAcquireInFlightRef.current || pendingSelectionRef.current) return false;
     if (planLimitSuspendedRef.current) return false;
+    const continuityPublication = source === "explicit" ? beginContinuityPublication() : null;
+    if (source === "explicit") {
+      exactContinuityRestoreRef.current = false;
+      restoreAttemptedForTokenRef.current = accountSessionToken;
+      setContinuityNotice(null);
+    }
     // A new pick supersedes a timed-out attempt before the effect issues the new selection.
     lateSelectionRef.current = null;
     accountSelectionGenerationRef.current += 1;
@@ -5945,6 +6220,8 @@ export const RemoteHostConnection: React.FC<{
       : null;
     const selectionTarget = {
       ...target,
+      continuitySource: source,
+      continuityPublication,
       sessionId: accountOpt.sessionId ?? null,
       daemonEpoch: (accountOpt as { daemonEpoch?: string | null }).daemonEpoch ?? inventoryEpoch,
       ...(accountOpt.attachOnly ? { attachOnly: true } : {}),
@@ -5957,7 +6234,7 @@ export const RemoteHostConnection: React.FC<{
       // Same machine: keep the connection, gate the body until the exact target confirms.
       initialAccountSelectionAttemptedRef.current = false;
       setInitialAccountTarget(selectionTarget);
-      setAccountLastSelectedTarget(relayUrl, target);
+      if (source === "explicit") setAccountLastSelectedTarget(relayUrl, target);
       return true;
     }
 
@@ -6013,7 +6290,7 @@ export const RemoteHostConnection: React.FC<{
     setToken(conn.deviceToken);
     initialAccountSelectionAttemptedRef.current = false;
     setInitialAccountTarget(selectionTarget);
-    setAccountLastSelectedTarget(relayUrl, target);
+    if (source === "explicit") setAccountLastSelectedTarget(relayUrl, target);
     return true;
   };
 
@@ -6034,16 +6311,8 @@ export const RemoteHostConnection: React.FC<{
     </Suspense>
   );
 
-  /* The last worktree an automatic restore is waiting on because its computer is offline or
-     failed its probe: the home says so instead of silently landing on Supervisor. */
-  const storedLastTarget = isAccountMode && !token ? getAccountLastSelectedTarget(relayUrl) : null;
-  const storedLastMachine = storedLastTarget
-    ? accountDiscovery.machines.find((machine) => machine.machineId === storedLastTarget.machineId) ?? null
-    : null;
-  const storedLastStatus = storedLastTarget ? accountDiscovery.machineStatuses[storedLastTarget.machineId]?.status : undefined;
-  const offlineLastTarget = storedLastTarget && storedLastMachine
-    && (storedLastMachine.online === false || storedLastStatus === "offline" || storedLastStatus === "error")
-    ? { ...storedLastTarget, machineName: storedLastMachine.displayName || "Your computer" }
+  const offlineLastTarget = isAccountMode && !token && continuityLoaded
+    ? resolveWaitingLastTarget(continuityPointer, accountDiscovery, getAccountLastSelectedTarget(relayUrl))
     : null;
   const canOpenBrowser = Boolean(token) && browserSessions.length > 0;
   const phoneAlertsSupported = !isMobileCompanion() && typeof navigator !== "undefined" && "serviceWorker" in navigator;
@@ -6120,6 +6389,10 @@ export const RemoteHostConnection: React.FC<{
   openPhoneSessionRef.current = openPhoneSession;
   const cancelOpening = () => {
     accountSelectionGenerationRef.current += 1;
+    restoreAttemptedForTokenRef.current = accountSessionTokenRef.current;
+    restoreAttemptInFlightRef.current = false;
+    retryableRestoreRef.current = null;
+    releaseExactContinuityRestore();
     setPhoneOpening(null);
     setCreationError(null);
     setInitialAccountTarget(null);
@@ -6170,7 +6443,9 @@ export const RemoteHostConnection: React.FC<{
       : offlineLastTarget
         ? {
             title: offlineLastTarget.worktreeLabel ?? offlineLastTarget.worktreeSlug ?? "Your last worktree",
-            subtitle: `${offlineLastTarget.machineName} is offline. Open Ferryx on it to continue.`,
+            subtitle: offlineLastTarget.offline
+              ? `${offlineLastTarget.machineName} is offline. Open Ferryx on it to continue.`
+              : `Couldn't reach ${offlineLastTarget.machineName}. Tap to retry.`,
             onOpen: () => {
               void accountDiscovery.retryMachine(offlineLastTarget.machineId);
             },
@@ -6546,17 +6821,7 @@ export const RemoteHostConnection: React.FC<{
             <ConnectingBody
               label={initialAccountTarget?.worktreeLabel ?? initialAccountTarget?.worktreeSlug ?? phoneOpening ?? initialAccountTarget?.workspaceId ?? "your worktree"}
               error={creationError}
-              onRetry={initialAccountTarget ? () => {
-                setCreationError(null);
-                initialAccountSelectionAttemptedRef.current = false;
-                void selectContext({
-                  workspaceId: initialAccountTarget.workspaceId,
-                  worktreeSlug: initialAccountTarget.worktreeSlug,
-                  worktreeLabel: initialAccountTarget.worktreeLabel,
-                  ...(initialAccountTarget.sessionId ? { sessionId: initialAccountTarget.sessionId } : {}),
-                  ...(initialAccountTarget.daemonEpoch ? { daemonEpoch: initialAccountTarget.daemonEpoch } : {}),
-                });
-              } : undefined}
+              onRetry={initialAccountTarget ? retryInitialSelection : undefined}
               onCancel={cancelOpening}
             />
           ) : viewMode === "chat" ? renderLazy(
@@ -6699,7 +6964,7 @@ export const RemoteHostConnection: React.FC<{
             </div>
           ) : effectiveSessionId && token ? renderLazy(
             <RemoteTerminal
-              key={`${effectiveSessionId}:${terminalRetryGeneration}`}
+              key={`${effectiveSessionId}:${terminalRetry.generation}`}
               showTitleBar={desktopSidebar}
               sessionId={effectiveSessionId}
               token={token}
@@ -6717,6 +6982,10 @@ export const RemoteHostConnection: React.FC<{
                 (model.context.activeTerminal?.sessionId === effectiveSessionId ? model.context.daemonEpoch : undefined)}
               onAgentStateFrame={handleMachineAgentStateFrame}
               createWebSocket={terminalCreateWebSocket}
+              takeover={terminalRetry.takeoverSessionId === effectiveSessionId}
+              onTakeoverConsumed={() => setTerminalRetry((current) => current.generation === terminalRetry.generation
+                ? { ...current, takeoverSessionId: null } : current)}
+              onTakeOver={() => handleTakeOverTerminal(effectiveSessionId)}
             />
           ) : null}
       </RemoteWorkspaceMirror>

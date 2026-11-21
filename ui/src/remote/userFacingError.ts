@@ -38,7 +38,17 @@ const CODE_COPY: Record<string, CodeCopy> = {
     hint: "Sign in to your Ferryx account to secure it.",
   },
   SESSION_GONE: { message: "That terminal has closed.", hint: "Pick another session or start a new one." },
+  CONTROL_CONFLICT: {
+    message: "This terminal is open on another device.",
+    hint: "Take it over here, or close it there first.",
+  },
+  SESSION_EXPIRED: { message: "That terminal's session expired.", hint: "Open it again to continue." },
+  SESSION_OWNERSHIP_CHANGED: {
+    message: "Another device took this terminal over.",
+    hint: "Switch back or open it again.",
+  },
   EPOCH_CHANGED: { message: "That terminal was restarted on your computer.", hint: "Open it again to continue." },
+  STALE_EPOCH: { message: "That terminal was restarted on your computer.", hint: "Open it again to continue." },
   NOT_FOUND: { message: "That item no longer exists." },
   PLAN_LIMIT: { message: "Your plan's limit has been reached." },
   HUB_UNAVAILABLE: { message: "The supervisor isn't running on that computer." },

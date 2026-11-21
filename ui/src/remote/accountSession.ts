@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+import { safeRandomUUID } from "../lib/uuid";
 import {
   buildAttachSocketUrl,
   getOrCreateAttachKey,
@@ -209,14 +211,18 @@ function truncateBody(text: string): string {
   return text.length > ERROR_BODY_MAX_CHARS ? `${text.slice(0, ERROR_BODY_MAX_CHARS)}...` : text;
 }
 
-/** Parses a 2xx JSON object body; a non-JSON or non-object body is a typed INVALID_RESPONSE. */
-async function readJsonObject(res: Response, what: string): Promise<Record<string, unknown>> {
-  let data: unknown;
+/** Parses a 2xx JSON body; a non-JSON body is a typed INVALID_RESPONSE, never a raw SyntaxError. */
+async function readJson(res: Response, what: string): Promise<unknown> {
   try {
-    data = await res.json();
+    return await res.json();
   } catch {
     throw new AccountSessionError("INVALID_RESPONSE", `${what} response is not valid JSON`, res.status);
   }
+}
+
+/** Parses a 2xx JSON object body; a non-JSON or non-object body is a typed INVALID_RESPONSE. */
+async function readJsonObject(res: Response, what: string): Promise<Record<string, unknown>> {
+  const data = await readJson(res, what);
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new AccountSessionError("INVALID_RESPONSE", `${what} response is not a JSON object`, res.status);
   }
@@ -430,25 +436,98 @@ export function getStoredAccountSessionToken(origin: string = getConfiguredAccou
 
 export const ACCOUNT_SESSION_CHANGED_EVENT = "ferryx:account-session";
 
-function dispatchAccountSessionChanged(origin: string): void {
+function dispatchAccountSessionChanged(origin: string, identityResolved = false): void {
   if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
     try {
       window.dispatchEvent(
         new CustomEvent(ACCOUNT_SESSION_CHANGED_EVENT, {
-          detail: { origin },
+          detail: { origin, identityResolved },
         }),
       );
     } catch {}
   }
 }
 
-export function storeAccountSessionToken(token: string, origin: string = getConfiguredAccountOrigin()): void {
+/** The account identity cache may name the token but must never carry it: this is what it stores. */
+function accountIdentityFingerprint(token: string): string {
+  return Array.from(sha256(new TextEncoder().encode(token)),
+    (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function getStoredAccountId(origin: string = getConfiguredAccountOrigin()): string | null {
+  try {
+    const token = getStoredAccountSessionToken(origin);
+    if (!token || typeof window === "undefined") return null;
+    const identity = JSON.parse(window.localStorage.getItem("ferryx.account.identity") ?? "null");
+    if (identity?.origin !== cleanOrigin(origin) || typeof identity.accountId !== "string") return null;
+    if (identity.tokenHash === accountIdentityFingerprint(token)) return identity.accountId;
+    // A record written before the token was hashed proves the same thing, and this read is the
+    // only place that can retire it: rewrite it hashed so the plaintext copy stops existing.
+    if (identity.token !== token) return null;
+    try {
+      window.localStorage.setItem("ferryx.account.identity", JSON.stringify({
+        tokenHash: accountIdentityFingerprint(token), origin: identity.origin, accountId: identity.accountId,
+      }));
+    } catch {}
+    return identity.accountId;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveStoredAccountId(origin: string, token: string, signal?: AbortSignal): Promise<string | null> {
+  const issuer = cleanOrigin(origin);
+  const current = () => !signal?.aborted && getStoredAccountSessionToken(issuer) === token;
+  if (!current()) return null;
+  const cached = getStoredAccountId(issuer);
+  if (cached) {
+    migrateAccountSessionCache(issuer, token, cached);
+    return cached;
+  }
+  const response = await fetchWithTimeout(`${issuer}/api/account/v1/me`, {
+    headers: bearerJson(token),
+    signal,
+    redirect: "error",
+  }).catch((error: unknown) => {
+    if (!current()) return null;
+    throw error;
+  });
+  if (!response || !current()) return null;
+  if (!response.ok) await throwAccountResponseError(response, "ACCOUNT_IDENTITY_FAILED", "Failed to resolve account identity");
+  const identity = await readJsonObject(response, "Account identity");
+  requireStrings(identity, ["accountId"], "Account identity", response.status);
+  if (!current()) return null;
+  const accountId = identity.accountId as string;
+  const resolved = getStoredAccountId(issuer);
+  if (resolved !== null && resolved !== accountId) return null;
+  try {
+    window.localStorage.setItem("ferryx.account.identity",
+      JSON.stringify({ tokenHash: accountIdentityFingerprint(token), origin: issuer, accountId }));
+  } catch (err) {
+    console.warn("Failed to persist account identity", err instanceof Error ? err.message : String(err));
+    return null;
+  }
+  migrateAccountSessionCache(issuer, token, accountId);
+  dispatchAccountSessionChanged(issuer, true);
+  return accountId;
+}
+
+export function storeAccountSessionToken(token: string, origin: string = getConfiguredAccountOrigin(), accountId?: string): void {
   const issuer = cleanOrigin(origin);
   if (getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID) !== token) {
     clearStoredAccountEntitlementSnapshot(issuer);
   }
   setRemoteAuthToken(token, ACCOUNT_TOKEN_HOST_ID);
   if (typeof window !== "undefined") window.localStorage.setItem(ACCOUNT_TOKEN_ORIGIN_KEY, issuer);
+  if (typeof window !== "undefined") {
+    try {
+      if (accountId) window.localStorage.setItem("ferryx.account.identity",
+        JSON.stringify({ tokenHash: accountIdentityFingerprint(token), origin: issuer, accountId }));
+      else if (!getStoredAccountId(issuer)) window.localStorage.removeItem("ferryx.account.identity");
+    } catch (err) {
+      console.warn("Failed to persist account identity", err instanceof Error ? err.message : String(err));
+    }
+  }
   dispatchAccountSessionChanged(issuer);
 }
 
@@ -457,6 +536,7 @@ export function clearStoredAccountSessionToken(): void {
   const issuer = storage?.getItem(ACCOUNT_TOKEN_ORIGIN_KEY) ?? null;
   clearRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
   storage?.removeItem(ACCOUNT_TOKEN_ORIGIN_KEY);
+  storage?.removeItem("ferryx.account.identity");
   if (typeof window !== "undefined") {
     clearAccountPreferredSessions();
     clearAccountLastSelectedTarget();
@@ -743,7 +823,7 @@ export async function consumeLogin(
   requireStrings(raw, ["token"], "Login consume", res.status);
   const data = raw as unknown as LoginConsumeResponse;
 
-  storeAccountSessionToken(data.token, origin);
+  storeAccountSessionToken(data.token, origin, data.accountId);
   return data;
 }
 
@@ -1557,13 +1637,144 @@ export function createAccountConnection(params: {
   };
 }
 
+function hashAccountCacheIdentity(identity: readonly string[]): string {
+  return Array.from(sha256(new TextEncoder().encode(JSON.stringify(identity))),
+    (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function accountCacheValue(raw: string | null): { value: string | null; intent: boolean } {
+  if (raw !== null) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.accountCacheIntent === 1 && typeof parsed.id === "string" && typeof parsed.value === "string") {
+        return { value: parsed.value, intent: true };
+      }
+    } catch {}
+  }
+  return { value: raw, intent: false };
+}
+
+type AccountCacheReceipt = { source: string; destination: string; previous: string | null; consumed: boolean };
+
+function accountCacheReceipt(raw: string | null): AccountCacheReceipt | null {
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.source === "string" &&
+      typeof parsed.destination === "string" && (parsed.previous === null || typeof parsed.previous === "string") &&
+      typeof parsed.consumed === "boolean") {
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+function writeAccountCacheValue(origin: string, key: string, value: string): void {
+  const storage = window.localStorage;
+  const token = getStoredAccountSessionToken(origin);
+  const source = token === null ? key : key.replace(accountCacheScope(origin), hashAccountCacheIdentity(["session", token]));
+  const pendingSource = storage.getItem(source);
+  const receiptKey = `ferryx.account.cache_migration.${hashAccountCacheIdentity([source])}`;
+  const receipt = accountCacheReceipt(storage.getItem(receiptKey));
+  const previous = storage.getItem(key);
+  const existing = accountCacheValue(previous);
+  // An identical write is skipped only where it cannot erase migration knowledge: a
+  // pending source must still be written so its fresh intent id marks this destination
+  // as edited, which is what stops migration replaying that older source over it.
+  if (existing.intent && existing.value === value &&
+    (key === source ? receipt?.source !== pendingSource : pendingSource === null)) return;
+  // A receipt only records this source generation when it names the exact pending
+  // source. A receipt left over from an earlier generation must be rebound: its
+  // `previous` snapshot no longer describes this destination, so migration would
+  // otherwise replay that older source value over the intent written here.
+  if (key !== source && pendingSource !== null && receipt?.source !== pendingSource) {
+    storage.setItem(receiptKey, JSON.stringify({ source: pendingSource, destination: key, previous, consumed: false }));
+  }
+  // crypto.randomUUID throws outside a secure context, and this cache write sits inside a
+  // try/catch whose failure silently drops the record: a plain-HTTP origin would then never
+  // remember a last target and never clear a stale one. The helper falls back to getRandomValues.
+  storage.setItem(key, JSON.stringify({ accountCacheIntent: 1, id: safeRandomUUID(), value }));
+}
+
+// The pre-v2 origin-only keys do not identify the writer. Keep those values intact;
+// a successful /me today does not establish who selected a pane on this browser before.
+// Only the exact session scope may be promoted to its authenticated account.
+function migrateAccountSessionCache(origin: string, token: string, accountId: string): void {
+  const sourceScope = hashAccountCacheIdentity(["session", token]);
+  const destinationScope = hashAccountCacheIdentity(["account", accountId]);
+  const encodedOrigin = encodeURIComponent(origin);
+  try {
+    const storage = window.localStorage;
+    const sources: [string, string][] = [];
+    const lastSource = `ferryx.account.last_target.v2.${encodedOrigin}.${sourceScope}`;
+    const preferredPrefix = `ferryx.account.preferred_session.v2.${encodedOrigin}.${sourceScope}.`;
+    for (let index = 0; index < storage.length; index++) {
+      const key = storage.key(index);
+      if (key === lastSource) {
+        sources.push([key, `ferryx.account.last_target.v2.${encodedOrigin}.${destinationScope}`]);
+      } else if (key?.startsWith(preferredPrefix)) {
+        sources.push([key, `ferryx.account.preferred_session.v2.${encodedOrigin}.${destinationScope}.${key.slice(preferredPrefix.length)}`]);
+      }
+    }
+    for (const [source, destination] of sources) {
+      // Receipts bind an exact source generation to one account destination. Persist
+      // before copying so a retry cannot replay it over a subsequent account edit.
+      if (getStoredAccountSessionToken(origin) !== token || getStoredAccountId(origin) !== accountId) return;
+      try {
+        const raw = storage.getItem(source);
+        if (raw === null) continue;
+        const decoded = accountCacheValue(raw);
+        const value = decoded.value;
+        if (value === null) continue;
+        const receiptKey = `ferryx.account.cache_migration.${hashAccountCacheIdentity([source])}`;
+        const storedReceipt = storage.getItem(receiptKey);
+        let receipt = accountCacheReceipt(storedReceipt);
+        if (storedReceipt !== null && receipt === null) {
+          // Neither side may be touched: without a trustworthy `previous` snapshot the
+          // destination edit cannot be honoured, and dropping the source would discard
+          // the pending selection outright.
+          console.warn("Ignoring malformed account session cache migration receipt");
+          continue;
+        }
+        if (receipt?.source === raw && receipt.destination !== destination) continue;
+        if (receipt === null || receipt.source !== raw) {
+          receipt = { source: raw, destination, previous: storage.getItem(destination), consumed: false };
+          storage.setItem(receiptKey, JSON.stringify(receipt));
+        }
+        if (!receipt.consumed) {
+          const existing = storage.getItem(destination);
+          if ((decoded.intent || receipt.previous === null) && existing === receipt.previous && existing !== value) {
+            storage.setItem(destination, value);
+          }
+          storage.setItem(receiptKey, JSON.stringify({ ...receipt, consumed: true }));
+        }
+        storage.removeItem(source);
+      } catch (err) {
+        console.warn("Failed to migrate account session cache", err instanceof Error ? err.message : String(err));
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to enumerate account session cache", err instanceof Error ? err.message : String(err));
+  }
+}
+
+function accountCacheScope(relayUrl: string): string {
+  const accountId = getStoredAccountId(relayUrl);
+  const token = getStoredAccountSessionToken(relayUrl);
+  // Separate identity domains: an account literally named "session:<token>" must
+  // never collide with a legacy login. SHA-256 bounds keys without exposing either.
+  const identity = accountId !== null ? ["account", accountId]
+    : token !== null ? ["session", token] : ["signed-out"];
+  return hashAccountCacheIdentity(identity);
+}
+
 function makeAccountPreferredSessionKey(relayUrl: string, machineId: string, workspaceId: string, slug?: string | null): string {
-  return `ferryx.account.preferred_session.${encodeURIComponent(relayUrl)}.${encodeURIComponent(machineId)}.${encodeURIComponent(workspaceId)}.${encodeURIComponent(slug ?? "")}`;
+  return `ferryx.account.preferred_session.v2.${encodeURIComponent(cleanOrigin(relayUrl))}.${accountCacheScope(relayUrl)}.${encodeURIComponent(machineId)}.${encodeURIComponent(workspaceId)}.${encodeURIComponent(slug ?? "")}`;
 }
 
 export function getAccountPreferredSessionId(relayUrl: string, machineId: string, workspaceId: string, slug?: string | null): string | null {
   try {
-    const raw = getMigratedItem(makeAccountPreferredSessionKey(relayUrl, machineId, workspaceId, slug));
+    const raw = typeof window === "undefined" ? null : accountCacheValue(window.localStorage.getItem(makeAccountPreferredSessionKey(relayUrl, machineId, workspaceId, slug))).value;
     return raw && raw.trim().length > 0 ? raw.trim() : null;
   } catch (err) {
     console.warn("Failed to read account preferred session", err instanceof Error ? err.message : String(err));
@@ -1574,7 +1785,8 @@ export function getAccountPreferredSessionId(relayUrl: string, machineId: string
 export function setAccountPreferredSessionId(relayUrl: string, machineId: string, workspaceId: string, slug: string | null | undefined, sessionId: string): void {
   try {
     if (typeof window !== "undefined" && window.localStorage) {
-      window.localStorage.setItem(makeAccountPreferredSessionKey(relayUrl, machineId, workspaceId, slug), sessionId);
+      const key = makeAccountPreferredSessionKey(relayUrl, machineId, workspaceId, slug);
+      writeAccountCacheValue(relayUrl, key, sessionId);
     }
   } catch (err) {
     console.warn("Failed to set account preferred session", err instanceof Error ? err.message : String(err));
@@ -1588,7 +1800,7 @@ export function clearAccountPreferredSessions(): void {
       const toRemove: string[] = [];
       for (let i = 0; i < storage.length; i++) {
         const key = storage.key(i);
-        if (key && (key.startsWith("ferryx.account.preferred_session.") || key.startsWith("ferryx.account.last_target."))) {
+        if (key && (key.startsWith("ferryx.account.preferred_session.") || key.startsWith("ferryx.account.last_target.") || key.startsWith("ferryx.account.cache_migration."))) {
           toRemove.push(key);
         }
       }
@@ -1606,16 +1818,73 @@ export interface AccountLastSelectedTarget {
   workspaceId: string;
   worktreeSlug?: string | null;
   worktreeLabel?: string | null;
+  sessionId?: string | null;
+}
+
+export interface AccountContinuityPointer {
+  machineId: string | null;
+  workspaceId: string | null;
+  worktreeSlug: string | null;
+  sessionId: string | null;
+  revision: number;
+  updatedAt: number;
+}
+
+export async function getAccountContinuity(origin: string, token: string, signal?: AbortSignal): Promise<AccountContinuityPointer | null> {
+  const response = await fetchWithTimeout(`${cleanOrigin(origin)}/api/account/v1/continuity`, {
+    headers: bearerJson(token),
+    signal,
+    redirect: "error",
+  });
+  // A gateway predating this optional endpoint cannot have an account pointer.
+  // Authentication, transport and server errors must not trigger the device-local fallback.
+  if (response.status === 404) return null;
+  if (!response.ok) await throwAccountResponseError(response, "CONTINUITY_READ_FAILED", "Failed to read continuity");
+  return parseAccountContinuity(await readJson(response, "Continuity"));
+}
+
+export function parseAccountContinuity(value: unknown): AccountContinuityPointer | null {
+  if (value === null) return null;
+  const row = value as AccountContinuityPointer;
+  if (!row || typeof row !== "object" || !Number.isSafeInteger(row.revision) || row.revision < 1 ||
+    typeof row.updatedAt !== "number" ||
+    ![row.machineId, row.workspaceId, row.worktreeSlug, row.sessionId].every((field) => field === null || (typeof field === "string" && field.length > 0)) ||
+    !((row.machineId !== null && row.workspaceId !== null && row.sessionId !== null) ||
+      [row.machineId, row.workspaceId, row.worktreeSlug, row.sessionId].every((field) => field === null))) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Invalid continuity pointer");
+  }
+  return row;
+}
+
+export async function putAccountContinuity(
+  origin: string,
+  token: string,
+  expectedRevision: number,
+  target: { machineId: string; workspaceId: string; worktreeSlug: string | null; sessionId: string },
+  signal?: AbortSignal,
+): Promise<AccountContinuityPointer> {
+  const response = await fetchWithTimeout(`${cleanOrigin(origin)}/api/account/v1/continuity`, {
+    method: "PUT",
+    headers: bearerJson(token),
+    body: JSON.stringify({ expectedRevision, ...target }),
+    signal,
+    redirect: "error",
+  });
+  if (response.status === 404) throw new AccountSessionError("CONTINUITY_UNSUPPORTED", "This account server does not support continuity", 404);
+  if (!response.ok) await throwAccountResponseError(response, "CONTINUITY_WRITE_FAILED", "Failed to publish continuity");
+  const pointer = parseAccountContinuity(await readJson(response, "Continuity"));
+  if (!pointer) throw new AccountSessionError("INVALID_RESPONSE", "Missing continuity pointer");
+  return pointer;
 }
 
 export function makeAccountLastSelectedTargetKey(relayUrl: string): string {
-  return `ferryx.account.last_target.${encodeURIComponent(cleanOrigin(relayUrl))}`;
+  return `ferryx.account.last_target.v2.${encodeURIComponent(cleanOrigin(relayUrl))}.${accountCacheScope(relayUrl)}`;
 }
 
 export function getAccountLastSelectedTarget(relayUrl: string): AccountLastSelectedTarget | null {
   try {
     if (typeof window === "undefined" || !window.localStorage) return null;
-    const raw = window.localStorage.getItem(makeAccountLastSelectedTargetKey(relayUrl));
+    const raw = accountCacheValue(window.localStorage.getItem(makeAccountLastSelectedTargetKey(relayUrl))).value;
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (
@@ -1633,6 +1902,7 @@ export function getAccountLastSelectedTarget(relayUrl: string): AccountLastSelec
       workspaceId: parsed.workspaceId,
       worktreeSlug: typeof parsed.worktreeSlug === "string" ? parsed.worktreeSlug : null,
       worktreeLabel: typeof parsed.worktreeLabel === "string" ? parsed.worktreeLabel : null,
+      ...(typeof parsed.sessionId === "string" ? { sessionId: parsed.sessionId } : {}),
     };
   } catch (err) {
     console.warn("Failed to read account last selected target", err instanceof Error ? err.message : String(err));
@@ -1643,7 +1913,9 @@ export function getAccountLastSelectedTarget(relayUrl: string): AccountLastSelec
 export function setAccountLastSelectedTarget(relayUrl: string, target: AccountLastSelectedTarget): void {
   try {
     if (typeof window !== "undefined" && window.localStorage) {
-      window.localStorage.setItem(makeAccountLastSelectedTargetKey(relayUrl), JSON.stringify(target));
+      const key = makeAccountLastSelectedTargetKey(relayUrl);
+      const value = JSON.stringify(target);
+      writeAccountCacheValue(relayUrl, key, value);
     }
   } catch (err) {
     console.warn("Failed to set account last selected target", err instanceof Error ? err.message : String(err));
@@ -1654,7 +1926,10 @@ export function clearAccountLastSelectedTarget(relayUrl?: string): void {
   try {
     if (typeof window !== "undefined" && window.localStorage) {
       if (relayUrl) {
-        window.localStorage.removeItem(makeAccountLastSelectedTargetKey(relayUrl));
+        // An explicit empty destination prevents a leftover source (for example
+        // after a failed removal) from resurrecting a cleared selection.
+        const key = makeAccountLastSelectedTargetKey(relayUrl);
+        writeAccountCacheValue(relayUrl, key, "");
       } else {
         const storage = window.localStorage;
         const toRemove: string[] = [];

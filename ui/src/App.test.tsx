@@ -3939,6 +3939,79 @@ describe("App project workspace flow", () => {
   });
 
   describe("Ferryx desktop focused-terminal publisher and remote selection listener", () => {
+    describe("continuity selection across a project switch", () => {
+      const load = () => import("./lib/continuitySelection");
+      const outgoingState = {
+        workspaceId: "project-1",
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activeWorktreePath: "/repo/p1",
+        layout: {
+          activeTabId: "tab-old",
+          tabs: [{ id: "tab-old", label: "old", sessionId: "sess-old" }],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-old": { id: "sess-old", backendSessionId: "backend-old", cwd: "/repo/p1", worktreePath: "/repo/p1" },
+        },
+        worktrees: [{ path: "/repo/p1", branch: "refs/heads/main" }],
+      } as any;
+      const incomingState = {
+        workspaceId: "project-2",
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activeWorktreePath: "/repo/p2",
+        layout: {
+          activeTabId: "tab-new",
+          tabs: [{ id: "tab-new", label: "new", sessionId: "sess-new" }],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-new": { id: "sess-new", backendSessionId: "backend-new", cwd: "/repo/p2", worktreePath: "/repo/p2" },
+        },
+        worktrees: [{ path: "/repo/p2", branch: "refs/heads/main" }],
+      } as any;
+      const project1 = { workspaceId: "project-1", repoRoot: "/repo/p1", gitRoot: "/repo/p1" } as any;
+      const project2 = { workspaceId: "project-2", repoRoot: "/repo/p2", gitRoot: "/repo/p2" } as any;
+
+      it("labels a mismatched store with the mounted workspace and reports nothing publishable", async () => {
+        const { deriveContinuitySelection } = await load();
+        const selection = deriveContinuitySelection(outgoingState, project2, null);
+        expect(selection).toEqual({
+          workspaceId: "project-1",
+          tabId: null,
+          leafId: null,
+          worktreePath: null,
+          worktreeSlug: null,
+          sessionId: null,
+          local: false,
+        });
+        expect(selection.sessionId).not.toBe("backend-old");
+      });
+
+      it("publishes the incoming workspace session once the swapped state carries a tab", async () => {
+        const { deriveContinuitySelection } = await load();
+        const selection = deriveContinuitySelection(incomingState, project2, null);
+        expect(selection).toMatchObject({
+          workspaceId: "project-2",
+          tabId: "tab-new",
+          sessionId: "backend-new",
+          worktreePath: "/repo/p2",
+          local: true,
+        });
+      });
+
+      it("derives a normal selection for the active project's own state", async () => {
+        const { deriveContinuitySelection } = await load();
+        expect(deriveContinuitySelection(outgoingState, project1, null)).toMatchObject({
+          workspaceId: "project-1",
+          tabId: "tab-old",
+          sessionId: "backend-old",
+          local: true,
+        });
+      });
+    });
+
     it("derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {

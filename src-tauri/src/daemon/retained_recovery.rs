@@ -50,10 +50,16 @@ impl DaemonSessionService {
             if let Some(metadata) = record.metadata {
                 self.session_metadata.write().insert(id.to_owned(), metadata);
             }
+            let (restore_cols, restore_rows) = (record.descriptor.cols, record.descriptor.rows);
             if let Err(error) = self.terminal_service.remote().restore(record.descriptor) {
                 self.session_router.remove_workspace(id);
                 self.session_metadata.write().remove(id);
                 return Err(error.to_string());
+            }
+            // Only a restored session may advertise a desktop baseline; recording it first left
+            // an entry behind on every failed restore.
+            if restore_cols > 0 && restore_rows > 0 {
+                self.record_desktop_geometry(id, restore_cols, restore_rows);
             }
             self.watch_remote_session(id)?;
             self.watch_agent_session(id);

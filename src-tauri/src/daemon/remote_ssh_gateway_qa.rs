@@ -45,10 +45,8 @@ pub(super) async fn exercise(daemon: &DaemonServer, workspace: &str, session: &s
         .projects
         .iter()
         .any(|project| project.workspace_id == workspace));
-    assert!(inventory
-        .sessions
-        .iter()
-        .any(|item| item.session_id == session && item.workspace_id.as_deref() == Some(workspace)));
+    assert!(!inventory.sessions.iter().any(|item| item.session_id == session),
+        "a mirror must not list an unselected SSH pane");
 
     let url = format!("http://{addr}/api/v1/terminal/{session}");
     let handshake = || {
@@ -79,6 +77,11 @@ pub(super) async fn exercise(daemon: &DaemonServer, workspace: &str, session: &s
         session_id: Some(session.to_owned()),
         ..Default::default()
     });
+    let inventory: RemoteWorkspaceState = client
+        .get(format!("http://{addr}/api/v1/workspace/state")).bearer_auth(&token)
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert!(inventory.sessions.iter().any(|item|
+        item.session_id == session && item.workspace_id.as_deref() == Some(workspace)));
     let response = handshake().send().await.unwrap();
     assert_eq!(response.status().as_u16(), 101);
     let mut socket = response.upgrade().await.unwrap();

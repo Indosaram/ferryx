@@ -224,6 +224,10 @@ struct AuthQuery {
     rows: Option<u16>,
     daemon_epoch: Option<crate::scoped_contracts::Epoch>,
     after_sequence: Option<crate::scoped_contracts::Epoch>,
+    /// `"1"` asks to displace a *reserved* foreign holder instead of being refused.
+    /// Scoped to this one upgrade attempt: it is never stored, so a plain reconnect
+    /// does not inherit the authority and hits `CONTROL_CONFLICT` again.
+    takeover: Option<String>,
 }
 
 fn validated_grid_geometry(cols: u16, rows: u16) -> Option<(u16, u16)> {
@@ -778,6 +782,21 @@ fn desktop_tab_title(
     })
 }
 
+/// Whether an SSH runtime state still owns a live target.
+///
+/// `Connected` is live, and `Reconnecting` is the same target between redials: the helper keeps
+/// the session and its output, only the link is being re-established. `Disconnected` lost the
+/// transport and `Expired` ended the target. This mirrors daemon admission
+/// (`session_service::ssh_transport_is_live`), so the inventory and the input gate can never
+/// disagree about the same runtime.
+fn ssh_runtime_is_live(state: crate::terminal::remote::RemoteConnectionState) -> bool {
+    matches!(
+        state,
+        crate::terminal::remote::RemoteConnectionState::Connected
+            | crate::terminal::remote::RemoteConnectionState::Reconnecting
+    )
+}
+
 pub(crate) async fn get_active_running_sessions(
     state: &RemoteGatewayState,
     cache: &WorkspaceSnapshotCache,
@@ -865,59 +884,90 @@ pub(crate) async fn get_active_running_sessions(
         });
     }
 
-    if active.is_none() {
-        for session_id in state.terminal_service.list_sessions() {
-            if sessions.iter().any(|s| s.session_id == session_id) {
-                continue;
-            }
-            if let Some(services) = &state.machine_services {
-                match services.sessions.machine_only_async(&session_id).await {
-                    Ok(false) => {}
-                    Ok(true) | Err(_) => continue,
-                }
-            }
-            let is_running_or_starting =
-                if let Some(session) = state.terminal_service.get_session(&session_id) {
-                    matches!(
-                        session.state(),
-                        crate::terminal::PtySessionState::Running
-                            | crate::terminal::PtySessionState::Starting
-                    )
-                } else if let Some(details) = state.terminal_service.remote().details(&session_id) {
-                    matches!(
-                        details.state,
-                        crate::terminal::remote::RemoteConnectionState::Connected
-                    )
-                } else {
-                    false
-                };
-
-            if !is_running_or_starting {
-                continue;
-            }
-
-            let worktree_path = state
-                .terminal_service
-                .get_session(&session_id)
-                .and_then(|s| s.worktree_path())
-                .or_else(|| {
-                    state
-                        .terminal_service
-                        .remote()
-                        .details(&session_id)
-                        .map(|d| PathBuf::from(d.descriptor.config.project_path))
-                });
-            let (derived_ws, derived_label) =
-                cache.derive_session_metadata(worktree_path.as_deref());
-
-            sessions.push(RemoteTerminalSession {
-                session_id,
-                title: Some("Terminal".to_string()),
-                workspace_id: derived_ws.or_else(|| Some("default".to_string())),
-                worktree_label: derived_label.or_else(|| Some("default".to_string())),
-                running: true,
-            });
+    for session_id in state.terminal_service.list_sessions() {
+        if sessions.iter().any(|s| s.session_id == session_id) {
+            continue;
         }
+        if let Some(services) = &state.machine_services {
+            match services.sessions.machine_only_async(&session_id).await {
+                Ok(false) => {}
+                Ok(true) | Err(_) => continue,
+            }
+        }
+        // Security: a live SSH runtime stays listed for every desktop selection; the
+        // selection supplies labels, never visibility. Local PTYs keep the historical
+        // desktop-absent backfill, and paired sessions own no runtime entry here.
+        let remote_details = state.terminal_service.remote().details(&session_id);
+        // `Reconnecting` is the same target between redials: the helper keeps the session
+        // and its output, only the link is being re-established, and daemon admission
+        // (`ssh_transport_is_live`) already accepts it. Listing must use that same
+        // predicate, or a restored session is invisible until its first redial succeeds.
+        let is_live_remote = remote_details
+            .as_ref()
+            .is_some_and(|details| ssh_runtime_is_live(details.state));
+        let is_live_local_pty = state
+            .terminal_service
+            .get_session(&session_id)
+            .is_some_and(|session| {
+                matches!(
+                    session.state(),
+                    crate::terminal::PtySessionState::Running
+                        | crate::terminal::PtySessionState::Starting
+                )
+            });
+
+        if !is_live_remote && !(active.is_none() && is_live_local_pty) {
+            continue;
+        }
+
+        // Security: an SSH session keeps its project identity, and an SSH project missing from
+        // the enabled inventory stays hidden here, exactly as the backend loop above hides it.
+        let ssh_project = remote_details.as_ref().and_then(|details| {
+            let project_id = details.descriptor.config.project_id.as_str();
+            crate::ssh::projects::is_remote(project_id).then(|| {
+                (
+                    project_id,
+                    ssh_projects
+                        .iter()
+                        .find(|project| project.workspace_id == project_id),
+                )
+            })
+        });
+        let (workspace_id, worktree_label) = match ssh_project {
+            Some((project_id, Some(project))) => {
+                (Some(project_id.to_string()), Some(super::ssh::label(project)))
+            }
+            Some((_, None)) => continue,
+            None => {
+                let worktree_path = state
+                    .terminal_service
+                    .get_session(&session_id)
+                    .and_then(|s| s.worktree_path())
+                    .or_else(|| {
+                        remote_details
+                            .as_ref()
+                            .map(|d| PathBuf::from(&d.descriptor.config.project_path))
+                    });
+                let (derived_ws, derived_label) =
+                    cache.derive_session_metadata(worktree_path.as_deref());
+                (
+                    derived_ws.or_else(|| Some("default".to_string())),
+                    derived_label.or_else(|| Some("default".to_string())),
+                )
+            }
+        };
+
+        let title = Some(
+            desktop_tab_title(&session_id, active.as_ref())
+                .unwrap_or_else(|| "Terminal".to_string()),
+        );
+        sessions.push(RemoteTerminalSession {
+            session_id,
+            title,
+            workspace_id,
+            worktree_label,
+            running: true,
+        });
     }
 
     sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
@@ -940,14 +990,21 @@ async fn published_session_is_registry_live(state: &RemoteGatewayState, session_
         }
     }
     if let Some(details) = state.terminal_service.remote().details(session_id) {
-        if matches!(
-            details.state,
-            crate::terminal::remote::RemoteConnectionState::Connected
-        ) {
+        // Same live-transport predicate as the session list: a redialing SSH session still
+        // owns a running target, so its desktop `running: false` is staleness, not an exit.
+        if ssh_runtime_is_live(details.state) {
             return true;
         }
     }
     false
+}
+
+/// A Mirror credential may discover a remote-backed pane only when the desktop exposes it.
+/// Local pane inventory and the separate Machine projection keep their existing semantics.
+fn mirror_lists_session(state: &RemoteGatewayState, id: &str, selected: Option<&str>) -> bool {
+    let id = parse_host_scoped_session_id(id).map_or(id, |(_, raw)| raw);
+    selected == Some(id) || (state.terminal_service.remote().details(id).is_none()
+        && !state.terminal_service.paired().contains(id))
 }
 
 async fn list_legacy_sessions(
@@ -971,8 +1028,10 @@ async fn list_legacy_sessions(
             "SSH inventory unavailable".into(),
         )
     })?;
-    let sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
-
+    let mut sessions = get_active_running_sessions(&state, &cache, &ssh_projects).await;
+    let active = state.active_selection();
+    let selected = active.as_ref().and_then(|a| a.session_id.as_deref());
+    sessions.retain(|row| mirror_lists_session(&state, &row.session_id, selected));
     Ok(Json(sessions))
 }
 
@@ -1036,7 +1095,12 @@ async fn get_workspace_state(
             terminal_tabs: Vec::new(),
         });
 
+    let declared = active_selection.as_ref().and_then(|a| a.session_id.as_deref());
     if device.access_scope != DeviceAccessScope::Machine {
+        active_context.terminal_tabs.retain(|tab| tab.session_id.as_deref()
+            .is_none_or(|id| mirror_lists_session(&state, id, declared)));
+        active_context.session_attention.retain(|entry|
+            mirror_lists_session(&state, &entry.backend_session_id, declared));
         if let Some(services) = state.machine_services.as_ref() {
             if let Some(ref sid) = active_context.session_id {
                 if !matches!(services.sessions.machine_only_async(sid).await, Ok(false)) {
@@ -1124,6 +1188,7 @@ async fn get_workspace_state(
         let mut backend_sessions = Vec::new();
         for sid in raw_backend_sessions {
             if device.access_scope != DeviceAccessScope::Machine {
+                if !mirror_lists_session(&state, &sid, declared) { continue; }
                 if let Some(services) = &state.machine_services {
                     if !matches!(services.sessions.machine_only_async(&sid).await, Ok(false)) {
                         continue;
@@ -1135,6 +1200,7 @@ async fn get_workspace_state(
         let mut terminal_sessions = Vec::new();
         for sid in raw_terminal_sessions {
             if device.access_scope != DeviceAccessScope::Machine {
+                if !mirror_lists_session(&state, &sid, declared) { continue; }
                 if let Some(services) = &state.machine_services {
                     if !matches!(services.sessions.machine_only_async(&sid).await, Ok(false)) {
                         continue;
@@ -1224,6 +1290,9 @@ async fn get_workspace_state(
         }
     }
     let mut sessions = get_active_running_sessions(&state, &cache, &ssh_rows).await;
+    if device.access_scope != DeviceAccessScope::Machine {
+        sessions.retain(|row| mirror_lists_session(&state, &row.session_id, declared));
+    }
 
     if let Some(ref session_id) = active_context.session_id {
         if let Some(s) = sessions.iter_mut().find(|s| &s.session_id == session_id) {
@@ -2237,6 +2306,8 @@ async fn ws_terminal_handler(
         .device_revocation(&device.id)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
     if device.access_scope == DeviceAccessScope::Machine {
+        let json_refusal = headers.get("x-ferryx-refusal-format")
+            .and_then(|value| value.to_str().ok()) == Some("json");
         if let Some(peer) = state.machine_services.as_ref().and_then(|services| {
             services
                 .sessions
@@ -2244,24 +2315,10 @@ async fn ws_terminal_handler(
                 .find_legacy_peer_for_session(&requested_session_id)
         }) {
             return machine_owner_socket::upgrade(
-                ws,
-                peer,
-                requested_session_id,
-                query,
-                token,
-                revocation,
-            )
-            .await;
+                ws, peer, requested_session_id, query, token, revocation, json_refusal,
+            ).await;
         }
-        return machine_terminal_upgrade(
-            ws,
-            requested_session_id,
-            query,
-            device,
-            revocation,
-            state,
-        )
-        .await;
+        return machine_terminal_upgrade(ws, requested_session_id, query, device, revocation, state, json_refusal).await;
     }
     let session_id = parse_host_scoped_session_id(&requested_session_id)
         .map(|(_, id)| id.to_string())
@@ -2304,35 +2361,22 @@ async fn ws_terminal_handler(
     };
 
     let active_selection = state.active_selection.read().clone();
-    if let Some(ref active) = active_selection {
-        let is_declared_active = active
-            .session_id
-            .as_deref()
-            .map(|id| id == session_id.as_str())
-            .unwrap_or(false);
-        if !is_declared_active && !is_session_valid {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Forbidden: session is not the active desktop session".into(),
-            ));
-        }
-        if let Some(declared_active_id) = active.session_id.as_deref() {
-            if declared_active_id != session_id.as_str() {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    "Forbidden: session is not the active desktop session".into(),
-                ));
-            }
-        }
-    } else if !is_session_valid
-        || state
-            .terminal_service
-            .remote()
-            .details(&session_id)
-            .is_some()
+    let declared_active_id = active_selection
+        .as_ref()
+        .and_then(|active| active.session_id.as_deref());
+    let is_declared_active = declared_active_id == Some(session_id.as_str());
+    // Validity is not exposure: a connected SSH session may still be private.
+    // Preserve admission of a declared session while its backend is starting.
+    if !is_session_valid && !is_declared_active {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Forbidden: session is not the active desktop session".into(),
+        ));
+    }
+    // Listing does not grant input; attach also checks selection for local panes.
+    if !mirror_lists_session(&state, &session_id, declared_active_id)
+        || declared_active_id.is_some_and(|id| id != session_id.as_str())
     {
-        // Local headless sessions remain attachable, but an SSH terminal must
-        // first be exposed through the desktop selection before mirror access.
         return Err((
             StatusCode::FORBIDDEN,
             "Forbidden: session is not the active desktop session".into(),
@@ -2380,13 +2424,71 @@ async fn ws_terminal_handler(
     }))
 }
 
+/// Only an opted-in client receives JSON; older terminal clients read the code on line one.
+fn machine_occupancy_response(holder: Option<&str>, json: bool) -> Response {
+    const CODE: &str = "CONTROL_CONFLICT";
+    let name = holder.map(sanitize_holder_display_name).filter(|name| !name.trim().is_empty());
+    if json {
+        let details = match name {
+            Some(holder) => serde_json::json!({ "holder": holder, "takeover": true }),
+            None => serde_json::json!({ "takeover": true }),
+        };
+        return (StatusCode::CONFLICT, Json(serde_json::json!({
+            "code": CODE, "message": CODE, "details": details
+        }))).into_response();
+    }
+    let body = name.map_or_else(|| CODE.to_owned(), |name| format!("{CODE}\n{name}"));
+    (StatusCode::CONFLICT, body).into_response()
+}
+
+/// A device picks its own name at pairing time, so it is untrusted display text: drop control
+/// characters (which would inject escape sequences and extra body lines) and the invisible
+/// bidi/zero-width ones that could reorder the sentence around it. Joiners and variation
+/// selectors stay, so an emoji holder name still renders as the person wrote it.
+fn sanitize_holder_display_name(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| {
+            !ch.is_control()
+                && !matches!(
+                    u32::from(*ch),
+                    0x061C | 0x200B..=0x200C | 0x200E..=0x200F | 0x202A..=0x202E
+                        | 0x2060..=0x206F | 0xFEFF
+                )
+        })
+        .collect()
+}
+
+fn machine_paired_outcome(id: &str, outcome: crate::terminal::paired_runtime::PairedRecoveryOutcome) -> axum::extract::ws::Message {
+    terminal_outcome_message(id, crate::remote::backend::RemotePairedRecoveryOutcome {
+        backend_session_id: outcome.backend_session_id,
+        daemon_epoch: outcome.daemon_epoch,
+        incarnation: outcome.incarnation,
+        generation: outcome.generation,
+        state: outcome.state,
+        blocked_reason: outcome.blocked_reason,
+        exit_code: outcome.exit_code,
+    })
+}
+
+pub(crate) fn machine_frame_mutates_input(message: &axum::extract::ws::Message) -> bool {
+    use crate::remote::protocol::MachineTerminalControl;
+    match message {
+        axum::extract::ws::Message::Binary(_) => true,
+        axum::extract::ws::Message::Text(text) => matches!(
+            serde_json::from_str::<MachineTerminalControl>(text),
+            Ok(MachineTerminalControl::Resize { .. } | MachineTerminalControl::Signal { .. })
+        ),
+        _ => false,
+    }
+}
+
 fn machine_socket_error(code: &str) -> (StatusCode, String) {
     let status = match code {
 
         "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
         "MACHINE_ACCESS_REQUIRED" => StatusCode::FORBIDDEN,
         "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
-        "CONTROL_CONFLICT" | "STALE_EPOCH" | "SESSION_EXPIRED" | "SESSION_OWNERSHIP_CHANGED" => {
+        "CONTROL_CONFLICT" | "STALE_EPOCH" | "STALE_GENERATION" | "SESSION_EXPIRED" | "SESSION_OWNERSHIP_CHANGED" => {
             StatusCode::CONFLICT
         }
         "MACHINE_SERVICE_UNAVAILABLE" | "HOST_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
@@ -2404,6 +2506,7 @@ async fn machine_terminal_upgrade(
     device: DeviceInfo,
     mut revoked: tokio::sync::watch::Receiver<bool>,
     state: Arc<RemoteGatewayState>,
+    json_refusal: bool,
 ) -> Result<Response, (StatusCode, String)> {
     use crate::daemon::session_service::DaemonSessionService;
     if device.permission != DevicePermission::Control {
@@ -2416,6 +2519,11 @@ async fn machine_terminal_upgrade(
     let render_grid = match query.render.as_deref() {
         None => false,
         Some("grid") => true,
+        Some(_) => return Err(machine_socket_error("INVALID_REQUEST")),
+    };
+    let takeover = match query.takeover.as_deref() {
+        None | Some("0") => false,
+        Some("1") => true,
         Some(_) => return Err(machine_socket_error("INVALID_REQUEST")),
     };
     let epoch = query
@@ -2433,30 +2541,75 @@ async fn machine_terminal_upgrade(
         daemon_epoch: epoch,
         session_id: id,
     };
+    let mut displaced_holder: Option<String> = None;
     let admission = async {
-        let mut controllers = services.sessions.machine_controllers.lock().await;
+        let input_generation = services.sessions.machine_input_generation(&target.session_id);
         let session = services.sessions.validate_machine_target(&target).await?;
+        services.sessions.validate_session_ssh_target(&target.session_id).await
+            .map_err(|error| error.to_string())?;
         let attachment = services
             .sessions
             .attach_machine_output(&target.session_id, query.after_sequence.map(|s| s.0))
             .ok_or("SESSION_NOT_FOUND")?
             .map_err(|_| "CAPACITY_EXCEEDED")?;
         services.sessions.validate_machine_target(&target).await?;
-        let lease = DaemonSessionService::acquire_machine_controller(
+        let (mut controllers, _geometry) = loop {
+            let controllers = services.sessions.machine_controllers.lock().await;
+            let Some(controller) = controllers.get(&target.session_id) else {
+                break (controllers, None);
+            };
+            let fence = controller.geometry_fence.clone();
+            match fence.clone().try_lock_owned() {
+                Ok(guard) => break (controllers, Some(guard)),
+                Err(_) => {
+                    drop(controllers);
+                    drop(fence.lock_owned().await);
+                }
+            }
+        };
+        // Output/status admission is independent of the input fence.
+        if services.sessions.machine_input_generation(&target.session_id) != input_generation {
+            return Err("STALE_GENERATION".into());
+        }
+        let lease = match DaemonSessionService::acquire_machine_controller_with(
             &mut controllers,
             &target.session_id,
             &device.id,
-        )?;
-        Ok::<_, String>((session, attachment, lease))
+            takeover,
+        ) {
+            Ok(lease) => lease,
+            Err(code) => {
+                // Resolve the holder while the map is still locked, so the name in the
+                // refusal matches the decision that produced it.
+                displaced_holder = DaemonSessionService::machine_controller_holder(
+                    &controllers,
+                    &target.session_id,
+                    &device.id,
+                    takeover,
+                );
+                return Err(code);
+            }
+        };
+        Ok::<_, String>((session, attachment, lease, input_generation))
     };
-    let (session, attachment, lease) = while_device_authorized(
+    let admitted = while_device_authorized(
         &mut revoked,
         tokio::time::timeout(Duration::from_secs(45), admission),
     )
     .await
     .ok_or_else(|| machine_socket_error("UNAUTHORIZED"))?
-    .map_err(|_| machine_socket_error("TIMEOUT"))?
-    .map_err(|e| machine_socket_error(&e))?;
+    .map_err(|_| machine_socket_error("TIMEOUT"))?;
+    let (session, attachment, lease, input_generation) = match admitted {
+        Ok(admission) => admission,
+        Err(code) if code == "CONTROL_CONFLICT" => {
+            let holder = displaced_holder.as_deref().map(|id| {
+                state.auth_manager.live_device(id).map(|device| device.name)
+                    .unwrap_or_else(|| "another device".to_string())
+            });
+            return Ok(machine_occupancy_response(holder.as_deref(), json_refusal));
+        }
+        Err(code) => return Err(machine_socket_error(&code)),
+    };
     let response = ws
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
@@ -2465,14 +2618,20 @@ async fn machine_terminal_upgrade(
         .on_upgrade(move |socket| async move {
             let session_id = session.target.session_id.clone();
             let device_id = device.id.clone();
-            let mut fenced = lease.cancelled.clone();
             let generation = lease.generation;
-            let resized = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // The restore debt belongs to the session's geometry and is carried across
+            // a takeover, so the flag is the controller's rather than this socket's. A
+            // per-socket flag lost the debt whenever a resizing holder was displaced: it
+            // failed the current-generation check at its own teardown and never restored,
+            // while its successor - which never resized - had nothing to restore.
+            let resized = lease.resized.clone();
             let work = handle_machine_terminal_socket(
                 socket,
                 session,
                 attachment,
                 generation,
+                input_generation,
+                lease.cancelled.clone(),
                 GatewaySocketContext { device, state: Arc::clone(&state) },
                 Arc::clone(&resized),
                 render_grid,
@@ -2480,18 +2639,89 @@ async fn machine_terminal_upgrade(
             tokio::select! {
                 biased;
                 _ = revoked.wait_for(|v| *v) => {},
-                _ = fenced.wait_for(|v| *v) => {},
                 _ = work => {},
             }
             // No task is detached, no input survives this scope, and failed
             // upgrades also drop the captured lease without closing the PTY.
             drop(lease);
-            // Only the socket that drove the size hands it back to the desktop.
-            let released = state.machine_services.as_ref().is_some_and(|services| {
-                services.sessions.release_remote_size(&session_id, &device_id, generation)
-            });
-            if released && resized.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = state.session_backend.restore_desktop_geometry(&session_id).await;
+            if let Some(services) = state.machine_services.as_ref() {
+                let _ = services.sessions.release_remote_size(&session_id, &device_id, generation);
+            }
+            #[cfg(test)]
+            let teardown_finished = machine_teardown_probe::before(&session_id).await;
+            if resized.load(std::sync::atomic::Ordering::Acquire) {
+                if let Some(services) = state.machine_services.as_ref() {
+                    let restore = async {
+                        let fence = services.sessions.machine_controllers.lock().await
+                            .get(&session_id).map(|controller| controller.geometry_fence.clone());
+                        let Some(fence) = fence else { return Ok::<_, String>(()); };
+                        let _geometry = fence.lock_owned().await;
+                        let controllers = services.sessions.machine_controllers.lock().await;
+                        let current = controllers
+                            .get(&session_id)
+                            .is_some_and(|controller| controller.generation == generation);
+                        drop(controllers);
+                        if current {
+                            #[cfg(test)]
+                            let restore_finished = machine_teardown_probe::before(&format!("restore:{session_id}")).await;
+                            let operation = async {
+                                if crate::terminal::paired_runtime::Runtime::owns(&session_id) {
+                                    let baseline = services.sessions.desktop_geometry(&session_id)
+                                        .or_else(|| state.terminal_service.output_hub().initial_size(&session_id));
+                                    if let Some((cols, rows)) = baseline {
+                                        // Desktop restoration owns geometry under this fence; unlike
+                                        // phone input, it must survive a paired transport reconnect.
+                                        match state.terminal_service.paired().resize(&session_id, 0, cols, rows)
+                                            .map_err(|error| error.to_string())?.await
+                                        {
+                                            Ok(()) => {},
+                                            Err(error) if error.message == "PAIRED_NOT_SENT" => {},
+                                            Err(error) => return Err(error.to_string()),
+                                        }
+                                    }
+                                } else if services.sessions.owns_machine_session(&session_id) {
+                                    // A machine pane this desktop never sized has no recorded
+                                    // baseline; the hub spawn geometry is then the size the pane
+                                    // opens at, exactly as the paired branch above and
+                                    // projection_geometry resolve it. Without the fallback the
+                                    // restore was skipped and the phone-sized PTY stayed behind.
+                                    let baseline = services.sessions.desktop_geometry(&session_id)
+                                        .or_else(|| state.terminal_service.output_hub().initial_size(&session_id));
+                                    if let Some((cols, rows)) = baseline {
+                                        let current_input = services.sessions.machine_input_generation(&session_id);
+                                        services.sessions.resize_machine_input(&session_id, current_input, cols, rows).await?;
+                                    }
+                                } else {
+                                    state.session_backend.restore_desktop_geometry(&session_id).await?;
+                                }
+                                Ok::<_, String>(())
+                            };
+                            match tokio::time::timeout(Duration::from_secs(3), operation).await {
+                                Ok(result) => {
+                                    result?;
+                                    // The debt is settled under the same fence and only for the
+                                    // current generation, so a displaced socket that also owed a
+                                    // restore cannot clear it for the holder that inherited it.
+                                    resized.swap(false, std::sync::atomic::Ordering::AcqRel);
+                                },
+                                Err(_) => return Err("machine geometry restore timed out".into()),
+                            }
+                            #[cfg(test)]
+                            if let Some(finished) = restore_finished {
+                                let _ = finished.send(());
+                            }
+                        }
+                        Ok::<_, String>(())
+                    };
+                    match restore.await {
+                        Ok(()) => {},
+                        Err(error) => tracing::warn!(%session_id, %error, "machine geometry restore failed"),
+                    }
+                }
+            }
+            #[cfg(test)]
+            if let Some(finished) = teardown_finished {
+                let _ = finished.send(());
             }
         });
     Ok(([(header::CACHE_CONTROL, "no-store")], response).into_response())
@@ -2506,6 +2736,35 @@ pub(crate) mod machine_input_fixture;
 #[cfg(test)]
 #[path = "machine_input_probe.rs"]
 pub(crate) mod machine_input_probe;
+#[cfg(test)]
+pub(crate) mod machine_teardown_probe {
+    use std::{collections::HashMap, sync::LazyLock};
+    use tokio::sync::oneshot;
+
+    struct Probe {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+        finished: oneshot::Sender<()>,
+    }
+    static PROBES: LazyLock<parking_lot::Mutex<HashMap<String, Probe>>> =
+        LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+    pub(crate) fn register(id: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>, oneshot::Receiver<()>) {
+        let (entered, entry) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let (finished, completion) = oneshot::channel();
+        assert!(PROBES.lock().insert(id.into(), Probe { entered, release: resume, finished }).is_none());
+        (entry, release, completion)
+    }
+
+    pub(super) async fn before(id: &str) -> Option<oneshot::Sender<()>> {
+        let probe = PROBES.lock().remove(id);
+        let probe = probe?;
+        let _ = probe.entered.send(());
+        let _ = probe.release.await;
+        Some(probe.finished)
+    }
+}
 #[cfg(feature = "local-split-qa")]
 #[path = "machine_delivery_observer.rs"]
 pub(crate) mod machine_delivery_observer;
@@ -2583,6 +2842,8 @@ async fn handle_machine_terminal_socket(
     session: crate::remote::machine_protocol::Session,
     attachment: crate::terminal::output_hub::machine_output::MachineAttachment,
     generation: u64,
+    input_generation: u64,
+    mut fenced: tokio::sync::watch::Receiver<bool>,
     context: GatewaySocketContext,
     resized: Arc<std::sync::atomic::AtomicBool>,
     render_grid: bool,
@@ -2593,9 +2854,19 @@ async fn handle_machine_terminal_socket(
     use crate::scoped_contracts::Epoch;
     let services = state.machine_services.as_ref().expect("admitted services");
     let target = &session.target;
-    let Some(pty) = services.sessions.machine_pty(&target.session_id) else {
+    let mut input_recovery = services.sessions.subscribe_machine_input_recovery(&target.session_id);
+    let mut ssh_recovery = state.terminal_service.remote().subscribe(&target.session_id).ok();
+    let stale_input = std::sync::atomic::AtomicBool::new(false);
+    // An SSH-backed session has no local `PtySession`: its terminal lives in the remote
+    // runtime. Admission and output replay are already session-agnostic, so requiring a
+    // local PTY here silently dropped every remote session from the machine wire. Input,
+    // resize and exit status go through the backend instead, which knows the owner.
+    if services.sessions.machine_pty(&target.session_id).is_none()
+        && !services.sessions.owns_machine_session(&target.session_id)
+        && input_recovery.is_none()
+    {
         return;
-    };
+    }
 
     // Subscribe to authoritative agent state updates BEFORE emitting the Attached boundary
     // so no racing agent state update or initial conversation identity is lost.
@@ -2631,11 +2902,25 @@ async fn handle_machine_terminal_socket(
     let Ok(boundary) = machine_control(Message::Text(boundary.into())) else {
         return;
     };
-    if machine_send(&mut sender, boundary, &mut termination)
-        .await
-        .is_err()
-    {
+    let retained_output = input_recovery.is_some()
+        && *termination.borrow() != Some(crate::terminal::output_hub::machine_output::MachineOutputError::Overflow);
+    let boundary_sent = if retained_output {
+        matches!(tokio::time::timeout(Duration::from_secs(3), sender.send(boundary)).await, Ok(Ok(())))
+    } else {
+        machine_send(&mut sender, boundary, &mut termination).await.is_ok()
+    };
+    if !boundary_sent {
         return;
+    }
+
+    // Recovery is control-plane evidence, not output. Deliver the initial tuple
+    // before starting futures that can finish on an already-ended output stream.
+    if let Some(recovery) = input_recovery.as_ref() {
+        let outcome = recovery.borrow().clone();
+        let message = machine_paired_outcome(&target.session_id, outcome);
+        if !matches!(tokio::time::timeout(Duration::from_secs(3), sender.send(message)).await, Ok(Ok(()))) {
+            return;
+        }
     }
 
     // Send initial authoritative agent state snapshot immediately after the boundary
@@ -2903,8 +3188,8 @@ async fn handle_machine_terminal_socket(
                     return
                 }
                 Err(crate::terminal::output_hub::machine_output::MachineOutputError::Closed) => {
-                    let status = match pty.state() {
-                        crate::terminal::PtySessionState::Exited { code } => {
+                    let status = match services.sessions.machine_exit_status(&target.session_id) {
+                        Some(crate::terminal::PtySessionState::Exited { code }) => {
                             serde_json::json!({"type":"exit","target":target,"exit":{"code":code,"signal":null}})
                         }
                         _ => {
@@ -3016,6 +3301,9 @@ async fn handle_machine_terminal_socket(
                 )
             );
             let operation = async {
+                if machine_frame_mutates_input(&message) {
+                    services.sessions.validate_machine_input_generation(&target.session_id, input_generation)?;
+                }
                 match message {
                     Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
                         // Typing here makes this viewer the size driver, so its size takes over.
@@ -3024,7 +3312,7 @@ async fn handle_machine_terminal_socket(
                         {
                             let requested = *requested_size.lock();
                             if let Some((cols, rows)) = requested {
-                                if state.session_backend.resize(&target.session_id, cols, rows).await.is_ok() {
+                                if services.sessions.resize_machine_input(&target.session_id, input_generation, cols, rows).await.is_ok() {
                                     resized.store(true, std::sync::atomic::Ordering::Release);
                                     if let Some(mirror) = &recv_mirror {
                                         let resized_mirror = mirror.lock().resize(cols, rows).is_ok();
@@ -3037,7 +3325,7 @@ async fn handle_machine_terminal_socket(
                         }
                         #[cfg(feature = "local-split-qa")]
                         let obs_seq = machine_delivery_observer::record_ingress(target, generation, "write", &bytes, None);
-                        let input = pty.write_input_cancellable(&bytes);
+                        let input = services.sessions.write_machine_input(&target.session_id, input_generation, &bytes);
                         #[cfg(test)]
                         let input = machine_input_probe::observe(&target.session_id, input);
                         let res = input.await.map_err(|error| error.to_string());
@@ -3070,16 +3358,11 @@ async fn handle_machine_terminal_socket(
                                     || (cols <= REMOTE_GRID_MAX_COLS && rows <= REMOTE_GRID_MAX_ROWS)) =>
                             {
                                 *requested_size.lock() = Some((cols, rows));
-                                // A viewer that is not driving keeps the driver's size instead of
-                                // flipping the PTY (and the other screen) to its own.
-                                if !services.sessions.remote_drives_size(&target.session_id, &device.id, generation) {
-                                    return Ok(());
-                                }
-                                state
-                                    .session_backend
-                                    .resize(&target.session_id, cols, rows)
-                                    .await?;
+                                let _ = services.sessions.claim_remote_size(&target.session_id, &device.id, generation);
                                 resized.store(true, std::sync::atomic::Ordering::Release);
+                                services.sessions
+                                    .resize_machine_input(&target.session_id, input_generation, cols, rows)
+                                    .await?;
                                 if let Some(mirror) = &recv_mirror {
                                     {
                                         let mut m = mirror.lock();
@@ -3096,9 +3379,8 @@ async fn handle_machine_terminal_socket(
                             }) if supplied.0 == generation && signal == "interrupt" => {
                                 #[cfg(feature = "local-split-qa")]
                                 let obs_seq = machine_delivery_observer::record_ingress(target, generation, "signal", signal.as_bytes(), _intent_id.as_deref());
-                                let res = state
-                                    .session_backend
-                                    .signal(&target.session_id, TerminalSignal::Interrupt)
+                                let res = services.sessions
+                                    .interrupt_machine_input(&target.session_id, input_generation)
                                     .await;
                                 #[cfg(feature = "local-split-qa")]
                                 machine_delivery_observer::record_delivery(obs_seq, res.is_ok(), res.as_ref().err().cloned());
@@ -3154,12 +3436,16 @@ async fn handle_machine_terminal_socket(
             let result = std::future::poll_fn(|cx| {
                 let cancelled = authority.borrow();
                 if *cancelled {
-                    return std::task::Poll::Ready(Err("STALE_GENERATION".into()));
+                    return std::task::Poll::Ready(Err("SESSION_OWNERSHIP_CHANGED".into()));
                 }
                 std::future::Future::poll(operation.as_mut(), cx)
             })
             .await;
             if let Err(code) = result {
+                if code == "STALE_GENERATION" {
+                    stale_input.store(true, std::sync::atomic::Ordering::Release);
+                    return;
+                }
                 let mut frame = serde_json::json!({"type":"error","code":code});
                 if acknowledgement {
                     frame["op"] = serde_json::Value::from("acknowledgeAgentOutcome");
@@ -3173,8 +3459,98 @@ async fn handle_machine_terminal_socket(
             }
         }
     };
-    {
-        tokio::select! { biased; _ = read => {}, _ = send => {}, _ = receive => {} }
+    let fence_state = fenced.clone();
+    let transport_changed = async {
+        loop {
+            let mut paired_read_only = false;
+            if let Some(recovery) = input_recovery.as_ref() {
+                let outcome = recovery.borrow().clone();
+                paired_read_only = outcome.state != "proxy_attached";
+                let message = terminal_outcome_message(&target.session_id,
+                    crate::remote::backend::RemotePairedRecoveryOutcome {
+                        backend_session_id: outcome.backend_session_id,
+                        daemon_epoch: outcome.daemon_epoch,
+                        incarnation: outcome.incarnation,
+                        generation: outcome.generation,
+                        state: outcome.state,
+                        blocked_reason: outcome.blocked_reason,
+                        exit_code: outcome.exit_code,
+                    });
+                let Ok(message) = machine_control(message) else { return; };
+                if controls.send(message).await.is_err() { return; }
+            }
+            if !paired_read_only
+                && services.sessions.machine_input_generation(&target.session_id) != input_generation
+            {
+                stale_input.store(true, std::sync::atomic::Ordering::Release);
+                return;
+            }
+            tokio::select! {
+                result = async {
+                    match input_recovery.as_mut() {
+                        Some(recovery) => recovery.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => { if result.is_err() { return; } }
+                result = async {
+                    match ssh_recovery.as_mut() {
+                        Some(recovery) => recovery.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => { if result.is_err() { return; } }
+            }
+        }
+    };
+    let displaced = {
+        tokio::select! {
+            biased;
+            _ = fenced.wait_for(|value| *value) => true,
+            _ = transport_changed => false,
+            _ = read => false,
+            _ = send => false,
+            _ = receive => *fence_state.borrow(),
+        }
+    };
+    // Controller displacement takes precedence over a simultaneous transport change.
+    let displaced = displaced || *fence_state.borrow();
+    if !displaced && stale_input.load(std::sync::atomic::Ordering::Acquire) {
+        let refusal = machine_control_message(serde_json::json!({"type":"error","code":"STALE_GENERATION"}));
+        match tokio::time::timeout(Duration::from_secs(3), sender.send(refusal)).await {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => tracing::warn!(%error, "machine recovery refusal send failed"),
+            Err(_) => tracing::warn!("machine recovery refusal send timed out"),
+        }
+        return;
+    }
+    if displaced {
+        let outcome = terminal_outcome_message(&target.session_id,
+            crate::remote::backend::RemotePairedRecoveryOutcome {
+                backend_session_id: target.session_id.clone(),
+                daemon_epoch: target.daemon_epoch.0.to_string(),
+                incarnation: format!("{}:{}", target.machine_id, target.daemon_epoch.0),
+                generation: Some(generation),
+                state: "blocked".into(),
+                blocked_reason: Some("SESSION_OWNERSHIP_CHANGED".into()),
+                exit_code: None,
+            });
+        match tokio::time::timeout(Duration::from_secs(3), sender.send(outcome)).await {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => tracing::warn!(%error, "machine ownership outcome send failed"),
+            Err(_) => tracing::warn!("machine ownership outcome send timed out"),
+        }
+        return;
+    }
+
+    // Output termination cancels machine_send, including queued recovery controls.
+    // Read the authoritative tuple after the writer ends and flush it independently
+    // so an affirmative exit cannot lose a race to its own output termination.
+    if let Some(recovery) = input_recovery.as_ref() {
+        let message = machine_paired_outcome(&target.session_id, recovery.borrow().clone());
+        match tokio::time::timeout(Duration::from_secs(3), sender.send(message)).await {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => tracing::warn!(%error, "machine final recovery outcome send failed"),
+            Err(_) => tracing::warn!("machine final recovery outcome send timed out"),
+        }
     }
 
     if close_rx.try_recv().is_ok() {
@@ -3350,6 +3726,12 @@ async fn handle_terminal_socket(
                                 can_control,
                             )
                             .await;
+                            if can_control && matches!(&ctrl, ClientControlMessage::Signal { signal } if signal == "interrupt") {
+                                let generation = recv_recovery_state.read().as_ref().map(|status| status.generation);
+                                if let Some(generation) = generation {
+                                    let _ = session_backend.write_generation(&session_id_clone, generation, b"\x03").await;
+                                }
+                            }
                             if ok && matches!(ctrl, ClientControlMessage::RemoteResize { .. }) {
                                 resized.store(true, std::sync::atomic::Ordering::Release);
                             }
@@ -3884,6 +4266,12 @@ async fn handle_terminal_grid_socket(
                                 can_control,
                             )
                             .await;
+                            if can_control && matches!(&ctrl, ClientControlMessage::Signal { signal } if signal == "interrupt") {
+                                let generation = recv_recovery_state.read().as_ref().map(|status| status.generation);
+                                if let Some(generation) = generation {
+                                    let _ = session_backend.write_generation(&session_id_clone, generation, b"\x03").await;
+                                }
+                            }
                             if let ClientControlMessage::RemoteResize { cols, rows, .. } = ctrl {
                                 if ok {
                                     resized.store(true, std::sync::atomic::Ordering::Release);
@@ -11632,6 +12020,215 @@ mod tests {
         pty.close_session(&session_id)
             .await
             .expect("close fixture PTY");
+    }
+
+    /// A connector whose dial never answers and whose retry delay never elapses: a restored
+    /// descriptor stays exactly as `restore` published it (`Reconnecting`) without touching the
+    /// network, scheduling backoff or reading a clock. Nothing in the runtime can write the state,
+    /// so a test may still drive it by hand afterwards.
+    #[cfg(unix)]
+    struct NeverAnswers;
+
+    #[cfg(unix)]
+    impl crate::terminal::remote::Connector for NeverAnswers {
+        fn connect<'a>(
+            &'a self,
+            _: &'a crate::terminal::remote::RemoteSessionDescriptor,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Arc<dyn crate::terminal::remote::Transport>,
+                            crate::ssh::bridge::BridgeError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(std::future::pending::<Result<
+                Arc<dyn crate::terminal::remote::Transport>,
+                crate::ssh::bridge::BridgeError,
+            >>())
+        }
+        fn delay(&self, _: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[cfg(unix)]
+    fn ssh_descriptor(
+        session_id: &str,
+        project_id: &str,
+    ) -> crate::terminal::remote::RemoteSessionDescriptor {
+        crate::terminal::remote::RemoteSessionDescriptor {
+            backend_session_id: session_id.into(),
+            target: crate::scoped_contracts::TargetRef {
+                host_id: "host".into(),
+                owner_id: "owner".into(),
+                epoch: crate::scoped_contracts::Epoch(1),
+                backend_session_id: "remote-target".into(),
+            },
+            config: crate::terminal::remote::RemoteSessionConfig {
+                host: crate::ssh::SshHost {
+                    id: "host".into(),
+                    label: "host".into(),
+                    hostname: "127.0.0.1".into(),
+                    username: None,
+                    port: Some(1),
+                    identity_file: None,
+                    jump_host: None,
+                    source: crate::ssh::SshHostSource::Config,
+                    auth_method: crate::ssh::SshAuthMethod::Agent,
+                    disabled: None,
+                    shell: None,
+                },
+                environment: crate::ssh::runtime::RemoteEnvironment {
+                    platform: crate::ssh::runtime::RemotePlatform::Posix,
+                    executor: crate::ssh::runtime::RemoteExecutor::Sh,
+                    version: "test".into(),
+                    home: "/home".into(),
+                    temp: "/tmp".into(),
+                    git: true,
+                },
+                helper: crate::ssh::helper_setup::HelperLocation {
+                    executable: "/unused/helper".into(),
+                    root: "/unused".into(),
+                },
+                project_id: project_id.into(),
+                project_path: "/srv/api".into(),
+                worktree: None,
+                agent_identity: None,
+            },
+            client_request_id: "request".into(),
+            remote_cursor: crate::ssh::bridge::RemoteCursor(1),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    /// `restore` is the restart path: it registers the persisted identity and publishes
+    /// `Reconnecting` synchronously, before any redial can land.
+    #[cfg(unix)]
+    fn state_with_restored_ssh(
+        session_id: &str,
+        project_id: &str,
+    ) -> (Arc<RemoteGatewayState>, WorkspaceSnapshotCache) {
+        let terminal_service = Arc::new(TerminalService::with_remote_connector_for_test(Arc::new(
+            NeverAnswers,
+        )));
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+        terminal_service
+            .remote()
+            .restore(ssh_descriptor(session_id, project_id))
+            .expect("restore the persisted SSH descriptor");
+        assert_eq!(
+            terminal_service.remote().details(session_id).unwrap().state,
+            crate::terminal::remote::RemoteConnectionState::Reconnecting
+        );
+        (state, WorkspaceSnapshotCache::build(&registry))
+    }
+
+    #[cfg(unix)]
+    fn ssh_project(workspace_id: &str) -> crate::ssh::projects::RemoteProject {
+        crate::ssh::projects::RemoteProject {
+            workspace_id: workspace_id.into(),
+            host_id: "host".into(),
+            repo_root: "/srv/api".into(),
+            git_root: None,
+            git_remote: None,
+            git_branch: None,
+            git_head: None,
+            platform: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn selection_shapes() -> [(&'static str, Option<Option<&'static str>>); 4] {
+        [
+            ("none", None),
+            ("no-session", Some(None)),
+            ("matching", Some(Some("ssh-session"))),
+            ("other", Some(Some("other-session"))),
+        ]
+    }
+
+    /// A daemon restart restores the persisted descriptor as `Reconnecting`, and the runtime keeps
+    /// it there until a redial succeeds. The session is the same live target across that window,
+    /// so the inventory must keep it listed as running, attributed to its SSH project, for every
+    /// desktop selection shape. This fixture is the SSH-inventory case: a real `ssh:` project id
+    /// that is present in the enabled inventory, which the HTTP fixtures (non-`ssh:` project id)
+    /// and the removal test (absent inventory) do not both exercise.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_reconnecting_ssh_session_is_listed_as_running_for_every_selection() {
+        let (state, cache) = state_with_restored_ssh("ssh-session", "ssh:project-a");
+        let projects = [ssh_project("ssh:project-a")];
+        let mut rows_by_shape = Vec::new();
+        for (shape, selection) in selection_shapes() {
+            state.set_active_selection_opt(selection.map(|session_id| {
+                RemoteActiveDesktopSelection {
+                    session_id: session_id.map(str::to_string),
+                    ..Default::default()
+                }
+            }));
+            let sessions = get_active_running_sessions(&state, &cache, &projects).await;
+            assert_eq!(
+                sessions.len(),
+                1,
+                "{shape}: a restored Reconnecting SSH session must stay listed, got {sessions:?}"
+            );
+            let row = &sessions[0];
+            assert_eq!(row.session_id, "ssh-session", "{shape}");
+            assert!(
+                row.running,
+                "{shape}: a restored session must project as running"
+            );
+            assert_eq!(row.workspace_id.as_deref(), Some("ssh:project-a"), "{shape}");
+            assert_eq!(row.worktree_label.as_deref(), Some("api"), "{shape}");
+            rows_by_shape.push((shape, row.title.clone(), row.workspace_id.clone()));
+        }
+        let (first_shape, first_title, first_workspace) = &rows_by_shape[0];
+        for (shape, title, workspace) in &rows_by_shape[1..] {
+            assert_eq!(
+                (workspace, title),
+                (first_workspace, first_title),
+                "{shape}: the desktop selection changed the listed identity (see {first_shape})"
+            );
+        }
+    }
+
+    /// The widening is scoped to the two live states: an ended target leaves the inventory and
+    /// stops counting as a live registry entry for a desktop-published `running: false` tab.
+    /// Both answers are independent of the desktop selection, so this runs with none.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ended_ssh_session_is_neither_listed_nor_registry_live() {
+        let (state, cache) = state_with_restored_ssh("ssh-session", "ssh:project-a");
+        let projects = [ssh_project("ssh:project-a")];
+        assert!(published_session_is_registry_live(&state, "ssh-session").await);
+        // The dial never answers, so the runtime cannot rewrite the state this test sets.
+        state
+            .terminal_service
+            .remote()
+            .entry_for_test("ssh-session")
+            .unwrap()
+            .state
+            .lock()
+            .details
+            .state = crate::terminal::remote::RemoteConnectionState::Expired;
+        assert!(
+            !published_session_is_registry_live(&state, "ssh-session").await,
+            "an ended SSH target must not keep a published `running: false` tab alive"
+        );
+        let sessions = get_active_running_sessions(&state, &cache, &projects).await;
+        assert!(
+            sessions.is_empty(),
+            "an ended SSH session must leave the inventory, got {sessions:?}"
+        );
     }
 
     #[tokio::test]
