@@ -1901,12 +1901,15 @@ pub(crate) async fn prompt_get(
         _ => {
             let now = pending_now_secs();
             let to_record = found.clone();
-            let reconciliation = on_pending_journal(state, move |journal| {
-                let result = crate::agent_control::pending_input::reconcile(journal, to_record, &session_owned, now);
-                result
+            on_pending_journal(state, move |journal| {
+                crate::agent_control::pending_input::reconcile(
+                    journal,
+                    to_record,
+                    &session_owned,
+                    now,
+                )
             })
-            .await;
-            reconciliation
+            .await
         }
     };
     if view.is_none() || ambiguous_prompt_selected {
@@ -4145,7 +4148,7 @@ mod tests {
         services: Option<Arc<crate::daemon::MachineServices>>,
     ) -> Arc<RemoteGatewayState> {
         let mut state = RemoteGatewayState::new_with_backend(
-            Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+            Arc::clone(backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
             crate::worktree::registry::WorkspaceRegistry::new(),
         );
         state.machine_services = services;

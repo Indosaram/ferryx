@@ -46,7 +46,7 @@ impl PutContinuity {
         let cleared = fields.iter().all(|field| field.is_none());
         let selected = [&self.machine_id, &self.workspace_id, &self.session_id].iter().all(|field| {
             field.as_ref().is_some_and(|value| !value.trim().is_empty() && value.len() <= 4096)
-        }) && self.worktree_slug.as_ref().map_or(true, |value| {
+        }) && self.worktree_slug.as_ref().is_none_or(|value| {
             !value.trim().is_empty() && value.len() <= 4096
         });
         if self.expected_revision < 0 || (!cleared && !selected) {
