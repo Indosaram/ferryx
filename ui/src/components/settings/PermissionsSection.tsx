@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import { OPEN_ONBOARDING_EVENT, resetOnboarding } from "../../lib/onboarding";
+import { SETUP_PROGRESS_HINT_STORAGE_KEY } from "../../lib/storageKeys";
 import {
   getSystemPermissionsStatus,
   openPermissionsSystemSettings,
@@ -146,6 +147,13 @@ export function PermissionsSection() {
 
   const handleRerunOnboarding = useCallback(() => {
     resetOnboarding();
+    // A dismissed setup panel is otherwise permanent: resetting the wizard has to restore it,
+    // or the panel can never come back once dismissed.
+    try {
+      window.localStorage.removeItem(SETUP_PROGRESS_HINT_STORAGE_KEY);
+    } catch {
+      // Storage unavailable: the wizard still reopens, only the panel stays dismissed.
+    }
     window.dispatchEvent(new CustomEvent(OPEN_ONBOARDING_EVENT));
   }, []);
 

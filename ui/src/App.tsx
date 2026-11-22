@@ -97,6 +97,8 @@ import {
 import { showNotificationPermissionHint } from "./lib/notificationPermissionHint";
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
+import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
+import { buildSetupProgress } from "./lib/setupProgress";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
@@ -116,6 +118,7 @@ import {
   ACTIVE_PROJECT_STORAGE_KEY,
   getMigratedItem,
   PROJECTS_STORAGE_KEY,
+  SETUP_PROGRESS_HINT_STORAGE_KEY,
   SIDEBAR_OPEN_STORAGE_KEY,
 } from "./lib/storageKeys";
 import {
@@ -2595,6 +2598,21 @@ function WorkspaceApp({
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
   const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
   const [onboardingDoneSteps, setOnboardingDoneSteps] = useState<readonly OnboardingStepId[]>([]);
+  // Populated once per launch so the sidebar can show setup progress after the first project.
+  const [setupProgressCtx, setSetupProgressCtx] = useState<OnboardingContext | null>(null);
+  // Mirrors what the wizard persisted, so the sidebar panel re-derives when a step is recorded
+  // instead of reading storage from a memo that cannot observe the write.
+  const [onboardingRecordedSteps, setOnboardingRecordedSteps] = useState<readonly OnboardingStepId[]>(
+    () => loadOnboardingState().completedSteps
+  );
+  // A dismissed setup panel is permanent until the wizard is rerun (Settings > Permissions).
+  const [setupProgressDismissed, setSetupProgressDismissed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SETUP_PROGRESS_HINT_STORAGE_KEY) === "dismissed";
+    } catch {
+      return false;
+    }
+  });
   // A local project added from the wizard's first-project step reopens the wizard on the
   // "try" step, which offers to create a first worktree there with the default agent.
   const [onboardingAddedProject, setOnboardingAddedProject] = useState<RegisteredProject | null>(null);
@@ -4230,6 +4248,14 @@ function WorkspaceApp({
         supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
+      setOnboardingRecordedSteps(loadOnboardingState().completedSteps);
+      // Re-read the dismissal so "Show Welcome Setup" (which clears the key) brings the sidebar
+      // panel back on the same event that reopens the wizard.
+      try {
+        setSetupProgressDismissed(window.localStorage.getItem(SETUP_PROGRESS_HINT_STORAGE_KEY) === "dismissed");
+      } catch {
+        // Storage unavailable: keep whatever state this launch already resolved.
+      }
       setOnboardingInitialStepIndex(0);
       setOnboardingSteps(wizardSteps(ctx));
     };
@@ -5019,6 +5045,56 @@ function WorkspaceApp({
   const { preset: shortcutPreset } = useShortcutPreset();
   useShortcuts(shortcutHandlers, { overrides: shortcutOverrides, preset: shortcutPreset });
 
+  const setupProgressItems = useMemo(() => {
+    if (!setupProgressCtx) return [];
+    return buildSetupProgress(
+      { ...setupProgressCtx, agents: resolvedAgents, projectCount: projects.length },
+      onboardingRecordedSteps
+    );
+  }, [onboardingRecordedSteps, projects.length, resolvedAgents, setupProgressCtx]);
+
+  const dismissSetupProgress = useCallback(() => {
+    setSetupProgressDismissed(true);
+    try {
+      window.localStorage.setItem(SETUP_PROGRESS_HINT_STORAGE_KEY, "dismissed");
+    } catch {
+      // A read-only storage area only costs the dismissal, never the panel itself.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isNativeRuntime || !isPrimary || activeRemoteHost) return;
+    let cancelled = false;
+    const refresh = () => {
+      void Promise.all([
+        getCliLauncherStatus().catch(() => null),
+        getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
+        getSetupStatus(),
+      ]).then(([cli, enrollment, devices, setup]) => {
+        if (cancelled) return;
+        setSetupProgressCtx({
+          permissions: null,
+          agents: resolvedAgentsRef.current,
+          cli,
+          projectCount: projectsRef.current.length,
+          accountLinked: enrollment?.enrolled === true,
+          pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
+          supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
+        });
+      });
+    };
+    refresh();
+    // Refreshing on focus catches goals satisfied in another window (CLI install, pairing, sign-in)
+    // without polling; the wizard's own open event covers the in-app path.
+    const events = ["focus", OPEN_ONBOARDING_EVENT] as const;
+    for (const name of events) window.addEventListener(name, refresh);
+    return () => {
+      cancelled = true;
+      for (const name of events) window.removeEventListener(name, refresh);
+    };
+  }, [activeRemoteHost, isNativeRuntime, isPrimary, projects.length, resolvedAgents]);
+
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
     ? `${registrationError.code}: ${registrationError.message}`
@@ -5098,6 +5174,17 @@ function WorkspaceApp({
           onOpenResources={() => setIsResourcesOpen(true)}
 
           onFocusSupervisorSession={handleFocusSupervisorSession}
+          footerSlot={
+            !activeRemoteHost && setupProgressCtx && !setupProgressDismissed ? (
+              <SetupProgressPanel
+                items={setupProgressItems}
+                onDismiss={dismissSetupProgress}
+                onOpenSetup={() => {
+                  window.dispatchEvent(new CustomEvent(OPEN_ONBOARDING_EVENT));
+                }}
+              />
+            ) : null
+          }
           onToggle={toggleSidebar}
         />
       ) : (
@@ -5301,7 +5388,9 @@ function WorkspaceApp({
             doneSteps={onboardingDoneSteps}
             agents={resolvedAgents}
             isMac={isMacShortcutPlatform()}
-            onStepCompleted={(step) => markOnboardingStepsCompleted([step])}
+            onStepCompleted={(step) => {
+              setOnboardingRecordedSteps(markOnboardingStepsCompleted([step]).completedSteps);
+            }}
             onFinish={() => {
               setOnboardingAddedProject(null);
               setOnboardingSteps(null);
