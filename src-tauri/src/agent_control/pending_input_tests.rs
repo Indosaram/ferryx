@@ -771,7 +771,7 @@ fn a_not_typed_refusal_still_frees_the_next_claim_for_either_entry_point() {
 
 fn owned(journal: &Journal, prompt_id: &str, session_id: &str) -> Option<PendingInput> {
     match get_for_session(journal, prompt_id, session_id).unwrap() {
-        PendingInputEntry::Owned(record) => Some(record),
+        PendingInputEntry::Owned(record) => Some(*record),
         PendingInputEntry::Absent | PendingInputEntry::Elsewhere => None,
     }
 }

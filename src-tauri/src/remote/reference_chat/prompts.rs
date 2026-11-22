@@ -3765,7 +3765,7 @@ mod tests {
         )
         .expect("the journal reopens");
         let stored = match stored {
-            crate::agent_control::pending_input::PendingInputEntry::Owned(stored) => stored,
+            crate::agent_control::pending_input::PendingInputEntry::Owned(stored) => *stored,
             other => panic!("this pane owns the row it wrote, got {other:?}"),
         };
         assert_eq!(stored.prompt_id, later, "the later occurrence is on disk under its own id");
