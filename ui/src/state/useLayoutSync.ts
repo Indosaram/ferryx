@@ -210,7 +210,9 @@ export function useLayoutSync({
       // A document that already matches the local layout is not a change: dispatching it would
       // replace every tab object on each poll.
       if (unchanged && minted.size === 0) return;
-      dispatchRef.current({ type: "RESTORE_WORKSPACE", state: { ...current, layout, sessions } });
+      const next = { ...current, layout, sessions };
+      stateRef.current = next;
+      dispatchRef.current({ type: "RESTORE_WORKSPACE", state: next });
       if (minted.size > 0) enrichDetached([...minted.keys()]);
     };
 
