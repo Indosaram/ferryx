@@ -12,7 +12,7 @@ export function SettingsHeading({
   return (
     <header className="mb-8 border-b border-border pb-5">
       <div className="mb-2 flex items-center gap-2 text-[15px] font-semibold">
-        <span className="text-muted-foreground [&>svg]:size-4">{icon}</span>
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-panel text-muted-foreground [&>svg]:size-4">{icon}</span>
         {title}
       </div>
       <p className="max-w-2xl text-[12px] leading-5 text-muted-foreground">{description}</p>

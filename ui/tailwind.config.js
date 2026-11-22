@@ -16,6 +16,7 @@ export default {
         background: opaque("background"),
         foreground: opaque("foreground"),
         card: opaque("card"),
+        panel: opaque("panel"),
         "card-foreground": opaque("card-foreground"),
         popover: opaque("popover"),
         "popover-foreground": opaque("popover-foreground"),

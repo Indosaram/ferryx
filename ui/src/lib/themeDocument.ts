@@ -16,7 +16,7 @@ export type ThemeColor = [red: number, green: number, blue: number, alpha: numbe
 /** Only colour declarations in index.css's two palette roots. RGB companions are derived, never authored. */
 export const THEME_TOKEN_ALLOWLIST: ReadonlySet<string> = new Set([
   "--surface-hairline", "--surface-highlight",
-  "--background", "--foreground", "--card", "--card-foreground", "--popover", "--popover-foreground",
+  "--background", "--foreground", "--card", "--panel", "--card-foreground", "--popover", "--popover-foreground",
   "--primary", "--primary-foreground", "--secondary", "--secondary-foreground", "--muted", "--muted-foreground",
   "--accent", "--surface-hover", "--accent-foreground", "--destructive", "--destructive-foreground",
   "--border", "--input", "--ring",

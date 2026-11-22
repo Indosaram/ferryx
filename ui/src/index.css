@@ -44,6 +44,10 @@
   --foreground-rgb: 250 250 250;
   --card: #171717;
   --card-rgb: 23 23 23;
+  /* Raised settings/panel surface: one step above the charcoal canvas so a grouped
+     settings card reads as a card, not as a hole. Its shape comes from --border. */
+  --panel: #262a32;
+  --panel-rgb: 38 42 50;
   --card-foreground: #fafafa;
   --card-foreground-rgb: 250 250 250;
   /* Floating layer: one step above the terminal surface (#282c34) and clearly
