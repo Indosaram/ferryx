@@ -661,22 +661,26 @@ mod tests {
         respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
             .await
             .expect_err("an idle reading of another epoch is not this turn's reply");
-        let ops = control.ops.lock().expect("ops");
-        assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, AgentOp::Send { .. }))
-                .count(),
-            1,
-            "the transcript is not sent twice"
-        );
-        assert!(ops.iter().any(|op| matches!(op, AgentOp::Wait { .. })));
-        assert_eq!(
-            ops.iter()
-                .filter(|op| matches!(op, AgentOp::Read { .. }))
-                .count(),
-            1,
-            "the turn fails on the wait gap instead of reading a reply from the new epoch"
-        );
+        {
+            // Inspected under one lock, released before the query below awaits: a guard held
+            // across the await would serialize the whole test runtime behind this pane.
+            let ops = control.ops.lock().expect("ops");
+            assert_eq!(
+                ops.iter()
+                    .filter(|op| matches!(op, AgentOp::Send { .. }))
+                    .count(),
+                1,
+                "the transcript is not sent twice"
+            );
+            assert!(ops.iter().any(|op| matches!(op, AgentOp::Wait { .. })));
+            assert_eq!(
+                ops.iter()
+                    .filter(|op| matches!(op, AgentOp::Read { .. }))
+                    .count(),
+                1,
+                "the turn fails on the wait gap instead of reading a reply from the new epoch"
+            );
+        }
         let roles: Vec<String> =
             sqlx::query_scalar("SELECT role FROM messages WHERE session_key = ? ORDER BY sequence")
                 .bind(session.storage_key())
