@@ -474,6 +474,7 @@ impl MachineOperationJournal {
     /// Stores the newest stamps of each named session in one write. A session this journal does
     /// not own (a desktop pane, or one that ended) is skipped; it changes nothing else, so no
     /// session revision moves and no machine event is owed.
+    #[cfg(test)]
     pub(crate) fn record_agent_stamps(
         &self,
         stamps: &BTreeMap<String, crate::agent_control::events::SessionStamps>,
@@ -654,7 +655,7 @@ impl MachineOperationJournal {
         let state = self.state.lock();
         let store = state.as_ref().map_err(Clone::clone)?;
         Ok(match pending_slot(store, prompt_id, session_id).1 {
-            Some(row) => PendingInputEntry::Owned(row),
+            Some(row) => PendingInputEntry::Owned(Box::new(row)),
             None if another_pane_holds(store, prompt_id, session_id) => {
                 PendingInputEntry::Elsewhere
             }
@@ -754,7 +755,7 @@ impl MachineOperationJournal {
         let current = state.as_ref().map_err(Clone::clone)?.clone();
         let (slot, own) = pending_slot(&current, prompt_id, session_id);
         let entry = match own {
-            Some(row) => PendingInputEntry::Owned(row),
+            Some(row) => PendingInputEntry::Owned(Box::new(row)),
             None if another_pane_holds(&current, prompt_id, session_id) => {
                 PendingInputEntry::Elsewhere
             }

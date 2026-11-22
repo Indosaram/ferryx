@@ -1415,6 +1415,9 @@ impl DaemonSessionService {
         )
     }
 
+    /// Test-only convenience for the non-takeover admission path; production admission always
+    /// states its `takeover` intent through [`Self::acquire_machine_controller_with`].
+    #[cfg(test)]
     pub(crate) fn acquire_machine_controller(
         controllers: &mut HashMap<String, MachineController>,
         id: &str,

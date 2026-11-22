@@ -1979,14 +1979,6 @@ fn install_agent_stamp_persistence(
 #[path = "agent_observation_journal_tests.rs"]
 mod agent_observation_journal_tests;
 
-/// Unix seconds, for the pending-input journal's timestamps.
-fn pending_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
-}
-
 /// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device
 /// sees machine-owned sessions; a Mirror device sees mirrored (desktop) sessions only.
 fn device_sees_session(device: &crate::remote::auth::DeviceInfo, machine_owned: bool) -> bool {
