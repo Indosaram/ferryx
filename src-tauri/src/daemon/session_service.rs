@@ -55,6 +55,10 @@ mod session_metadata_provider;
 
 const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 
+/// Upper bound on how long a local spawn may wait for the per-workspace worktree gate before it
+/// reports TIMEOUT instead of blocking indefinitely.
+const LOCAL_SPAWN_GATE_BUDGET: Duration = Duration::from_secs(10);
+
 /// One layout long-poll parks at most this long before it answers with the stored document.
 pub(crate) const LAYOUT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -3337,22 +3341,26 @@ impl DaemonSessionService {
             // Cancellation cannot release admission before PTY ownership is published.
             let _spawn_guard = _spawn_guard;
             let workspace_gate = workspace_service.worktree_gate(&workspace_id_owned);
-            let deadline = split_deadline.or_else(|| machine.as_ref().map(|m| m.deadline));
-            let _workspace_gate = match deadline {
-                Some(deadline) => workspace_gate
-                    .try_lock_until(deadline)
-                    .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
-                None => workspace_gate.lock(),
-            };
+            // A local spawn has no caller-supplied deadline, so without a bound here it waits on
+            // the workspace gate forever when another operation holds it (measured: a spawn into
+            // a worktree that did not exist hung past 90 s with no reply at all). Machine and
+            // local-split spawns keep their own tighter budgets.
+            let deadline = split_deadline
+                .or_else(|| machine.as_ref().map(|m| m.deadline))
+                .unwrap_or_else(|| Instant::now() + LOCAL_SPAWN_GATE_BUDGET);
+            let _workspace_gate = workspace_gate
+                .try_lock_until(deadline)
+                .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?;
             let _gate = if split_deadline.is_some() {
                 None
-            } else { Some(match deadline {
-                Some(deadline) => workspace_service
-                    .mutation_gate
-                    .try_lock_until(deadline)
-                    .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
-                None => workspace_service.mutation_gate.lock(),
-            }) };
+            } else {
+                Some(
+                    workspace_service
+                        .mutation_gate
+                        .try_lock_until(deadline)
+                        .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
+                )
+            };
             let result = (|| -> Result<_, SpawnError> {
                 if let Some(machine) = &machine {
                     (machine.check)()?;
@@ -3700,8 +3708,18 @@ impl DaemonSessionService {
                 }
                 // The process cwd is already on `cmd`; the session's worktree identity (root jail,
                 // FERRYX_WORKTREE_PATH, managed workspace id) belongs to the root, not the cwd.
+                // `spawn_worktree` already carries the managed workspace id and `default_cwd` is
+                // the canonical worktree path, so the PTY layer must not re-resolve either
+                // through git (that costs two subprocesses per spawn).
                 let (session_id, mut lifecycle_rx) = terminal_service
-                    .spawn_in_worktree_with_id(raw_id, cmd, cols, rows, &mgr, &default_cwd)
+                    .spawn_in_worktree_resolved(
+                        raw_id,
+                        cmd,
+                        cols,
+                        rows,
+                        default_cwd.clone(),
+                        spawn_worktree.as_ref().map(|identity| identity.ws_id.clone()),
+                    )
                     .map_err(|e| SpawnError::Other(e.to_string()))?;
                 #[cfg(test)]
                 if machine.is_some() {
