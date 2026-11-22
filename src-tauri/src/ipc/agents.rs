@@ -1178,9 +1178,53 @@ pub(crate) fn search_paths() -> Vec<PathBuf> {
             if let Some(value) = login_shell_path() {
                 push_all(value);
             }
+            // Probed last: a user-installed binary on PATH must always win over a bundle copy.
+            append_bundle_fallback_dirs(&mut dirs, &platform_bundle_fallback_candidates());
             dirs
         })
         .clone()
+}
+
+/// Appends app-bundle bin directories to `dirs` when the probe binary inside them is executable.
+///
+/// Pure and cross-platform so the precedence rule is testable without the real `/Applications`
+/// tree; `search_paths()` calls it after PATH so a user-installed binary always wins.
+pub(crate) fn append_bundle_fallback_dirs(dirs: &mut Vec<PathBuf>, candidates: &[(&Path, &str)]) {
+    for (bin_dir, probe_binary_name) in candidates {
+        if bin_dir.as_os_str().is_empty() {
+            continue;
+        }
+        let dir_buf = bin_dir.to_path_buf();
+        if !dirs.contains(&dir_buf) && is_executable_file(&bin_dir.join(probe_binary_name)) {
+            dirs.push(dir_buf);
+        }
+    }
+}
+
+// A GUI `.app` or a launchd daemon inherits neither the user's login-shell PATH nor the
+// Homebrew/`~/.local/bin` entries a terminal export would add, so an agent shipped inside
+// another app bundle stays invisible even though the bundle sits in /Applications. Probed
+// after PATH (see `search_paths`) so a user-installed binary always takes precedence.
+#[cfg(target_os = "macos")]
+const MACOS_BUNDLE_FALLBACK_CANDIDATES: &[(&str, &str)] = &[(
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin",
+    "codex",
+)];
+
+// `Path::new` is not const-stable, so the `&Path` view is built here rather than in the const.
+#[cfg(target_os = "macos")]
+fn platform_bundle_fallback_candidates() -> Vec<(&'static Path, &'static str)> {
+    MACOS_BUNDLE_FALLBACK_CANDIDATES
+        .iter()
+        .map(|&(bin_dir, probe_binary_name)| (Path::new(bin_dir), probe_binary_name))
+        .collect()
+}
+
+/// Every other target has no app-bundle layout to probe; the call site stays unconditional so
+/// the helper above is live on all platforms and never trips `dead_code`.
+#[cfg(not(target_os = "macos"))]
+fn platform_bundle_fallback_candidates() -> Vec<(&'static Path, &'static str)> {
+    Vec::new()
 }
 
 // Terminals spawn through the user's login shell, so its PATH (Homebrew, nvm,
@@ -2338,6 +2382,110 @@ mod tests {
         assert!(!is_valid_opencode_session_id("ses_"));
         assert!(!is_valid_opencode_session_id("ses_has space"));
         assert!(!is_valid_opencode_session_id("ses_has;semi"));
+    }
+
+    #[cfg(unix)]
+    fn write_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().expect("parent dir")).expect("create dir");
+        std::fs::write(path, b"#!/bin/sh\n").expect("write file");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    // Given only a bundle copy of codex and an empty PATH dir list,
+    // when the bundle fallback runs, then the bundle bin dir is appended and codex resolves.
+    #[cfg(unix)]
+    #[test]
+    fn bundle_fallback_supplies_codex_when_path_has_none() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle_bin = temp.path().join("ChatGPT.app/Contents/Resources/codex-cli/bin");
+        write_mode(&bundle_bin.join("codex"), 0o755);
+
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        append_bundle_fallback_dirs(&mut dirs, &[(bundle_bin.as_path(), "codex")]);
+
+        assert_eq!(dirs, vec![bundle_bin.clone()]);
+        assert_eq!(resolve_binary("codex", &dirs), Some(bundle_bin.join("codex")));
+    }
+
+    // Given a PATH bin dir ahead of the bundle fallback, both holding codex,
+    // when both are offered, then the PATH copy wins.
+    #[cfg(unix)]
+    #[test]
+    fn path_binary_takes_precedence_over_bundle_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path_bin = temp.path().join("path-bin");
+        write_mode(&path_bin.join("codex"), 0o755);
+        let bundle_bin = temp.path().join("ChatGPT.app/Contents/Resources/codex-cli/bin");
+        write_mode(&bundle_bin.join("codex"), 0o755);
+
+        let mut dirs: Vec<PathBuf> = vec![path_bin.clone()];
+        append_bundle_fallback_dirs(&mut dirs, &[(bundle_bin.as_path(), "codex")]);
+
+        assert_eq!(resolve_binary("codex", &dirs), Some(path_bin.join("codex")));
+    }
+
+    // Given a non-executable codex file and a missing bundle dir,
+    // when the bundle fallback runs, then neither is appended.
+    #[cfg(unix)]
+    #[test]
+    fn bundle_fallback_skips_non_executable_and_missing_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plain_bin = temp.path().join("plain/bin");
+        write_mode(&plain_bin.join("codex"), 0o644);
+        let missing_bin = temp.path().join("missing/bin");
+
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        append_bundle_fallback_dirs(
+            &mut dirs,
+            &[(plain_bin.as_path(), "codex"), (missing_bin.as_path(), "codex")],
+        );
+
+        assert!(dirs.is_empty(), "unexpected dirs: {dirs:?}");
+        assert_eq!(resolve_binary("codex", &dirs), None);
+    }
+
+    // Given the bundle dir already present in the search path,
+    // when the bundle fallback runs, then it is not pushed a second time.
+    #[cfg(unix)]
+    #[test]
+    fn bundle_fallback_does_not_duplicate_an_existing_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle_bin = temp.path().join("ChatGPT.app/Contents/Resources/codex-cli/bin");
+        write_mode(&bundle_bin.join("codex"), 0o755);
+
+        let mut dirs: Vec<PathBuf> = vec![bundle_bin.clone()];
+        append_bundle_fallback_dirs(&mut dirs, &[(bundle_bin.as_path(), "codex")]);
+
+        assert_eq!(dirs, vec![bundle_bin]);
+    }
+
+    // Given the absolute bundle binary path, when resolution runs, then the `/` rejection still
+    // holds: the fallback dir is a search root, never an absolute binary path for the resolver.
+    #[test]
+    fn resolve_binary_rejects_the_absolute_bundle_binary_path() {
+        let dirs = [PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin",
+        )];
+        assert_eq!(
+            resolve_binary(
+                "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+                &dirs
+            ),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_bundle_candidates_include_the_chatgpt_codex_bin_dir() {
+        let bin_dirs: Vec<&Path> = platform_bundle_fallback_candidates()
+            .iter()
+            .map(|(bin_dir, _)| *bin_dir)
+            .collect();
+        assert!(bin_dirs.contains(&Path::new(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"
+        )));
     }
 }
 

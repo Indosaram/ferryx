@@ -19,6 +19,8 @@ export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
 export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";
 export const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "ferryx.update.dismissedVersion";
 export const UPDATE_CHANNEL_STORAGE_KEY = "ferryx.update.channel";
+/** Download a found update in the background instead of only when the user asks: "true" or "false". */
+export const UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY = "ferryx.updater.backgroundDownload";
 export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.onboarding-dismissed";
 export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
 export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id";

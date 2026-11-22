@@ -1,12 +1,12 @@
 //! Modern macOS notification submission and its completion contract.
 
-#[cfg(test)]
-use super::model::NotificationTarget;
-use super::model::{NotificationContent, NotificationSound};
+use super::model::{
+    notification_identifier_for_target, NotificationContent, NotificationSound, NotificationTarget,
+};
 use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSCopying, NSDictionary, NSError, NSString};
+use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSError, NSString};
 use objc2_user_notifications::{
     UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound,
     UNUserNotificationCenter,
@@ -76,11 +76,7 @@ pub fn submit_notification(content: &NotificationContent) -> Result<(), String> 
     if !super::permission::macos::has_bundle_identity() {
         return Err("notifications require a bundled .app".into());
     }
-    let identifier = format!(
-        "ferryx-{}-{}",
-        std::process::id(),
-        SUBMISSION_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
+    let identifier = submission_identifier(content.target.as_ref());
     await_submission(|handler| {
         objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
             let native = native_content(content);
@@ -94,6 +90,43 @@ pub fn submit_notification(content: &NotificationContent) -> Result<(), String> 
         }))
         .map_err(|_| "UNUserNotificationCenter submission raised an exception".to_string())
     })
+}
+
+/// Identifier for one submission request.
+///
+/// A target-keyed identifier is stable across prompts for the same pane, which
+/// is what makes replacement and withdrawal addressable. Target-less
+/// notifications (test / id-less) get a unique identifier so they never
+/// overwrite one another.
+fn submission_identifier(target: Option<&NotificationTarget>) -> String {
+    match target {
+        Some(target) => notification_identifier_for_target(target),
+        None => format!(
+            "ferryx-{}-{}",
+            std::process::id(),
+            SUBMISSION_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ),
+    }
+}
+
+/// Remove the delivered notification for `target` from Notification Center.
+///
+/// An unbundled binary has no bundle proxy, so asking
+/// `UNUserNotificationCenter` for its center raises an Objective-C exception
+/// that no Rust guard can catch. There is nothing delivered in that process
+/// either, so the withdrawal is a clean no-op.
+pub fn withdraw_notification(target: &NotificationTarget) -> Result<(), String> {
+    if !super::permission::macos::has_bundle_identity() {
+        return Ok(());
+    }
+    let identifier = notification_identifier_for_target(target);
+    objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+        let id_ns = NSString::from_str(&identifier);
+        let ids = NSArray::from_retained_slice(&[id_ns]);
+        UNUserNotificationCenter::currentNotificationCenter()
+            .removeDeliveredNotificationsWithIdentifiers(&ids);
+    }))
+    .map_err(|_| "UNUserNotificationCenter withdrawal raised an exception".to_string())
 }
 
 #[cfg(test)]
@@ -210,5 +243,51 @@ mod tests {
     #[test]
     fn submission_does_not_report_success_without_a_callback() {
         assert!(await_submission(|_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn submission_identifier_is_stable_for_a_targeted_prompt() {
+        let target = NotificationTarget {
+            workspace_id: "ws-5".into(),
+            session_id: "fe-11".into(),
+        };
+        let first = submission_identifier(Some(&target));
+        let second = submission_identifier(Some(&target));
+
+        assert_eq!(first, second);
+        assert_eq!(first, notification_identifier_for_target(&target));
+    }
+
+    #[test]
+    fn submission_identifier_is_unique_without_a_target() {
+        let first = submission_identifier(None);
+        let second = submission_identifier(None);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn targeted_identifiers_never_collide_with_target_less_ones() {
+        // Withdrawal names only target-keyed identifiers; a test notification
+        // must stay out of that namespace.
+        let targeted = submission_identifier(Some(&NotificationTarget {
+            workspace_id: "ws".into(),
+            session_id: "s".into(),
+        }));
+
+        assert_ne!(targeted, submission_identifier(None));
+    }
+
+    #[test]
+    fn withdraw_notification_is_a_clean_no_op_without_a_bundle() {
+        if super::super::permission::macos::has_bundle_identity() {
+            return;
+        }
+        let target = NotificationTarget {
+            workspace_id: "ws-5".into(),
+            session_id: "fe-11".into(),
+        };
+
+        assert_eq!(withdraw_notification(&target), Ok(()));
     }
 }

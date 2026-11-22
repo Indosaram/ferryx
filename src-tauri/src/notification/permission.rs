@@ -111,7 +111,7 @@ impl NotificationPermissionProvider for DesktopFallbackPermissionProvider {
 
 #[cfg(target_os = "macos")]
 pub mod macos {
-    pub use super::super::macos_submission::submit_notification;
+    pub use super::super::macos_submission::{submit_notification, withdraw_notification};
     use super::*;
     use block2::RcBlock;
     use objc2_foundation::{NSBundle, NSError};

@@ -1,6 +1,7 @@
 import { toast } from "../components/ui/sonner";
 import { DISMISSED_UPDATE_VERSION_STORAGE_KEY } from "./storageKeys";
 import {
+  applyStagedUpdate,
   cancelUpdateDownload,
   downloadAndInstallUpdate,
   getUpdateStatus,
@@ -129,6 +130,24 @@ export function handleUpdateStatusChange(
           action: undefined,
         },
       );
+      break;
+    }
+    case "staged": {
+      // A staged download is already on disk, so it is never suppressed as dismissed: the user
+      // asked for it, and it costs one click to finish.
+      toast.info("Update ready to restart", {
+        id: UPDATE_TOAST_ID,
+        description: version
+          ? `Ferryx v${version} is downloaded. Sessions won't be interrupted.`
+          : "Update downloaded. Sessions won't be interrupted.",
+        duration: Infinity,
+        action: {
+          label: "Restart to update",
+          onClick: () => {
+            void applyStagedUpdate();
+          },
+        },
+      });
       break;
     }
     case "error": {

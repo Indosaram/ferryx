@@ -5,6 +5,8 @@
 //! they can be unit tested without displaying real notifications or opening
 //! an audio device.
 
+// allow: SIZE_OK — the pure notification domain plus its in-file test module.
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -29,6 +31,24 @@ pub const SUPPORTED_AUDIO_EXTENSIONS: &[&str] =
 pub struct NotificationTarget {
     pub workspace_id: String,
     pub session_id: String,
+}
+
+/// Stable macOS notification identifier for one pane target.
+///
+/// `UNUserNotificationCenter` replaces a delivered notification when a new
+/// request reuses its identifier, so keying the identifier by the pane lets a
+/// later prompt for that pane supersede the earlier banner instead of stacking
+/// duplicates, and lets a withdrawal name exactly the banner to remove.
+///
+/// The workspace length prefix keeps the encoding injective: without it
+/// `("a.b", "c")` and `("a", "b.c")` would render identically.
+pub fn notification_identifier_for_target(target: &NotificationTarget) -> String {
+    format!(
+        "ferryx.s.{}:{}.{}",
+        target.workspace_id.len(),
+        target.workspace_id,
+        target.session_id
+    )
 }
 
 /// Application event that asked for a notification.
@@ -116,6 +136,17 @@ impl DispatchNotificationResult {
     pub fn submitted() -> Self {
         Self {
             submitted: true,
+            reason: None,
+        }
+    }
+
+    /// A request the order fence dropped before it reached the backend.
+    ///
+    /// Not a rejection: nothing was wrong with the request, a newer dispatch or
+    /// withdrawal for the same pane had already superseded it.
+    pub fn suppressed() -> Self {
+        Self {
+            submitted: false,
             reason: None,
         }
     }
@@ -572,5 +603,44 @@ mod target_tests {
             ..Default::default()
         };
         assert_eq!(format_notification(&request).target, None);
+    }
+
+    fn target_of(workspace_id: &str, session_id: &str) -> NotificationTarget {
+        NotificationTarget {
+            workspace_id: workspace_id.into(),
+            session_id: session_id.into(),
+        }
+    }
+
+    #[test]
+    fn notification_identifier_is_deterministic() {
+        let first = notification_identifier_for_target(&target_of("ws-1", "fe-session-7"));
+        let second = notification_identifier_for_target(&target_of("ws-1", "fe-session-7"));
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn notification_identifier_keeps_dotted_ids_apart() {
+        // Without the length prefix both pairs would render as "ferryx.s.a.b.c".
+        assert_ne!(
+            notification_identifier_for_target(&target_of("a.b", "c")),
+            notification_identifier_for_target(&target_of("a", "b.c"))
+        );
+        assert_ne!(
+            notification_identifier_for_target(&target_of("ws.1", "2")),
+            notification_identifier_for_target(&target_of("ws", "1.2"))
+        );
+    }
+
+    #[test]
+    fn notification_identifier_keeps_empty_ids_apart() {
+        let empty = notification_identifier_for_target(&target_of("", ""));
+        let session_only = notification_identifier_for_target(&target_of("", "x"));
+        let workspace_only = notification_identifier_for_target(&target_of("x", ""));
+
+        assert_ne!(empty, session_only);
+        assert_ne!(empty, workspace_only);
+        assert_ne!(session_only, workspace_only);
     }
 }

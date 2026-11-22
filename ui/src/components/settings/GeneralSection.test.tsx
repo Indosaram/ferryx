@@ -4,25 +4,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GeneralSection, SoftwareUpdateCard } from "./GeneralSection";
 
 const updater = vi.hoisted(() => ({
+  applyStagedUpdate: vi.fn(),
   checkForUpdate: vi.fn(),
   downloadAndInstallUpdate: vi.fn(),
+  getBackgroundUpdateDownload: vi.fn(() => false),
   getCurrentVersion: vi.fn(),
   getUpdateStatus: vi.fn(),
   getUpdateChannel: vi.fn(() => "stable"),
+  setBackgroundUpdateDownload: vi.fn(),
   setUpdateChannel: vi.fn(),
   relaunchApp: vi.fn(),
+  stageAvailableUpdate: vi.fn(),
   subscribeUpdateStatus: vi.fn(),
   updatesManagedExternally: vi.fn(),
 }));
 
 vi.mock("../../lib/updater", () => ({
+  applyStagedUpdate: () => updater.applyStagedUpdate(),
   checkForUpdate: () => updater.checkForUpdate(),
   downloadAndInstallUpdate: () => updater.downloadAndInstallUpdate(),
+  getBackgroundUpdateDownload: () => updater.getBackgroundUpdateDownload(),
   getCurrentVersion: () => updater.getCurrentVersion(),
   getUpdateStatus: () => updater.getUpdateStatus(),
   getUpdateChannel: () => updater.getUpdateChannel(),
+  setBackgroundUpdateDownload: (enabled: unknown) => updater.setBackgroundUpdateDownload(enabled),
   setUpdateChannel: (channel: unknown) => updater.setUpdateChannel(channel),
   relaunchApp: () => updater.relaunchApp(),
+  stageAvailableUpdate: () => updater.stageAvailableUpdate(),
   subscribeUpdateStatus: (listener: unknown) => updater.subscribeUpdateStatus(listener),
   updatesManagedExternally: () => updater.updatesManagedExternally(),
 }));
@@ -110,6 +118,59 @@ describe("SoftwareUpdateCard externally managed installs", () => {
   it("does not render auto-suspend setting row", () => {
     render(<GeneralSection />);
     expect(screen.queryByLabelText("Auto-suspend idle sessions")).toBeNull();
+  });
+
+  it("hides the background download switch when the install is managed externally", async () => {
+    render(<GeneralSection />);
+
+    await screen.findByText(/Updates are managed by the Microsoft Store\.|Updates are managed by your system package manager\.|Updates for this install are managed outside the app\./);
+    expect(screen.queryByRole("switch", { name: "Download updates in background" })).toBeNull();
+  });
+});
+
+describe("SoftwareUpdateCard background download preference", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    updater.getUpdateStatus.mockReturnValue({ state: "idle" });
+    updater.subscribeUpdateStatus.mockReturnValue(() => undefined);
+    updater.getCurrentVersion.mockResolvedValue("2026.924.1");
+    updater.updatesManagedExternally.mockResolvedValue(false);
+    updater.getBackgroundUpdateDownload.mockReturnValue(false);
+    native.getDaemonSupervisor.mockResolvedValue({ supported: false, enabled: false });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("persists the switch and offers a restart once an update is staged", async () => {
+    render(<SoftwareUpdateCard />);
+
+    const toggle = await screen.findByRole("switch", { name: "Download updates in background" });
+    expect(toggle).not.toBeChecked();
+
+    fireEvent.click(toggle);
+
+    expect(updater.setBackgroundUpdateDownload).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("reports a staged download and restarts into it on demand", async () => {
+    updater.getUpdateStatus.mockReturnValue({
+      state: "staged",
+      version: "2026.924.1",
+      downloadProgress: 1,
+    });
+    render(<SoftwareUpdateCard />);
+
+    const status = await screen.findByTestId("settings-update-status");
+    expect(status).toHaveTextContent("Version 2026.924.1 is downloaded and ready to restart.");
+    expect(screen.getByRole("button", { name: /check for updates/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /install and relaunch/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restart to update" }));
+
+    expect(updater.applyStagedUpdate).toHaveBeenCalledTimes(1);
+    expect(updater.downloadAndInstallUpdate).not.toHaveBeenCalled();
   });
 });
 

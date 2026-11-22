@@ -1671,6 +1671,15 @@ export async function dispatchNotification(req: import('./types').DispatchNotifi
 }
 
 /**
+ * Remove the banner delivered for `target`. Rust fences the recall against that pane's own
+ * dispatch sequence, so a late withdrawal can never delete a newer banner that replaced it.
+ */
+export async function withdrawNotification(target: import('./types').NotificationTarget): Promise<void> {
+  if (!isTauri()) return;
+  await invokeCommand<void>('cmd_notification_withdraw', { target });
+}
+
+/**
  * Wake signal fired app-wide when the user clicks an OS notification. The payload is
  * intentionally ignored: the drain queue is the source of truth. Outside Tauri this is a
  * no-op so callers can register unconditionally.

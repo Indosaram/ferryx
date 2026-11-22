@@ -2,7 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 
-import { UPDATE_CHANNEL_STORAGE_KEY } from "./storageKeys";
+import { UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, UPDATE_CHANNEL_STORAGE_KEY } from "./storageKeys";
 
 export type UpdateFailure = "cancelled" | "stalled";
 
@@ -38,12 +38,46 @@ export function getUpdateChannel(): UpdateChannel {
   }
 }
 
-/** Persists the channel and re-checks so the offer reflects it, unless a download is underway. */
+/**
+ * Whether a found update is downloaded in the background instead of only on request. Defaults to
+ * off, so nothing is fetched until the user asks for it.
+ */
+export function getBackgroundUpdateDownload(storage: Storage | null = channelStorage()): boolean {
+  try {
+    return storage?.getItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Persists the preference and, when it is turned on, stages an offer that is already waiting. */
+export function setBackgroundUpdateDownload(
+  enabled: boolean,
+  storage: Storage | null = channelStorage(),
+): void {
+  try {
+    storage?.setItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, enabled ? "true" : "false");
+  } catch (error) {
+    console.warn("Failed to persist the background update download preference", error);
+  }
+  if (enabled && status.state === "available") void stageAvailableUpdate();
+}
+
+/**
+ * Persists the channel and re-checks so the offer reflects it, unless a download is underway. A
+ * staged download belongs to the previous channel, so it is discarded first: the bytes cannot be
+ * installed under a channel that no longer matches them.
+ */
 export async function setUpdateChannel(channel: UpdateChannel): Promise<void> {
   try {
     channelStorage()?.setItem(UPDATE_CHANNEL_STORAGE_KEY, channel);
   } catch (error) {
     console.warn("Failed to persist the update channel", error);
+  }
+  if (status.state === "staged") {
+    await sendCancel();
+    pendingUpdate = null;
+    setStatus({ state: "idle" });
   }
   await checkForUpdate();
 }
@@ -57,7 +91,7 @@ type UpdateOffer = {
 };
 
 export type UpdateStatus = {
-  state: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error";
+  state: "idle" | "checking" | "available" | "downloading" | "staged" | "downloaded" | "error";
   version?: string;
   releaseNotes?: string;
   downloadProgress?: number;
@@ -112,6 +146,17 @@ function describe(error: unknown): string {
   return "Unknown updater failure";
 }
 
+/** `cmd_updater_install` reports this when no verified bytes are waiting (see ipc/updater.rs). */
+const UPDATER_NO_PENDING_INSTALL = "UPDATER_NO_PENDING_INSTALL";
+
+function isNoPendingInstall(error: unknown): boolean {
+  if (typeof error === "object" && error !== null) {
+    const { code } = error as { code?: unknown };
+    if (code === UPDATER_NO_PENDING_INSTALL) return true;
+  }
+  return describe(error).includes(UPDATER_NO_PENDING_INSTALL);
+}
+
 export function getUpdateStatus(): UpdateStatus {
   return status;
 }
@@ -156,6 +201,7 @@ export async function checkForUpdate(): Promise<void> {
   if (
     status.state === "checking" ||
     status.state === "downloading" ||
+    status.state === "staged" ||
     status.state === "downloaded"
   ) {
     return;
@@ -179,6 +225,7 @@ export async function checkForUpdate(): Promise<void> {
       version: update.version,
       releaseNotes: update.body ?? undefined,
     });
+    if (getBackgroundUpdateDownload()) void stageAvailableUpdate();
   } catch (error) {
     pendingUpdate = null;
     setStatus({ state: "error", error: describe(error) });
@@ -196,6 +243,12 @@ type UpdaterDownloadEvent =
 
 type DownloadOutcome = "finished" | UpdateFailure | { error: string };
 
+/** How a supervised download ended, with the cancel race already resolved. */
+type DownloadResult =
+  | { kind: "downloaded" }
+  | { kind: "failed"; failure: UpdateFailure }
+  | { kind: "error"; error: string };
+
 /** How often a cancel the backend has not yet acted on is sent again. */
 export const CANCEL_RETRY_MS = 1000;
 
@@ -203,7 +256,6 @@ type ActiveDownload = {
   cancelRequested: boolean;
   /** The backend reported a terminal event; nothing is left to cancel. */
   settled: boolean;
-  installing: boolean;
   cancelRetry: ReturnType<typeof setInterval> | null;
 };
 
@@ -224,18 +276,13 @@ async function sendCancel(): Promise<void> {
   }
 }
 
-export async function downloadAndInstallUpdate(): Promise<void> {
-  if (!isTauri()) return;
-
-  const update = pendingUpdate;
-  if (!update || status.state !== "available" || activeDownload) return;
-
+/** Runs `cmd_updater_download` under the shared supervision and reports how it ended. */
+async function runDownload(update: UpdateOffer): Promise<DownloadResult> {
   const version = update.version;
   const releaseNotes = update.body ?? undefined;
   const download: ActiveDownload = {
     cancelRequested: false,
     settled: false,
-    installing: false,
     cancelRetry: null,
   };
   activeDownload = download;
@@ -297,40 +344,89 @@ export async function downloadAndInstallUpdate(): Promise<void> {
     download.settled = true;
     stopCancelRetry(download);
     activeDownload = null;
-    setStatus({ state: "error", version, releaseNotes, error: describe(error) });
-    return;
-  }
-
-  if (result === "finished" && !download.cancelRequested) {
-    download.installing = true;
-    setStatus({ state: "downloading", version, releaseNotes, downloadProgress: 1, installing: true });
-    try {
-      await invoke("cmd_updater_install");
-    } catch (error) {
-      activeDownload = null;
-      setStatus({ state: "error", version, releaseNotes, error: describe(error) });
-      return;
-    }
-    activeDownload = null;
-    setStatus({ state: "downloaded", version, releaseNotes, downloadProgress: 1 });
-    return;
+    return { kind: "error", error: describe(error) };
   }
 
   activeDownload = null;
+  if (result === "finished" && !download.cancelRequested) {
+    return { kind: "downloaded" };
+  }
+
   if (typeof result === "object") {
-    setStatus({ state: "error", version, releaseNotes, error: result.error });
-    return;
+    return { kind: "error", error: result.error };
   }
   // A download that completed after the user cancelled is discarded rather than installed.
   if (result === "finished") await sendCancel();
+  return {
+    kind: "failed",
+    failure: result === "stalled" && !download.cancelRequested ? "stalled" : "cancelled",
+  };
+}
+
+/**
+ * Downloads the offered update without installing it, leaving the verified bytes in the backend's
+ * slot. The user's restart then installs them, so a background download never restarts the app.
+ */
+export async function stageAvailableUpdate(): Promise<void> {
+  if (!isTauri()) return;
+
+  const update = pendingUpdate;
+  if (!update || status.state !== "available" || activeDownload) return;
+
+  const version = update.version;
+  const releaseNotes = update.body ?? undefined;
+  const result = await runDownload(update);
+  if (result.kind === "downloaded") {
+    setStatus({ state: "staged", version, releaseNotes, downloadProgress: 1 });
+    return;
+  }
+  if (result.kind === "error") {
+    setStatus({ state: "error", version, releaseNotes, error: result.error });
+    return;
+  }
   // The offer stays available, and is never marked dismissed, so the user can retry it and the
   // periodic check is not blocked.
-  setStatus({
-    state: "available",
-    version,
-    releaseNotes,
-    lastFailure: result === "stalled" && !download.cancelRequested ? "stalled" : "cancelled",
-  });
+  setStatus({ state: "available", version, releaseNotes, lastFailure: result.failure });
+}
+
+/** Installs the bytes a finished download left in the backend's slot. Never relaunches. */
+async function installStagedUpdate(): Promise<boolean> {
+  const current = status;
+  if (current.state !== "staged") return false;
+  const { version, releaseNotes } = current;
+
+  setStatus({ state: "downloading", version, releaseNotes, downloadProgress: 1, installing: true });
+  try {
+    await invoke("cmd_updater_install");
+  } catch (error) {
+    if (isNoPendingInstall(error)) {
+      // Another window already consumed or discarded the bytes, so the offer is downloaded again
+      // rather than leaving the card dead on an install that can never succeed.
+      setStatus({ state: "available", version, releaseNotes });
+      return false;
+    }
+    setStatus({ state: "error", version, releaseNotes, error: describe(error) });
+    return false;
+  }
+  setStatus({ state: "downloaded", version, releaseNotes, downloadProgress: 1 });
+  return true;
+}
+
+/** Installs a staged update and restarts into it. */
+export async function applyStagedUpdate(): Promise<void> {
+  if (!isTauri()) return;
+  if (await installStagedUpdate()) await relaunchApp();
+}
+
+/**
+ * Downloads the offered update and installs it, without relaunching: the callers that promise a
+ * restart (the settings card, the toast) call `relaunchApp` once the state reaches "downloaded".
+ */
+export async function downloadAndInstallUpdate(): Promise<void> {
+  if (!isTauri()) return;
+  await stageAvailableUpdate();
+  if (status.state !== "staged") return;
+  await installStagedUpdate();
 }
 
 /**
@@ -340,7 +436,7 @@ export async function downloadAndInstallUpdate(): Promise<void> {
 export async function cancelUpdateDownload(): Promise<void> {
   if (!isTauri()) return;
   const download = activeDownload;
-  if (!download || download.cancelRequested || download.installing) return;
+  if (!download || download.cancelRequested) return;
   download.cancelRequested = true;
   setStatus({ ...status, cancelRequested: true });
   await sendCancel();

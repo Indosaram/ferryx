@@ -3,6 +3,10 @@
 //! Nothing here opens an audio device or displays a real notification.
 
 use super::model::*;
+use super::{
+    macos_notification_settings_url, open_macos_notification_settings_for,
+    MACOS_LEGACY_NOTIFICATION_SETTINGS_URL,
+};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -666,6 +670,79 @@ fn open_system_settings_result_serializes_for_the_frontend() {
     .unwrap();
 
     assert_eq!(value, json!({ "opened": false, "reason": "unsupported" }));
+}
+
+#[test]
+fn macos_settings_url_targets_the_app_pane_on_ventura_and_later() {
+    assert_eq!(
+        macos_notification_settings_url(13, Some("com.ferryx.app")),
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.ferryx.app"
+    );
+}
+
+#[test]
+fn macos_settings_url_trims_the_bundle_identifier() {
+    assert_eq!(
+        macos_notification_settings_url(26, Some(" com.ferryx.app.dev ")),
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.ferryx.app.dev"
+    );
+}
+
+#[test]
+fn macos_settings_url_ignores_the_bundle_identifier_before_ventura() {
+    // Pre-13 System Preferences has no per-app notifications pane to address.
+    assert_eq!(
+        macos_notification_settings_url(12, Some("com.ferryx.app")),
+        MACOS_LEGACY_NOTIFICATION_SETTINGS_URL
+    );
+}
+
+#[test]
+fn macos_settings_url_falls_back_without_a_usable_bundle_identifier() {
+    // An unbundled binary, or a blank identifier, cannot own an app pane.
+    assert_eq!(
+        macos_notification_settings_url(15, None),
+        MACOS_LEGACY_NOTIFICATION_SETTINGS_URL
+    );
+    assert_eq!(
+        macos_notification_settings_url(15, Some("   ")),
+        MACOS_LEGACY_NOTIFICATION_SETTINGS_URL
+    );
+}
+
+#[test]
+fn macos_settings_opener_hands_the_app_pane_url_to_open() {
+    let recorded = std::cell::RefCell::new(None);
+
+    open_macos_notification_settings_for(15, Some("com.ferryx.app"), |program, args| {
+        *recorded.borrow_mut() = Some((
+            program.to_string(),
+            args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+        ));
+        true
+    });
+
+    let (program, args) = recorded.into_inner().expect("launcher was invoked");
+    assert_eq!(program, "open");
+    assert_eq!(
+        args,
+        vec![
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.ferryx.app"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn macos_settings_opener_reports_failure_when_the_launch_fails() {
+    let result =
+        open_macos_notification_settings_for(15, Some("com.ferryx.app"), |_program, _args| false);
+
+    assert!(!result.opened);
+    assert_eq!(
+        result.reason.as_deref(),
+        Some("could not open macOS notification settings")
+    );
 }
 
 #[test]

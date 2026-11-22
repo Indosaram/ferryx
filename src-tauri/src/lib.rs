@@ -55,6 +55,7 @@ pub mod worktree;
 pub use worktree::naming as worktree_naming;
 #[cfg(feature = "desktop")]
 pub mod watchdog;
+pub mod webview_recovery;
 
 #[cfg(feature = "desktop")]
 use crate::daemon::DaemonClient;
@@ -1626,6 +1627,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     // rescan task; kept as a separate clone so `.manage(workspace_registry)`
     // below still owns the managed instance.
     let worktree_rescan_registry = workspace_registry.clone();
+    // Rate limit for web content-process recovery reloads, shared by every webview.
+    #[cfg(target_os = "macos")]
+    let webview_crash_guard =
+        std::sync::Arc::new(crate::webview_recovery::WebviewCrashLoopGuard::default());
 
     // Exactly one canonical workspace is registered for the startup root; the
     // legacy `default` alias is intentionally not registered, and persisted
@@ -1732,7 +1737,18 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             }
             #[cfg(not(target_os = "macos"))]
             let _ = event;
-        })
+        });
+    // Installing this hook replaces `tauri-runtime-wry`'s built-in fallback reload for EVERY
+    // webview, so the hook itself reloads app windows and `browser-*` guest webviews alike.
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(move |webview| {
+        let _ = crate::webview_recovery::handle_web_content_process_terminated(
+            webview,
+            &webview_crash_guard,
+            std::time::Instant::now(),
+        );
+    });
+    let builder = builder
         .setup(move |app| {
             // First, so everything below sees the main window exactly as in a normal run.
             // The QA primary window builds its own main window below.
@@ -2116,6 +2132,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_worktree_disk_scan_cancel,
         cmd_worktree_disk_scan_result,
         cmd_notification_dispatch,
+        cmd_notification_withdraw,
         cmd_notification_get_permission_status,
         cmd_notification_request_permission,
         cmd_notification_probe_delivery,
