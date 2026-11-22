@@ -1616,6 +1616,8 @@ test("finalizeMacosBundle: bundled mhc binaries get the Developer ID signature, 
       dmgPath: null,
       workspaceDir: fixture.workspaceDir,
       signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
       exec: fixture.exec,
     });
 
@@ -1962,10 +1964,47 @@ test("finalizeMacosBundle: a bundle with no keeper at all still seals when a kee
       dmgPath: null,
       workspaceDir: fixture.workspaceDir,
       signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
-      approveNotarization: false,
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
       exec: fixture.exec,
     });
     assert.equal(outcome.keeper, null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: refuses a signed release that skips notarization", () => {
+  // A Developer ID build without a notarization ticket is rejected by Gatekeeper on end-user
+  // machines, so shipping one is a green build whose artifacts nobody can open. Ad-hoc bundles
+  // (identity '-') are never distributed and must keep sealing without a submission.
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-notarize-required-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: null,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          approveNotarization: false,
+          exec: fixture.exec,
+        }),
+      /Refusing to produce an unnotarized macOS release/,
+    );
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: null,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          approveNotarization: true,
+          exec: fixture.exec,
+        }),
+      /no notaryProfile is configured/,
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

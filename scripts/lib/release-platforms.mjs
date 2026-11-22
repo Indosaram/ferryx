@@ -1247,6 +1247,24 @@ export function finalizeMacosBundle({
   // `requireKeeper` turns "a keeper is optional here" into "this bundle must carry one", so the two
   // macOS release paths cannot seal a keeper-less app even if the install step is skipped.
   if (sidecars.keeper !== null || requireKeeper) assertKeeperInApp({ appPath });
+  // A signed-but-unnotarized macOS build is rejected by Gatekeeper on end-user machines
+  // ("Unnotarized Developer ID"), and the updater tar/DMG then ship without a ticket: a green
+  // build whose artifacts are unusable. Ad-hoc identities ('-' and nothing else) mark bundles
+  // that are never distributed -- the daemon-lifetime QA harness and the test fixtures -- so they
+  // keep sealing without a submission; a real Developer ID may not.
+  const isDistributable = Boolean(signingIdentity) && signingIdentity !== "-";
+  if (approveNotarization && !notaryProfile) {
+    throw new Error(
+      "approveNotarization is set but no notaryProfile is configured for this host; " +
+        "add notaryProfile to the host entry in the release hosts config",
+    );
+  }
+  if (isDistributable && !approveNotarization) {
+    throw new Error(
+      "Refusing to produce an unnotarized macOS release: pass --approve-notarization " +
+        "(or set approveNotarization) so the app, DMG and updater tar carry a notarization ticket",
+    );
+  }
   const notarizations = [];
   if (approveNotarization && notaryProfile) {
     const appZipPath = join(workspaceDir, "Ferryx-notary.zip");
