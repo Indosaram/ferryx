@@ -682,9 +682,17 @@ export function Sidebar({
           <span className="pointer-events-none absolute inset-y-0 right-0 w-px bg-worktree-sidebar-border transition-colors group-hover:bg-ring/45" />
         </div>
         {resizing ? (
-          // A dialog-role surface makes native terminal/browser surfaces yield (see
-          // nativeTerminalVisibility) so a native pane cannot swallow the resize pointerup.
-          <div role="dialog" aria-hidden="true" data-testid="sidebar-resize-mask" className="fixed inset-0 z-50 cursor-col-resize" />
+          // The mask swallows the pointerup so a native pane under the cursor cannot eat it and
+          // leave the drag (and the full-screen mask) stuck forever. It is aria-hidden because it
+          // is not a real dialog, so it opts in explicitly: hidden surfaces no longer suppress
+          // pane input, but this one must keep making native surfaces yield.
+          <div
+            role="dialog"
+            aria-hidden="true"
+            data-native-terminal-force-yield="true"
+            data-testid="sidebar-resize-mask"
+            className="fixed inset-0 z-50 cursor-col-resize"
+          />
         ) : null}
       </aside>
 

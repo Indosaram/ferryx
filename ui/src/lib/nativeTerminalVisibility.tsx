@@ -16,6 +16,14 @@ const NativeTerminalVisibilityContext = createContext({ visible: true, occluded:
 // pane opts out with data-native-terminal-yield="off".
 const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="alertdialog"], [role="search"]';
 const OPT_OUT_SELECTOR = '[data-native-terminal-yield="off"]';
+// A hidden surface (aria-hidden, [hidden]) is painted but cannot receive a keystroke,
+// so it must never take the keyboard away from a terminal behind it: a dialog left
+// mounted after it closed used to freeze pane input for as long as it stayed in the DOM.
+const HIDDEN_SURFACE_SELECTOR = '[aria-hidden="true"], [hidden]';
+// The one surface that must keep yielding while hidden: the sidebar resize mask. It is
+// invisible, but a native pane under the pointer would otherwise swallow the drag's
+// pointerup and leave the drag (and its mask) running forever.
+const FORCE_YIELD_SELECTOR = '[data-native-terminal-force-yield="true"]';
 
 // Docked search sits outside native bounds: retain rendering, not terminal input.
 // This applies to the marked surface only; it never exempts a separate modal.
@@ -32,10 +40,14 @@ function getOverlayState(): { inputOwned: boolean; occluding: boolean } {
   let occluding = false;
   const surfaces = document.querySelectorAll(YIELDING_SURFACE_SELECTOR);
   for (const surface of surfaces) {
-    if (surface.closest(OPT_OUT_SELECTOR) === null) {
-      inputOwned = true;
-      if (!surface.matches(KEEP_VISIBLE_SELECTOR)) occluding = true;
+    if (surface.closest(OPT_OUT_SELECTOR) !== null) continue;
+    // An invisible surface cannot own input, so it must not suppress a live terminal.
+    if (surface.closest(FORCE_YIELD_SELECTOR) === null &&
+        surface.closest(HIDDEN_SURFACE_SELECTOR) !== null) {
+      continue;
     }
+    inputOwned = true;
+    if (!surface.matches(KEEP_VISIBLE_SELECTOR)) occluding = true;
   }
   return { inputOwned, occluding };
 }
@@ -91,7 +103,10 @@ export function useNativeTerminalVisibilityState(): { readonly visible: boolean;
     const observer = new MutationObserver(update);
     observer.observe(document.body, {
       childList: true, subtree: true, attributes: true,
-      attributeFilter: ["role", "data-native-terminal-yield", "data-native-terminal-keep-visible"],
+      attributeFilter: [
+        "role", "data-native-terminal-yield", "data-native-terminal-keep-visible",
+        "data-native-terminal-force-yield", "aria-hidden", "hidden",
+      ],
     });
     return () => observer.disconnect();
   }, []);

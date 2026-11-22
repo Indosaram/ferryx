@@ -206,6 +206,46 @@ describe("useNativeTerminalVisibility", () => {
     expect(result.current).toBe(true);
   });
 
+  it("does not yield surface when a hidden dialog stays mounted", async () => {
+    const { result } = renderHook(() => useNativeTerminalVisibility());
+
+    // A closed dialog that was left in the DOM (aria-hidden) cannot receive a keystroke.
+    // Treating it as an input owner froze typing in every pane behind it.
+    const hiddenDialog = document.createElement("div");
+    hiddenDialog.setAttribute("role", "dialog");
+    hiddenDialog.setAttribute("aria-hidden", "true");
+    await act(async () => {
+      document.body.appendChild(hiddenDialog);
+    });
+    expect(result.current).toBe(true);
+
+    // Opening it (dropping aria-hidden) must take input again.
+    await act(async () => {
+      hiddenDialog.removeAttribute("aria-hidden");
+    });
+    expect(result.current).toBe(false);
+  });
+
+  it("still yields for the hidden surface that forces yielding", async () => {
+    const { result } = renderHook(() => useNativeTerminalVisibility());
+
+    // The sidebar resize mask is invisible on purpose but must keep native surfaces from
+    // swallowing the drag's pointerup, so it opts back in explicitly.
+    const mask = document.createElement("div");
+    mask.setAttribute("role", "dialog");
+    mask.setAttribute("aria-hidden", "true");
+    mask.setAttribute("data-native-terminal-force-yield", "true");
+    await act(async () => {
+      document.body.appendChild(mask);
+    });
+    expect(result.current).toBe(false);
+
+    await act(async () => {
+      document.body.removeChild(mask);
+    });
+    expect(result.current).toBe(true);
+  });
+
   it("does not yield surface when an in-flow alertdialog opts out", async () => {
     const { result } = renderHook(() => useNativeTerminalVisibility());
 
@@ -373,6 +413,21 @@ describe("useNativeTerminalVisibility", () => {
         document.body.appendChild(modal);
       });
       expect(hostBridge.setNativeTerminalDomOverlayInput).toHaveBeenLastCalledWith(true);
+    });
+
+    it("never reports ownership for a hidden surface", async () => {
+      hostBridge.setNativeTerminalDomOverlayInput.mockClear();
+      renderHook(() => useNativeTerminalVisibility());
+
+      const hiddenDialog = document.createElement("div");
+      hiddenDialog.setAttribute("role", "dialog");
+      hiddenDialog.setAttribute("aria-hidden", "true");
+      await act(async () => {
+        document.body.appendChild(hiddenDialog);
+      });
+      expect(
+        hostBridge.setNativeTerminalDomOverlayInput.mock.calls.every(([active]) => active === false),
+      ).toBe(true);
     });
   });
 });
