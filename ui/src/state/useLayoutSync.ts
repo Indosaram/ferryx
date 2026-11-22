@@ -5,7 +5,7 @@ import {
   PairedOperationError,
   type PairedDaemonProjectAdapter,
 } from "../lib/pairedDaemonProject";
-import { layoutGet, layoutPut } from "../lib/tauri";
+import { layoutGet, layoutPut, pairedTerminalReattach } from "../lib/tauri";
 import type { RegisteredProject, TerminalSession } from "../lib/types";
 import {
   applySharedLayout,
@@ -30,7 +30,7 @@ export function layoutSyncSessionId(backendSessionId: string): string {
 
 function findFrontendSessionId(sessions: WorkspaceState["sessions"], backendSessionId: string): string | null {
   for (const session of Object.values(sessions)) {
-    if (session.backendSessionId === backendSessionId) return session.id;
+    if (session.backendSessionId === backendSessionId || session.id === layoutSyncSessionId(backendSessionId)) return session.id;
   }
   return null;
 }
@@ -137,6 +137,9 @@ export function useLayoutSync({
   const isPaired = paired !== null;
   const remoteWorkspaceId = paired?.remoteWorkspaceId;
   const workspaceId = project.workspaceId;
+  // The document always carries host ids, not the local proxy ids adopted below.
+  const sharedTabs = (current: WorkspaceState) => toSharedLayout(current.layout, current.sessions,
+    isPaired ? (id) => id.startsWith("layout-sync:") ? id.slice("layout-sync:".length) : null : undefined);
 
   useEffect(() => {
     if (!enabled) return;
@@ -150,19 +153,24 @@ export function useLayoutSync({
      * carries the backend session id, while attaching needs the daemon epoch and the working
      * directory, and both live on the host's session list.
      */
+    let live = true;
     const enrichDetached = (mintedIds: string[]) => {
       if (!adapter || !remoteWorkspaceId || mintedIds.length === 0) return;
-      void adapter.sessions(remoteWorkspaceId).then((listed) => {
+      void adapter.sessions(remoteWorkspaceId).then(async (listed) => {
         const rows = new Map(listed.sessions.map((row) => [row.target.sessionId, row]));
-        const current = stateRef.current;
         const patched: Record<string, TerminalSession> = {};
         for (const id of mintedIds) {
-          const session = current.sessions[id];
+          const session = stateRef.current.sessions[id];
           const row = session?.backendSessionId ? rows.get(session.backendSessionId) : undefined;
           if (!session || !row) continue;
+          const backendSessionId = await pairedTerminalReattach({ ...adapter.context, target: row.target });
+          if (!live) return;
+          const retained = stateRef.current.sessions[id];
+          if (!retained || retained.backendSessionId !== session.backendSessionId) continue;
           const epoch = /^(0|[1-9][0-9]*)$/.test(row.target.daemonEpoch) ? row.target.daemonEpoch : null;
           patched[id] = {
-            ...session,
+            ...retained,
+            backendSessionId,
             cwd: row.cwd || session.cwd,
             worktree: row.worktree ?? session.worktree,
             ...(epoch ? { daemonEpoch: epoch } : {}),
@@ -173,7 +181,8 @@ export function useLayoutSync({
             remoteConnectionState: "disconnected",
           };
         }
-        if (Object.keys(patched).length === 0) return;
+        if (!live || Object.keys(patched).length === 0) return;
+        const current = stateRef.current;
         dispatchRef.current({
           type: "RESTORE_WORKSPACE",
           state: { ...current, sessions: { ...current.sessions, ...patched } },
@@ -195,7 +204,7 @@ export function useLayoutSync({
       const sessions = { ...current.sessions, ...Object.fromEntries(minted) };
       // The baseline is what this layout publishes, so applying a document can never replay as
       // a local change (a server-side ratio clamp included) and echo straight back out.
-      const applied = JSON.stringify(toSharedLayout(layout, sessions));
+      const applied = JSON.stringify(sharedTabs({ ...current, layout, sessions }));
       const unchanged = applied === snapshotRef.current;
       snapshotRef.current = applied;
       // A document that already matches the local layout is not a change: dispatching it would
@@ -208,15 +217,16 @@ export function useLayoutSync({
     const loop = createLayoutSyncLoop({
       transport,
       isPaired,
-      readLocal: () => toSharedLayout(stateRef.current.layout, stateRef.current.sessions),
+      readLocal: () => sharedTabs(stateRef.current),
       applyRemote,
       onError: (error) => errorRef.current?.(error),
       debounceMs,
     });
     loopRef.current = loop;
-    snapshotRef.current = JSON.stringify(toSharedLayout(stateRef.current.layout, stateRef.current.sessions));
+    snapshotRef.current = JSON.stringify(sharedTabs(stateRef.current));
     void loop.start();
     return () => {
+      live = false;
       loopRef.current = null;
       loop.stop();
     };
@@ -225,7 +235,7 @@ export function useLayoutSync({
   useEffect(() => {
     const loop = loopRef.current;
     if (!loop) return;
-    const shared: SharedTab[] = toSharedLayout(state.layout, state.sessions);
+    const shared: SharedTab[] = sharedTabs(state);
     const key = JSON.stringify(shared);
     if (key === snapshotRef.current) return;
     snapshotRef.current = key;

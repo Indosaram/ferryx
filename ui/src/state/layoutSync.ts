@@ -3,6 +3,7 @@ import {
   isTerminalTab,
   type LayoutState,
   type PaneContent,
+  type PersistedTab,
   type TabPaneLayout,
   type TerminalSession,
   type WorkspaceTab,
@@ -378,7 +379,7 @@ export type LayoutSyncTransport = {
 export type PersistedLayoutSource = {
   workspaceId: string;
   target?: { kind: string } | null;
-  layout: { tabs: ReadonlyArray<{ id: string; label: string; kind?: string; pinned?: boolean }>; layoutsByTabId?: LayoutState["layoutsByTabId"] };
+  layout: { tabs: ReadonlyArray<PersistedTab>; layoutsByTabId?: LayoutState["layoutsByTabId"] };
   terminalSessions: Record<string, { backendSessionId?: string | null; lastBackendSessionId?: string | null } | undefined>;
 };
 
@@ -405,10 +406,19 @@ export async function publishPersistedLayouts(
     for (const [id, session] of Object.entries(workspace.terminalSessions)) {
       sessions[id] = { id, backendSessionId: session?.backendSessionId ?? session?.lastBackendSessionId ?? null };
     }
-    const tabs = toSharedLayout(
-      { tabs: workspace.layout.tabs, layoutsByTabId: workspace.layout.layoutsByTabId ?? {}, activeTabId: null } as unknown as LayoutState,
-      sessions,
-    );
+    const tabs = workspace.layout.tabs.map((tab): SharedTab => {
+      const base = { id: tab.id, kind: tab.kind ?? "terminal", label: tab.label, pinned: tab.pinned === true };
+      if (base.kind !== "terminal") return { ...base, paneTree: null };
+      const legacy = workspace.layout.layoutsByTabId?.[tab.id];
+      const root = tab.terminal?.paneTree ?? legacy?.root;
+      const sessionIds = tab.terminal?.sessionIdsByLeafId ?? legacy?.sessionIdsByLeafId;
+      return {
+        ...base,
+        paneTree: root && sessionIds
+          ? toSharedPane(root, sessionIds, (id) => sessions[id]?.backendSessionId ?? "")
+          : null,
+      };
+    });
     if (tabs.length === 0) continue;
     const result = await transport.put(0, tabs);
     if (!result.conflict) published.push(workspace.workspaceId);

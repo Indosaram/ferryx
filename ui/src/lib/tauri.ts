@@ -1036,6 +1036,14 @@ export async function retryTerminalRemoteSession(sessionId: string): Promise<
   return invokeCommand("cmd_terminal_remote_retry", { sessionId });
 }
 
+export async function pairedTerminalReattach(descriptor: {
+  hostId: string;
+  generation: string;
+  target: { machineId: string; daemonEpoch: string; sessionId: string };
+}): Promise<string> {
+  return invokeCommand<string>("cmd_paired_terminal_reattach", { descriptor });
+}
+
 export async function retryPairedSession(request: {
   backendSessionId: string;
   daemonEpoch: string;

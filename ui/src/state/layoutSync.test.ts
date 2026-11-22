@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { serializeWorkspaceState } from "../lib/sessionPersistence";
 import type { TerminalSession, WorkspaceTab } from "../lib/types";
 import { createLayoutState, layoutReducer } from "./layout";
 import {
@@ -222,10 +223,12 @@ describe("createLayoutSyncLoop", () => {
     });
     const layout = splitLayout();
     const persisted = (workspaceId: string, kind?: string) => ({
-      workspaceId,
+      ...serializeWorkspaceState(workspaceId, "/repo", {
+        workspaceId, worktrees: [], activeWorktreePath: null, layout,
+        sessions: { s1: session("s1", "b1"), s2: session("s2", "b2") },
+        unreadTabIds: {}, unreadWorktreePaths: {},
+      }).workspaces[workspaceId],
       target: kind ? { kind } : undefined,
-      layout: { tabs: layout.tabs, layoutsByTabId: layout.layoutsByTabId },
-      terminalSessions: { s1: { backendSessionId: "b1" }, s2: { lastBackendSessionId: "b2" } },
     });
     const published = await publishPersistedLayouts(
       [persisted("idle"), persisted("newer"), persisted("active"), persisted("paired", "pairedDaemon")],

@@ -101,6 +101,16 @@ pub async fn cmd_retry_paired_session<R: tauri::Runtime>(
     Ok(retry_res)
 }
 
+/// Adopt an existing host PTY as a local paired proxy; never creates a host session.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_paired_terminal_reattach(
+    daemon: State<'_, Arc<DaemonClient>>,
+    descriptor: crate::terminal::paired_daemon::Descriptor,
+) -> std::result::Result<String, crate::paired_host::client::ClientError> {
+    daemon.paired_terminal_reattach(descriptor).await.map(|(id, _)| id)
+}
+
 #[cfg(feature = "desktop")]
 pub fn emit_paired_host_inventory_changed<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
