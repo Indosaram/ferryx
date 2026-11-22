@@ -861,7 +861,7 @@ $versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun -
 Write-Output '---BUILD_RESULT---'
 Write-Output ($versions | ConvertTo-Json -Compress)
 } finally {
-  Remove-Item -LiteralPath $signingSecretFile -Force -ErrorAction SilentlyContinue
+  if ($signingSecretFile) { Remove-Item -LiteralPath $signingSecretFile -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
   Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
 }
