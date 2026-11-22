@@ -14,10 +14,14 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 
-use crate::agent_control::{pty_run_id, AgentOp, FixedLauncher, RecordingControl, LOCAL_HOST_ID};
+use crate::agent_control::{
+    pty_run_id, AgentControl, AgentOp, Delivery, FixedLauncher, RecordingControl, WorkerSend,
+    LOCAL_HOST_ID,
+};
 use crate::goals::contract::RequirementSpec;
 use crate::supervisor::admission::{
-    submit_work, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
+    submit_work, ActorContext, AdmittedWork, OperationClass, OwnerChoices, SubmitOutcome,
+    SubmitWork,
 };
 use crate::supervisor::dispatcher::{Dispatcher, PTY_RUN_LOST};
 use crate::supervisor::receipts::{
@@ -64,6 +68,11 @@ async fn owner_pool() -> SqlitePool {
 
 /// Admits one goal and returns (goal id, dispatch request id).
 async fn admit(pool: &SqlitePool) -> (String, String) {
+    let work = admit_source(pool).await;
+    (work.receipt.goal_id, work.receipt.dispatch_request_id)
+}
+
+async fn admit_source(pool: &SqlitePool) -> Box<AdmittedWork> {
     let actor = ActorContext {
         principal: OWNER.into(),
         source_adapter: ChannelProvider::Slack,
@@ -88,7 +97,7 @@ async fn admit(pool: &SqlitePool) -> (String, String) {
         turn_limit: None,
     };
     match submit_work(pool, &actor, &work).await.unwrap() {
-        SubmitOutcome::Admitted(work) => (work.receipt.goal_id, work.receipt.dispatch_request_id),
+        SubmitOutcome::Admitted(work) => work,
         other => panic!("expected an admitted goal, got {other:?}"),
     }
 }
@@ -174,6 +183,106 @@ async fn a_crash_before_send_dispatches_the_pending_intent_exactly_once_after_re
     assert_eq!(restart(&pool, control.clone()).await, 0);
     assert_eq!(sends(&control), 1, "never sent twice");
     assert!(no_pane_mutation_but_sends(&control));
+}
+
+struct DelayedReceipt {
+    pool: SqlitePool,
+    goal_id: String,
+    request_id: String,
+    control: RecordingControl,
+    sent: Notify,
+    release_receipt: Notify,
+}
+
+#[async_trait]
+impl AgentControl for DelayedReceipt {
+    async fn execute(
+        &self,
+        host_id: Option<&str>,
+        op: AgentOp,
+    ) -> crate::error::Result<serde_json::Value> {
+        self.control.execute(host_id, op).await
+    }
+
+    async fn deliver(&self, send: &WorkerSend) -> Delivery {
+        assert_eq!(send.request_id, self.request_id);
+        // Read through the pool, not through the writer's transaction: the
+        // exact dispatched intent and the goal transition must already be committed.
+        assert_eq!(
+            dispatch_state(&self.pool, &send.request_id).await.0,
+            "claimed"
+        );
+        assert_eq!(
+            goal_state(&self.pool, &self.goal_id).await.0,
+            RunState::Dispatching
+        );
+        let receipt = self.control.deliver(send).await;
+        self.sent.notify_one();
+        self.release_receipt.notified().await;
+        receipt
+    }
+}
+
+#[tokio::test]
+async fn replay_does_not_dispatch_twice_while_the_first_receipt_is_in_flight() {
+    let pool = owner_pool().await;
+    let (first, second) = timeout(DEADLINE, async {
+        tokio::join!(admit_source(&pool), admit_source(&pool))
+    })
+    .await
+    .expect("both admissions completed");
+    assert_ne!(
+        first.duplicate, second.duplicate,
+        "one new admission and one replay"
+    );
+    assert_eq!(
+        first.receipt, second.receipt,
+        "replay must return exactly the first receipt"
+    );
+    let goal_id = first.receipt.goal_id;
+    let request_id = first.receipt.dispatch_request_id;
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "ready");
+
+    let control = Arc::new(DelayedReceipt {
+        pool: pool.clone(),
+        goal_id: goal_id.clone(),
+        request_id: request_id.clone(),
+        control: RecordingControl::observing(),
+        sent: Notify::new(),
+        release_receipt: Notify::new(),
+    });
+    let worker = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        HOST,
+    );
+    let contender = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        HOST,
+    );
+
+    let (results, ()) = timeout(DEADLINE, async {
+        tokio::join!(worker.drain(), async {
+            control.sent.notified().await;
+            assert_eq!(sends(&control.control), 1);
+            let replay = admit_source(&pool).await;
+            assert!(replay.duplicate);
+            assert_eq!(replay.receipt.goal_id, goal_id);
+            assert_eq!(replay.receipt.dispatch_request_id, request_id);
+            assert!(contender.drain().await.is_empty(), "no second intent to claim");
+            control.release_receipt.notify_one();
+        })
+    })
+    .await
+    .expect("dispatch and replay completed");
+    assert_eq!(results.len(), 1);
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "started");
+    assert_eq!(goal_state(&pool, &goal_id).await.0, RunState::Running);
+    assert_eq!(sends(&control.control), 1);
+    assert!(contender.drain().await.is_empty());
 }
 
 #[tokio::test]

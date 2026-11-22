@@ -1380,9 +1380,9 @@ async fn a_failing_judge_keeps_doubling_backoff_across_restarts() {
     assert_eq!(calls(), 3);
     assert_eq!(answered.delivered.len(), 1);
     assert_eq!(event_ids(&handler.last()), ["rep-0"]);
+    // Read back from the row, not the scheduler: the columns must own this state.
     let reset: (i64, Option<i64>) = sqlx::query_as(
-        "SELECT wake_judge_failures, wake_judge_retry_at_ms\
-           FROM supervisor_goals WHERE goal_id = ?",
+        "SELECT wake_judge_failures, wake_judge_retry_at_ms FROM supervisor_goals WHERE goal_id = ?",
     )
     .bind(&goal)
     .fetch_one(&pool)
