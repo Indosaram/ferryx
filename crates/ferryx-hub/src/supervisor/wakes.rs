@@ -46,8 +46,8 @@
 //! The loop ([`WakeScheduler::run`]) sleeps until the next batch or deadline is due, a
 //! [`poke`] (the store sends one with every goal transition and owner correction), or the
 //! bounded [`WAKE_RESCAN`] (a database read): nothing calls a model while a goal waits.
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -777,8 +777,6 @@ pub struct WakeScheduler {
     rescan: Duration,
     /// Told what each loop tick did, after the tick's wake subscription.
     ticked: Option<mpsc::UnboundedSender<TickReport>>,
-    /// Per goal: when a judge that failed may be asked again, and its consecutive failures.
-    judge_backoff: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
 impl WakeScheduler {
@@ -790,7 +788,6 @@ impl WakeScheduler {
             clock: Arc::new(SystemClock),
             rescan: WAKE_RESCAN,
             ticked: None,
-            judge_backoff: Mutex::new(HashMap::new()),
         }
     }
 
@@ -834,7 +831,7 @@ impl WakeScheduler {
                 }
             };
             let pause = match report.next_due {
-                Some(due) => (due - now)
+                Some(due) => (due - self.clock.now())
                     .to_std()
                     .unwrap_or(Duration::ZERO)
                     .min(self.rescan),
@@ -937,33 +934,46 @@ impl WakeScheduler {
         self.deliver(&goal, generation, batch, now, report).await
     }
 
-    /// When the judge may next be asked about `goal_id` after it failed, if it did.
-    fn judge_retry_at(&self, goal_id: &str) -> Option<DateTime<Utc>> {
-        self.judge_backoff
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(goal_id)
-            .map(|(retry_at, _)| *retry_at)
+    /// The persisted deadline survives scheduler and hub restarts.
+    async fn judge_retry_at(
+        &self,
+        goal_id: &str,
+    ) -> Result<Option<DateTime<Utc>>, SupervisorError> {
+        let retry_at: Option<i64> = sqlx::query_scalar(
+            "SELECT wake_judge_retry_at_ms FROM supervisor_goals WHERE goal_id = ?",
+        )
+        .bind(goal_id)
+        .fetch_one(&self.pool)
+        .await?;
+        retry_at.map(Self::decode_judge_retry_at).transpose()
     }
 
-    /// Records a failed judgment for `goal_id`; returns when to ask again.
-    fn judge_failed(&self, goal_id: &str, now: DateTime<Utc>) -> DateTime<Utc> {
-        let mut backoff = self
-            .judge_backoff
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let entry = backoff.entry(goal_id.to_owned()).or_insert((now, 0));
-        entry.1 = entry.1.saturating_add(1);
-        let delay = (JUDGE_RETRY_MIN_SECS << (entry.1 - 1).min(5)).min(JUDGE_RETRY_MAX_SECS);
-        entry.0 = now + chrono::Duration::seconds(delay);
-        entry.0
+    /// Records one failed judgment atomically. SQLite evaluates both assignments against
+    /// the old count: the first failure waits 30 seconds, and the delay then doubles.
+    async fn judge_failed(
+        &self,
+        goal_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<DateTime<Utc>, SupervisorError> {
+        let retry_at: i64 = sqlx::query_scalar(
+            "UPDATE supervisor_goals
+             SET wake_judge_retry_at_ms = ? + 1000 * min(? * (1 << min(wake_judge_failures, 5)), ?),
+                 wake_judge_failures = min(wake_judge_failures + 1, 6)
+             WHERE goal_id = ?
+             RETURNING wake_judge_retry_at_ms",
+        )
+        .bind(now.timestamp_millis())
+        .bind(JUDGE_RETRY_MIN_SECS)
+        .bind(JUDGE_RETRY_MAX_SECS)
+        .bind(goal_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Self::decode_judge_retry_at(retry_at)
     }
 
-    fn judge_answered(&self, goal_id: &str) {
-        self.judge_backoff
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(goal_id);
+    fn decode_judge_retry_at(retry_at: i64) -> Result<DateTime<Utc>, SupervisorError> {
+        DateTime::<Utc>::from_timestamp_millis(retry_at)
+            .ok_or_else(|| SupervisorError::Invalid("invalid wake judge retry deadline".to_owned()))
     }
 
     async fn apply_state_events(
@@ -1340,24 +1350,25 @@ impl WakeScheduler {
             let score = match cached {
                 Some(score) => score,
                 None => {
-                    let backing_off = self.judge_retry_at(&goal.goal_id).filter(|at| *at > now);
+                    let backing_off = self
+                        .judge_retry_at(&goal.goal_id)
+                        .await?
+                        .filter(|at| *at > now);
                     let score = match backing_off {
                         Some(_) => None,
-                        None => {
-                            self.judge_once(judge.as_ref(), goal, &batch, turn_id)
-                                .await?
-                        }
+                        None => self.judge_once(judge.as_ref(), goal, &batch, turn_id).await?,
                     };
                     match score {
-                        Some(score) => {
-                            self.judge_answered(&goal.goal_id);
-                            score
-                        }
+                        Some(score) => score,
                         None => {
                             // A failing judge is asked again only after a backoff, never on
                             // every rescan.
-                            let retry_at = backing_off
-                                .unwrap_or_else(|| self.judge_failed(&goal.goal_id, now));
+                            let retry_at = match backing_off {
+                                Some(at) => at,
+                                // The judge may have spent longer than the backoff trying
+                                // to answer: start the wait at the observed failure.
+                                None => self.judge_failed(&goal.goal_id, self.clock.now()).await?,
+                            };
                             report.due_at(retry_at);
                             report
                                 .deferred
@@ -1431,11 +1442,22 @@ impl WakeScheduler {
         );
         match judge.score(&state).await {
             Ok(score) => {
+                // Don't leave a stale backoff behind if we restart after saving the score.
+                let mut tx = self.pool.begin_write().await?;
                 sqlx::query("UPDATE supervisor_wake_turns SET judge_score = ? WHERE id = ?")
                     .bind(score)
                     .bind(turn_id)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await?;
+                sqlx::query(
+                    "UPDATE supervisor_goals
+                     SET wake_judge_retry_at_ms = NULL, wake_judge_failures = 0
+                     WHERE goal_id = ? AND wake_judge_failures > 0",
+                )
+                .bind(&goal.goal_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
                 Ok(Some(score))
             }
             Err(error) => {
