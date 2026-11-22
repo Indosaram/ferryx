@@ -343,7 +343,7 @@ $rustV = ((rustc --version 2>$null) -replace '^rustc\\s+', '' -replace '\\s+.*$'
 $cargoV = ((cargo --version 2>$null) -replace '^cargo\\s+', '' -replace '\\s+.*$', '')
 
 # vswhere & link.exe
-$vswhere = Join-Path \${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+$vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) "Microsoft Visual Studio/Installer/vswhere.exe"
 $hasVswhere = Test-Path $vswhere
 $linker = $null
 if ($hasVswhere) {
@@ -766,14 +766,37 @@ $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
 # at the host root and survives a workspace cleanup, so on a second run this block is skipped --
 # with vcvars inside it, cargo would run without VCINSTALLDIR/WindowsSdkDir and ffmpeg-sys-next
 # would die with STATUS_STACK_OVERFLOW. MSYS2 also inherits cl.exe/link.exe from here.
-$vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+$vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio/Installer/vswhere.exe'
 $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vsInstall) { throw 'Visual Studio C++ build tools not found (vswhere)' }
 $vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
 # Import the MSVC x64 developer environment into this process so MSYS2 inherits cl.exe/link.exe.
-foreach ($line in (cmd.exe /d /c "\`"$vcvars\`" >nul && set")) {
+#
+# COMSPEC is pwsh.exe on this host. vcvars64.bat re-enters a subshell through COMSPEC, and
+# PowerShell cannot run .bat syntax, so the call returned exit code 0 having set nothing:
+# VCINSTALLDIR, WindowsSdkDir and the MSVC PATH entries all stayed empty. ffmpeg-sys-next
+# died with STATUS_STACK_OVERFLOW, and openssl-src ran 'nmake depend' against a PATH with no
+# nmake, failing with exit code 2.
+#
+# Setting $env:COMSPEC from PowerShell is not enough: the child cmd.exe comes up with the
+# machine COMSPEC again, so vcvars still misbehaves. COMSPEC has to be assigned inside the
+# generated .bat before the call. Measured on maho-win, this form yields
+# VCINSTALLDIR=...\BuildTools\VC\, WindowsSdkDir=...\Windows Kits\10\, and nmake on PATH.
+# vswhere is reached through [Environment] instead of the env:ProgramFiles(x86) variable:
+# the parenthesised name is not a valid variable literal and expands to nothing on this host.
+$realCmd = Join-Path $env:SystemRoot 'System32\\cmd.exe'
+$vcImportBat = Join-Path $env:TEMP 'ferryx-vcvars-import.bat'
+Set-Content -LiteralPath $vcImportBat -Encoding ASCII -Value @(
+  '@echo off',
+  ('set "COMSPEC=' + $realCmd + '"'),
+  ('call "' + $vcvars + '" >nul 2>&1'),
+  'set'
+)
+foreach ($line in (& $realCmd /d /c $vcImportBat)) {
   if ($line -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
 }
+Remove-Item -LiteralPath $vcImportBat -Force -ErrorAction SilentlyContinue
+
 if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt'))) {
   Remove-Item -LiteralPath $ffmpegPrefix, "$ffmpegPrefix.build" -Recurse -Force -ErrorAction SilentlyContinue
   $env:MSYSTEM = 'MINGW64'
