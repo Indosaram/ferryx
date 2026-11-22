@@ -1,11 +1,19 @@
 use super::*;
 
-#[tokio::test]
+// Both cases drive a real 40s production deadline and observe the answer through a client task
+// that lives on this test's own runtime. On a single-threaded runtime that task, and the
+// `timeout_at` that must expire inside the gateway, make progress only while the one worker
+// thread is scheduled, so under a full parallel suite a descheduled thread stalls the request and
+// the observation window expires with `window_expired` even though nothing is locked: widening
+// every budget moves the observation without producing the response. Two worker threads keep the
+// client task and the timer driver running off a different thread than the one awaiting them; the
+// production deadline and the bound on each wait are unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn journal_final_spawn_revocation() {
     spawn_contention(false).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn journal_final_spawn_deadline() {
     spawn_contention(true).await;
 }
@@ -78,9 +86,19 @@ async fn spawn_contention(expire: bool) {
             });
         let _ = joined_tx.send(());
     });
+    // The gateway stamps its admission deadline when the request is admitted
+    // (`workspace_api::admit`: 40s for this mutation), which under a loaded suite can be
+    // arbitrarily later than `started` above, because the send waits for an auth slot and a
+    // worker first. Every wait that has to outlive the deadline is therefore measured from the
+    // observed events below plus slack, never from `started`; a busy runner then delays an
+    // observation instead of failing it, and the production deadline stays the only clock the
+    // assertions read.
+    let deadline_bound = Duration::from_secs(40);
+    let observe_bound = deadline_bound + Duration::from_secs(60);
+    let hold_bound = observe_bound + deadline_bound + Duration::from_secs(60);
     let client = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(50))
+        .timeout(hold_bound + Duration::from_secs(30))
         .build()
         .unwrap();
     let request = uuid::Uuid::new_v4().to_string();
@@ -100,7 +118,7 @@ async fn spawn_contention(expire: bool) {
     let mut writer = None;
     let outcome = std::panic::AssertUnwindSafe(async {
         // This signal occurs only after the first HTTP reconciliation completed.
-        tokio::time::timeout(Duration::from_secs(10), queued_rx).await.unwrap().unwrap();
+        tokio::time::timeout(observe_bound, queued_rx).await.unwrap().unwrap();
         let (held_tx, held_rx) = tokio::sync::oneshot::channel();
         let (read_tx, read_rx) = tokio::sync::oneshot::channel();
         let held_tx = Mutex::new(Some(held_tx));
@@ -110,7 +128,7 @@ async fn spawn_contention(expire: bool) {
             "persist" => if let Some(tx) = held_tx.lock().unwrap().take() {
                 let _ = tx.send(());
                 let parked = started.elapsed().as_millis();
-                let released = release_rx.lock().unwrap().recv_timeout(Duration::from_secs(60));
+                let released = release_rx.lock().unwrap().recv_timeout(hold_bound);
                 eprintln!(
                     "A09_PHASE expire={expire} phase=release parked_ms={parked} ms={} released={}",
                     started.elapsed().as_millis(),
@@ -123,9 +141,9 @@ async fn spawn_contention(expire: bool) {
         }));
         let workspaces = service.clone();
         writer = Some(std::thread::spawn(move || workspaces.journal.begin("fixture", &uuid::Uuid::new_v4().to_string(), "fixture", "digest", "none").unwrap()));
-        tokio::time::timeout(Duration::from_secs(10), held_rx).await.unwrap().unwrap();
+        tokio::time::timeout(observe_bound, held_rx).await.unwrap().unwrap();
         drop(gate.take());
-        tokio::time::timeout(Duration::from_secs(10), read_rx).await.unwrap().unwrap();
+        tokio::time::timeout(observe_bound, read_rx).await.unwrap().unwrap();
         let health = client.get(format!("http://{address}/health")).timeout(Duration::from_millis(500)).send().await;
         assert!(health.is_ok(), "late spawn journal blocked unrelated HTTP: {health:?}");
         assert!(spawn_lock.try_lock().is_err());
@@ -134,7 +152,14 @@ async fn spawn_contention(expire: bool) {
             crate::ipc::run_blocking(move || Ok(auth.revoke_device(&device).unwrap())).await.unwrap();
         }
         eprintln!("A09_PHASE expire={expire} phase=observe ms={}", started.elapsed().as_millis());
-        let observed = tokio::time::timeout(Duration::from_secs(45), response.as_mut().unwrap()).await;
+        // This instant follows the gateway's own reconciliation of the spawn, so the request is
+        // already admitted here and its 40s deadline is at most `deadline_bound` away.
+        let admitted = std::time::Instant::now();
+        let observed = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(admitted + observe_bound),
+            response.as_mut().unwrap(),
+        )
+        .await;
         let observed_kind = match &observed {
             Err(_) => "window_expired".to_string(),
             Ok(Err(_)) => "join_failed".to_string(),
