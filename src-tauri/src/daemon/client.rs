@@ -2685,6 +2685,7 @@ impl DaemonClient {
             | Operation::Sessions { .. }
             | Operation::Session { .. }
             | Operation::DagStream { .. }
+            | Operation::SocketForward
             | Operation::FileRead { .. }
             | Operation::FileWrite { .. }
             | Operation::FileList { .. }

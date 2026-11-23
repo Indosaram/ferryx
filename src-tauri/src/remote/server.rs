@@ -301,6 +301,7 @@ fn valid_socket_target(target: &str) -> bool {
                 })
         })
         || target == super::dag_api::DAG_SOCKET_TARGET
+        || target == super::cloud_socket::SOCKET_FORWARD_TARGET
 }
 
 /// Mints a single-use ticket for one WebSocket upgrade.
@@ -5024,6 +5025,9 @@ fn gateway_capability_names(
         if catalog_ok {
             capabilities.push(super::dag_api::DAG_STREAM_CAPABILITY);
         }
+        // The forwarded RPC socket needs nothing but the machine Control scope this branch
+        // already requires: it is the plainest route in the set, not the heaviest.
+        capabilities.push(super::cloud_socket::SOCKET_FORWARD_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
@@ -10138,6 +10142,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/workspace/dag",
             get(super::dag_api::ws_dag_handler),
+        )
+        .route(
+            "/api/v1/cloud/socket",
+            get(super::cloud_socket::ws_socket_forward_handler),
         )
         .route("/api/v1/push/test", post(push_test))
         .route("/api/v1/push/session-mute", post(push_session_mute))

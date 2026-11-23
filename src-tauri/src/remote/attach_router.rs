@@ -74,14 +74,14 @@ async fn serve_direct_attach(
 }
 
 /// Bridges axum's websocket into the byte-stream shape the shared attach handshake needs.
-struct AxumWebSocketStream {
+pub(crate) struct AxumWebSocketStream {
     socket: axum::extract::ws::WebSocket,
     read_buffer: Vec<u8>,
     eof: bool,
 }
 
 impl AxumWebSocketStream {
-    fn new(socket: axum::extract::ws::WebSocket) -> Self {
+    pub(crate) fn new(socket: axum::extract::ws::WebSocket) -> Self {
         Self {
             socket,
             read_buffer: Vec::new(),

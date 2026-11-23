@@ -787,6 +787,10 @@ pub struct RemoteGatewayState {
     pub(crate) browse_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     pub(crate) agent_history_home: RwLock<Option<PathBuf>>,
+    /// Test override for the forwarded RPC socket path. Absent in production, where the path
+    /// is `$HOME/.ferryx-cloud/rpc.sock` and no caller can influence it.
+    #[cfg(test)]
+    pub(crate) cloud_socket_target: RwLock<Option<PathBuf>>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
     /// Absent for legacy/test constructors. Presence enables no future API.
     pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
@@ -914,6 +918,18 @@ impl Drop for RemoteGatewayState {
 }
 
 impl RemoteGatewayState {
+    /// The socket the cloud socket-forward route copies bytes to.
+    ///
+    /// Production always answers the fixed host path, so no caller can reach another socket.
+    /// Tests may point it at their own listener.
+    pub(crate) fn cloud_socket_target(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(target) = self.cloud_socket_target.read().clone() {
+            return Some(target);
+        }
+        crate::remote::cloud_socket::rpc_socket_path()
+    }
+
     /// Derive both gateway handles from the authority before publication.
     pub(crate) fn with_machine_services(
         mut self,
@@ -1142,6 +1158,8 @@ impl RemoteGatewayState {
             browse_probe: RwLock::new(None),
             #[cfg(test)]
             agent_history_home: RwLock::new(None),
+            #[cfg(test)]
+            cloud_socket_target: RwLock::new(None),
             #[cfg(test)]
             supervisor_test_hub: RwLock::new(None),
             #[cfg(test)]

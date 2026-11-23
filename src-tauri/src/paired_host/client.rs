@@ -112,6 +112,10 @@ pub enum Operation {
     DagStream {
         workspace_id: String,
     },
+    /// Capability probe for the forwarded RPC socket (`socket_forward_v1`). Like
+    /// [`Self::DagStream`] the stream itself is a socket, opened by
+    /// [`MachineClient::attach_socket_forward`], so the probe only reads the capability list.
+    SocketForward,
     /// Agent control on the paired host. Send/Answer/Stop are mutations and are not retried.
     /// `fence` marks a supervisor's input: it rides the send/answer/stop body and the host
     /// refuses it when stale (`STALE_SUPERVISOR_FENCE`). A person's control carries none.
@@ -624,6 +628,10 @@ impl Operation {
                 path = "capabilities";
                 r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
             }
+            Self::SocketForward => {
+                path = "capabilities";
+                r.capability = Some(crate::remote::cloud_socket::SOCKET_FORWARD_CAPABILITY);
+            }
             Self::SupervisorFence { .. } => {
                 path = "supervisor/fence";
                 r.capability = Some(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
@@ -1097,6 +1105,13 @@ async fn record_outcome(
     }
 }
 
+/// A live authenticated socket-forward stream. Holding the lease keeps the stream bound to the
+/// generation that authorized it: a forget or re-pair cancels it.
+pub struct PairedSocketForward {
+    pub socket: super::secure_http::PairedSocket,
+    pub lease: CredentialLease,
+}
+
 /// A live authenticated DAG stream. Holding the lease keeps the stream bound to the
 /// generation that authorized it: a forget or re-pair cancels it.
 pub struct PairedDagStream {
@@ -1260,6 +1275,7 @@ fn gateway_path(segments: &[String], query: &[(String, String)]) -> Result<Strin
     })
 }
 
+#[derive(Clone)]
 pub struct MachineClient {
     http: reqwest::Client,
 }
@@ -1346,6 +1362,54 @@ impl MachineClient {
             direct_epoch,
             remote_pid,
         })
+    }
+
+    /// Opens an authenticated stream to the paired host's own RPC socket.
+    ///
+    /// Same shape as [`Self::attach_dag`], for the same reason: the capability probe runs
+    /// through the executor every other machine operation uses, so a host whose `machineId`
+    /// does not match the inventory record, or whose grant is not machine/control, is refused
+    /// before a socket exists. The route has no query and no client-supplied path: the host
+    /// resolves `$HOME/.ferryx-cloud/rpc.sock` itself, so there is nothing here to validate
+    /// beyond the identity the probe already proved.
+    ///
+    /// The stream rides the same end-to-end encrypted relay session as any other paired
+    /// request (`SecureTarget` with the default `Http` lifetime), so the relay carries
+    /// ciphertext and needs no change.
+    pub async fn attach_socket_forward(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<PairedSocketForward> {
+        self.execute_with_capability(
+            service,
+            OperationRequest {
+                host_id: host_id.clone(),
+                generation,
+                operation: Operation::SocketForward,
+            },
+            Some(crate::remote::cloud_socket::SOCKET_FORWARD_CAPABILITY),
+        )
+        .await?;
+
+        let (host, lease) = service.capture_operation(host_id, generation).await?;
+        let (socket, _) = self
+            .open_socket(
+                &host,
+                &lease,
+                &["api", "v1", "cloud", "socket"].map(str::to_owned),
+                &[],
+                crate::remote::cloud_socket::SOCKET_FORWARD_TARGET,
+                crate::remote::attach_crypto::MAX_ATTACH_FRAME,
+            )
+            .await?;
+        // Re-verify the generation: a forget or re-pair during the upgrade must not leave a
+        // live stream authorized by a retired credential.
+        service
+            .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok(PairedSocketForward { socket, lease })
     }
 
     /// Opens an authenticated DAG stream on the paired host.
@@ -2358,6 +2422,7 @@ fn map_result(
         // The capability probe returns this host's advertised capabilities; the stream
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),
+        Operation::SocketForward => OperationResult::Capabilities(decode(bytes)?),
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::SupervisorFence { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::Resources => OperationResult::Resources(decode(bytes)?),
