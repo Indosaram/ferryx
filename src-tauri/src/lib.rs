@@ -18,6 +18,7 @@ pub mod agent_transcript;
 pub mod browser;
 pub mod cli;
 pub mod clipboard_image;
+pub mod cloud_host;
 pub mod daemon;
 pub mod hub_runtime;
 pub mod supervisor_checkpoint;
@@ -1958,6 +1959,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::paired_host::cmd_retry_paired_session,
+        crate::cloud_host::cli::cmd_cloud_host_list,
         crate::ipc::remote_desktop::cmd_rd_supported,
         crate::ipc::file_preview::cmd_file_preview_open,
         crate::ipc::file_preview::cmd_file_preview_open_child,
