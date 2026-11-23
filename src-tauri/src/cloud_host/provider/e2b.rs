@@ -205,6 +205,10 @@ impl E2bProvider {
         key_header: Option<&str>,
     ) -> Result<ApiResponse, SandboxError> {
         let token = self.token()?;
+        let is_body_method = matches!(
+            method,
+            reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+        );
         let mut request = self
             .client
             .request(method, format!("{}{path}", self.api_base))
@@ -214,6 +218,10 @@ impl E2bProvider {
         }
         if let Some(body) = body {
             request = request.json(&body);
+        } else if is_body_method {
+            // E2B's load balancer rejects bodyless POSTs (such as `/pause`) with 411 unless
+            // `Content-Length: 0` is sent explicitly.
+            request = request.header(reqwest::header::CONTENT_LENGTH, "0");
         }
         let response = request.send().await.map_err(|error| transport_error(&error))?;
         let status = response.status().as_u16();

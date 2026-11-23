@@ -526,8 +526,11 @@ async fn run_steps<S: ProvisionSteps + ?Sized>(
     steps.wait_ready().await?;
     steps.connect().await?;
     let home = steps.home().await?;
-    steps.bootstrap(role, &home).await?;
+    // Push the filtered agent config (auth/models/settings) BEFORE bootstrap starts the `omo`
+    // host daemon, so the daemon loads the `hms` provider and stripped settings on its very first
+    // launch instead of requiring a restart.
     steps.push_agent_files(&home).await?;
+    steps.bootstrap(role, &home).await?;
     let egress = steps.model_egress(&home).await?;
     if transport == Transport::Relay {
         if let Some(detail) = steps.enroll().await? {
@@ -1820,7 +1823,13 @@ fn filter_models(bytes: &[u8], egress: ModelEgress) -> Result<Vec<u8>, String> {
 fn filter_settings(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let parsed: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("{SETTINGS_FILE} is not JSON: {error}"))?;
-    let filtered = strip_key_like_fields(parsed);
+    let mut filtered = strip_key_like_fields(parsed);
+    // Drop local-machine plugin packages and npmCommand (e.g. ["bun"]): on a bare 512 MiB cloud
+    // box, auto-installing host plugins on first session open fails with ENOENT or OOM.
+    if let Some(object) = filtered.as_object_mut() {
+        object.remove("packages");
+        object.remove("npmCommand");
+    }
     serde_json::to_vec(&filtered)
         .map_err(|error| format!("cannot serialize the settings: {error}"))
 }
@@ -1985,19 +1994,42 @@ async fn relay_forward(
         }
         None => None,
     };
-    let inventory = crate::paired_host::inventory::Inventory::open(Path::new(&dir))
-        .map_err(|error| format!("cannot read the paired-host inventory: {error}"))?;
-    let host = inventory
-        .list()
-        .into_iter()
-        .find(|host| machine_id.as_ref() == Some(&host.machine_id))
-        .ok_or_else(|| {
-            format!(
-                "{} has no paired host for its relay record yet; run the account reconcile first",
-                row.name
-            )
-        })?;
     let service = crate::paired_host::service::PairedHostService::open(PathBuf::from(&dir));
+    let find_host = |dir: &Path| -> Result<Option<crate::paired_host::inventory::HostView>, String> {
+        let inventory = crate::paired_host::inventory::Inventory::open(dir)
+            .map_err(|error| format!("cannot read the paired-host inventory: {error}"))?;
+        Ok(inventory
+            .list()
+            .into_iter()
+            .find(|host| machine_id.as_ref() == Some(&host.machine_id)))
+    };
+    let host = match find_host(Path::new(&dir))? {
+        Some(host) => host,
+        None => {
+            // Freshly enrolled cloud slots may not be paired in this Mac's local inventory yet:
+            // adopt the local account session once so `cloud socket` works with no manual step.
+            if let Ok(home) = local_home() {
+                let token_path = enroll::account_session_token_path(&home);
+                if let Ok(token) = std::fs::read_to_string(&token_path) {
+                    let trimmed = token.trim();
+                    if !trimmed.is_empty() {
+                        let _ = service
+                            .adopt_account_session(
+                                enroll::RELAY_ORIGIN.to_string(),
+                                Some(trimmed.to_string()),
+                            )
+                            .await;
+                    }
+                }
+            }
+            find_host(Path::new(&dir))?.ok_or_else(|| {
+                format!(
+                    "{} has no paired host for its relay record yet; run the account reconcile first",
+                    row.name
+                )
+            })?
+        }
+    };
     let client = crate::paired_host::client::MachineClient::new();
     crate::paired_host::socket_forward::listen(
         client,
@@ -2976,8 +3008,8 @@ mod housekeeping_tests {
         CreateStep::WaitReady,
         CreateStep::Connect,
         CreateStep::Home,
-        CreateStep::Bootstrap,
         CreateStep::PushAgentFiles,
+        CreateStep::Bootstrap,
         CreateStep::ModelEgress,
         CreateStep::Enroll,
     ];
