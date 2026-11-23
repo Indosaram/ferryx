@@ -1,0 +1,13 @@
+# instabox sandbox bong-i-1
+# Certificate expires 2026-11-22T05:29:06+09:00.
+# The certificate is short-lived; refresh it with: instabox ssh-cert bong-i-1
+Host instabox-bong-i-1
+  HostName ssh.instabox.sh
+  Port 2222
+  User m_agqyb2s35jvh2e3brqywyknz6e
+  IdentityFile /Users/indo/.config/instabox/ssh/id_ed25519
+  CertificateFile /Users/indo/.config/instabox/ssh/m_agqyb2s35jvh2e3brqywyknz6e-cert.pub
+  IdentitiesOnly yes
+  UserKnownHostsFile /Users/indo/.config/instabox/ssh/known_hosts
+  StrictHostKeyChecking yes
+  UpdateHostKeys no

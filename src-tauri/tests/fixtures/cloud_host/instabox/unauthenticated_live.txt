@@ -1,0 +1,1 @@
+instabox: session expired (unauthenticated); run `instabox login`

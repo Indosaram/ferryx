@@ -1,0 +1,28 @@
+ID:              8gfghorqbabhg5qx1bgj1
+Name:            fx-t9-probe
+Namespace:       project_REDACTED
+Status:          running
+Image:           tensorlake/ubuntu-minimal
+Runtime:         cloud-hypervisor
+CPUs:            1
+Memory:          1024 MiB
+Disk:            10240 MiB
+GPUs:            -
+Proxy auth:      required
+Internet:        allowed
+Created:         7 min ago
+Timeout:         300s
+URL:             https://8gfghorqbabhg5qx1bgj1.sandbox.tensorlake.ai
+Entrypoint:      
+Ports:           
+Allow out:       
+Deny out:        
+SSH Config:
+Host tl-fx-t9-probe
+    HostName 8gfghorqbabhg5qx1bgj1.sandbox.tensorlake.ai
+    User 8gfghorqbabhg5qx1bgj1
+    # Set this to the private key whose public key you registered with `tl sbx ssh keys add`
+    IdentityFile ~/.ssh/id_ed25519_tensorlake
+    IdentitiesOnly yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3

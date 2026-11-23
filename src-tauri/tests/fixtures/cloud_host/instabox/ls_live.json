@@ -1,0 +1,42 @@
+[
+  {
+    "id": "m_agqyb2s35jvh2e3brqywyknz6e",
+    "name": "bong-i-1",
+    "desiredState": "running",
+    "state": "running",
+    "revision": 279,
+    "operationId": null,
+    "template": {
+      "id": "agent-browser",
+      "version": "2026-10-25.23",
+      "digest": "sha256:a2465775c94f801d9433982b4138b8b587fe54c44c3b2371a09a4580b5ab66db"
+    },
+    "spec": {
+      "vcpus": 4,
+      "memMiB": 8192,
+      "persistentDiskGiB": 20,
+      "rootDiskGiB": 16
+    },
+    "storage": {
+      "sizeGiB": 20,
+      "mountPath": "/data",
+      "persistent": true,
+      "synced": true,
+      "snapshotSeq": 132
+    },
+    "runtime": {
+      "ready": true,
+      "processesPreserved": true
+    },
+    "timeoutAt": null,
+    "onTimeout": "",
+    "autoSuspendAfterSeconds": 1800,
+    "metadata": {
+      "role": "build"
+    },
+    "vault": true,
+    "guestUser": "indo",
+    "createdAt": "2026-10-28T05:10:05.156618Z",
+    "updatedAt": "2026-11-21T19:29:05.902532Z"
+  }
+]

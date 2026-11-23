@@ -1,0 +1,3 @@
+ID	Name	Status	Image	CPUs	Memory	Disk	GPUs	Created At
+s7jus08qec4axzgbpq76h	fx-probe	running	tensorlake/ubuntu	1	1024 MiB	10240 MiB	-	38 min ago
+1 sandbox

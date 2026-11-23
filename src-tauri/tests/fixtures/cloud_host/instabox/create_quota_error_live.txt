@@ -1,0 +1,1 @@
+instabox: error quota_exceeded: sandbox limit reached (1 of 1) in org Indosaram (org_0c103895341448e3849508155212e36d, personal) on the free plan: delete a sandbox first, or upgrade to a paid plan for more; to create in a workspace, pass its orgId (CLI: --org, or instabox workspace use) [request req_bqhf5t4mqidi5lmyxopijbsd4m]
