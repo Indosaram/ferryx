@@ -1067,93 +1067,102 @@ async fn hold(registry: &ProviderRegistry, name: &str) -> i32 {
     };
     match row.transport {
         Transport::Ssh => {
-            // The same access the verbs use: it resolves the machine's SSH files, and the home
-            // directory its rpc socket lives under is read from the box rather than assumed.
-            let access = match open_access(&provider, &row).await {
-                Ok(access) => access,
-                Err(error) => {
-                    eprintln!("{error}");
-                    return EXIT_FAILURE;
-                }
-            };
-            let AccessKind::Ssh { files, .. } = &access.inner else {
-                eprintln!("{name} is not reachable over SSH");
+            #[cfg(not(unix))]
+            {
+                let _ = (&provider, &row);
+                eprintln!("SSH socket forwarding for {name} is not supported on this platform");
                 return EXIT_FAILURE;
-            };
-            let home = match access.home().await {
-                Ok(home) => home,
-                Err(error) => {
-                    eprintln!("{error}");
-                    return EXIT_FAILURE;
-                }
-            };
-            let local = match crate::ssh::socket_forward::default_local_socket(&row.name) {
-                Ok(local) => local,
-                Err(error) => {
-                    eprintln!("cannot resolve the socket path for {name}: {error}");
-                    return EXIT_FAILURE;
-                }
-            };
-            let spec = match crate::ssh::socket_forward::ForwardSpec::new(local, box_socket(&home)) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    eprintln!("bad forward spec for {name}: {error}");
-                    return EXIT_FAILURE;
-                }
-            };
-            let forward = match crate::ssh::socket_forward::start_with_files(files, &spec).await {
-                Ok(forward) => forward,
-                Err(error) => {
-                    eprintln!("cannot forward {name}'s socket: {error}");
-                    return EXIT_FAILURE;
-                }
-            };
-            // A machine whose provider blocks the model endpoint serves that endpoint from this
-            // Mac over its own `ssh -T` channel. The bridge is proved reachable *before* the
-            // socket is published, because a published socket is a promise that a session can run
-            // and a session whose first model call fails breaks that promise.
-            if model_egress(&row.provider) == ModelEgress::Bridge {
-                let program = match crate::ssh::exec::resolve_ssh_program() {
-                    Ok(program) => program,
+            }
+            #[cfg(unix)]
+            {
+                // The same access the verbs use: it resolves the machine's SSH files, and the home
+                // directory its rpc socket lives under is read from the box rather than assumed.
+                let access = match open_access(&provider, &row).await {
+                    Ok(access) => access,
                     Err(error) => {
-                        eprintln!("cannot find ssh: {error}");
+                        eprintln!("{error}");
                         return EXIT_FAILURE;
                     }
                 };
-                let files = files.clone();
-                let box_home = home.clone();
-                let mut bridge = tokio::spawn(async move {
-                    serve_model_bridge(&program, &files, &box_home).await
-                });
-                // The probe is the readiness signal: it answers once the listener is reachable
-                // from inside the box, so this waits for the state rather than for a delay.
-                let mut probe = Box::pin(prove_model_bridge(&access, &home));
-                let ready = tokio::select! {
-                    result = &mut probe => Some(result),
-                    joined = &mut bridge => {
-                        let detail = match joined {
-                            Ok(Ok(())) => "the channel closed".to_string(),
-                            Ok(Err(error)) => error,
-                            Err(error) => error.to_string(),
-                        };
-                        eprintln!("cannot bridge {name}'s model calls: {detail}");
-                        None
-                    }
+                let AccessKind::Ssh { files, .. } = &access.inner else {
+                    eprintln!("{name} is not reachable over SSH");
+                    return EXIT_FAILURE;
                 };
-                match ready {
-                    Some(Ok(())) => {
-                        eprintln!("bridging {name}'s model calls over the dispatch channel");
-                        hold_open((forward, bridge)).await;
-                    }
-                    Some(Err(error)) => {
-                        eprintln!("cannot bridge {name}'s model calls: {error}");
-                        bridge.abort();
+                let home = match access.home().await {
+                    Ok(home) => home,
+                    Err(error) => {
+                        eprintln!("{error}");
                         return EXIT_FAILURE;
                     }
-                    None => return EXIT_FAILURE,
+                };
+                let local = match crate::ssh::socket_forward::default_local_socket(&row.name) {
+                    Ok(local) => local,
+                    Err(error) => {
+                        eprintln!("cannot resolve the socket path for {name}: {error}");
+                        return EXIT_FAILURE;
+                    }
+                };
+                let spec = match crate::ssh::socket_forward::ForwardSpec::new(local, box_socket(&home)) {
+                    Ok(spec) => spec,
+                    Err(error) => {
+                        eprintln!("bad forward spec for {name}: {error}");
+                        return EXIT_FAILURE;
+                    }
+                };
+                let forward = match crate::ssh::socket_forward::start_with_files(files, &spec).await {
+                    Ok(forward) => forward,
+                    Err(error) => {
+                        eprintln!("cannot forward {name}'s socket: {error}");
+                        return EXIT_FAILURE;
+                    }
+                };
+                // A machine whose provider blocks the model endpoint serves that endpoint from this
+                // Mac over its own `ssh -T` channel. The bridge is proved reachable *before* the
+                // socket is published, because a published socket is a promise that a session can run
+                // and a session whose first model call fails breaks that promise.
+                if model_egress(&row.provider) == ModelEgress::Bridge {
+                    let program = match crate::ssh::exec::resolve_ssh_program() {
+                        Ok(program) => program,
+                        Err(error) => {
+                            eprintln!("cannot find ssh: {error}");
+                            return EXIT_FAILURE;
+                        }
+                    };
+                    let files = files.clone();
+                    let box_home = home.clone();
+                    let mut bridge = tokio::spawn(async move {
+                        serve_model_bridge(&program, &files, &box_home).await
+                    });
+                    // The probe is the readiness signal: it answers once the listener is reachable
+                    // from inside the box, so this waits for the state rather than for a delay.
+                    let mut probe = Box::pin(prove_model_bridge(&access, &home));
+                    let ready = tokio::select! {
+                        result = &mut probe => Some(result),
+                        joined = &mut bridge => {
+                            let detail = match joined {
+                                Ok(Ok(())) => "the channel closed".to_string(),
+                                Ok(Err(error)) => error,
+                                Err(error) => error.to_string(),
+                            };
+                            eprintln!("cannot bridge {name}'s model calls: {detail}");
+                            None
+                        }
+                    };
+                    match ready {
+                        Some(Ok(())) => {
+                            eprintln!("bridging {name}'s model calls over the dispatch channel");
+                            hold_open((forward, bridge)).await;
+                        }
+                        Some(Err(error)) => {
+                            eprintln!("cannot bridge {name}'s model calls: {error}");
+                            bridge.abort();
+                            return EXIT_FAILURE;
+                        }
+                        None => return EXIT_FAILURE,
+                    }
+                } else {
+                    hold_open(forward).await;
                 }
-            } else {
-                hold_open(forward).await;
             }
         }
         Transport::Relay => {
@@ -1190,6 +1199,7 @@ async fn hold_open<T>(guard: T) {
 /// Read from the local file rather than hard-coded, so changing the endpoint is a `models.json`
 /// edit on this Mac and nothing here moves. The value is not a secret (a host and a path prefix),
 /// and it is never printed.
+#[cfg(any(unix, test))]
 fn upstream_endpoint(models: &[u8]) -> Result<(String, String), String> {
     let parsed: Value = serde_json::from_slice(models)
         .map_err(|error| format!("local {MODELS_FILE} is not JSON: {error}"))?;
@@ -1230,6 +1240,7 @@ fn bridged_url(origin: &str, base_path: &str, path: &str) -> String {
 /// is framed back chunk by chunk so server-sent events arrive as they are produced. Nothing is
 /// stored: headers and body go out as they came in, and no credential is read here - the `hms` key
 /// is already inside the request the engine made.
+#[cfg(unix)]
 async fn serve_model_bridge(
     program: &str,
     files: &crate::ssh::socket_forward::MachineFiles,
@@ -1437,6 +1448,7 @@ where
 
 /// Prove the bridge answers **from inside the box**, so a socket is never published over a model
 /// route that does not work.
+#[cfg(any(unix, test))]
 async fn prove_model_bridge(access: &Access, home: &str) -> Result<(), String> {
     let script = format!("{}/{BOX_MODEL_BRIDGE}", home.trim_end_matches('/'));
     let command = format!(
@@ -1538,6 +1550,7 @@ struct Access {
 
 #[derive(Clone)]
 enum AccessKind {
+    #[cfg(unix)]
     Ssh {
         program: String,
         files: crate::ssh::socket_forward::MachineFiles,
@@ -1553,6 +1566,7 @@ async fn open_access(
     row: &CatalogRow,
 ) -> Result<Access, String> {
     match row.transport {
+        #[cfg(unix)]
         Transport::Ssh => {
             let target = provider
                 .ssh_target(&row.sandbox_id)
@@ -1565,6 +1579,11 @@ async fn open_access(
                 .map_err(|error| format!("cannot find ssh: {error}"))?;
             Ok(Access { inner: AccessKind::Ssh { program, files } })
         }
+        #[cfg(not(unix))]
+        Transport::Ssh => Err(format!(
+            "SSH cloud host access for {} is not supported on this platform",
+            row.name
+        )),
         Transport::Relay => Ok(Access {
             inner: AccessKind::Relay {
                 provider: provider.clone(),
@@ -1578,6 +1597,7 @@ impl Access {
     /// One non-interactive command. Never carries a secret: callers pass paths only.
     async fn run(&self, command: &str, timeout_seconds: u64) -> Result<ExecResult, String> {
         match &self.inner {
+            #[cfg(unix)]
             AccessKind::Ssh { program, files } => {
                 ssh_exec(program, files, command, timeout_seconds).await
             }
@@ -1600,6 +1620,7 @@ impl Access {
     ) -> Result<(), String> {
         let remote = format!("{}/{relative}", home.trim_end_matches('/'));
         match &self.inner {
+            #[cfg(unix)]
             AccessKind::Ssh { program, files } => {
                 scp_file(program, files, &remote, bytes, mode).await
             }
@@ -1864,7 +1885,11 @@ async fn establish_model_egress(
     if egress == ModelEgress::Direct {
         return Ok(egress);
     }
-    if !matches!(access.inner, AccessKind::Ssh { .. }) {
+    #[cfg(unix)]
+    let is_ssh = matches!(access.inner, AccessKind::Ssh { .. });
+    #[cfg(not(unix))]
+    let is_ssh = false;
+    if !is_ssh {
         // A bridge runs over one `ssh -T` channel, so a relay-only provider cannot be given one.
         // Saying so here beats a machine whose model calls fail with `connection refused`.
         return Err(format!(
@@ -1917,6 +1942,7 @@ fn box_socket(home: &str) -> String {
 }
 
 /// A T1 machine's SSH files, from the provider's own endpoint.
+#[cfg(unix)]
 fn machine_ssh(
     name: &str,
     target: super::provider::SshTarget,
@@ -2029,6 +2055,7 @@ fn spawn_holder(name: &str) -> Result<(), String> {
 // SSH plumbing (T1): a command and a file push over the per-machine conf
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(unix)]
 async fn ssh_exec(
     program: &str,
     files: &crate::ssh::socket_forward::MachineFiles,
@@ -2072,6 +2099,7 @@ async fn ssh_exec(
 /// `scp` reads the same per-machine conf as `ssh`, so it inherits the pinned host key and the
 /// `ProxyCommand` a CodeSpace needs. The bytes come from a 0600 temporary file that is removed
 /// before this returns.
+#[cfg(unix)]
 async fn scp_file(
     program: &str,
     files: &crate::ssh::socket_forward::MachineFiles,
@@ -2144,6 +2172,7 @@ async fn scp_file(
     Ok(())
 }
 
+#[cfg(any(unix, test))]
 fn scp_program(ssh_program: &str) -> String {
     match Path::new(ssh_program).parent() {
         Some(parent) if !parent.as_os_str().is_empty() => {

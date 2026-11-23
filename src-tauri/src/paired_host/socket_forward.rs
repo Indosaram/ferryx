@@ -196,40 +196,39 @@ async fn carry(
 /// surfaces on the caller's first verb with no indication which hop was wrong. One answered
 /// line turns that into a bound, attributable error.
 pub async fn probe(path: &Path) -> Result<String, ClientError> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ClientError::local("SOCKET_PROBE_FAILED"))
+    }
+    #[cfg(unix)]
+    {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let connect = async {
-        #[cfg(unix)]
-        {
-            tokio::net::UnixStream::connect(path).await
-        }
-        #[cfg(not(unix))]
-        {
-            Err(std::io::Error::other("unix socket unavailable"))
-        }
-    };
-    let Ok(connected) = tokio::time::timeout(PROBE_DEADLINE, connect).await else {
-        return Err(ClientError::local("SOCKET_PROBE_TIMEOUT"));
-    };
-    let Ok(stream) = connected else {
-        return Err(ClientError::local("SOCKET_PROBE_FAILED"));
-    };
-    let mut stream = stream;
-    stream
-        .write_all(PROBE_REQUEST.as_bytes())
-        .await
-        .map_err(|_| ClientError::local("SOCKET_PROBE_FAILED"))?;
-    let mut line = String::new();
-    let mut reader = BufReader::new(stream);
-    let read = reader.read_line(&mut line);
-    tokio::time::timeout(PROBE_DEADLINE, read)
-        .await
-        .map_err(|_| ClientError::local("SOCKET_PROBE_TIMEOUT"))?
-        .map_err(|_| ClientError::local("SOCKET_PROBE_FAILED"))?;
-    // The reply must parse: a daemon that answers with a diagnostic line is not ready.
-    serde_json::from_str::<serde_json::Value>(line.trim())
-        .map(|_| line)
-        .map_err(|_| ClientError::local("SOCKET_PROBE_NOT_JSON"))
+        let Ok(connected) =
+            tokio::time::timeout(PROBE_DEADLINE, tokio::net::UnixStream::connect(path)).await
+        else {
+            return Err(ClientError::local("SOCKET_PROBE_TIMEOUT"));
+        };
+        let Ok(mut stream) = connected else {
+            return Err(ClientError::local("SOCKET_PROBE_FAILED"));
+        };
+        stream
+            .write_all(PROBE_REQUEST.as_bytes())
+            .await
+            .map_err(|_| ClientError::local("SOCKET_PROBE_FAILED"))?;
+        let mut line = String::new();
+        let mut reader = BufReader::new(stream);
+        let read = reader.read_line(&mut line);
+        tokio::time::timeout(PROBE_DEADLINE, read)
+            .await
+            .map_err(|_| ClientError::local("SOCKET_PROBE_TIMEOUT"))?
+            .map_err(|_| ClientError::local("SOCKET_PROBE_FAILED"))?;
+        // The reply must parse: a daemon that answers with a diagnostic line is not ready.
+        serde_json::from_str::<serde_json::Value>(line.trim())
+            .map(|_| line)
+            .map_err(|_| ClientError::local("SOCKET_PROBE_NOT_JSON"))
+    }
 }
 
 #[cfg(test)]

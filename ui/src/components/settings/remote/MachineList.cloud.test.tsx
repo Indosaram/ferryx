@@ -84,7 +84,7 @@ describe("cloud machines in the machines list", () => {
   });
 
   it("reads the catalog itself when no rows are passed in", async () => {
-    invokeMock.mockImplementation(async (command: string) =>
+    invokeMock.mockImplementation(async (command: unknown) =>
       command === CLOUD_HOST_LIST_COMMAND
         ? [{ name: "box-2", provider: "daytona", state: "stopped", sandboxId: "sbx-9", transport: "ssh" }]
         : [],
@@ -100,7 +100,7 @@ describe("cloud machines in the machines list", () => {
   });
 
   it("drops rows that cannot be labelled instead of rendering a blank badge", async () => {
-    invokeMock.mockImplementation(async (command: string) =>
+    invokeMock.mockImplementation(async (command: unknown) =>
       command === CLOUD_HOST_LIST_COMMAND
         ? [{ name: "box-3" }, { name: "box-4", provider: "e2b", state: "ready", sandboxId: "sbx-4" }]
         : [],
@@ -114,7 +114,7 @@ describe("cloud machines in the machines list", () => {
   });
 
   it("renders no cloud rows when the command fails", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
+    invokeMock.mockImplementation(async (command: unknown) => {
       if (command === CLOUD_HOST_LIST_COMMAND) throw new Error("no catalog");
       return [];
     });
