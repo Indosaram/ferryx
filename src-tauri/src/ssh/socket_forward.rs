@@ -819,10 +819,19 @@ fn validate_reply(reply: &[u8]) -> Result<(), IpcError> {
     let value: serde_json::Value = serde_json::from_slice(reply)
         .map_err(|error| io_error(format!("Readiness reply is not JSON: {error}")))?;
     // The reply must be the daemon's *answer*, not a mirror of our request: the request line is
-    // itself valid JSON, so a listener that echoes it back parses perfectly. Only the reply's own
-    // `type` distinguishes the two.
+    // itself valid JSON, so a listener that echoes it back parses perfectly. Real omo/mhc RPC
+    // daemons answer `get_protocol_info` with
+    // `{"type":"response","command":"get_protocol_info","success":true,...}`; legacy fixtures use
+    // `{"type":"protocol_info",...}`. Both are distinct from the echoed request (`type:
+    // "get_protocol_info"`).
     match value.get("type").and_then(|kind| kind.as_str()) {
         Some(PROBE_REPLY_TYPE) => Ok(()),
+        Some("response")
+            if value.get("command").and_then(|cmd| cmd.as_str()) == Some("get_protocol_info")
+                && value.get("success").and_then(|ok| ok.as_bool()) != Some(false) =>
+        {
+            Ok(())
+        }
         Some(other) => Err(io_error(format!(
             "Readiness reply is not a {PROBE_REPLY_TYPE} answer (type: {other})"
         ))),
@@ -1916,13 +1925,11 @@ mod tests {
     fn teardown_only_removes_the_name_this_forward_published() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fx-published.sock");
-        // The older forward's entry, then the newer one re-binding the same name.
-        let older = {
-            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-            let published = published_name(&path).expect("bind identity");
-            drop(listener);
-            published
-        };
+        // The older forward's entry, then the newer one re-binding the same name while the older
+        // listener still holds its socket inode open (preventing ext4 immediate inode reuse on
+        // Linux and matching the real overlap between two live forwards).
+        let _older_listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let older = published_name(&path).expect("bind identity");
         // A second bind on the same path fails while the first listener lives, which is exactly
         // why production unlinks first; do that here too so the newer entry is a new inode.
         std::fs::remove_file(&path).unwrap();

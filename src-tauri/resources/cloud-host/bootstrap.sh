@@ -501,8 +501,10 @@ install_omo() {
     fail 11 "missing npm: it ships with node and is required to install omo-ai"
   fi
   # npm's own output goes to stderr: the OK line is the only stdout line.
+  # Cap V8's old-space heap so 512 MiB sandboxes (e.g. E2B base) do not OOM-kill npm install.
   mkdir -p "$FX_STAGING/prefix"
-  if ! npm_config_prefix="$FX_STAGING/prefix" npm install --global --no-audit --no-fund \
+  if ! NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=256" \
+    npm_config_prefix="$FX_STAGING/prefix" npm install --global --no-audit --no-fund \
     --loglevel=error "$FX_STAGING/$asset" >&2 9>&-; then
     fail 13 "npm install failed for omo-ai $FX_OMO_AI_VERSION"
   fi
