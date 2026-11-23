@@ -15,6 +15,8 @@ pub mod projects;
 pub mod remote_hooks;
 pub mod resources;
 pub mod runtime;
+#[cfg(unix)]
+pub mod socket_forward;
 pub mod state_bridge;
 #[cfg(unix)]
 pub mod transport_unix;
