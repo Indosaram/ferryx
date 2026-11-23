@@ -702,6 +702,11 @@ impl ProvisionSteps for LiveSteps<'_> {
         .map_err(|error| {
             StepFailure::with_code(error.exit_code(), format!("{}: {error}", CreateStep::Enroll.as_str()))
         })?;
+        // A reused relay slot keeps the same machineId, so any previous box's device token in this
+        // Mac's paired-host inventory is now invalid against the fresh box. Forget the stale entry
+        // and adopt the account session now so `cloud socket` opens immediately with a fresh token.
+        #[cfg(unix)]
+        refresh_relay_pairing(&reachability.machine_id).await;
         Ok(Some(format!(
             "relay record {} is reachable (machineId {})",
             reachability.session_id, reachability.machine_id
@@ -1971,6 +1976,37 @@ fn machine_ssh(
         pinned_host_key: target.known_hosts_line,
         proxy_command: target.proxy_command,
         certificate_file,
+    }
+}
+
+/// Drop any stale paired-host credential for a reused cloud slot's `machine_id` and re-pair it
+/// against the freshly enrolled box using the local account session token.
+#[cfg(unix)]
+async fn refresh_relay_pairing(machine_id: &str) {
+    let Ok(dir) = crate::remote::auth::canonical_identity_dir() else {
+        return;
+    };
+    let service = crate::paired_host::service::PairedHostService::open(PathBuf::from(&dir));
+    if let Ok(inventory) = crate::paired_host::inventory::Inventory::open(Path::new(&dir)) {
+        for host in inventory.list() {
+            if host.machine_id == machine_id {
+                let _ = service.forget(host.host_id, host.generation).await;
+            }
+        }
+    }
+    if let Ok(home) = local_home() {
+        let token_path = enroll::account_session_token_path(&home);
+        if let Ok(token) = std::fs::read_to_string(&token_path) {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                let _ = service
+                    .adopt_account_session(
+                        enroll::RELAY_ORIGIN.to_string(),
+                        Some(trimmed.to_string()),
+                    )
+                    .await;
+            }
+        }
     }
 }
 
