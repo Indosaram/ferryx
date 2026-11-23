@@ -8,6 +8,7 @@ import {
   browserTabSelectIndex,
   browserWorkspaceSelectIndex,
   closeBrowser,
+  describeInstalledCookieImportBlock,
   downloadBrowserUrlToFolder,
   extractBrowserCookieImportReason,
   formatBrowserCookieImportError,
@@ -314,6 +315,26 @@ describe("browser automation ipc", () => {
     expect(result).toEqual({ importedCount: 42, skippedCount: 5 });
   });
 
+  it("keeps the app-bound refusal from a mixed v10-imported / v20-refused import", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      importedCount: 3,
+      skippedCount: 2,
+      blocked: { reason: "app-bound-key-refused", skippedCount: 2, hresult: "0x8004A007" },
+    });
+
+    const result = await importInstalledBrowserCookies("default", "chrome");
+
+    expect(result.importedCount).toBeGreaterThan(0);
+    expect(result.blocked).toEqual({
+      reason: "app-bound-key-refused",
+      skippedCount: 2,
+      hresult: "0x8004A007",
+    });
+    expect(describeInstalledCookieImportBlock(result.blocked)).toBe(
+      "app-bound-key-refused (0x8004A007): Chrome refused to release its app-bound cookies to Ferryx, so those were skipped; sign in again on the sites that need them.",
+    );
+  });
+
   it("invokes cmd_browser_download_to_folder with the tab and url", async () => {
     vi.mocked(invoke).mockResolvedValueOnce({ id: "d1", status: "completed" });
 
@@ -423,6 +444,20 @@ describe("browser cookie import error formatting and reasoning", () => {
     );
   });
 
+  it("formats an app-bound refusal with the reason and its measured hresult", () => {
+    const error = {
+      code: "BROWSER_COOKIE_IMPORT_FAILED",
+      message:
+        "app-bound-key-refused: the browser refused its app-bound key (HRESULT 0x8004A007); its app-bound cookies cannot be decrypted",
+      details: { reason: "app-bound-key-refused", hresult: "0x8004A007" },
+    };
+
+    expect(extractBrowserCookieImportReason(error)).toBe("app-bound-key-refused");
+    expect(formatBrowserCookieImportError(error)).toBe(
+      "app-bound-key-refused: Chrome refused to release its app-bound cookies to Ferryx, so those were skipped; sign in again on the sites that need them.",
+    );
+  });
+
   it("formats custom reason without actionable mapping as reason alone", () => {
     const customError = {
       code: "BROWSER_COOKIE_IMPORT_FAILED",
@@ -458,5 +493,15 @@ describe("browser cookie import error formatting and reasoning", () => {
 
   it("getBrowserCookieImportActionableMessage returns null for unrecognized reasons", () => {
     expect(getBrowserCookieImportActionableMessage("unknown-reason")).toBeNull();
+  });
+
+  it("describeInstalledCookieImportBlock is null unless a named block was reported", () => {
+    expect(describeInstalledCookieImportBlock(undefined)).toBeNull();
+    expect(describeInstalledCookieImportBlock(null)).toBeNull();
+    expect(describeInstalledCookieImportBlock({ reason: "  " })).toBeNull();
+    expect(describeInstalledCookieImportBlock({ reason: "custom-block" })).toBe("custom-block");
+    expect(describeInstalledCookieImportBlock({ reason: "custom-block", hresult: "0x1" })).toBe(
+      "custom-block (0x1)",
+    );
   });
 });

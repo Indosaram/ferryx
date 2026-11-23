@@ -94,12 +94,77 @@
           "type": "string",
           "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
         },
+        "port": {
+          "description": "TLS signaling port of that host; a QA box can run several, so it is not assumed to be 19730.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
         "binary": {
           "description": "maho-client executable; defaults to `maho-client` on PATH.",
           "type": "string",
           "minLength": 1
+        },
+        "rdClient": {
+          "description": "RD client the harness passes to connectMahord; defaults to `maho-client`.",
+          "type": "string",
+          "minLength": 1
         }
       }
+    },
+    "windowRect": {
+      "description": "The Ferryx window's rectangle in screenshot pixels, when the host cannot report it live. Optional: it only narrows the consent-card search.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "left",
+        "top",
+        "right",
+        "bottom"
+      ],
+      "properties": {
+        "left": { "type": "integer", "minimum": 0 },
+        "top": { "type": "integer", "minimum": 0 },
+        "right": { "type": "integer", "minimum": 1 },
+        "bottom": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "guiEnv": {
+      "description": "Extra environment for the launched GUI only: desktop-session variables (XDG_RUNTIME_DIR, WAYLAND_DISPLAY, HYPRLAND_INSTANCE_SIGNATURE) that a GUI cannot discover over ssh. Never secrets.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "guiLaunch": {
+      "description": "Arguments and working directory for the launched GUI, for a host whose app needs its own flags.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "args": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string" },
+        "unit": { "type": "string", "description": "Linux transient user unit name for the launched GUI, so teardown stops exactly it." }
+      }
+    },
+    "guiFrontend": {
+      "description": "The origin a debug GUI build loads (its `devUrl`). When set, preflight asserts it answers 200 and starts it from this spec if nothing is serving, so a 404 window cannot be mistaken for a pairing failure.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port", "command"],
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "command": { "type": "string", "description": "Executable that serves the built frontend, e.g. python3." },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string", "description": "Directory the server serves; the built `ui/dist`." }
+      }
+    },
+    "env": {
+      "description": "Extra environment for isolated child processes (host quirks only, e.g. WEBKIT_DISABLE_DMABUF_RENDERER). Never secrets.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "tesseract": {
+      "description": "tesseract executable used to read the consent card's words. Optional: when absent, PATH is searched, and with no binary at all the harness falls back to measured button pixels and says so in the transcript.",
+      "$ref": "#/$defs/absolutePath"
     },
     "remoteGateway": {
       "description": "Existing remote gateway bootstrap for the QA (non-production) device used by Q2/Q4/Q8/Q9.",
@@ -145,6 +210,12 @@
           "maximum": 600000
         },
         "approvalMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 600000
+        },
+        "startupMs": {
+          "description": "Time allowed for the launched GUI to start answering on its socket. Distinct from readyMs, which bounds one request.",
           "type": "integer",
           "minimum": 100,
           "maximum": 600000

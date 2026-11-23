@@ -31,6 +31,44 @@ use windows::Win32::System::Com::{
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+/// Why the app-bound (`v20`) key in `Local State` could not be released.
+///
+/// The browser's elevation service releases an app-bound key only to its own signed image, so
+/// any other caller gets `kValidationDidNotPass` (`0x8004A007`) back. That is a refusal, not a
+/// missing key: the `v10` DPAPI key cannot open a `v20` row, so falling back to it only turned
+/// every `v20` cookie into a generic decryption failure. The refusal is therefore typed and
+/// carried to the importer, which reports the `v20` rows as seen and not applied.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AppBoundKeyError {
+    #[error("the browser's elevation service refused the app-bound key (HRESULT 0x{hresult:08X})")]
+    Refused { hresult: u32 },
+    /// The elevator could not be reached at all: no COM config for this browser, the service
+    /// is not installed, or the interface is not proxied.
+    #[error("{0}")]
+    Unavailable(String),
+    /// The key material in `Local State` is not an app-bound key this code can present.
+    #[error("{0}")]
+    Malformed(String),
+}
+
+impl AppBoundKeyError {
+    /// Stable machine-readable code, surfaced as `details.reason` of the cookie import error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Refused { .. } => "app-bound-key-refused",
+            Self::Unavailable(_) | Self::Malformed(_) => "app-bound-key-unavailable",
+        }
+    }
+
+    /// The measured COM status of a refusal, when the service answered.
+    pub fn hresult(&self) -> Option<u32> {
+        match self {
+            Self::Refused { hresult } => Some(*hresult),
+            Self::Unavailable(_) | Self::Malformed(_) => None,
+        }
+    }
+}
+
 /// Decryptor for Windows Chrome / Edge / Brave cookies.
 pub struct WindowsAppBoundDecryptor {
     aes_key: Zeroizing<Vec<u8>>,
@@ -40,37 +78,44 @@ impl WindowsAppBoundDecryptor {
     /// Attempts to decrypt the AES key from the browser's Local State.
     ///
     /// Tries the IElevator2 (Chrome 144+ v2) COM interface first, falling back
-    /// to IElevator (v1) if available, and finally falling back to user-context DPAPI
-    /// (for browsers that do not use App-Bound encryption).
+    /// to IElevator (v1) if available. When `Local State` holds an app-bound key, a refusal is
+    /// returned as [`AppBoundKeyError::Refused`] and NOT degraded into the `v10` DPAPI key: the
+    /// `v10` key cannot decrypt a `v20` row, so the fallback hid the reason. Only a profile
+    /// without an app-bound key (pre-Chrome-117) uses the DPAPI key alone.
     #[cfg(windows)]
-    pub fn for_browser(browser_name: &str, local_state_path: &Path) -> Result<Self, String> {
+    pub fn for_browser(
+        browser_name: &str,
+        local_state_path: &Path,
+    ) -> Result<Self, AppBoundKeyError> {
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
 
-        let content = std::fs::read_to_string(local_state_path).map_err(|e| e.to_string())?;
-        let json: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let content = std::fs::read_to_string(local_state_path)
+            .map_err(|e| AppBoundKeyError::Unavailable(format!("reading Local State: {e}")))?;
+        let json: Value = serde_json::from_str(&content)
+            .map_err(|e| AppBoundKeyError::Unavailable(format!("parsing Local State: {e}")))?;
 
-        // 1. Try to load the app_bound_encrypted_key (v20 Chrome/Edge/Brave)
+        // 1. The app_bound_encrypted_key (v20 Chrome/Edge/Brave).
         if let Some(app_bound_b64) = json["os_crypt"]["app_bound_encrypted_key"].as_str() {
             use base64::Engine as _;
             let encrypted_key = base64::engine::general_purpose::STANDARD
                 .decode(app_bound_b64)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    AppBoundKeyError::Malformed(format!(
+                        "app_bound_encrypted_key is not base64: {e}"
+                    ))
+                })?;
 
-            if encrypted_key.starts_with(b"APPB") {
-                let payload = &encrypted_key[4..];
-                // Try COM decryption
-                match decrypt_via_com(browser_name, payload) {
-                    Ok(key) => return Ok(Self { aes_key: key }),
-                    Err(e) => {
-                        tracing::warn!(browser = browser_name, error = %e, "app-bound key decryption failed; falling back to DPAPI");
-                    }
-                }
+            if let Some(payload) = encrypted_key.strip_prefix(b"APPB") {
+                let key = decrypt_key(browser_name, payload)?;
+                return Ok(Self { aes_key: key });
             }
         }
 
-        // 2. Fall back to standard DPAPI (v10 / pre-Chrome-117 key format)
+        // 2. No app-bound key in this profile: the DPAPI key is the only one (v10 / pre-Chrome-117).
         Self::from_dpapi_json(&json).ok_or_else(|| {
-            format!("Could not extract decryption key for browser {}", browser_name)
+            AppBoundKeyError::Unavailable(format!(
+                "Local State of {browser_name} holds no decryption key"
+            ))
         })
     }
 
@@ -233,17 +278,68 @@ fn get_browser_config(browser_name: &str) -> Option<BrowserComConfig> {
     }
 }
 
+/// Asks the browser's elevation service for the app-bound key.
+///
+/// Tests replace the COM round-trip with [`COM_DECRYPT_OVERRIDE`] so the refusal path is
+/// exercised without a browser, its service, or a real profile; production always goes through
+/// [`decrypt_via_com`].
 #[cfg(windows)]
-fn decrypt_via_com(browser_name: &str, encrypted_key: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
-    let config = get_browser_config(browser_name)
-        .ok_or_else(|| format!("COM configuration missing for browser {}", browser_name))?;
+fn decrypt_key(
+    browser_name: &str,
+    encrypted_key: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, AppBoundKeyError> {
+    #[cfg(any(test, feature = "testing"))]
+    if let Some(override_fn) = *COM_DECRYPT_OVERRIDE.lock().unwrap() {
+        return override_fn(browser_name, encrypted_key);
+    }
+    decrypt_via_com(browser_name, encrypted_key)
+}
+
+/// Test seam: the COM round-trip that releases the app-bound key. A test that installs an
+/// override holds [`COM_DECRYPT_LOCK`] for its whole body, so the process-wide override cannot
+/// leak into a test running beside it.
+///
+/// `pub` rather than `pub(crate)` because a dependent crate's tests (src-tauri) drive the same
+/// refusal path; the `testing` feature is what makes this reachable outside this crate, and it is
+/// only enabled by a dev-dependency. `#[doc(hidden)]` keeps it out of the public API docs.
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+#[cfg(windows)]
+pub type ComDecryptOverride =
+    fn(&str, &[u8]) -> Result<Zeroizing<Vec<u8>>, AppBoundKeyError>;
+
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+#[cfg(windows)]
+pub static COM_DECRYPT_OVERRIDE: std::sync::Mutex<Option<ComDecryptOverride>> =
+    std::sync::Mutex::new(None);
+
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+#[cfg(windows)]
+pub static COM_DECRYPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(windows)]
+fn decrypt_via_com(
+    browser_name: &str,
+    encrypted_key: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, AppBoundKeyError> {
+    let config = get_browser_config(browser_name).ok_or_else(|| {
+        AppBoundKeyError::Unavailable(format!(
+            "COM configuration missing for browser {}",
+            browser_name
+        ))
+    })?;
 
     unsafe {
-        let guid = |text: &str| GUID::try_from(text).map_err(|e| format!("invalid GUID {text}: {e}"));
+        let guid = |text: &str| {
+            GUID::try_from(text)
+                .map_err(|e| AppBoundKeyError::Unavailable(format!("invalid GUID {text}: {e}")))
+        };
         let clsid = guid(config.clsid)?;
 
         let unknown: IUnknown = CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER)
-            .map_err(|e| format!("CoCreateInstance failed: {}", e))?;
+            .map_err(|e| AppBoundKeyError::Unavailable(format!("CoCreateInstance failed: {}", e)))?;
 
         // Query the IElevator interfaces in order; the first one the service proxies wins.
         let mut elevator_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -256,10 +352,10 @@ fn decrypt_via_com(browser_name: &str, encrypted_key: &[u8]) -> Result<Zeroizing
         }
 
         if hr.is_err() || elevator_ptr.is_null() {
-            return Err(format!(
+            return Err(AppBoundKeyError::Unavailable(format!(
                 "QueryInterface for IElevator failed with HRESULT 0x{:08X}",
                 hr.0
-            ));
+            )));
         }
 
         // DecryptData impersonates the caller to undo the user-level DPAPI layer; without an
@@ -276,7 +372,9 @@ fn decrypt_via_com(browser_name: &str, encrypted_key: &[u8]) -> Result<Zeroizing
             EOAC_DYNAMIC_CLOAKING,
         ) {
             let _ = IUnknown::from_raw(elevator_ptr);
-            return Err(format!("CoSetProxyBlanket on IElevator failed: {error}"));
+            return Err(AppBoundKeyError::Unavailable(format!(
+                "CoSetProxyBlanket on IElevator failed: {error}"
+            )));
         }
 
         let result = call_decrypt_data(elevator_ptr, config.vtable_slot, encrypted_key);
@@ -297,7 +395,7 @@ unsafe fn call_decrypt_data(
     unknown_ptr: *mut std::ffi::c_void,
     slot: usize,
     input: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, String> {
+) -> Result<Zeroizing<Vec<u8>>, AppBoundKeyError> {
     let vtable_ptr = *(unknown_ptr as *mut *mut *mut std::ffi::c_void);
     let func_ptr = *vtable_ptr.add(slot);
 
@@ -312,7 +410,7 @@ unsafe fn call_decrypt_data(
 
     let ciphertext: BSTR = SysAllocStringByteLen(Some(input));
     if ciphertext.is_empty() && !input.is_empty() {
-        return Err("BSTR allocation failed".into());
+        return Err(AppBoundKeyError::Malformed("BSTR allocation failed".into()));
     }
     let mut plaintext_raw: *const u16 = std::ptr::null();
     let mut last_error: u32 = 0;
@@ -322,15 +420,23 @@ unsafe fn call_decrypt_data(
     let plaintext = BSTR::from_raw(plaintext_raw);
 
     if hr < 0 {
-        return Err(format!(
-            "COM DecryptData failed with HRESULT 0x{:08X}, last_error={}",
-            hr, last_error
-        ));
+        // The service answered and refused the key: 0x8004A007 (kValidationDidNotPass) for any
+        // caller that is not the browser's own image.
+        tracing::warn!(
+            hresult = format!("0x{:08X}", hr),
+            last_error,
+            "elevation service refused the app-bound key"
+        );
+        return Err(AppBoundKeyError::Refused {
+            hresult: hr as u32,
+        });
     }
 
     let size = SysStringByteLen(&plaintext) as usize;
     if plaintext_raw.is_null() || size == 0 {
-        return Err("COM DecryptData returned null or empty output".into());
+        return Err(AppBoundKeyError::Malformed(
+            "COM DecryptData returned null or empty output".into(),
+        ));
     }
 
     let key = Zeroizing::new(std::slice::from_raw_parts(plaintext_raw as *const u8, size).to_vec());
@@ -393,5 +499,157 @@ mod review_tests {
             "session-value"
         );
         assert!(decryptor.decrypt_bound_cookie(&blob, 24, ".other.com").is_err());
+    }
+
+    /// The refusal keeps the measured HRESULT and reports the stable code the cookie importer
+    /// hands to the shell, while an unreachable service does not claim to be a refusal.
+    #[test]
+    fn a_refusal_is_typed_with_its_hresult_and_never_collapses_into_a_missing_key() {
+        let refused = AppBoundKeyError::Refused { hresult: 0x8004_A007 };
+        assert_eq!(refused.code(), "app-bound-key-refused");
+        assert_eq!(refused.hresult(), Some(0x8004_A007));
+        assert!(
+            refused.to_string().contains("0x8004A007"),
+            "the reason must carry the measured status: {refused}"
+        );
+
+        let unreachable = AppBoundKeyError::Unavailable("CoCreateInstance failed".into());
+        assert_eq!(unreachable.code(), "app-bound-key-unavailable");
+        assert_eq!(unreachable.hresult(), None);
+
+        let malformed = AppBoundKeyError::Malformed("not base64".into());
+        assert_eq!(malformed.code(), "app-bound-key-unavailable");
+    }
+
+    #[cfg(windows)]
+    mod windows_key_selection {
+        use super::*;
+        use base64::Engine as _;
+        use std::io::Write;
+        use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+        /// A `Local State` holding `os_crypt.encrypted_key` (the `v10` DPAPI key) and, when
+        /// `app_bound` is given, `os_crypt.app_bound_encrypted_key` (the `APPB`-prefixed key).
+        fn local_state(app_bound: Option<Vec<u8>>, dpapi_key: Option<&[u8]>) -> (tempfile::TempDir, std::path::PathBuf) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("Local State");
+            let mut os_crypt = serde_json::Map::new();
+            if let Some(key) = dpapi_key {
+                let mut wrapped = b"DPAPI".to_vec();
+                wrapped.extend_from_slice(&dpapi_protect(key));
+                os_crypt.insert(
+                    "encrypted_key".into(),
+                    Value::String(base64::engine::general_purpose::STANDARD.encode(wrapped)),
+                );
+            }
+            if let Some(app_bound) = app_bound {
+                let mut wrapped = b"APPB".to_vec();
+                wrapped.extend_from_slice(&app_bound);
+                os_crypt.insert(
+                    "app_bound_encrypted_key".into(),
+                    Value::String(base64::engine::general_purpose::STANDARD.encode(wrapped)),
+                );
+            }
+            let json = serde_json::json!({ "os_crypt": Value::Object(os_crypt) });
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(json.to_string().as_bytes()).unwrap();
+            (dir, path)
+        }
+
+        /// DPAPI-protects `plain` in the current user context, as Chrome writes its `v10` key.
+        fn dpapi_protect(plain: &[u8]) -> Vec<u8> {
+            let input = CRYPT_INTEGER_BLOB {
+                cbData: plain.len() as u32,
+                pbData: plain.as_ptr() as *mut u8,
+            };
+            let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+            unsafe {
+                CryptProtectData(&input, None, None, None, None, 0, &mut out).unwrap();
+                let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+                let _ = LocalFree(Some(HLOCAL(out.pbData as *mut std::ffi::c_void)));
+                bytes
+            }
+        }
+
+        /// A `v10` AES-256-GCM cookie blob for `value` on `host` under `key`, host-bound the way
+        /// Chromium writes it for database version 24.
+        fn v10_cookie(key: &[u8], host: &str, value: &str) -> Vec<u8> {
+            use sha2::{Digest, Sha256};
+            let iv = [9u8; 12];
+            let mut plain = Sha256::digest(host.as_bytes()).to_vec();
+            plain.extend_from_slice(value.as_bytes());
+            let cipher = Aes256Gcm::new_from_slice(key).unwrap();
+            let mut blob = b"v10".to_vec();
+            blob.extend_from_slice(&iv);
+            blob.extend(cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).unwrap());
+            blob
+        }
+
+        /// Characterization (passes before and after the fix): a profile whose `Local State` has
+        /// only the DPAPI key still yields a working decryptor, so `v10` cookies keep importing.
+        #[test]
+        fn v10_dpapi_key_alone_still_decrypts_a_v10_cookie() {
+            let key = [0x5Au8; 32];
+            let (_dir, path) = local_state(None, Some(&key));
+            let decryptor = WindowsAppBoundDecryptor::for_browser("Chrome", &path)
+                .expect("a DPAPI-only profile must open");
+            let blob = v10_cookie(&key, ".example.com", "v10-value");
+            assert_eq!(
+                decryptor
+                    .decrypt_bound_cookie(&blob[3..], 24, ".example.com")
+                    .unwrap(),
+                "v10-value"
+            );
+        }
+
+        /// Regression: an `APPB` key the elevation service refuses must NOT degrade into the
+        /// DPAPI key. Before the fix `for_browser` logged a warning, handed back the `v10`
+        /// decryptor and every `v20` row then failed with a generic AES-GCM error.
+        #[test]
+        fn a_refused_app_bound_key_is_reported_instead_of_falling_back_to_dpapi() {
+            let _guard = COM_DECRYPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let (_dir, path) = local_state(Some(b"sealed-app-bound".to_vec()), Some(&[0x11u8; 32]));
+
+            *COM_DECRYPT_OVERRIDE.lock().unwrap() = Some(|_browser, _key| {
+                Err(AppBoundKeyError::Refused { hresult: 0x8004_A007 })
+            });
+            let result = WindowsAppBoundDecryptor::for_browser("Chrome", &path);
+            *COM_DECRYPT_OVERRIDE.lock().unwrap() = None;
+
+            match result {
+                Err(AppBoundKeyError::Refused { hresult }) => assert_eq!(hresult, 0x8004_A007),
+                Err(other) => panic!("a refusal must stay a refusal, got {other:?}"),
+                Ok(_) => panic!("the DPAPI key cannot open v20 rows; it must not stand in"),
+            }
+        }
+
+        /// The seam still drives the success path: a released key opens `v20` cookies.
+        #[test]
+        fn a_released_app_bound_key_decrypts_a_v20_cookie() {
+            static KEY: [u8; 32] = [0x77; 32];
+            let _guard = COM_DECRYPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let (_dir, path) = local_state(Some(b"sealed-app-bound".to_vec()), None);
+
+            *COM_DECRYPT_OVERRIDE.lock().unwrap() = Some(|_browser, payload| {
+                assert_eq!(payload, b"sealed-app-bound", "the APPB prefix is stripped");
+                Ok(Zeroizing::new(KEY.to_vec()))
+            });
+            let decryptor = WindowsAppBoundDecryptor::for_browser("Chrome", &path);
+            *COM_DECRYPT_OVERRIDE.lock().unwrap() = None;
+            let decryptor = decryptor.expect("a released key opens");
+
+            use sha2::{Digest, Sha256};
+            let iv = [4u8; 12];
+            let mut plain = Sha256::digest(b".example.com").to_vec();
+            plain.extend_from_slice(b"v20-value");
+            let cipher = Aes256Gcm::new_from_slice(&KEY).unwrap();
+            let mut blob = b"v20".to_vec();
+            blob.extend_from_slice(&iv);
+            blob.extend(cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).unwrap());
+            assert_eq!(
+                decryptor.decrypt_bound_cookie(&blob[3..], 24, ".example.com").unwrap(),
+                "v20-value"
+            );
+        }
     }
 }

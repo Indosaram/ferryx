@@ -103,13 +103,18 @@ export const KIND_DEFINITIONS = Object.freeze({
     allowedExtensions: ["ferryx-rd-client-darwin-universal", "ferryx-rd-client"],
   },
   // Windows needs the client and its FFmpeg DLL sidecars together: the client links FFmpeg
-  // dynamically, so a bare .exe fails to start on a host without a system FFmpeg.
+  // dynamically, so a bare .exe exits 0xC0000135 (STATUS_DLL_NOT_FOUND) on a host without a
+  // system FFmpeg (measured 2026-11-10). One release asset cannot carry several files, so the
+  // artifact is a zip holding ferryx-rd-client.exe plus exactly the DLLs it loads.
   "rd-client-windows-amd64": {
     permittedHost: "maho-win",
     isUpdater: false,
     expectedTargets: [],
-    stableAlias: "ferryx-rd-client-windows-amd64.exe",
-    allowedExtensions: ["-windows-amd64.exe", "ferryx-rd-client.exe"],
+    stableAlias: "ferryx-rd-client-windows-amd64.zip",
+    allowedExtensions: ["-windows-amd64.zip"],
+    // Members a Windows client needs beside the exe to start at all. The client loads avcodec
+    // and avutil directly and swscale/swresample through the FFmpeg link closure.
+    zipEntries: ["ferryx-rd-client.exe", "avcodec-*.dll", "avutil-*.dll", "swscale-*.dll", "swresample-*.dll"],
   },
 });
 
@@ -149,6 +154,92 @@ export const ALLOWED_ARTIFACT_KEYS = Object.freeze([
 const SHA256_REGEX = /^[0-9a-f]{64}$/;
 const COMMIT_SHA_REGEX = /^[0-9a-f]{40}$/;
 const REPO_REGEX = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
+
+/**
+ * Members a multi-file artifact must carry, as exact names or `*` globs (e.g. `avcodec-*.dll`).
+ * `[]` for a single-file artifact.
+ *
+ * @param {string} kind
+ * @returns {string[]}
+ */
+export function zipEntriesForKind(kind) {
+  return KIND_DEFINITIONS[kind]?.zipEntries ?? [];
+}
+
+/**
+ * Matches one `zipEntries` pattern against a zip member name. `*` matches any run of characters
+ * except a path separator, so a nested entry never satisfies a top-level requirement.
+ */
+function matchesZipPattern(pattern, name) {
+  const source = pattern
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[^/]*");
+  return new RegExp(`^${source}$`).test(name);
+}
+
+/**
+ * Checks a zip member list against the kind's `zipEntries` contract and returns the entries that
+ * are missing. An artifact with no `zipEntries` requires nothing.
+ *
+ * @param {string} kind
+ * @param {string[]} names zip member names, as the archive stores them
+ * @returns {string[]} the patterns no member satisfies
+ */
+export function missingZipEntries(kind, names) {
+  const required = zipEntriesForKind(kind);
+  return required.filter((pattern) => !names.some((name) => matchesZipPattern(pattern, name)));
+}
+
+const ZIP_EOCD_SIGNATURE = 0x06054b50;
+const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
+const ZIP64_LOCATOR_SIGNATURE = 0x07064b50;
+const ZIP64_EOCD_SIGNATURE = 0x06064b50;
+const ZIP_U16_MAX = 0xffff;
+const ZIP_U32_MAX = 0xffffffff;
+
+/**
+ * Lists the member names of a zip archive from its central directory, in archive order.
+ * Returns null when `buffer` is not a readable zip (no end-of-central-directory record), so a
+ * caller can tell "not a zip" from "a zip with the wrong members".
+ *
+ * @param {Buffer} buffer
+ * @returns {string[] | null}
+ */
+export function listZipEntries(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 22) return null;
+  let eocd = -1;
+  const first = Math.max(0, buffer.length - 22 - 0xffff);
+  for (let i = buffer.length - 22; i >= first; i -= 1) {
+    if (buffer.readUInt32LE(i) === ZIP_EOCD_SIGNATURE) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+  let entries = buffer.readUInt16LE(eocd + 10);
+  let offset = buffer.readUInt32LE(eocd + 16);
+  if (entries === ZIP_U16_MAX || offset === ZIP_U32_MAX) {
+    const locator = eocd - 20;
+    if (locator < 0 || buffer.readUInt32LE(locator) !== ZIP64_LOCATOR_SIGNATURE) return null;
+    const record = Number(buffer.readBigUInt64LE(locator + 8));
+    if (record + 56 > buffer.length || buffer.readUInt32LE(record) !== ZIP64_EOCD_SIGNATURE) return null;
+    entries = Number(buffer.readBigUInt64LE(record + 32));
+    offset = Number(buffer.readBigUInt64LE(record + 48));
+  }
+  const names = [];
+  for (let n = 0; n < entries; n += 1) {
+    if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== ZIP_CENTRAL_SIGNATURE) return null;
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const nameStart = offset + 46;
+    if (nameStart + nameLength > buffer.length) return null;
+    names.push(buffer.toString("utf8", nameStart, nameStart + nameLength));
+    offset = nameStart + nameLength + extraLength + commentLength;
+  }
+  return names;
+}
 
 /**
  * Validates that a relative path does not escape or use traversal.

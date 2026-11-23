@@ -107,13 +107,34 @@ export function createPipeSession({ write, maxBytes = MAX_FRAME_BYTES, timeoutMs
   let nextId = 1;
   let closed = null;
 
+  // Requests the daemon may refuse before it can read an id (an oversized frame is rejected on
+  // size alone). Those refusals arrive with `id: null` and belong to the oldest such request.
+  const uncorrelated = new Set();
   const settle = ({ frame, error, raw }) => {
     if (error) { errors.push(error); onTranscript({ dir: 'in', error: { code: error.code, message: error.message } }); return; }
     onTranscript({ dir: 'in', frame });
-    const entry = frame && Object.hasOwn(frame, 'id') ? pending.get(frame.id) : undefined;
-    if (!entry) { unsolicited.push({ frame, raw }); return; }
-    pending.delete(frame.id);
-    entry.resolve(frame);
+    const hasId = frame && frame.id !== null && frame.id !== undefined && Object.hasOwn(frame, 'id');
+    const entry = hasId ? pending.get(frame.id) : undefined;
+    if (entry) {
+      pending.delete(frame.id);
+      uncorrelated.delete(frame.id);
+      entry.resolve(frame);
+      return;
+    }
+    // A frame the daemon refused before it could read an id (oversized, or JSON it could not parse)
+    // arrives with `id: null` - it never had one to echo. Only a request sent with `allowOversize`
+    // can be the one refused that way, so the refusal is handed to the oldest such request; the
+    // pipe answers strictly in order, one response per request. Without this the caller waited out
+    // its whole deadline and reported a transport timeout for an immediate typed refusal (Q6 on
+    // omarchy). A malformed line sent with sendRaw() has no request behind it and stays unsolicited.
+    if (!hasId && frame && frame.error && uncorrelated.size > 0) {
+      const id = uncorrelated.values().next().value;
+      const waiting = pending.get(id);
+      uncorrelated.delete(id);
+      pending.delete(id);
+      if (waiting) { waiting.resolve(frame); return; }
+    }
+    unsolicited.push({ frame, raw });
   };
 
   return {
@@ -125,9 +146,10 @@ export function createPipeSession({ write, maxBytes = MAX_FRAME_BYTES, timeoutMs
       const frame = { ...message, id };
       const bytes = encodeFrame(frame, { maxBytes, allowOversize });
       const response = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+      if (allowOversize) uncorrelated.add(id);
       onTranscript({ dir: 'out', frame: allowOversize ? { id, op: frame.op, oversizeBytes: bytes.byteLength } : frame });
       write(bytes);
-      return withTimeout(response, timeout, `pipe ${frame.op} #${id}`, () => pending.delete(id));
+      return withTimeout(response, timeout, `pipe ${frame.op} #${id}`, () => { pending.delete(id); uncorrelated.delete(id); });
     },
     /** Raw bytes for malformed-input tests; there is no response correlation. */
     sendRaw(text) {

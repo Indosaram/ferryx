@@ -78,6 +78,31 @@ describe("RemoteDesktopPane", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   });
 
+  it("shows the typed refusal when hosting is off on the far machine, then reconnects once it is on", async () => {
+    // C3 regression: a disabled host answers RD_HOST_DISABLED instead of leaving the pane on
+    // "Connecting…" forever. The refusal must be user-visible text, not a spinner.
+    let calls = 0;
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_rd_connect") {
+        calls += 1;
+        if (calls === 1) throw { code: "RD_HOST_DISABLED", message: "off", details: {} };
+        return { rdSessionId: "rd-after-enable" };
+      }
+      return undefined;
+    });
+    render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Remote desktop hosting is turned off on that machine.");
+    // The refusal replaces the connecting overlay: no lingering progress state.
+    expect(screen.queryByText(/Connecting/)).toBeNull();
+    expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-state", "error");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_connect", expect.objectContaining({ hostId: "host-1" })));
+    await waitFor(() => expect(calls).toBe(2));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("draws frames and sends normalized pointer and key input once connected", async () => {
     const drawImage = vi.fn();
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);

@@ -1197,6 +1197,8 @@ mod transport {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::remote::remote_desktop::PAIR_ROUTE;
+        use crate::remote::DevicePermission;
 
         fn http_error(code: &str, status: u16) -> ClientError {
             let mut details = serde_json::Map::new();
@@ -1265,6 +1267,96 @@ mod transport {
                 serde_json::json!({ "pairingId": "p1", "keyB64": short, "hostName": "Desk" });
             assert!(pairing_record(body.to_string().as_bytes(), 0).is_err());
             assert!(pairing_record(b"not json", 0).is_err());
+        }
+
+        /// C3 regression: with remote desktop hosting OFF on the far machine the pane must get a
+        /// typed refusal instead of waiting. The gateway answers the pair route with 409 +
+        /// RD_HOST_DISABLED before any socket upgrade, and the viewer's transport maps that 409
+        /// to the same RD_HOST_DISABLED code the pane renders as "turned off". This drives the
+        /// real gateway router and the real MachineClient, so a regression in either the route or
+        /// the mapping fails here rather than showing up as a spinner in the GUI.
+        #[test]
+        fn a_disabled_host_refuses_the_pair_route_before_any_stream() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let state = {
+                let _context = rt.enter();
+                Arc::new(crate::remote::state::RemoteGatewayState::new_with_paths(
+                    Arc::new(crate::terminal::TerminalService::default()),
+                    crate::worktree::WorkspaceRegistry::new(),
+                    Some(dir.path().join("remote-config.json")),
+                    Some(dir.path().join("remote-auth.json")),
+                ))
+            };
+            // The host stays disabled: never call set(), so this is the default state the GUI
+            // finds on a machine whose owner turned remote desktop off.
+            assert!(!state.remote_desktop.state().enabled);
+
+            let listener = rt
+                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+                .expect("bind gateway");
+            let gateway = listener.local_addr().expect("gateway addr");
+            let router = crate::remote::create_remote_router(Arc::clone(&state));
+            let server = rt.spawn(async move { axum::serve(listener, router).await });
+
+            let code = state
+                .auth_manager
+                .create_scoped_pairing_code(
+                    DevicePermission::Control,
+                    crate::remote::auth::DeviceAccessScope::Machine,
+                )
+                .expect("machine pairing code");
+            let (token, _device) = state
+                .auth_manager
+                .exchange_pairing_code(&code, "c3 disabled host")
+                .expect("exchange pairing code");
+
+            let started = std::time::Instant::now();
+            let (status, body) = rt.block_on(async {
+                let http = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("http client");
+                let response = http
+                    .post(format!("http://{gateway}{PAIR_ROUTE}"))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .expect("pair request");
+                (response.status().as_u16(), response.bytes().await.expect("pair body").to_vec())
+            });
+            let elapsed = started.elapsed();
+            assert_eq!(status, 409, "disabled host must answer 409: {}", String::from_utf8_lossy(&body));
+            let refusal: serde_json::Value = serde_json::from_slice(&body).expect("refusal JSON");
+            assert_eq!(refusal["code"], "RD_HOST_DISABLED", "typed refusal: {refusal}");
+            // Well inside the pane's 30 s budget: the refusal is immediate, not a timeout.
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "refusal took {elapsed:?}, expected an immediate answer"
+            );
+
+            // The same refusal travels through the client's error mapping to the pane's code.
+            let mut details = serde_json::Map::new();
+            details.insert("httpStatus".into(), serde_json::json!(status));
+            let client_error = ClientError {
+                code: refusal["code"].as_str().unwrap_or_default().to_owned(),
+                machine_error: Some(Box::new(crate::remote::machine_protocol::MachineError {
+                    code: refusal["code"].as_str().unwrap_or_default().to_owned(),
+                    message: refusal["message"].as_str().unwrap_or_default().to_owned(),
+                    retryable: false,
+                    request_id: String::new(),
+                    details,
+                })),
+                request_id: None,
+                ambiguous: false,
+            };
+            assert_eq!(code_of(&map_client_error(&client_error)), RD_HOST_DISABLED);
+
+            server.abort();
         }
     }
 }

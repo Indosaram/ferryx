@@ -29,6 +29,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 import { Database } from "bun:sqlite";
 
+import { cardButtonPoint } from "./card-buttons.mjs";
+
 const argv = process.argv.slice(2);
 const option = (name) => {
   const index = argv.indexOf(`--${name}`);
@@ -1618,29 +1620,88 @@ function rowButtonLabel(path, { x0, x1, y0, y1 }) {
   const label = clusters.filter((cluster) => cluster.right - cluster.left >= 12 && cluster.right - cluster.left <= 120 && cluster.bottom - cluster.top <= 24).at(-1);
   return label ? { x: Math.round((label.left + label.right) / 2), y: Math.round((label.top + label.bottom) / 2) } : null;
 }
+
+/** The controller name the audit pairs as; every card title the audit meets names it. */
+const CARD_CONTROLLER = "ferryxqa";
+/**
+ * The approval card's title line as OCR read it, or null when it could not be read. Both card
+ * kinds must be recognised, because card-buttons.mjs can only protect a card whose title it was
+ * told about: a grant card whose title is missed is judged with `titleTop: null` and the only
+ * evidence left is a sibling button, so a wrapped title word alone on its row is a live risk.
+ * Titles as BrowserAgentApprovalCard renders them:
+ *   Allow "<controller>" to control the browser?   pair
+ *   Let <controller> use <origin>?                 origin grant
+ *   Let <controller> run <tool> once?              capability grant
+ * "control the browser?" covers a pair title whose controller name OCR mangled. Nothing looser than
+ * these is accepted: a bare "Let" anywhere on the screen would be a title above the real one, and
+ * every word below it - the card's own title included - would then look like a button row, which
+ * is the defect this file exists to prevent. A missed title only costs the weaker evidence tier,
+ * so failing to recognise one is the safe direction.
+ */
+function cardTitle(words) {
+  return (
+    [
+      findPhrase(words, `Allow "${CARD_CONTROLLER}"`)[0],
+      findPhrase(words, `Let ${CARD_CONTROLLER}`)[0],
+      findPhrase(words, "control the browser?")[0],
+    ]
+      .filter(Boolean)
+      .sort((a, b) => a.top - b.top)[0] ?? null
+  );
+}
+/**
+ * Where `primaryButtonBelow` starts looking: the card title when it was read, else the top-most
+ * occurrence of the button label itself. The label word alone never justifies a click (it may be
+ * a partly-read title, which is exactly H1), but it is a card-local anchor: the pixel scan then
+ * looks *below* it for a light filled pill, which lands on the real button row.
+ */
+function cardAnchor(words, title, label) {
+  if (title) return title;
+  const labels = (words ?? []).filter((word) => word.text === label).sort((a, b) => a.top - b.top);
+  const first = labels[0];
+  return first ? { left: first.left, top: first.top, height: first.height, y: first.top + Math.round(first.height / 2), x: first.left + Math.round(first.width / 2) } : null;
+}
 async function clickCardButton(label, timeout = 20000) {
   const hit = await until(() => {
     const path = probeShot();
     const words = ocr(path) ?? [];
-    const title = findPhrase(words, "Let ferryxqa")[0] ?? findPhrase(words, "Allow \"ferryxqa\"")[0] ?? null;
+    const title = cardTitle(words);
     // The card's Deny has its primary button right of it on the same line; prefer that pair.
     const denies = words.filter((word) => word.text === "Deny").sort((a, b) => a.top - b.top);
     const paired = (word) => words.some((other) => other.text === label && Math.abs(other.top - word.top) <= 14 && other.left > word.left && other.left - word.left < 160);
     const deny = denies.find(paired) ?? denies[0];
-    if (!deny) {
-      // Windows OCR often drops the dark "Deny" button but reads the light primary one; cards
-      // sit top-centre, so the topmost match is the card's.
-      const alone = words.filter((word) => word.text === label).sort((a, b) => a.top - b.top)[0];
-      if (alone) return { at: [alone.left + Math.round(alone.width / 2), alone.top + Math.round(alone.height / 2)], via: "ocr (no Deny)", words: [] };
-      return title && label !== "Deny" ? primaryButtonBelow(path, title) : null;
+    if (deny) {
+      const button = words.find((word) => word.text === label && Math.abs(word.top - deny.top) <= 14 && word.left > deny.left);
+      const at = button
+        ? [button.left + Math.round(button.width / 2), button.top + Math.round(button.height / 2)]
+        : [deny.left + deny.width + 44, deny.top + Math.round(deny.height / 2)];
+      return { at, via: button ? "ocr" : "offset from Deny", words: words.filter((word) => Math.abs(word.top - deny.top) < 120).map((word) => word.text).slice(0, 40) };
     }
-    const button = words.find((word) => word.text === label && Math.abs(word.top - deny.top) <= 14 && word.left > deny.left);
-    const at = button
-      ? [button.left + Math.round(button.width / 2), button.top + Math.round(button.height / 2)]
-      : [deny.left + deny.width + 44, deny.top + Math.round(deny.height / 2)];
-    return { at, via: button ? "ocr" : "offset from Deny", words: words.filter((word) => Math.abs(word.top - deny.top) < 120).map((word) => word.text).slice(0, 40) };
+    // Windows OCR often drops the dark "Deny" button, so the primary is not provably next to it.
+    // Card titles open with the same verb as the button ("Allow \"ferryxqa\" to control the
+    // browser?" over Deny/Allow), and the old fallback took the topmost match: on Windows run
+    // 45024452034 it clicked (581,167), the title's own "Allow", the card expired unapproved and
+    // a click that approved nothing was recorded as ok. Let card-buttons.mjs accept a label only
+    // on positive evidence: a sibling button left of it, or nothing following it on a row that
+    // is provably below the title line this call hands over. `title` is therefore read for every
+    // card kind (cardTitle above): without it, a lone label word proves nothing and the locator
+    // returns null so the pixel fallback below runs.
+    const located = cardButtonPoint(words, label, { titleTop: title?.top ?? null });
+    if (located.at) {
+      return {
+        at: located.at,
+        via: located.via,
+        rejected: located.rejected,
+        words: words.filter((word) => Math.abs(word.top - located.at[1]) < 120).map((word) => word.text).slice(0, 40),
+      };
+    }
+    // No word is provably the button: fall back to its pixels below the card title, which OCR
+    // reads on every frame even when it reads neither button label. The anchor is the title when
+    // it was read, else the top-most label word (see cardAnchor).
+    const anchor = cardAnchor(words, title, label);
+    return anchor && label !== "Deny" ? primaryButtonBelow(path, anchor) : null;
   }, timeout, 700);
-  if (!hit) return { ok: false, stderr: "approval card (Deny button) not visible" };
+  if (!hit) return { ok: false, stderr: "approval card primary button not visible" };
   return { ...host.click(...hit.at), ...hit };
 }
 /** Spawns a blocking `controllers grant|pair` and answers its card by a real click. */

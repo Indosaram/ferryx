@@ -1700,6 +1700,19 @@ test("remote builders: every release builds, stages and checks the LGPL FFmpeg p
   assert.doesNotMatch(windows, /^.*bun tauri build[^\n]*--features/m);
   assert.match(windows, /--features cli --bin ferryx-rd-client/);
   assert.ok(windows.indexOf("--check") < windows.indexOf("tauri build"), "payload check precedes the build");
+  // The Windows client cannot start without its FFmpeg DLLs beside it (0xC0000135 on a host with
+  // no system FFmpeg), so the published artifact is a zip that must contain both.
+  assert.match(windows, /\$rdStageDir = Join-Path \$workspace 'rd-client-zip'/);
+  assert.match(windows, /Copy-Item -LiteralPath \$rdClient\[0\]\.FullName -Destination \(Join-Path \$rdStageDir 'ferryx-rd-client\.exe'\)/);
+  assert.match(windows, /\$rdRuntimeDir = Join-Path \$ffmpegPayload 'runtime'/);
+  assert.match(windows, /Get-ChildItem -Path \$rdRuntimeDir -Filter \$pattern -File/);
+  assert.match(windows, /Compress-Archive -Path \(Join-Path \$rdStageDir '\*'\) -DestinationPath \$rdZip/);
+  assert.match(windows, /ferryx-rd-client-windows-amd64\.zip/);
+  // The archive is verified by reading it back, not by trusting the packer.
+  assert.match(windows, /\[System\.IO\.Compression\.ZipFile\]::OpenRead\(\$rdZip\)/);
+  assert.ok(windows.indexOf("Compress-Archive") < windows.indexOf("ZipFile]::OpenRead"), "the zip is read back after packing");
+  // The DLLs live in the staged payload's runtime/ dir; a root-level glob shipped none of them.
+  assert.doesNotMatch(windows, /Get-ChildItem -Path \$ffmpegPayload -Filter \$pattern/);
 });
 
 test("verifyMacosFfmpegBundle: fails closed on missing dylib, absolute install name or missing rpath", () => {

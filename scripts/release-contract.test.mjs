@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  KIND_DEFINITIONS,
+  listZipEntries,
+  missingZipEntries,
   parsePlan,
   parseReceipt,
   requiredKinds,
 } from "./lib/release-contract.mjs";
+import { buildZip } from "./fixtures/rd-client-artifact.mjs";
 
 function makeValidPlan(overrides = {}) {
   return {
@@ -857,3 +861,95 @@ test("parseReceipt enforces permitted hosts and targets for cli artifacts", () =
 });
 
 
+
+// ------------------- Windows RD client zip contract -------------------
+//
+// The Windows client links FFmpeg dynamically: beside it on disk it needs avcodec/avutil/
+// swscale/swresample, or Windows refuses to start it with 0xC0000135 (STATUS_DLL_NOT_FOUND),
+// measured 2026-11-10. One release asset cannot carry several files, so the artifact is a zip
+// whose members the contract pins.
+
+test("the Windows RD client artifact is a zip that must carry the client and its FFmpeg DLLs", () => {
+  const def = KIND_DEFINITIONS["rd-client-windows-amd64"];
+  assert.equal(def.stableAlias, "ferryx-rd-client-windows-amd64.zip");
+  assert.deepEqual(def.allowedExtensions, ["-windows-amd64.zip"]);
+  assert.deepEqual(def.zipEntries, [
+    "ferryx-rd-client.exe",
+    "avcodec-*.dll",
+    "avutil-*.dll",
+    "swscale-*.dll",
+    "swresample-*.dll",
+  ]);
+  // Every other kind is a single file, so nothing else gains a zip requirement by accident.
+  for (const [kind, other] of Object.entries(KIND_DEFINITIONS)) {
+    if (kind === "rd-client-windows-amd64") continue;
+    assert.equal(other.zipEntries, undefined, `${kind} must not require zip members`);
+  }
+});
+
+test("a Windows RD client receipt naming a bare .exe is refused", () => {
+  const plan = makeValidPlan();
+  const receipt = makeValidReceipt("maho-win", plan);
+  receipt.artifacts.push({
+    kind: "rd-client-windows-amd64",
+    name: "ferryx-rd-client-windows-amd64.exe",
+    relPath: "windows/ferryx-rd-client-windows-amd64.exe",
+    bytes: 11558912,
+    sha256: "9123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    signatureRelPath: null,
+    targets: [],
+  });
+  assert.throws(
+    () => parseReceipt(receipt, plan),
+    /does not match allowed extensions/i,
+  );
+});
+
+test("a Windows RD client receipt naming the zip is accepted", () => {
+  const plan = makeValidPlan();
+  const receipt = makeValidReceipt("maho-win", plan);
+  receipt.artifacts.push({
+    kind: "rd-client-windows-amd64",
+    name: "ferryx-rd-client-windows-amd64.zip",
+    relPath: "windows/ferryx-rd-client-windows-amd64.zip",
+    bytes: 4558912,
+    sha256: "9123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    signatureRelPath: null,
+    targets: [],
+  });
+  const parsed = parseReceipt(receipt, plan);
+  assert.equal(parsed.artifacts.at(-1).kind, "rd-client-windows-amd64");
+});
+
+test("missingZipEntries names exactly the members an incomplete client zip lacks", () => {
+  const complete = ["ferryx-rd-client.exe", "avcodec-63.dll", "avutil-61.dll", "swscale-10.dll", "swresample-7.dll"];
+  assert.deepEqual(missingZipEntries("rd-client-windows-amd64", complete), []);
+  assert.deepEqual(
+    missingZipEntries("rd-client-windows-amd64", ["ferryx-rd-client.exe"]),
+    ["avcodec-*.dll", "avutil-*.dll", "swscale-*.dll", "swresample-*.dll"],
+  );
+  assert.deepEqual(
+    missingZipEntries("rd-client-windows-amd64", ["avcodec-63.dll", "avutil-61.dll", "swscale-10.dll", "swresample-7.dll"]),
+    ["ferryx-rd-client.exe"],
+  );
+  // A DLL parked in a subdirectory does not satisfy a top-level requirement: Windows resolves
+  // sidecars next to the executable, not in a nested folder.
+  assert.deepEqual(
+    missingZipEntries("rd-client-windows-amd64", ["ferryx-rd-client.exe", "dlls/avcodec-63.dll"]),
+    ["avcodec-*.dll", "avutil-*.dll", "swscale-*.dll", "swresample-*.dll"],
+  );
+  // Kinds without a zip contract never report missing members.
+  assert.deepEqual(missingZipEntries("cli-linux-amd64", []), []);
+});
+
+test("listZipEntries reads real archive member names and refuses non-zips", () => {
+  const archive = buildZip([
+    { name: "ferryx-rd-client.exe", body: "exe" },
+    { name: "avcodec-63.dll", body: "avcodec" },
+  ]);
+  assert.deepEqual(listZipEntries(archive), ["ferryx-rd-client.exe", "avcodec-63.dll"]);
+  assert.equal(listZipEntries(Buffer.from("not a zip at all")), null);
+  assert.equal(listZipEntries(Buffer.alloc(0)), null);
+  // A truncated archive has no readable central directory.
+  assert.equal(listZipEntries(archive.subarray(0, 20)), null);
+});

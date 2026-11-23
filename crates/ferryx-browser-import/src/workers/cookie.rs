@@ -4,11 +4,13 @@
 //!
 //! For Chromium-derived browsers, v10-encrypted cookies are transparently
 //! decrypted via macOS Keychain (`<Browser> Safe Storage` entry). v20 cookies
-//! (Chrome 117+ App-Bound Encryption) are skipped outside Windows — they
-//! require an extra Win32 DPAPI hop / per-app entitlement that is out of scope
-//! here. Every encrypted cookie that cannot be decrypted is counted and
-//! reported once per import as a `Summary` line ("N cookies need sign-in
-//! again"), so the loss is visible instead of silent.
+//! (Chrome 117+ App-Bound Encryption) need the browser's elevation service on
+//! Windows, which refuses any caller but the browser itself: those rows are
+//! reported with their reason (`app-bound-key-refused`) and never applied,
+//! while the same profile's v10 rows still import. Every encrypted cookie that
+//! cannot be decrypted is counted and reported once per import as a `Summary`
+//! line ("N cookies need sign-in again"), so the loss is visible instead of
+//! silent.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
@@ -123,6 +125,9 @@ impl ImportWorker for CookieWorker {
                 let windows_v10 = local_state.as_deref().and_then(|path| {
                     crate::decrypt::win_app_bound::WindowsAppBoundDecryptor::for_v10(path).ok()
                 });
+                // `v20` is fetched at most once. An error here is a measured refusal from the
+                // elevation service, NOT a reason to reach for the `v10` key (which cannot open
+                // a `v20` row): it is reported with the row count instead.
                 #[cfg(target_os = "windows")]
                 let windows_v20 = std::cell::OnceCell::new();
                 #[cfg(target_os = "windows")]
@@ -137,15 +142,22 @@ impl ImportWorker for CookieWorker {
                                 BrowserType::Opera => "Opera",
                                 _ => "Chromium",
                             };
-                            local_state.as_deref().and_then(|path| {
-                                crate::decrypt::win_app_bound::WindowsAppBoundDecryptor::for_browser(
-                                    browser_name,
-                                    path,
-                                )
-                                .ok()
-                            })
+                            local_state
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    crate::decrypt::win_app_bound::AppBoundKeyError::Unavailable(
+                                        "no Local State above the profile directory".into(),
+                                    )
+                                })
+                                .and_then(|path| {
+                                    crate::decrypt::win_app_bound::WindowsAppBoundDecryptor::for_browser(
+                                        browser_name,
+                                        path,
+                                    )
+                                })
                         })
                         .as_ref()
+                        .map_err(|error| error.clone())
                 };
 
                 let decrypt = |entry: &ChromiumCookieEntry| -> Option<String> {
@@ -181,7 +193,7 @@ impl ImportWorker for CookieWorker {
                         EncryptionVersion::V20 => {
                             #[cfg(target_os = "windows")]
                             {
-                                windows_decryptor_v20().and_then(|dec| {
+                                windows_decryptor_v20().ok().and_then(|dec| {
                                     dec.decrypt_bound_cookie(&entry.encrypted_value[3..], entry.database_version, &entry.cookie.host).ok()
                                 })
                             }
@@ -196,6 +208,22 @@ impl ImportWorker for CookieWorker {
 
                 let tally =
                     import_chromium_entries(&entries, decrypt, destination, cancelled, progress);
+                // An app-bound key the service refused is why the `v20` rows were dropped: report
+                // it as seen/not applied instead of leaving a bare "needs sign-in" count. The
+                // `v10` rows above were still imported while that key was fetched, so the refusal
+                // never costs them.
+                #[cfg(target_os = "windows")]
+                if tally.v20_unapplied > 0 {
+                    if let Err(refusal) = windows_decryptor_v20() {
+                        let _ = progress.send(ImportProgress::Blocked {
+                            import_type: ImportType::Cookies,
+                            code: refusal.code().to_string(),
+                            message: refusal.to_string(),
+                            rows: tally.v20_unapplied,
+                            hresult: refusal.hresult(),
+                        });
+                    }
+                }
                 count = tally.imported;
                 send_sign_in_summary(progress, tally.needs_sign_in);
             }
@@ -211,6 +239,9 @@ struct ChromiumCookieTally {
     /// Encrypted cookies that could not be decrypted (on macOS/Linux this
     /// includes every App-Bound `v20` cookie). Their sites need sign-in again.
     needs_sign_in: u32,
+    /// The subset of `needs_sign_in` that were App-Bound (`v20`) rows: these are the ones an
+    /// app-bound key refusal is responsible for, so they are the count reported with it.
+    v20_unapplied: u32,
 }
 
 fn import_chromium_entries(
@@ -241,6 +272,9 @@ fn import_chromium_entries(
         let Some(value) = decrypted_value else {
             if !entry.encrypted_value.is_empty() {
                 tally.needs_sign_in += 1;
+                if entry.encryption_version == EncryptionVersion::V20 {
+                    tally.v20_unapplied += 1;
+                }
             }
             continue;
         };
@@ -404,7 +438,8 @@ mod tests {
             tally,
             ChromiumCookieTally {
                 imported: 2,
-                needs_sign_in: 3
+                needs_sign_in: 3,
+                v20_unapplied: 2,
             }
         );
         let hosts: Vec<String> = dest.cookies.lock().unwrap().iter().map(|c| c.host.clone()).collect();
@@ -418,6 +453,164 @@ mod tests {
                 message: "3 cookies need sign-in again".to_string(),
             }]
         );
+    }
+
+    /// End to end on a real profile layout: a temp `Local State` holding an APPB key and a temp
+    /// `Network/Cookies` database with v10 and v20 rows. The elevation service answers "refused"
+    /// (the measured `0x8004A007`), so the v20 rows must be reported once with that reason and
+    /// left unapplied, while the v10 rows still arrive.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_app_bound_key_reports_the_v20_rows_and_still_imports_the_v10_ones() {
+        use crate::decrypt::win_app_bound::{AppBoundKeyError, COM_DECRYPT_LOCK, COM_DECRYPT_OVERRIDE};
+        use base64::Engine as _;
+
+        let _guard = COM_DECRYPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let key = [0x2Bu8; 32];
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("Default");
+        let network = profile.join("Network");
+        std::fs::create_dir_all(&network).unwrap();
+
+        // Local State: the v10 DPAPI key (real, user-context) and an APPB key the service refuses.
+        let mut dpapi = b"DPAPI".to_vec();
+        dpapi.extend_from_slice(&dpapi_protect(&key));
+        let mut app_bound = b"APPB".to_vec();
+        app_bound.extend_from_slice(b"sealed-app-bound");
+        let local_state = serde_json::json!({
+            "os_crypt": {
+                "encrypted_key": base64::engine::general_purpose::STANDARD.encode(&dpapi),
+                "app_bound_encrypted_key": base64::engine::general_purpose::STANDARD.encode(&app_bound),
+            }
+        });
+        std::fs::write(dir.path().join("Local State"), local_state.to_string()).unwrap();
+
+        // Cookies: one v10 row (decrypts), two v20 rows (refused), one plaintext row.
+        let conn = rusqlite::Connection::open(network.join("Cookies")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT NOT NULL UNIQUE, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('version', '24');
+             CREATE TABLE cookies (
+                 host_key TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL DEFAULT '',
+                 encrypted_value BLOB DEFAULT x'', path TEXT NOT NULL DEFAULT '/',
+                 expires_utc INTEGER NOT NULL DEFAULT 0, is_secure INTEGER NOT NULL DEFAULT 0,
+                 is_httponly INTEGER NOT NULL DEFAULT 0, samesite INTEGER NOT NULL DEFAULT -1,
+                 source_scheme INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        let expires = (4_000_000_000i64 + 11_644_473_600) * 1_000_000;
+        let insert = |host: &str, name: &str, value: &str, encrypted: &[u8]| {
+            conn.execute(
+                "INSERT INTO cookies (host_key, name, value, encrypted_value, expires_utc, is_secure, is_httponly, samesite)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 1)",
+                rusqlite::params![host, name, value, encrypted, expires],
+            )
+            .unwrap();
+        };
+        insert(".v10.test", "v10", "", &v10_cookie(&key, ".v10.test", "v10-value"));
+        insert(".v20a.test", "a", "", b"v20sealed-ciphertext-a");
+        insert(".v20b.test", "b", "", b"v20sealed-ciphertext-b");
+        insert(".plain.test", "plain", "plain-value", b"");
+        drop(conn);
+
+        *COM_DECRYPT_OVERRIDE.lock().unwrap() = Some(|_browser, payload| {
+            assert_eq!(payload, b"sealed-app-bound", "the APPB prefix is stripped before COM");
+            Err(AppBoundKeyError::Refused { hresult: 0x8004_A007 })
+        });
+
+        let dest = MockDestination::new();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let browser = DetectedBrowser {
+            browser_type: BrowserType::Chrome,
+            display_name: "Google Chrome".into(),
+            profile_path: profile,
+            services_supported: crate::ImportServices::COOKIES,
+            requires_full_disk_access: false,
+        };
+        let outcome = CookieWorker.run(&browser, &dest, &cancelled, &tx);
+        *COM_DECRYPT_OVERRIDE.lock().unwrap() = None;
+
+        let imported = outcome.expect("the worker returns its count");
+        assert_eq!(imported, 2, "the v10 and plaintext rows still import");
+        let hosts: Vec<String> =
+            dest.cookies.lock().unwrap().iter().map(|c| c.host.clone()).collect();
+        assert_eq!(hosts, vec![".v10.test", ".plain.test"], "v20 rows are not applied");
+        assert_eq!(
+            dest.cookies.lock().unwrap()[0].value, "v10-value",
+            "the v10 row really decrypted"
+        );
+
+        let msgs: Vec<_> = rx.try_iter().collect();
+        let blocked = msgs
+            .iter()
+            .find_map(|m| match m {
+                ImportProgress::Blocked { code, rows, hresult, message, .. } => {
+                    Some((code.clone(), *rows, *hresult, message.clone()))
+                }
+                _ => None,
+            })
+            .expect("the refusal is reported, not swallowed");
+        assert_eq!(blocked.0, "app-bound-key-refused");
+        assert_eq!(blocked.1, 2, "both v20 rows are reported as seen and not applied");
+        assert_eq!(blocked.2, Some(0x8004_A007), "the measured HRESULT travels with it");
+        assert!(blocked.3.contains("0x8004A007"), "{}", blocked.3);
+
+        // The synthetic-import report: what the importer saw, what it reported, what it applied.
+        println!(
+            "SYNTHETIC_IMPORT {}",
+            serde_json::json!({
+                "source": "temp Local State with an APPB key + temp Network/Cookies with v20 rows",
+                "v20_seen": blocked.1,
+                "reported_reason": blocked.0,
+                "reported_hresult": format!("0x{:08X}", blocked.2.unwrap()),
+                "v20_not_applied": blocked.1,
+                "applied_hosts": hosts,
+                "imported_count": imported,
+            })
+        );
+
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m, ImportProgress::Summary { count: 2, message, .. }
+                    if message == "2 cookies need sign-in again"
+            )),
+            "{msgs:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    fn dpapi_protect(plain: &[u8]) -> Vec<u8> {
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: plain.len() as u32,
+            pbData: plain.as_ptr() as *mut u8,
+        };
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        unsafe {
+            CryptProtectData(&input, None, None, None, None, 0, &mut out).unwrap();
+            let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+            let _ = LocalFree(Some(HLOCAL(out.pbData as *mut std::ffi::c_void)));
+            bytes
+        }
+    }
+
+    /// A `v10` AES-256-GCM cookie blob, host-bound for database version 24.
+    #[cfg(windows)]
+    fn v10_cookie(key: &[u8], host: &str, value: &str) -> Vec<u8> {
+        use aes_gcm::aead::{Aead, KeyInit};
+        use aes_gcm::{Aes256Gcm, Nonce};
+        use sha2::{Digest, Sha256};
+        let iv = [0x31u8; 12];
+        let mut plain = Sha256::digest(host.as_bytes()).to_vec();
+        plain.extend_from_slice(value.as_bytes());
+        let cipher = Aes256Gcm::new_from_slice(key).unwrap();
+        let mut blob = b"v10".to_vec();
+        blob.extend_from_slice(&iv);
+        blob.extend(cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).unwrap());
+        blob
     }
 
     #[test]

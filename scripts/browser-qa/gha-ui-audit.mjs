@@ -44,6 +44,7 @@ import { inflateSync } from "node:zlib";
 import {
   assertStepLive,
   dailyChromium,
+  dailyInbound,
   dailyFixtures,
   dailyRestart,
   dailyWebviewAfter,
@@ -63,7 +64,7 @@ const platform = process.platform; // linux | darwin | win32
 const binary = resolve(option("binary") ?? "");
 const out = resolve(option("out") ?? "ui-audit");
 const scenario = option("scenario") ?? "full";
-if (!["full", "drag-mask"].includes(scenario)) throw new Error(`unknown --scenario ${scenario} (full | drag-mask)`);
+if (!["full", "drag-mask", "daily-mac"].includes(scenario)) throw new Error(`unknown --scenario ${scenario} (full | drag-mask | daily-mac)`);
 // Wall-clock budget for the whole audit. The CI step timeout (75 min) kills the driver before
 // teardown, which loses the totals (Windows run 41824966041 stopped in daily-g11-profiles), so
 // past the budget every later step is recorded as skipped and the run goes on to teardown.
@@ -82,7 +83,16 @@ mkdirSync(shots, { recursive: true });
 mkdirSync(ocrDir, { recursive: true });
 
 // One isolation dir per scenario: two invocations in one job must not share FERRYX_* dirs.
-const isolation = join(process.env.RUNNER_TEMP ?? out, scenario === "full" ? "ferryx-ui-audit-isolation" : `ferryx-ui-audit-isolation-${scenario}`);
+// FERRYX_RUNTIME_DIR holds the daemon's unix sockets, and macOS caps a socket path at SUN_LEN
+// (104 bytes): a long --out under a deep evidence tree overflowed it and the app panicked in its
+// setup hook ("path must be shorter than SUN_LEN"). RUNNER_TEMP is short on CI; a local run can
+// point FERRYX_UI_AUDIT_ISOLATION at a short dir of its own.
+const isolation = process.env.FERRYX_UI_AUDIT_ISOLATION
+  ? resolve(process.env.FERRYX_UI_AUDIT_ISOLATION)
+  : join(process.env.RUNNER_TEMP ?? out, scenario === "full" ? "ferryx-ui-audit-isolation" : `ferryx-ui-audit-isolation-${scenario}`);
+if (platform === "darwin" && join(isolation, "runtime", "daemon.sock").length >= 104) {
+  throw new Error(`isolation dir is too long for the daemon socket (${join(isolation, "runtime", "daemon.sock").length} >= 104 bytes): set FERRYX_UI_AUDIT_ISOLATION to a short path`);
+}
 const dirs = Object.fromEntries(["data", "runtime", "session", "tmp", "home"].map((name) => [name, join(isolation, name)]));
 for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
 
@@ -292,6 +302,7 @@ const macKeyCodes = { Tab: 48, Enter: 36, Escape: 53, Space: 49, Down: 125, Back
 const mac = {
   pid: null,
   pixelScale: null,
+  envFlagSupported: undefined,
   osa(script) {
     return run("osascript", ["-e", script]);
   },
@@ -350,6 +361,35 @@ const mac = {
   screenshot(path) {
     return run("screencapture", ["-x", "-t", "png", path]);
   },
+  /**
+   * Hands `url` to the app the way the OS does for an inbound link: `open -a <bundle> <url>`.
+   * LaunchServices routes it to the running app as a kAEGetURL Apple Event, or starts the app
+   * when none is running. `open` exits 0 once LaunchServices accepts the request, so the status
+   * proves the hand-off happened, never that a tab appeared.
+   *
+   * `env` is passed with `open --env KEY=VAL` (macOS 13+). It is mandatory for a cold start:
+   * LaunchServices launches the app from launchd with the caller's environment dropped, so
+   * without it a QA `open` would start the real user profile and could attach to the production
+   * daemon. A cold-started process also receives the URL as an Apple Event, not in argv, so the
+   * env is the only thing that keeps the new instance isolated.
+   */
+  openUrl(bundle, url, env = null) {
+    const envArgs = Object.entries(env ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
+    const args = [...envArgs, "-a", bundle, url];
+    const result = run("open", args, { timeout: 60000 });
+    return { ok: result.ok, status: result.status, stderr: result.stderr, env_keys: Object.keys(env ?? {}), args: envArgs.length ? args.map((arg) => (/^-\-env$/.test(arg) ? arg : arg.replace(/=.*/, "=***"))) : args };
+  },
+  /**
+   * Whether this `open` supports `--env`. Checked once: without it a cold-started app cannot be
+   * kept in the isolation dirs, and the caller must refuse the closed-app case instead of
+   * starting a process that would use the real profile.
+   */
+  openSupportsEnv() {
+    if (this.envFlagSupported !== undefined) return this.envFlagSupported;
+    const help = run("open", ["--help"], { timeout: 15000 });
+    this.envFlagSupported = /--env\b/.test(`${help.stdout}${help.stderr}`);
+    return this.envFlagSupported;
+  },
   wheelBinary: null,
   wheel(x, y, notches) {
     if (!this.wheelBinary) {
@@ -378,12 +418,52 @@ const mac = {
   },
   scale() {
     if (this.pixelScale) return this.pixelScale;
-    const bounds = this.osa('tell application "Finder" to get bounds of window of desktop').stdout.split(/,\s*/).map(Number);
+    const bounds = this.desktopBounds();
     const probe = join(ocrDir, "scale-probe.png");
     this.screenshot(probe);
     const width = existsSync(probe) ? readFileSync(probe).readUInt32BE(16) : 0;
-    this.pixelScale = bounds.length === 4 && bounds[2] > 0 && width > 0 ? width / bounds[2] : 1;
+    this.pixelScale = bounds && bounds.width > 0 && width > 0 ? width / bounds.width : 1;
     return this.pixelScale;
+  },
+  /**
+   * The main display in points, or null. `Finder` is the usual source, but Automation may be
+   * denied for it (macOS maho-mac: -1743 "Not authorized to send Apple events to Finder"), and a
+   * silent 1.0 scale then made every point-space click land at half the intended pixel on a 2x
+   * display. CoreGraphics always answers, so it is the fallback.
+   */
+  desktopBounds() {
+    const viaFinder = this.osa('tell application "Finder" to get bounds of window of desktop');
+    if (viaFinder.ok) {
+      const [x, y, right, bottom] = viaFinder.stdout.split(/,\s*/).map(Number);
+      if ([x, y, right, bottom].every(Number.isFinite) && right > 0 && bottom > 0) {
+        return { x, y, width: right - x, height: bottom - y, via: "Finder" };
+      }
+    }
+    const viaCG = run("osascript", ["-l", "JavaScript", "-e", `ObjC.import('CoreGraphics');
+const id = $.CGMainDisplayID();
+const r = $.CGDisplayBounds(id);
+JSON.stringify({ x: r.origin.x, y: r.origin.y, width: r.size.width, height: r.size.height })`]);
+    if (viaCG.ok) {
+      try {
+        const box = JSON.parse(viaCG.stdout.trim());
+        if (box.width > 0 && box.height > 0) return { ...box, via: "CoreGraphics" };
+      } catch {}
+    }
+    return null;
+  },
+  /**
+   * The app window in screenshot PIXELS, or null. Other users' windows are open on this host, so
+   * an uncropped frame lets OCR find their text and a click then lands in their app; every read
+   * and click is confined to this box.
+   */
+  geometry() {
+    if (!this.pid) return null;
+    const result = this.osa(`tell application "System Events" to tell (first process whose unix id is ${this.pid}) to get {position, size} of window 1`);
+    if (!result.ok) return null;
+    const [x, y, width, height] = result.stdout.split(/,\s*/).map(Number);
+    if (![x, y, width, height].every(Number.isFinite) || width < 200 || height < 200) return null;
+    const scale = this.scale();
+    return { x: Math.round(x * scale), y: Math.round(y * scale), width: Math.round(width * scale), height: Math.round(height * scale) };
   },
 };
 
@@ -777,7 +857,10 @@ function ocrVariants(path) {
     // Linux: the 1920x1080 root shot is mostly black around the 1280x870 window, and tesseract
     // reads nothing from some of those frames (measured on run 41334976522 probes: 0 words full
     // frame, 47 lines cropped). Crop every variant to the window; words are shifted back.
-    const box = platform === "linux" ? linux.geometry() : null;
+    // macOS: a shared host (maho-mac) has other users' windows on screen, so an uncropped frame
+    // both buries this app's text under theirs and, worse, lets a located word belong to another
+    // app that a click would then hit. Crop to the app window there too.
+    const box = platform === "linux" ? linux.geometry() : platform === "darwin" ? mac.geometry() : null;
     const crop = box ? ["-crop", `${box.width}x${box.height}+${box.x}+${box.y}`, "+repage"] : [];
     const base = { dx: box?.x ?? 0, dy: box?.y ?? 0 };
     const variants = [];
@@ -811,7 +894,7 @@ const bandDir = join(out, "ocr-bands");
  */
 function ocrBands(path, { height: bandHeight = 130, step: bandStep = 100, prefix = "band" } = {}) {
   if (!imageMagick || (platform === "win32" && imageMagick !== "magick")) return [];
-  const box = platform === "linux" ? linux.geometry() : null;
+  const box = platform === "linux" ? linux.geometry() : platform === "darwin" ? mac.geometry() : null;
   let { width, height } = box ?? {};
   if (!box) {
     const header = readFileSync(path).subarray(0, 24);
@@ -870,13 +953,20 @@ function ocrStrips(path) {
  * 2-4x on Windows (daily-g11-private 69s -> 307s) and the Windows and Linux audits hit the 60 min
  * step timeout before the engine and extension sections (Windows stopped at
  * settings-browser-site-settings, Linux at extension-store-open).
+ *
+ * `psm` is tesseract's page segmentation mode, 11 (sparse text) by default so every existing caller
+ * keeps the mode it was measured with. Layout modes read labels that sparse mode drops: the store's
+ * in-iframe "No thanks" is absent from `--psm 11` on all 21 archived macOS frames 289-309 and read
+ * at ~96% confidence by `--psm 6` ("No" @2432,1389 / "thanks" @2499,1387 on the 3x variant). The
+ * mode changes nothing about coordinates: every pass still divides its boxes by the variant's own
+ * upscale factor and adds the Linux window crop, so pixels->screen scaling is identical.
  */
-function ocr(path, { bands = false, strips = false, outside = false } = {}) {
+function ocr(path, { bands = false, strips = false, outside = false, psm = 11 } = {}) {
   if (!tesseract || !path || !existsSync(path)) return null;
   const words = [];
   let anyPass = false;
   for (const { file, factor, dx = 0, dy = 0 } of ocrVariants(path)) {
-    const result = run(tesseract, [file, "-", "--psm", "11", "tsv"], { timeout: 120000 });
+    const result = run(tesseract, [file, "-", "--psm", String(psm), "tsv"], { timeout: 120000 });
     if (!result.ok) continue;
     anyPass = true;
     const lines = result.stdout.split(/\r?\n/);
@@ -900,7 +990,7 @@ function ocr(path, { bands = false, strips = false, outside = false } = {}) {
   // "work"). The frame is read uncropped only after a cropped pass succeeded, and only when
   // `outside` is asked for, so the extra tesseract call stays off the hot path.
   if (anyPass && outside && platform === "linux") {
-    const result = run(tesseract, [path, "-", "--psm", "11", "tsv"], { timeout: 120000 });
+    const result = run(tesseract, [path, "-", "--psm", String(psm), "tsv"], { timeout: 120000 });
     if (result.ok) {
       const lines = result.stdout.split(/\r?\n/);
       const header = lines.shift()?.split("\t") ?? [];
@@ -1163,6 +1253,31 @@ writeFileSync(agentAuthority, JSON.stringify({ settings: { requirePairing: false
 summary.agent_access = { requirePairing: false, file: agentAuthority };
 
 let app = null;
+/**
+ * Pids of QA app processes this harness did not spawn (a LaunchServices cold start). They are
+ * stopped at teardown by exact pid, resolved from the QA bundle identifier.
+ */
+const adoptedPids = [];
+/**
+ * The QA bundle identifier, read from the launched bundle's Info.plist. It is what proves
+ * ownership of a process this harness did not spawn: the production app is `com.ferryx.app`, and
+ * a run must never resolve, adopt or stop that one.
+ */
+const qaBundleId = (() => {
+  if (platform !== "darwin" || !binary) return null;
+  // The binary lives at <Bundle>.app/Contents/MacOS/ferryx.
+  const bundle = binary.replace(/\/Contents\/MacOS\/[^/]+$/, "");
+  const plist = join(bundle, "Contents", "Info.plist");
+  if (!existsSync(plist)) return null;
+  const result = run("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIdentifier", plist], { timeout: 15000 });
+  const id = result.ok ? result.stdout.trim() : "";
+  if (!id) return null;
+  if (id === "com.ferryx.app") {
+    summary.notes.push("Refusing to run against the production bundle identifier com.ferryx.app: a QA run must never adopt or stop the user's app.");
+    return null;
+  }
+  return id;
+})();
 /** The log file of the running app (app.log, then the restart logs). */
 let currentAppLog = "app.log";
 // Session files outside the isolation dirs, before the app ever ran (G1: nothing is written there).
@@ -2113,6 +2228,70 @@ const daily = {
   host,
   win,
   run,
+  /**
+   * Quits the app like a user and waits for its pid to exit, leaving it closed.
+   *
+   * G10's closed case needs the app really gone before `open -a`: LaunchServices then starts it
+   * with the URL in argv instead of sending a kAEGetURL Apple Event to a running instance. The
+   * fallback SIGTERM (and a last SIGKILL) exists because a debug build can ignore Mod+Q while a
+   * modal sheet holds the window; the pid is the only process this touches.
+   */
+  async quitApp() {
+    const old = app;
+    if (!old) return { ok: true, already_closed: true };
+    app = null;
+    const exited = new Promise((done) => old.once("exit", done));
+    host.focus();
+    await sleep(500);
+    if (platform === "darwin") host.key({ key: "q", mods: ["mod"] });
+    else host.key({ key: "F4", mods: ["alt"] });
+    let quitVia = platform === "darwin" ? "Mod+Q" : "Alt+F4";
+    let stopped = await Promise.race([exited.then(() => true), sleep(20000).then(() => false)]);
+    if (!stopped) {
+      quitVia = "fallback-kill";
+      try {
+        old.kill("SIGTERM");
+      } catch {}
+      stopped = await Promise.race([exited.then(() => true), sleep(15000).then(() => false)]);
+    }
+    if (!stopped) {
+      try {
+        old.kill("SIGKILL");
+      } catch {}
+      stopped = await Promise.race([exited.then(() => true), sleep(10000).then(() => false)]);
+    }
+    // The daemon outlives the GUI by design; only the GUI pid is waited for here.
+    return { ok: stopped, quit_via: quitVia, pid: old.pid };
+  },
+  /**
+   * The GUI pids of this QA bundle, oldest first. Ownership is the bundle identifier of the QA
+   * build (`com.ferryx.app.qa.*`, never `com.ferryx.app`), and the `--daemon` child is dropped: it
+   * runs the same executable but owns no window and no tab list. Resolving by process name would
+   * also match the production app and other users' copies, so it is never used.
+   */
+  qaGuiPids() {
+    if (platform !== "darwin" || !qaBundleId) return [];
+    const listed = host.osa(`tell application "System Events" to get unix id of every process whose bundle identifier is "${qaBundleId}"`);
+    if (!listed.ok) return [];
+    return listed.stdout.split(/,\s*/).map(Number).filter(Number.isFinite).filter((pid) => {
+      const argv = run("ps", ["-o", "command=", "-p", String(pid)]).stdout;
+      return Boolean(argv) && !/--daemon\b/.test(argv);
+    });
+  },
+  /**
+   * Adopts a process this harness did not spawn (a LaunchServices cold start) so teardown and the
+   * window helpers address it. Only a pid of the QA bundle that was not present before counts; if
+   * none appeared, nothing is adopted and teardown has nothing extra to stop.
+   */
+  async adoptColdStart() {
+    const known = new Set(adoptedPids);
+    if (app?.pid) known.add(app.pid);
+    const found = await until(() => daily.qaGuiPids().find((pid) => !known.has(pid)) ?? null, 60000, 1000);
+    if (!found) return { ok: false, stderr: "no new QA app process appeared" };
+    adoptedPids.push(found);
+    mac.pid = found;
+    return { ok: true, pid: found };
+  },
   // The daily scenarios read inactive tab titles, toolbar and prompt text: banded OCR on.
   ocr: (path) => ocr(path, { bands: true }),
   // Strip-only pass on the same frame, for a locator that missed its word in `ocr`.
@@ -2130,12 +2309,36 @@ const daily = {
   clickNav,
   scrollSettingsTo,
   quitAndRelaunch,
+  quitApp: () => daily.quitApp(),
+  adoptColdStart: () => daily.adoptColdStart(),
+  bundle: process.env.FERRYX_UI_AUDIT_BUNDLE ? resolve(process.env.FERRYX_UI_AUDIT_BUNDLE) : null,
+  /** The isolated dirs a cold start must inherit, so `open --env` can pass them through. */
+  isolatedEnv: { FERRYX_DATA_DIR: dirs.data, FERRYX_RUNTIME_DIR: dirs.runtime, FERRYX_SESSION_DIR: dirs.session, HOME: dirs.home },
   startedAtMs,
   outsideBefore,
   closeDialogs: () => (platform === "win32" ? win.closeDialogs() : { ok: true }),
   appLogName: () => currentAppLog,
   chromeFocusClick: () => chromeFocus[1](),
 };
+if (scenario === "daily-mac") {
+  // The focused macOS daily run: G1 (restart restores tabs and their back stack), G3 (vault save,
+  // restart, fill offer, autofill, keychain item) and G10 (an inbound link with the app running
+  // and with it closed). It exists because the full scenario reaches the daily gaps only after ~20
+  // minutes of unrelated steps, and the macOS daily work needs several isolated repeats.
+  if (platform !== "darwin") throw new Error("--scenario daily-mac runs on macOS only");
+  const bundle = daily.bundle;
+  if (!bundle || !existsSync(bundle)) throw new Error("--scenario daily-mac needs FERRYX_UI_AUDIT_BUNDLE naming the .app bundle for `open -a`");
+  await step("daily-mac-skip-onboarding", "Click 'Skip setup' so the wizard does not cover the app", [focus, clickOr("Skip", [key("Tab", { key: "Tab" }), key("Escape", { key: "Escape" })], { timeout: 8000 }), 2000]);
+  await step("daily-mac-advanced", "Turn Advanced features on, which is what offers 'New Browser Tab' in the tab strip '+' menu", [focus, dismissStoreToast, ["open Settings", openSettings], 2500, ["click Advanced features switch", () => clickRowSwitch("Advanced")], 1500, ["close Settings", () => host.key({ key: "Escape" })], 1500]);
+  await dailyWebviewBefore(daily);
+  await dailyRestart(daily);
+  await dailyWebviewAfter(daily);
+  // G10 runs last: its closed case quits the app and starts a fresh one, which would disturb any
+  // step after it.
+  await dailyInbound(daily, { bundle, marker: "inbound=running", closed: false });
+  await dailyInbound(daily, { bundle, marker: "inbound=closed", closed: true, env: daily.isolatedEnv });
+  await teardown();
+}
 // Settings is open: these run on the page, so close it first; they need the system webview.
 await step("daily-settings-closed", "Escape closes Settings before the daily-browser scenarios", [focus, key("Escape", { key: "Escape" }), 1500]);
 await dailyWebviewBefore(daily);
@@ -2227,15 +2430,36 @@ async function clickEngineDownload() {
   const deadline = Date.now() + 8000;
   let candidates = [];
   do {
-    const words = ocr(probeShot(), { bands: true }) ?? [];
-    const isLabel = (word) => words.some((next) => /^size$/i.test(next.text) && Math.abs(next.top - word.top) <= 8 && next.left > word.left && next.left - (word.left + word.width) < 40);
-    const unique = new Map();
-    for (const word of words.filter((entry) => entry.text === "Download")) {
-      const keyed = `${Math.round(word.left / 12)}:${Math.round(word.top / 12)}`;
-      unique.set(keyed, { word, label: unique.get(keyed)?.label || isLabel(word) });
+    const shot = probeShot();
+    let words = ocr(shot, { bands: true }) ?? [];
+    const isLabel = (list, word) => list.some((next) => /^size$/i.test(next.text) && Math.abs(next.top - word.top) <= 8 && next.left > word.left && next.left - (word.left + word.width) < 40);
+    const collect = (list) => {
+      const unique = new Map();
+      for (const word of list.filter((entry) => entry.text === "Download")) {
+        const keyed = `dl:${Math.round(word.left / 12)}:${Math.round(word.top / 12)}`;
+        const label = isLabel(list, word);
+        const prev = unique.get(keyed);
+        const combinedLabel = prev ? prev.label && label : label;
+        unique.set(keyed, { word, label: combinedLabel, tier: combinedLabel ? 2 : 0 });
+      }
+      for (const word of list.filter((entry) => entry.text === "Install")) {
+        const eng = list.find((next) => /^engine$/i.test(next.text) && Math.abs(next.top - word.top) <= 10 && next.left > word.left && next.left - (word.left + word.width) < 60);
+        if (!eng) continue;
+        const keyed = `ie:${Math.round(word.left / 12)}:${Math.round(word.top / 12)}`;
+        if (!unique.has(keyed)) unique.set(keyed, { word: { left: word.left, top: word.top, width: (eng.left + eng.width) - word.left, height: Math.max(word.height, eng.height) }, label: false, tier: 1 });
+      }
+      return [...unique.values()];
+    };
+    candidates = collect(words);
+    // --psm 11 can drop the right-hand [Download] button on macOS while reading the left-hand
+    // "Download size" label (runs 45080861572, 45090822213); re-scan the same frame in layout mode.
+    if (!candidates.some((entry) => entry.tier === 0)) {
+      const layoutWords = ocr(shot, { bands: true, psm: 6 }) ?? [];
+      words = [...words, ...layoutWords];
+      candidates = collect(words);
     }
-    // Buttons first, then (a misread line can drop "size") the labels; rightmost first in each.
-    candidates = [...unique.values()].sort((a, b) => Number(a.label) - Number(b.label) || b.word.left - a.word.left);
+    // Tier 0: Download button, Tier 1: Install engine button, Tier 2: Download size fallback; rightmost first in each.
+    candidates.sort((a, b) => a.tier - b.tier || b.word.left - a.word.left);
     if (candidates.length) break;
     await sleep(1000);
   } while (Date.now() < deadline);
@@ -2732,66 +2956,273 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     ],
     { any: ["Chrome", "uBlock"] },
   );
+  // Page scripts for the store install. They run in the real page through the CLI; only what is
+  // measured there (rects, hit tests) and the OCR-friendly colours change in the page - every
+  // click on the install button itself is still the host's own OS input.
+  //
+  // The store answers a non-Chrome Chromium in two shapes: a "Switch to Chrome?" dialog with
+  // "No thanks", and an inline banner reading "Switch to Chrome to install extensions and
+  // themes". macOS run 45014020714 showed the banner while this dismissal looked only for the
+  // dialog's "No thanks" and recorded `absent`, so both shapes are detected and the variant is
+  // recorded.
+  const dismissScript =
+    "(() => {" +
+    " const textOf = (el) => (el.textContent || '').replace(/\\s+/g, ' ').trim();" +
+    " const shown = (el) => Boolean(el) && el.getBoundingClientRect().height > 0;" +
+    " const body = (document.body && document.body.innerText) || '';" +
+    " const noThanks = [...document.querySelectorAll('button,a,[role=button],span')].filter((el) => textOf(el) === 'No thanks' && shown(el)).pop();" +
+    " const dialog = Boolean(noThanks) || /Google recommends using Chrome/.test(body);" +
+    // Only a banner-sized element whose text starts with the sentence: the whole page also
+    // contains it, further down, and a control found there would not be the banner's own.
+    " const banners = [...document.querySelectorAll('div,section,aside')].filter((el) => { const t = textOf(el); const r = el.getBoundingClientRect(); return t.startsWith('Switch to Chrome to install extensions and themes') && t.length < 120 && r.height > 0 && r.height < 200; });" +
+    " const banner = banners.length ? banners[banners.length - 1] : null;" +
+    " const control = banner ? [...banner.querySelectorAll('button,[role=button],a')].find((el) => /dismiss|close|no,?\\s*thanks|got it/i.test((el.getAttribute('aria-label') || '') + ' ' + textOf(el))) : null;" +
+    " const variant = dialog && banner ? 'both' : dialog ? 'dialog' : banner ? 'banner' : 'none';" +
+    " if (noThanks) { noThanks.click(); return JSON.stringify({variant, dismissed: true, via: 'No thanks'}); }" +
+    " if (shown(control)) { control.click(); return JSON.stringify({variant, dismissed: true, via: 'banner ' + ((control.getAttribute('aria-label') || textOf(control)).slice(0, 40))}); }" +
+    " if (banner) return JSON.stringify({variant, dismissed: false, why: 'the inline banner has no dismiss control'});" +
+    " if (dialog) return JSON.stringify({variant, dismissed: false, why: 'no shown No thanks button'});" +
+    " return JSON.stringify({variant});" +
+    "})()";
+  // Scroll the install button into view, then measure it where it ended up. The rect alone was
+  // not enough (macOS run 45014020714: centre 467,216 inside a 644px viewport, yet the screenshot
+  // showed a blank page), so the same script also reports whether elementFromPoint at the measured
+  // centre hits the button and, when it does not, which element is on top there.
+  const measureScript =
+    "(() => {" +
+    " const b = [...document.querySelectorAll('button')].find((el) => /Add to Chrome/i.test(el.textContent || ''));" +
+    " if (!b) return JSON.stringify({found: false});" +
+    " b.style.setProperty('background', '#ffffff', 'important');" +
+    " b.style.setProperty('color', '#000000', 'important');" +
+    " b.querySelectorAll('*').forEach((el) => el.style.setProperty('color', '#000000', 'important'));" +
+    " const rect = () => b.getBoundingClientRect();" +
+    " const before = rect();" +
+    " const vw = innerWidth, vh = innerHeight;" +
+    " const inside = (r) => r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= vw && r.bottom <= vh;" +
+    " b.scrollIntoView({block: 'center', inline: 'center'});" +
+    " let after = rect();" +
+    // scrollIntoView moves scroll containers of the document, not an ancestor's own scrollbar.
+    " for (let p = b.parentElement; p && p !== document.documentElement; p = p.parentElement) {" +
+    "   const style = getComputedStyle(p);" +
+    "   if (!/(auto|scroll)/.test(style.overflowX + style.overflowY)) continue;" +
+    "   p.scrollLeft += Math.round(after.left + after.width / 2 - p.clientWidth / 2);" +
+    "   p.scrollTop += Math.round(after.top + after.height / 2 - p.clientHeight / 2);" +
+    "   after = rect();" +
+    " }" +
+    " if (!inside(after)) { window.scrollBy({top: after.top + after.height / 2 - vh / 2, left: after.left + after.width / 2 - vw / 2, behavior: 'auto'}); after = rect(); }" +
+    " const x = Math.round(after.left + after.width / 2), y = Math.round(after.top + after.height / 2);" +
+    " const top = inside(after) ? document.elementFromPoint(x, y) : null;" +
+    " const hit = Boolean(top) && (top === b || b.contains(top) || top.contains(b));" +
+    " const anchors = [];" +
+    " for (const text of ['Share', 'Featured', 'Overview', 'Extension', 'Privacy & Security', 'uBlock Origin Lite']) {" +
+    "   const el = [...document.querySelectorAll('a,button,span,div,h1,h2,h3,p')].find((e) => (e.textContent || '').trim() === text && e.children.length === 0);" +
+    "   if (!el) continue; const r = el.getBoundingClientRect();" +
+    "   if (r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= vw && r.bottom <= vh) anchors.push({text, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: Math.round(r.width), h: Math.round(r.height)});" +
+    " }" +
+    " const share = anchors.find((a) => a.text === 'Share') || null;" +
+    " const onTop = top ? ((top.tagName || '') + ' ' + (top.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 40)) : null;" +
+    " return JSON.stringify({found: true, x, y, w: Math.round(after.width), h: Math.round(after.height), disabled: b.disabled, text: (b.textContent || '').trim(), before: {x: Math.round(before.left + before.width / 2), y: Math.round(before.top + before.height / 2)}, share: share ? {x: share.x, y: share.y} : null, anchors, dpr: devicePixelRatio, vw, vh, in_view: inside(after), hit_test: hit, on_top: onTop});" +
+    "})()";
+  /** The parsed JSON payload of a CLI eval, which may arrive quoted as a JSON string. */
+  const evalJson = (result) => {
+    if (!result?.ok) return null;
+    try {
+      let parsed = JSON.parse(result.stdout);
+      if (typeof parsed === "string") parsed = JSON.parse(parsed);
+      return parsed ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const storeEval = (script) => (storeTab ? cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" });
+  /**
+   * Where the install button is on screen when OCR cannot read its label: its page rect moved by
+   * the offset between page CSS pixels and screenshot pixels, measured from page texts that OCR
+   * did read. Two different anchor texts must agree on that offset before a click is aimed, so a
+   * stray instance of one label (a tab title, a breadcrumb) cannot move the pointer.
+   */
+  const anchoredPoint = (words, button) => {
+    if (!button?.anchors?.length) return null;
+    const scale = button.dpr || 1;
+    const found = new Map();
+    for (const anchor of button.anchors) {
+      const word = words.find((entry) => norm(entry.text) === norm(anchor.text));
+      if (!word) continue;
+      found.set(anchor.text, { x: word.left + word.width / 2 - anchor.x * scale, y: word.top + word.height / 2 - anchor.y * scale });
+    }
+    const origins = [...found.entries()];
+    if (origins.length < 2) return null;
+    const agreeing = origins.filter(([, a]) => origins.filter(([, b]) => Math.abs(a.x - b.x) <= 12 && Math.abs(a.y - b.y) <= 12).length >= 2);
+    if (!agreeing.length) return null;
+    const mid = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+    const origin = { x: mid(agreeing.map(([, a]) => a.x)), y: mid(agreeing.map(([, a]) => a.y)) };
+    return { at: [Math.round(origin.x + button.x * scale), Math.round(origin.y + button.y * scale)], anchors: agreeing.map(([text]) => text) };
+  };
+  /** Focus the install button in the page, then press Enter with the host's own keyboard. */
+  const activateAddToChrome = async () => {
+    const script = "(() => { const b = [...document.querySelectorAll('button')].find((el) => /Add to Chrome/i.test(el.textContent || '')); if (!b) return JSON.stringify({focused: false, why: 'no button'}); b.focus(); const a = document.activeElement; return JSON.stringify({focused: Boolean(a) && (a === b || b.contains(a)), disabled: b.disabled, text: (b.textContent || '').trim()}); })()";
+    const result = await storeEval(script);
+    const focused = evalJson(result);
+    if (!focused?.focused) return { ok: false, stderr: `the install button did not take focus (${result?.stdout?.slice(0, 120) || result?.stderr || "no result"})` };
+    host.focus();
+    await sleep(400);
+    const pressed = host.key({ key: "Enter" });
+    await sleep(1200);
+    return { ok: pressed.ok, via: "keyboard after CLI focus", focused, stderr: pressed.ok ? "" : pressed.stderr };
+  };
+  /**
+   * The store draws its "Switch to Chrome?" callout inside a cross-origin iframe on some runs
+   * (macOS run 45049171770, screenshot 63: elementFromPoint over "Add to Chrome" hit "IFRAME ").
+   * A CLI eval in the top document cannot reach that iframe's "No thanks" button, but the button
+   * is plain blue text on white, so OCR reads it there and the host clicks it with real input.
+   */
+  // OCR splits the label on the space it reads, so the phrase hit is preferred and the single word
+  // (norm() drops the space) is the fallback.
+  const noThanksHit = (words) => findPhrase(words, "No thanks")[0] ?? findWord(words, "No thanks");
+  /**
+   * Locate "No thanks" on one screenshot. `--psm 11` (the default everywhere else, sparse text)
+   * never yields this label, so the line mode then the block mode are tried first on the very same
+   * image and sparse mode is only the last resort; the mode that matched is reported back so the
+   * post-click read uses the same one.
+   */
+  const readNoThanks = (shot) => {
+    for (const psm of [6, 3, 11]) {
+      const hit = noThanksHit(ocr(shot, { psm }) ?? []);
+      if (hit) return { hit, psm };
+    }
+    return { hit: null, psm: null };
+  };
+  const dismissNoThanksByOcr = async ({ attempts = 3 } = {}) => {
+    let clickedAt = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const found = readNoThanks(probeShot());
+      if (found.hit) {
+        const clicked = host.click(found.hit.x, found.hit.y);
+        clickedAt = [found.hit.x, found.hit.y];
+        if (!clicked.ok) return { dismissed: false, verified: false, via: "ocr No thanks (iframe)", at: clickedAt, psm: found.psm, attempt, stderr: clicked.stderr ?? "the click failed" };
+        await sleep(800);
+        // A click that landed is not a dismissal: the callout can stay up over the iframe (run
+        // 45058174460 recorded hit_test:false, on_top:"IFRAME " after the click). Only a frame the
+        // same mode no longer reads the label on counts as dismissed.
+        const after = ocr(probeShot(), { psm: found.psm });
+        if (after === null) return { dismissed: false, verified: false, unreadable: true, via: "ocr No thanks (iframe)", at: clickedAt, psm: found.psm, attempt, stderr: "the frame after the click could not be read, so the dismissal is unconfirmed" };
+        if (!noThanksHit(after)) return { dismissed: true, verified: true, via: "ocr No thanks (iframe)", at: clickedAt, psm: found.psm, attempt, stderr: "" };
+      }
+      if (attempt < attempts) await sleep(800);
+    }
+    return {
+      dismissed: false,
+      verified: false,
+      via: clickedAt ? "ocr No thanks (iframe)" : "none",
+      ...(clickedAt ? { at: clickedAt, still_visible: true } : {}),
+      attempt: attempts,
+      stderr: clickedAt ? "'No thanks' is still on screen after the click" : "OCR read no 'No thanks'",
+    };
+  };
+  /** The measure script's report that an iframe, not the button, is at the button's centre. */
+  const overlaidByIframe = (button) => Boolean(button) && button.hit_test === false && /^IFRAME/i.test(button.on_top ?? "");
   await step(
     "extension-store-install",
     "Click 'Add to Chrome', then 'Add extension' in Chrome's dialog; wait until the extension is in the profile",
     [
-      // The store shows "Switch to Chrome?" to every Chromium that is not Google Chrome; it does
-      // not block the install. It can sit off screen right of the pane, so it is answered in the
-      // page.
-      ["optional dismiss the 'Switch to Chrome?' prompt (CLI eval)", async () => {
-        const script = "(() => { const b = [...document.querySelectorAll('button,a,[role=button]')].find((e) => (e.textContent || '').trim() === 'No thanks'); if (!b) return 'absent'; b.click(); return 'dismissed'; })()";
-        const result = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" };
-        record.switch_to_chrome_prompt = result.ok ? result.stdout.replace(/"/g, "") : null;
-        return { ok: result.ok, prompt: record.switch_to_chrome_prompt, stderr: result.stderr };
+      // The store shows "Switch to Chrome?" to every Chromium that is not Google Chrome, either as
+      // a dialog or as an inline banner. It can cover the install button, so it is answered in the
+      // page before the click; both shapes are detected and the variant is recorded.
+      ["dismiss the 'Switch to Chrome' prompt (CLI eval)", async () => {
+        const result = await storeEval(dismissScript);
+        const parsed = evalJson(result);
+        record.switch_to_chrome = parsed ?? { variant: null, dismissed: false, why: result?.stderr || "the eval returned no JSON" };
+        // The callout can sit in a cross-origin iframe, where the page script sees neither it nor
+        // its "No thanks" (variant banner/none, dismissed false). OCR sees the button, so it is
+        // clicked with the host's own mouse before anything below tries to click through it.
+        let ocrDismiss = null;
+        if (record.switch_to_chrome.dismissed !== true) {
+          ocrDismiss = await dismissNoThanksByOcr();
+          record.switch_to_chrome = ocrDismiss.dismissed
+            ? { ...record.switch_to_chrome, dismissed: true, via: ocrDismiss.via, ocr_at: ocrDismiss.at }
+            : { ...record.switch_to_chrome, ocr: ocrDismiss.stderr };
+        }
+        record.switch_to_chrome_prompt = record.switch_to_chrome.variant ? `${record.switch_to_chrome.variant}${record.switch_to_chrome.dismissed ? " dismissed" : ""}` : null;
+        // A dialog left in place would swallow the click below: that is a real failure. The inline
+        // banner does not cover the button, so a banner without a dismiss control is reported only.
+        const blocked = parsed?.variant === "dialog" || parsed?.variant === "both" ? !record.switch_to_chrome.dismissed : false;
+        const ok = (Boolean(parsed) || Boolean(ocrDismiss?.dismissed)) && !blocked;
+        return { ok, prompt: record.switch_to_chrome_prompt, ...(parsed ?? {}), ...(ocrDismiss ? { ocr: ocrDismiss } : {}), stderr: blocked ? parsed.why : result?.ok || ocrDismiss?.dismissed ? "" : result?.stderr ?? ocrDismiss?.stderr };
       }],
       1500,
-      // The store page is wider than the pane: the CLI scrolls the install button into view and
-      // gives it dark-on-white colours so OCR reads its label (white on blue it reads nothing);
-      // the click on it is still real OS input.
+      // The store page is wider than the pane: the button is scrolled into view and given
+      // dark-on-white colours so OCR reads its label (white on blue it reads nothing); the click
+      // on it is still real OS input. The rect is recomputed after the scroll, and a second pass
+      // after a short pause confirms where the page settled.
       ["scroll the install button into view (CLI eval)", async () => {
-        // Also reports the "Share" link's rect, a fallback anchor from page CSS pixels to screen.
-        // Centred: on the 1024px Windows runner screen the window is wider than the screen, so a
-        // button at the pane's right edge is off screen.
-        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Add to Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); b.style.setProperty('background', '#ffffff', 'important'); b.style.setProperty('color', '#000000', 'important'); b.querySelectorAll('*').forEach((e) => e.style.setProperty('color', '#000000', 'important')); const r = b.getBoundingClientRect(); const s = [...document.querySelectorAll('a,button,span')].find((e) => (e.textContent || '').trim() === 'Share'); const q = s && s.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: b.disabled, text: b.textContent.trim(), share: q ? {x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2)} : null, dpr: devicePixelRatio, vw: innerWidth}); })()";
+        const passes = [];
         const deadline = Date.now() + 30000;
-        let result = null;
         do {
-          result = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" };
-          if (result.ok && !result.stdout.includes("none")) {
-            try {
-              let parsed = JSON.parse(result.stdout);
-              if (typeof parsed === "string") parsed = JSON.parse(parsed);
-              installButton = parsed;
-            } catch {}
-            return { ok: Boolean(installButton), button: installButton ?? result.stdout };
+          const measured = evalJson(await storeEval(measureScript));
+          if (measured && measured.found === false) {
+            await sleep(2000);
+            continue;
+          }
+          if (measured) {
+            installButton = measured;
+            passes.push({ in_view: measured.in_view, hit_test: measured.hit_test, at: [measured.x, measured.y], on_top: measured.on_top, vw: measured.vw, vh: measured.vh });
+            // Two passes: the second re-measures after the page has painted the scroll.
+            if (passes.length >= 2) break;
+            await sleep(800);
+            continue;
           }
           await sleep(2000);
         } while (Date.now() < deadline);
-        record.error = "the store page offers no 'Add to Chrome' button";
-        return { ok: false, last: result?.stdout ?? null, stderr: result?.stderr || "no 'Add to Chrome' button in the page" };
+        // The prompt can also arrive (or stay) after the dismissal above, still covering the
+        // button: an iframe on top of the button's centre is answered once more, then re-measured.
+        if (overlaidByIframe(installButton)) {
+          const ocrDismiss = await dismissNoThanksByOcr({ attempts: 2 });
+          record.install_iframe_dismiss = ocrDismiss;
+          const remeasured = ocrDismiss.dismissed ? evalJson(await storeEval(measureScript)) : null;
+          if (remeasured?.found) {
+            installButton = remeasured;
+            passes.push({ after: ocrDismiss.via, in_view: remeasured.in_view, hit_test: remeasured.hit_test, at: [remeasured.x, remeasured.y], on_top: remeasured.on_top, vw: remeasured.vw, vh: remeasured.vh });
+          }
+        }
+        record.install_scroll = { attempts: passes.length, passes, button: installButton };
+        if (!installButton) {
+          record.error = "the store page offers no 'Add to Chrome' button";
+          return { ok: false, stderr: "no 'Add to Chrome' button in the page", passes };
+        }
+        // Not being in view is evidence for the click step, not a verdict here: the click has
+        // fallbacks (anchored rect, focus + Enter) that do not need the label on screen.
+        return { ok: true, button: installButton, passes };
       }],
       1500,
       ["click Add to Chrome", async () => {
-        const deadline = Date.now() + 20000;
+        const ocrDeadline = Date.now() + 8000;
         do {
           const words = ocr(probeShot()) ?? [];
           const hit = findPhrase(words, "Add to Chrome")[0];
-          if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y], via: "ocr" };
-          // The label is white on blue: map the button's page rect through the OCR'd "Share" link.
-          const share = installButton?.share && installButton.share.x > 0 ? words.find((word) => word.text === "Share") : null;
-          if (share) {
-            const scale = installButton.dpr || 1;
-            const at = [
-              Math.round(share.left + share.width / 2 + (installButton.x - installButton.share.x) * scale),
-              Math.round(share.top + share.height / 2 + (installButton.y - installButton.share.y) * scale),
-            ];
-            return { ...host.click(...at), at, via: "page rect anchored on 'Share'" };
+          if (hit) {
+            const clicked = host.click(hit.x, hit.y);
+            record.install_click = { via: "ocr", at: [hit.x, hit.y], ok: clicked.ok };
+            if (clicked.ok) return { ...clicked, at: [hit.x, hit.y], via: "ocr" };
           }
           await sleep(1500);
-        } while (Date.now() < deadline);
-        record.error ??= `'Add to Chrome' could not be located on screen (page rect ${JSON.stringify(installButton)})`;
-        return { ok: false, stderr: "'Add to Chrome' not visible" };
+        } while (Date.now() < ocrDeadline);
+        // The label is white on blue and OCR can miss it entirely: aim at the button's page rect
+        // through page text OCR did read (the old fallback used the "Share" link alone, which is
+        // off screen on a narrow pane).
+        const words = ocr(probeShot()) ?? [];
+        const point = anchoredPoint(words, installButton);
+        if (point) {
+          const clicked = host.click(...point.at);
+          record.install_click = { via: `page rect anchored on ${point.anchors.join(", ")}`, at: point.at, ok: clicked.ok };
+          if (clicked.ok) return { ...clicked, at: point.at, via: "page rect anchored on page text", anchors: point.anchors };
+        }
+        // Last: focus the button in the page and press Enter, which activates it under an overlay
+        // too. Still the host's input, and it names the button it hit in the record.
+        const keyboard = await activateAddToChrome();
+        record.install_click = { via: keyboard.via ?? "none", ok: keyboard.ok, focused: keyboard.focused ?? null };
+        if (keyboard.ok) return keyboard;
+        record.error ??= `'Add to Chrome' could not be clicked (page rect ${JSON.stringify(installButton)}, keyboard: ${keyboard.stderr})`;
+        return { ok: false, stderr: "'Add to Chrome' not visible", keyboard: keyboard.stderr };
       }],
       ["click Add extension", async () => {
         const deadline = Date.now() + 30000;
@@ -3105,6 +3536,23 @@ async function teardown() {
     else {
       try {
         process.kill(-app.pid, "SIGTERM");
+      } catch {}
+    }
+  }
+  // A cold start (G10 closed) is not `app`: stop each adopted pid by exact pid, and only while it
+  // still belongs to the QA bundle, so a recycled pid is never signalled.
+  for (const pid of adoptedPids) {
+    if (platform === "darwin" && !daily.qaGuiPids().includes(pid)) continue;
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+  if (adoptedPids.length) {
+    await sleep(4000);
+    for (const pid of adoptedPids) {
+      if (platform === "darwin" && !daily.qaGuiPids().includes(pid)) continue;
+      try {
+        process.kill(pid, "SIGKILL");
       } catch {}
     }
   }

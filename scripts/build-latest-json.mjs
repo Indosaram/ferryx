@@ -19,10 +19,13 @@ import { verifyMinisign } from "./lib/minisign-verify.mjs";
 import {
   isSafeRelativePath,
   KIND_DEFINITIONS,
+  listZipEntries,
+  missingZipEntries,
   parsePlan,
   parseReceipt,
   requiredKinds,
   VALID_HOSTS,
+  zipEntriesForKind,
 } from "./lib/release-contract.mjs";
 import { KEEPER_MANIFEST_KEY, keeperManifest, readKeeperLedger } from "./lib/release-keeper.mjs";
 
@@ -268,6 +271,24 @@ export function assembleRelease(options) {
     }
 
     const kindDef = KIND_DEFINITIONS[artifact.kind];
+    // A multi-file artifact (the Windows RD client zip) is only shippable if it actually carries
+    // every file the binary needs at run time. A zip that lists just the .exe passes every size
+    // and checksum check and still installs a client that dies with STATUS_DLL_NOT_FOUND.
+    const requiredEntries = zipEntriesForKind(artifact.kind);
+    if (requiredEntries.length > 0) {
+      const entries = listZipEntries(fileBuffer);
+      if (entries === null) {
+        throw new Error(
+          `Artifact '${artifact.name}' of kind '${artifact.kind}' must be a readable zip carrying [${requiredEntries.join(", ")}]`,
+        );
+      }
+      const missing = missingZipEntries(artifact.kind, entries);
+      if (missing.length > 0) {
+        throw new Error(
+          `Artifact '${artifact.name}' is missing required zip members [${missing.join(", ")}]; it carries [${entries.join(", ")}]`,
+        );
+      }
+    }
     if (kindDef.isUpdater) {
       if (!sigContent) {
         throw new Error(`Updater artifact '${artifact.name}' requires a valid signature file`);

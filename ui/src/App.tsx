@@ -40,6 +40,7 @@ import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { startInboundUrlDelivery } from "./lib/inboundUrls";
 import { printBrowser, stepBrowserZoom } from "./lib/browserSystem";
 import { useBrowserLibrarySync } from "./lib/browserLibrarySync";
 import { listen } from "@tauri-apps/api/event";
@@ -4474,6 +4475,36 @@ function WorkspaceApp({
       unlisten?.();
     };
   }, [createBrowserTab, reportRuntimeError]);
+
+  // An http(s) link handed to Ferryx by the OS (Ferryx set as the default browser, so `open -a`
+  // and a link click in another app arrive as an Apple Event) is queued by the backend and
+  // announced with an empty event. Nothing opened it before: the queue could be drained but never
+  // was, so the link was delivered and silently lost. Every window runs this, which is safe
+  // because the take is atomic on the backend: the first window to drain gets the URL and the
+  // others get nothing, so the focused window opens it once and no duplicate tab can appear.
+  const inboundOpenRef = useRef<(url: string) => void>((url) => {
+    void createBrowserTab(url).catch(reportRuntimeError);
+  });
+  inboundOpenRef.current = (url) => {
+    void createBrowserTab(url).catch(reportRuntimeError);
+  };
+  const inboundDeliveryRef = useRef<ReturnType<typeof startInboundUrlDelivery> | null>(null);
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    const delivery = startInboundUrlDelivery({
+      canDrain: () => !activeRemoteHostRef.current,
+      open: (url) => inboundOpenRef.current(url),
+    });
+    inboundDeliveryRef.current = delivery;
+    return () => {
+      delivery.dispose();
+      inboundDeliveryRef.current = null;
+    };
+  }, [isNativeRuntime]);
+
+  useEffect(() => {
+    if (!activeRemoteHost) inboundDeliveryRef.current?.trigger();
+  }, [activeRemoteHost]);
 
   useEffect(() => {
     const onOpenFilePreview = (event: Event) => {

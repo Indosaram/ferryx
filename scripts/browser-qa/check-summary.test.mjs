@@ -1,6 +1,6 @@
 import { describe, expect, it, test } from "bun:test";
 
-import { CDP_REQUIRED, collectChecks, missingCdpChecks, missingCoverage } from "./check-summary.mjs";
+import { CDP_REQUIRED, appExitFailure, collectChecks, missingCdpChecks, missingCoverage, reportSummary } from "./check-summary.mjs";
 
 const gaps = (names) => Object.fromEntries(names.map((name) => [name, { checks: { observed: true } }]));
 const full = (platform, daily) => ({
@@ -81,4 +81,48 @@ test("cookies must import on linux and macos; windows asserts the v20 fallback i
   const windows = passing("win32");
   delete windows.import.checks.v20_cookie_not_applied;
   expect(missingCdpChecks(windows)).toEqual(["import.v20_cookie_not_applied missing"]);
+});
+
+// Windows run 45014020714: the debug exe never loaded (0xC0000135 = exit 53) and the audit
+// reported 48 skipped_app_exited steps plus 55 false checks instead of the launch failure.
+const deadApp = (app_exit, totals = { ok: 0, skipped_app_exited: 48 }) => ({
+  ...passing("win32"),
+  binary: "/d/a/ferryx/src-tauri/target/debug/ferryx.exe",
+  app_exit,
+  totals,
+});
+
+test("a nonzero app exit outside teardown fails once, naming the binary and the code", () => {
+  const summary = deadApp({ code: 53, signal: null, at: "2026-11-22T11:11:32.999Z", during_teardown: false });
+  const report = reportSummary("ui-audit-windows", summary);
+  expect(report.failures).toBe(1);
+  expect(report.lines).toHaveLength(2);
+  expect(report.lines[0].verdict).toBe("FAIL");
+  expect(report.lines[0].text).toContain("exit code 53");
+  expect(report.lines[0].text).toContain(summary.binary);
+  expect(report.lines[1].text).toContain("48 step(s) recorded skipped_app_exited");
+  // The skipped step check rows are gone: they were consequences of the exit, not verdicts.
+  expect(report.lines.some((line) => line.text.includes(".checks."))).toBe(false);
+});
+
+test("an app exit with no during_teardown flag is still a failure", () => {
+  expect(appExitFailure({ app_exit: { code: 1, signal: null } })).toContain("exit code 1");
+  expect(appExitFailure({ app_exit: { code: null, signal: "SIGSEGV" } })).toContain("signal SIGSEGV");
+});
+
+test("a zero exit, a teardown stop and no exit at all are not failures", () => {
+  expect(appExitFailure({ app_exit: { code: 0, signal: null, during_teardown: false } })).toBeNull();
+  expect(appExitFailure({ app_exit: { code: null, signal: "SIGTERM", during_teardown: true } })).toBeNull();
+  expect(appExitFailure({ app_exit: { code: 53, signal: null, during_teardown: true } })).toBeNull();
+  expect(appExitFailure(passing("darwin"))).toBeNull();
+});
+
+test("a live app still reports its own failing checks", () => {
+  const report = reportSummary("ui-audit-macos", { platform: "darwin", checks: { working: true, broken: false, noted: "x" }, informational: ["noted"] });
+  expect(report.failures).toBe(1);
+  expect(report.lines.filter((line) => line.verdict === "FAIL").map((line) => line.text)).toEqual(["ui-audit-macos: checks.broken = false"]);
+});
+
+test("the summary names the binary when it carries none", () => {
+  expect(appExitFailure({ app_exit: { code: 53, signal: null } })).toContain("summary has no binary field");
 });

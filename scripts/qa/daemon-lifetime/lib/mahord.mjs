@@ -10,8 +10,10 @@ import { withDeadline } from './proc.mjs';
 
 export const TOOLS = Object.freeze({ click: 'remote_mouse_click', type: 'remote_type_text', key: 'remote_key_press', hotkey: 'remote_hotkey', screenshot: 'remote_take_screenshot' });
 
-export function mahordArgs({ host, pairingId }) {
-  return ['--host', host, '--pairing-id', pairingId, '--mcp'];
+export function mahordArgs({ host, pairingId, port }) {
+  // A QA box can run more than one host process (maho-win had a ferryx daemon on 19730 and the
+  // MahoRD host on 19740), so the signaling port is configurable rather than assumed.
+  return ['--host', host, '--pairing-id', pairingId, ...(port ? ['--tcp-port', String(port)] : []), '--mcp'];
 }
 
 /**
@@ -113,6 +115,10 @@ export async function connectMahord(gui, { binary = resolveMahordBinary(), log =
 async function openMahord(gui, { binary, log }) {
   if (gui.kind !== 'mahord') throw new Error(`not a MahoRD host: ${gui.kind}`);
   const child = spawn(binary, mahordArgs(gui), { stdio: ['pipe', 'pipe', 'pipe'] });
+  // The client reports a refused handshake on stderr and exits; without capturing it the harness can
+  // only say "exited 1", which hid a wrong signaling port behind a generic message.
+  let stderrTail = '';
+  child.stderr?.on('data', (chunk) => { stderrTail = (stderrTail + String(chunk)).slice(-1200); });
   const pending = new Map();
   let nextId = 1;
   createInterface({ input: child.stdout }).on('line', (line) => {
@@ -146,7 +152,7 @@ async function openMahord(gui, { binary, log }) {
   });
   const deathMessage = () => (exitState.error
     ? `maho-client failed to start: ${exitState.error.message}`
-    : `maho-client exited ${exitState.code ?? exitState.signal} before answering`);
+    : `maho-client exited ${exitState.code ?? exitState.signal} before answering${stderrTail ? `: ${stderrTail.trim().split('\n').slice(-3).join(' | ')}` : ''}`);
   // Shared hosts hit build bursts that stall the RD encode loop for tens of seconds; a 30s
   // deadline turned that into a hard Q00 failure (run 20261111t050123z). 90s rides them out.
   const rpc = (method, params, deadlineMs = 90_000) => {

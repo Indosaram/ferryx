@@ -23,4 +23,4 @@ pub use linux_keyring::fetch_linux_keys;
 #[cfg(any(target_os = "windows", test))]
 pub mod win_app_bound;
 #[cfg(target_os = "windows")]
-pub use win_app_bound::WindowsAppBoundDecryptor;
+pub use win_app_bound::{AppBoundKeyError, WindowsAppBoundDecryptor};

@@ -877,12 +877,37 @@ $env:CARGO_TARGET_DIR = $savedTargetDir
 if ($rdExit -ne 0) { exit $rdExit }
 $rdClient = @(Get-ChildItem -Path (Join-Path $rdTargetDir 'release') -Filter 'ferryx-rd-client.exe' -File)
 if ($rdClient.Count -ne 1) { throw "Expected exactly one ferryx-rd-client.exe, found $($rdClient.Count)" }
-Copy-Item -LiteralPath $rdClient[0].FullName -Destination (Join-Path $outDir 'ferryx-rd-client-windows-amd64.exe')
+# The client links FFmpeg dynamically, so it only starts with its DLL sidecars beside it: a bare
+# .exe exits 0xC0000135 (STATUS_DLL_NOT_FOUND) in about 0 ms on any machine without a system
+# FFmpeg (measured on maho-win, 2026-11-10). A release asset cannot carry two files, so the
+# published artifact is one zip holding the exe and exactly the DLLs it needs. Those DLLs live in
+# the staged payload's runtime/ directory, not at its root (scripts/stage-ffmpeg.mjs), which is why
+# the previous root-level glob shipped no DLLs at all.
+$rdStageDir = Join-Path $workspace 'rd-client-zip'
+if (Test-Path $rdStageDir) { throw 'Remote output collision' }
+New-Item -ItemType Directory -Path $rdStageDir | Out-Null
+Copy-Item -LiteralPath $rdClient[0].FullName -Destination (Join-Path $rdStageDir 'ferryx-rd-client.exe')
+$rdRuntimeDir = Join-Path $ffmpegPayload 'runtime'
+if (-not (Test-Path $rdRuntimeDir)) { throw "FFmpeg payload runtime directory is missing: $rdRuntimeDir" }
 foreach ($pattern in @('avcodec-*.dll', 'avutil-*.dll', 'swscale-*.dll', 'swresample-*.dll')) {
-  foreach ($dll in @(Get-ChildItem -Path $ffmpegPayload -Filter $pattern -File -ErrorAction SilentlyContinue)) {
-    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $outDir $dll.Name) -Force
-  }
+  $dlls = @(Get-ChildItem -Path $rdRuntimeDir -Filter $pattern -File -ErrorAction SilentlyContinue)
+  if ($dlls.Count -ne 1) { throw "Expected exactly one $pattern in the FFmpeg payload runtime directory, found $($dlls.Count)" }
+  Copy-Item -LiteralPath $dlls[0].FullName -Destination (Join-Path $rdStageDir $dlls[0].Name)
 }
+$rdZip = Join-Path $outDir 'ferryx-rd-client-windows-amd64.zip'
+if (Test-Path $rdZip) { Remove-Item -LiteralPath $rdZip -Force }
+Compress-Archive -Path (Join-Path $rdStageDir '*') -DestinationPath $rdZip -CompressionLevel Optimal
+# Verify the archive instead of trusting the packer: every staged file must be an entry, and the
+# client itself must be there under the name its DLL lookup needs.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$rdArchive = [System.IO.Compression.ZipFile]::OpenRead($rdZip)
+try { $rdEntries = @($rdArchive.Entries | ForEach-Object { $_.FullName }) } finally { $rdArchive.Dispose() }
+$rdStaged = @(Get-ChildItem -Path $rdStageDir -File | ForEach-Object { $_.Name })
+if ($rdStaged -notcontains 'ferryx-rd-client.exe') { throw 'The RD client zip has no ferryx-rd-client.exe' }
+$rdMissing = @($rdStaged | Where-Object { $rdEntries -notcontains $_ })
+if ($rdMissing.Count -gt 0) { throw "The RD client zip is missing: $($rdMissing -join ', ')" }
+if ($rdEntries.Count -ne $rdStaged.Count) { throw "The RD client zip carries $($rdEntries.Count) entries, expected $($rdStaged.Count)" }
+if ((Get-Item -LiteralPath $rdZip).Length -le 0) { throw 'The RD client zip is empty' }
 & (Join-Path $sourceDir 'scripts/build-msix.ps1') -ExePath $executables[0].FullName -Version ${quotePowerShell(plan.msixVersion)} -OutputDir $outDir -SkipSigning -FfmpegPayloadDir $ffmpegPayload
 if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ${nsisBuild}Pop-Location
@@ -2022,7 +2047,7 @@ export async function buildHost({
           });
           const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
           toolchains = parseBuildResult(result.stdout);
-          const names = ["Ferryx_x64.msix", "ferryx-rd-client-windows-amd64.exe"];
+          const names = ["Ferryx_x64.msix", "ferryx-rd-client-windows-amd64.zip"];
           if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
           for (const name of names) {
             await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });

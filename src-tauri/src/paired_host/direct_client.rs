@@ -1,11 +1,12 @@
 //! MachineClient hooks for the direct path: pick the request base, report direct
 //! transport loss, and start the background negotiator once trust is known.
 
+use std::time::Duration;
 use url::Url;
 
 use super::client::ClientError;
-use super::direct_connect::{ensure_direct, is_running, DirectAttempt};
-use super::direct_route::GLOBAL_DIRECT_ROUTES;
+use super::direct_connect::{ensure_direct as start_direct, is_running, DirectAttempt};
+use super::direct_route::{RouteState, GLOBAL_DIRECT_ROUTES};
 use super::direct_trust::{trusted_key, DirectTrustStore};
 use super::inventory::{CredentialLease, HostView};
 
@@ -40,6 +41,68 @@ pub(crate) fn is_transport_failure(error: &ClientError) -> bool {
     error.machine_error.is_none() && matches!(error.code.as_str(), "HOST_UNAVAILABLE" | "TIMEOUT")
 }
 
+/// Gives this process's direct worker a bounded head start before choosing a route.
+/// Only a locally pinned (manual or account-attested) host key permits waiting;
+/// account discovery still runs in the background on a trust miss.
+pub(crate) async fn ensure_direct(
+    http: &reqwest::Client,
+    host: &HostView,
+    lease: &CredentialLease,
+    budget: Duration,
+) {
+    if GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id).is_some() || lease.token().is_err() {
+        return;
+    }
+    // Subscribe before kick: even an immediately promoted or failed attempt is observed.
+    let mut events = GLOBAL_DIRECT_ROUTES.subscribe();
+    let mut cancelled = lease.cancellation();
+    kick(http, host, lease);
+    let Some(dir) = identity_dir() else {
+        return;
+    };
+    let wait = async {
+        if trusted_key(DirectTrustStore::at(&dir), host.machine_id.clone())
+            .await
+            .is_none()
+        {
+            return;
+        }
+        loop {
+            if GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id).is_some() {
+                return;
+            }
+            match events.recv().await {
+                Ok(event)
+                    if event.host_id == host.host_id
+                        && !matches!(event.state, RouteState::Attempting) =>
+                {
+                    return
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                _ => {}
+            }
+        }
+    };
+    tokio::select! { biased;
+        _ = cancelled.changed() => {}
+        _ = tokio::time::timeout(budget, wait) => {}
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    // Replace only transport negotiation; trust loading, promotion events and client IO stay real.
+    static TEST_ATTEMPT: (std::path::PathBuf, tokio::sync::mpsc::UnboundedSender<Option<DirectAttempt>>);
+}
+
+fn identity_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Ok(dir) = TEST_ATTEMPT.try_with(|(dir, _)| dir.clone()) {
+        return Some(dir);
+    }
+    crate::remote::auth::canonical_identity_dir().ok()
+}
+
 /// Starts direct negotiation in the background after the relay confirmed the
 /// host's machine identity. Without a locally provisioned host key nothing
 /// starts and every request stays on the relay. Never blocks the caller.
@@ -53,15 +116,26 @@ pub(crate) fn kick(http: &reqwest::Client, host: &HostView, lease: &CredentialLe
     let Ok(bearer) = lease.token().map(str::to_owned) else {
         return;
     };
+    let Some(dir) = identity_dir() else {
+        return;
+    };
+    #[cfg(test)]
+    let test_attempt = TEST_ATTEMPT.try_with(|(_, sender)| sender.clone()).ok();
     let http = http.clone();
     let host = host.clone();
     tokio::spawn(async move {
-        let Some(attempt) = load_attempt(&host, bearer).await else {
-            return;
-        };
+        let attempt = load_attempt(dir, &host, bearer).await;
         if *cancelled.borrow_and_update() {
             return;
         }
+        #[cfg(test)]
+        if let Some(sender) = test_attempt {
+            let _ = sender.send(attempt);
+            return;
+        }
+        let Some(attempt) = attempt else {
+            return;
+        };
         let cancelled = async move {
             // borrow_and_update first: a flag already set before subscribe counts.
             while !*cancelled.borrow_and_update() {
@@ -70,12 +144,22 @@ pub(crate) fn kick(http: &reqwest::Client, host: &HostView, lease: &CredentialLe
                 }
             }
         };
-        ensure_direct(&GLOBAL_DIRECT_ROUTES, http, attempt, generation, cancelled);
+        start_direct(&GLOBAL_DIRECT_ROUTES, http, attempt, generation, cancelled);
     });
 }
 
-async fn load_attempt(host: &HostView, bearer: String) -> Option<DirectAttempt> {
-    let dir = crate::remote::auth::canonical_identity_dir().ok()?;
+async fn load_attempt(
+    dir: std::path::PathBuf,
+    host: &HostView,
+    bearer: String,
+) -> Option<DirectAttempt> {
+    // A pinned host must not wait on account availability before it can negotiate.
+    if trusted_key(DirectTrustStore::at(&dir), host.machine_id.clone())
+        .await
+        .is_some()
+    {
+        return load_attempt_in(dir, host, bearer, None).await;
+    }
     let http = super::direct_autotrust::account_http();
     let account_key = if super::direct_trust::auto_trust_enabled() {
         crate::remote::direct_lease::ensure_account_public_key(Some(&dir), &http)
@@ -84,7 +168,13 @@ async fn load_attempt(host: &HostView, bearer: String) -> Option<DirectAttempt> 
     } else {
         None
     };
-    load_attempt_in(dir, host, bearer, account_key.as_deref().map(|key| (&http, key))).await
+    load_attempt_in(
+        dir,
+        host,
+        bearer,
+        account_key.as_deref().map(|key| (&http, key)),
+    )
+    .await
 }
 
 /// [`load_attempt`] against an explicit identity dir. `auto_trust` carries the account HTTP
@@ -171,6 +261,313 @@ mod tests {
     use std::time::Duration;
 
     const LIMIT: Duration = Duration::from_secs(15);
+
+    struct DesktopFixture {
+        root: tempfile::TempDir,
+        service: crate::paired_host::service::PairedHostService,
+        host: HostView,
+        origin: String,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl DesktopFixture {
+        async fn new(pin: Option<super::super::direct_trust::PinSource>) -> Self {
+            use crate::paired_host::inventory::{Inventory, Pairing};
+            use axum::{
+                routing::{get, post},
+                Json, Router,
+            };
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let relay_origin = origin.clone();
+            let (root, host) = crate::ipc::run_blocking(move || {
+                let root = tempfile::tempdir().unwrap();
+                let dir = root.path().join("remote");
+                crate::remote::auth::load_or_generate_machine_identity(&dir).unwrap();
+                if let Some(source) = pin {
+                    let store = DirectTrustStore::at(&dir);
+                    let key = identity("rd-host", 31).public_key;
+                    match source {
+                        super::super::direct_trust::PinSource::Manual => {
+                            store.provision("rd-host", &key, false).unwrap();
+                        }
+                        super::super::direct_trust::PinSource::Account => {
+                            store.provision_from_account("rd-host", &key, 1).unwrap();
+                        }
+                    }
+                }
+                let mut inventory =
+                    Inventory::open_test_loopback(&root.path().join("inventory")).unwrap();
+                let host = inventory
+                    .pair(&Pairing {
+                        relay_origin,
+                        machine_id: "rd-host".into(),
+                        display_label: "rd-host".into(),
+                        grant_scope: GrantScope::Machine,
+                        device_token: "rd-bearer".into(),
+                    })
+                    .unwrap();
+                Ok((root, host))
+            })
+            .await
+            .unwrap();
+            let relay_path = "/host/rd-host/api/v1/remote-desktop/pair";
+            let router = Router::new()
+                .route(
+                    relay_path,
+                    post(|| async { Json(serde_json::json!({ "transport": "relay" })) }),
+                )
+                .route(
+                    "/api/v1/remote-desktop/pair",
+                    post(|headers: axum::http::HeaderMap| async move {
+                        assert_eq!(headers["authorization"], "Bearer rd-bearer");
+                        Json(serde_json::json!({ "transport": "direct" }))
+                    }),
+                )
+                .route(
+                    "/api/v1/remote-desktop/stream",
+                    get(
+                        |headers: axum::http::HeaderMap,
+                         ws: axum::extract::ws::WebSocketUpgrade| async move {
+                            assert_eq!(headers["authorization"], "Bearer rd-bearer");
+                            ws.on_upgrade(|mut socket| async move {
+                                socket
+                                    .send(axum::extract::ws::Message::Binary(vec![7, 8, 9].into()))
+                                    .await
+                                    .unwrap();
+                            })
+                        },
+                    ),
+                );
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let service = crate::paired_host::service::PairedHostService::open_test_loopback(
+                root.path().join("inventory"),
+            );
+            assert!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id).is_none());
+            Self {
+                root,
+                service,
+                host,
+                origin,
+                server,
+            }
+        }
+
+        fn promote(&self, attempt: DirectAttempt) {
+            assert_eq!(attempt.host_id, self.host.host_id);
+            assert_eq!(attempt.host_machine_id, self.host.machine_id);
+            assert_eq!(attempt.bearer, "rd-bearer");
+            assert_eq!(
+                attempt.host_key,
+                super::super::direct_trust::parse_verifying_key(
+                    &identity("rd-host", 31).public_key
+                )
+                .unwrap()
+            );
+            let epoch = GLOBAL_DIRECT_ROUTES
+                .begin_attempt(&self.host.host_id, std::time::Instant::now())
+                .unwrap();
+            assert!(GLOBAL_DIRECT_ROUTES.publish(
+                &self.host.host_id,
+                epoch,
+                self.origin.clone(),
+                super::super::direct_route::DirectGuard::default(),
+            ));
+        }
+
+        async fn close(self) {
+            GLOBAL_DIRECT_ROUTES.reset(&self.host.host_id);
+            self.server.abort();
+            assert!(self.server.await.unwrap_err().is_cancelled());
+            crate::ipc::run_blocking(move || {
+                self.root.close().unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_remote_desktop_pair_starts_and_uses_direct_for_manual_and_account_pins() {
+        use crate::paired_host::{client::MachineClient, direct_trust::PinSource};
+        for pin in [PinSource::Manual, PinSource::Account] {
+            let fixture = DesktopFixture::new(Some(pin)).await;
+            let (sender, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+            TEST_ATTEMPT
+                .scope((fixture.root.path().join("remote"), sender), async {
+                    let client = MachineClient::new();
+                    let pair = client.remote_desktop_pair(
+                        &fixture.service,
+                        fixture.host.host_id.clone(),
+                        fixture.host.generation,
+                    );
+                    let promote = async {
+                        fixture.promote(attempts.recv().await.unwrap().expect("trusted attempt"));
+                    };
+                    let (body, ()) =
+                        tokio::time::timeout(LIMIT, async { tokio::join!(pair, promote) })
+                            .await
+                            .expect("pair observes direct promotion");
+                    let body: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+                    assert_eq!(body["transport"], "direct");
+                })
+                .await;
+            fixture.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_remote_desktop_stream_starts_and_uses_direct() {
+        use crate::paired_host::{client::MachineClient, direct_trust::PinSource};
+        use futures_util::StreamExt;
+        let fixture = DesktopFixture::new(Some(PinSource::Manual)).await;
+        let (sender, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        TEST_ATTEMPT
+            .scope((fixture.root.path().join("remote"), sender), async {
+                let client = MachineClient::new();
+                let stream = client.remote_desktop_stream(
+                    &fixture.service,
+                    fixture.host.host_id.clone(),
+                    fixture.host.generation,
+                );
+                let promote = async {
+                    fixture.promote(attempts.recv().await.unwrap().expect("trusted attempt"));
+                };
+                tokio::time::timeout(LIMIT, async {
+                    let (socket, ()) = tokio::join!(stream, promote);
+                    let frame = socket.unwrap().next().await.unwrap().unwrap();
+                    assert_eq!(frame.into_data().as_ref(), &[7, 8, 9]);
+                })
+                .await
+                .expect("stream observes direct promotion and carries bytes");
+            })
+            .await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn untrusted_remote_desktop_pair_uses_relay_without_a_promotion_wait() {
+        use crate::paired_host::client::MachineClient;
+        let fixture = DesktopFixture::new(None).await;
+        let (sender, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        TEST_ATTEMPT
+            .scope((fixture.root.path().join("remote"), sender), async {
+                let (host, lease) = fixture
+                    .service
+                    .capture_operation(fixture.host.host_id.clone(), fixture.host.generation)
+                    .await
+                    .unwrap();
+                // An unconditional wait would exceed this watchdog. No network negotiation is
+                // faked as successful, and no wall-clock latency threshold can make this flaky.
+                tokio::time::timeout(
+                    LIMIT,
+                    ensure_direct(&http(), &host, &lease, Duration::from_secs(60)),
+                )
+                .await
+                .expect("no trusted host key means no promotion wait");
+                assert!(tokio::time::timeout(LIMIT, attempts.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none());
+                let body = tokio::time::timeout(
+                    LIMIT,
+                    MachineClient::new().remote_desktop_pair(
+                        &fixture.service,
+                        host.host_id.clone(),
+                        host.generation,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["transport"], "relay");
+                assert!(tokio::time::timeout(LIMIT, attempts.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none());
+                assert!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id).is_none());
+            })
+            .await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn direct_promotion_budget_expires_without_a_route() {
+        use crate::paired_host::direct_trust::PinSource;
+        let fixture = DesktopFixture::new(Some(PinSource::Manual)).await;
+        let (sender, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        TEST_ATTEMPT
+            .scope((fixture.root.path().join("remote"), sender), async {
+                let (host, lease) = fixture
+                    .service
+                    .capture_operation(fixture.host.host_id.clone(), fixture.host.generation)
+                    .await
+                    .unwrap();
+                let http = http();
+                let wait = ensure_direct(&http, &host, &lease, Duration::from_secs(3));
+                let expire = async {
+                    attempts
+                        .recv()
+                        .await
+                        .unwrap()
+                        .expect("trusted attempt started");
+                    // Time is the behavior under test; advance only after its start signal.
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(3)).await;
+                };
+                tokio::time::timeout(LIMIT, async { tokio::join!(wait, expire) })
+                    .await
+                    .expect("unreachable direct path stays bounded");
+                tokio::time::resume();
+                assert!(request_base(&host).unwrap().direct_epoch.is_none());
+                assert!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id).is_none());
+            })
+            .await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn published_direct_route_needs_no_trust_lookup_or_negotiation() {
+        use crate::paired_host::{client::MachineClient, direct_route::DirectGuard};
+        let fixture = DesktopFixture::new(None).await;
+        let (sender, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        let epoch = GLOBAL_DIRECT_ROUTES
+            .begin_attempt(&fixture.host.host_id, std::time::Instant::now())
+            .unwrap();
+        assert!(GLOBAL_DIRECT_ROUTES.publish(
+            &fixture.host.host_id,
+            epoch,
+            fixture.origin.clone(),
+            DirectGuard::default(),
+        ));
+        TEST_ATTEMPT
+            .scope((fixture.root.path().join("missing"), sender), async {
+                let body = tokio::time::timeout(
+                    LIMIT,
+                    MachineClient::new().remote_desktop_pair(
+                        &fixture.service,
+                        fixture.host.host_id.clone(),
+                        fixture.host.generation,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["transport"], "direct");
+                assert!(matches!(
+                    attempts.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
+            })
+            .await;
+        fixture.close().await;
+    }
 
     fn host_view(machine_id: &str) -> HostView {
         HostView {

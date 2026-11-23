@@ -13,6 +13,9 @@
 // scripts/browser-qa/daily-scenarios.mjs), so a scenario that never started cannot pass.
 // A CDP-audit summary (scenario "cdp", gha-cdp-audit.mjs) must carry every check of
 // CDP_REQUIRED as `true`; a missing section or check fails, and `informational` cannot excuse one.
+// A summary whose `app_exit` has a non-null nonzero code (or a signal) and is not marked
+// `during_teardown` fails once, naming the binary and the code: the app died before the audit
+// finished, so its checks were never evaluated and are not selector failures.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -76,6 +79,56 @@ export function missingCoverage(summary) {
   return missing;
 }
 
+/**
+ * Why the audited app's own exit fails the summary, or null. A step whose child is already gone
+ * records `skipped_app_exited` and leaves its checks false, so dozens of them would otherwise
+ * read as selector failures; the one fact that explains them is the exit itself (Windows run
+ * 45014020714: exit 53 = 0xC0000135 STATUS_DLL_NOT_FOUND, 48 skipped steps, 55 false checks).
+ * A stop during teardown is how every passing run ends, so it is not a failure.
+ */
+export function appExitFailure(summary) {
+  const exit = summary?.app_exit;
+  if (!exit || typeof exit !== "object") return null;
+  if (exit.during_teardown === true) return null;
+  const code = exit.code ?? null;
+  const signal = exit.signal ?? null;
+  if (signal == null && (code == null || code === 0)) return null;
+  const how = signal != null ? `signal ${signal}` : `exit code ${code}`;
+  const binary = summary?.binary ?? "the app binary (summary has no binary field)";
+  return `the app exited before the audit finished (app_exit ${how} at ${exit.at ?? "unknown time"}) - ${binary}, so every step after it recorded skipped_app_exited and its checks were never evaluated`;
+}
+
+/**
+ * The lines to print for one summary and how many of them are failures. A dead app short
+ * circuits the check rows: they are consequences of the exit, and the exit is reported once.
+ */
+export function reportSummary(name, summary) {
+  const lines = [];
+  const appExit = appExitFailure(summary);
+  if (appExit) {
+    lines.push({ verdict: "FAIL", text: `${name}: ${appExit}` });
+    const skipped = summary?.totals?.skipped_app_exited ?? 0;
+    if (skipped) lines.push({ verdict: "info", text: `${name}: ${skipped} step(s) recorded skipped_app_exited; their checks are not selector failures` });
+    return { lines, failures: 1 };
+  }
+  let failures = 0;
+  if (summary?.pass === false) {
+    lines.push({ verdict: "FAIL", text: `${name}: pass=false` });
+    failures += 1;
+  }
+  for (const reason of missingCoverage(summary)) {
+    lines.push({ verdict: "FAIL", text: `${name}: ${reason}` });
+    failures += 1;
+  }
+  for (const row of collectChecks(summary)) {
+    const ok = row.value === true;
+    const verdict = ok ? "ok  " : row.informational ? "info" : "FAIL";
+    if (!ok && !row.informational) failures += 1;
+    lines.push({ verdict, text: `${name}: ${row.path} = ${JSON.stringify(row.value)}` });
+  }
+  return { lines, failures };
+}
+
 /** Every required CDP check that is absent or not exactly `true`. */
 export function missingCdpChecks(summary) {
   const extra = CDP_REQUIRED_BY_PLATFORM[summary.platform] ?? {};
@@ -118,20 +171,9 @@ if (import.meta.main) {
         failed += 1;
         continue;
       }
-      if (summary.pass === false) {
-        console.log(`FAIL ${name}: pass=false`);
-        failed += 1;
-      }
-      for (const reason of missingCoverage(summary)) {
-        console.log(`FAIL ${name}: ${reason}`);
-        failed += 1;
-      }
-      for (const row of collectChecks(summary)) {
-        const ok = row.value === true;
-        const verdict = ok ? "ok  " : row.informational ? "info" : "FAIL";
-        if (!ok && !row.informational) failed += 1;
-        console.log(`${verdict} ${name}: ${row.path} = ${JSON.stringify(row.value)}`);
-      }
+      const report = reportSummary(name, summary);
+      for (const line of report.lines) console.log(`${line.verdict} ${line.text}`);
+      failed += report.failures;
     }
   }
   console.log(failed ? `${failed} failing check(s)` : "all checks pass");

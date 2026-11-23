@@ -345,6 +345,10 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 tempfile = "3.17"
 tokio-test = "0.4"
 tokio = { version = "1.53", features = ["test-util"] }
+# The cookie tests drive the app-bound refusal path through the importer's test seam. The
+# `testing` feature opens that seam; release builds never see it because dev-dependencies are
+# not built for them.
+ferryx-browser-import = { path = "../crates/ferryx-browser-import", features = ["testing"] }
 
 # tests/wry_delegate_classes_macos.rs builds a wry webview directly; the same wry tauri runs on.
 [target.'cfg(target_os = "macos")'.dev-dependencies]

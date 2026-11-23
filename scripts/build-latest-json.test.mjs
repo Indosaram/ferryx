@@ -380,7 +380,7 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
     assert.equal(existsSync(join(outDir, "Ferryx_x64.msix")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-universal")), true);
-    for (const name of ["ferryx-rd-client-linux-amd64", "ferryx-rd-client-darwin-universal", "ferryx-rd-client-windows-amd64.exe"]) {
+    for (const name of ["ferryx-rd-client-linux-amd64", "ferryx-rd-client-darwin-universal", "ferryx-rd-client-windows-amd64.zip"]) {
       assert.ok(existsSync(join(outDir, name)), name);
     }
 
