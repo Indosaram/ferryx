@@ -286,6 +286,17 @@ impl SandboxProvider for SpritesProvider {
         }
     }
 
+    /// A new Sprite is `cold` (filesystem only, verified live on create) or `warm`, and both map to
+    /// [`SandboxState::Stopped`] because its runtime is not up. The platform never promotes one to
+    /// `running` by itself: the first request for the Sprite - `GET /v1/sprites/{name}` included -
+    /// is what starts it. `cloud create`'s next step after the wait is `exec`, so insisting on a
+    /// `Ready` observation here waited out the whole 300 s budget and rolled back a Sprite that
+    /// was healthy the entire time (`.omo/evidence/.../task-14-smoke.md`, cost: one create+delete
+    /// cycle of a $1 balance).
+    fn accepts_stopped_as_ready_on_create(&self) -> bool {
+        true
+    }
+
     async fn create(&self, request: CreateSandbox) -> Result<String, SandboxError> {
         // A Sprite's environment is fixed by the platform: `POST /v1/sprites` accepts a name and
         // `url_settings` only, and nothing mutates the environment afterwards. Refuse before
@@ -572,11 +583,16 @@ fn unexpected(call: &str, error: &serde_json::Error) -> SandboxError {
 fn map_state(status: Option<&str>) -> SandboxState {
     match status.unwrap_or_default() {
         "running" => SandboxState::Ready,
-        // `warm` is suspended with memory frozen and `cold` is fully stopped: both answer a
-        // request in under 2 s and neither is a failure.
-        "warm" | "cold" => SandboxState::Stopped,
-        "starting" | "warming" => SandboxState::Provisioning,
+        // `warm` keeps its runtime, `suspended` keeps its memory on disk and resumes on the next
+        // start, `cold` is filesystem only: all three still hold a filesystem and none is a
+        // failure, so they are stopped rather than provisioning.
+        "warm" | "suspended" | "cold" => SandboxState::Stopped,
+        "starting" | "warming" | "booting" | "warm_stopped" => SandboxState::Provisioning,
         "stopping" => SandboxState::Stopping,
+        // Terminal states. Reporting these as `Provisioning` would keep a dead Sprite looking like
+        // it is still coming up, so `resume` could never learn it is unrecoverable.
+        "error" => SandboxState::Error,
+        "deleting" => SandboxState::Deleted,
         _ => SandboxState::Provisioning,
     }
 }
@@ -949,6 +965,41 @@ mod tests {
     }
 
     #[test]
+    fn every_documented_status_maps_to_its_state() {
+        // The OpenAPI `Sprite.status` description lists exactly these: running, warm (runtime
+        // kept), suspended (memory on disk, resumes on next start), cold (filesystem only),
+        // error, deleting. A cluster-scoped route may also answer `booting` or `warm_stopped`.
+        for (raw, expected) in [
+            ("running", SandboxState::Ready),
+            ("warm", SandboxState::Stopped),
+            ("suspended", SandboxState::Stopped),
+            ("cold", SandboxState::Stopped),
+            ("booting", SandboxState::Provisioning),
+            ("warm_stopped", SandboxState::Provisioning),
+            ("stopping", SandboxState::Stopping),
+            ("error", SandboxState::Error),
+            ("deleting", SandboxState::Deleted),
+        ] {
+            assert_eq!(map_state(Some(raw)), expected, "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_a_sprite_in_the_error_state() {
+        // A Sprite whose runtime the platform gave up on is not resumable. Before the mapping was
+        // fixed `error` read as `Provisioning`, so this refused nothing and handed the caller a
+        // machine that would never come back.
+        let stub = StubCli::new(200, r#"{"name":"fx-qa-probe-7","status":"error"}"#);
+        let provider = stub.provider();
+        let error = provider
+            .resume("fx-qa-probe-7", None)
+            .await
+            .expect_err("an error-state sprite cannot be resumed");
+        assert_eq!(error.kind, ErrorKind::Fatal, "{}", error.message);
+        assert_eq!(error.provider_code, "unresumable", "{}", error.message);
+    }
+
+    #[test]
     fn list_live_decodes_the_sprites_array() {
         let parsed: ListEnvelope = parse_json(&fixture("list_live.json"), "list").unwrap();
         assert_eq!(parsed.sprites.len(), 1);
@@ -1114,6 +1165,23 @@ mod tests {
         assert_eq!(capabilities.max_ttl_seconds, None);
         assert!(capabilities.native_auto_stop);
         assert!(!capabilities.ttl_required);
+    }
+
+    /// The one provider that can be created `Stopped` and still be workable. It must opt in, or
+    /// `cloud create` spends its whole 300 s ready budget on a Sprite the platform never reports as
+    /// `running` on its own (task 14 live smoke: `wait_ready: fx-smoke-sprites did not become ready
+    /// within 300s`).
+    #[test]
+    fn a_new_sprite_counts_as_ready_while_stopped() {
+        let provider = SpritesProvider::without_cli();
+        assert!(
+            provider.accepts_stopped_as_ready_on_create(),
+            "a cold/warm Sprite is woken by the first exec, so the create wait must accept it"
+        );
+        // The states that make that true: both are `Stopped`, never `Ready`, until something asks
+        // the machine to run.
+        assert_eq!(map_state(Some("cold")), SandboxState::Stopped);
+        assert_eq!(map_state(Some("warm")), SandboxState::Stopped);
     }
 
     #[tokio::test]
