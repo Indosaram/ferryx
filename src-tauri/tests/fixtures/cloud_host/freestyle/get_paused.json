@@ -1,0 +1,15 @@
+{
+  "id": "vm-fixture-0001",
+  "state": "paused",
+  "slug": "fx-t8-fixture",
+  "displayName": "fx-t8-fixture",
+  "resources": { "cpu": 2, "memory": 4096, "storage": 10240 },
+  "metadata": { "fx": "t8-fixture" },
+  "autoDeleteSeconds": null,
+  "automaticRestart": true,
+  "idleTimeoutSeconds": null,
+  "image": "ubuntu",
+  "experimentalGpu": false,
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-01T00:05:00Z"
+}

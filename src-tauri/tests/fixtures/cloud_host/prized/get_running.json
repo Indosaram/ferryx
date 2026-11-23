@@ -1,0 +1,28 @@
+{
+  "box": {
+    "id": "5d0a0000-0000-4000-8000-000000000001",
+    "hostname": "fx-t8-fixture",
+    "observedState": "running",
+    "desiredState": "running",
+    "tier": "nano",
+    "region": "us-west-2",
+    "createdAt": "2026-01-01T00:00:00Z",
+    "autoPauseMin": 120,
+    "inUse": true
+  },
+  "state": {
+    "observedState": "running",
+    "desiredState": "running",
+    "job": null
+  },
+  "vitals": {
+    "cpuPct": 3,
+    "memPct": 21,
+    "idleForSec": 0
+  },
+  "events": [],
+  "job": null,
+  "storageMove": null,
+  "pausesSurvived": 0,
+  "envVars": []
+}

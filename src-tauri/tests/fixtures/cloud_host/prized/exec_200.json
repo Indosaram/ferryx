@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "type": "exec.result",
+  "exitCode": 0,
+  "signal": "",
+  "stdout": "x86_64\n",
+  "stderr": "",
+  "stdoutTruncated": false,
+  "stderrTruncated": false,
+  "timedOut": false,
+  "startedAt": "2026-01-01T00:00:01Z",
+  "finishedAt": "2026-01-01T00:00:02Z",
+  "cwd": "~"
+}
