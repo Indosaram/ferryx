@@ -92,6 +92,9 @@ pub struct MachineSsh {
     /// Per-machine file stem and `Host` alias. A bare token, never a path.
     pub name: String,
     pub hostname: String,
+    /// The provider's ssh username. It is not restricted to a POSIX login: Freestyle's gateway
+    /// authenticates `<vm-id>:<token>`, so it is validated by [`validate_cloud_username`] rather
+    /// than by the ordinary `User` token rule.
     pub username: Option<String>,
     pub port: Option<u16>,
     pub identity_file: Option<String>,
@@ -273,9 +276,16 @@ pub fn write_machine_files(machine: &MachineSsh) -> Result<MachineFiles, IpcErro
 /// Same, into `root`. Split out so tests own a disposable directory instead of `~/.ssh`.
 pub fn write_machine_files_in(root: &Path, machine: &MachineSsh) -> Result<MachineFiles, IpcError> {
     validate_name(&machine.name)?;
-    // The host, user, port and identity go through the one rule the rest of the SSH module uses,
-    // so a cloud machine cannot reach ssh with a token an ordinary host would be refused.
+    // The hostname, port and identity go through the one rule the rest of the SSH module uses, so
+    // a cloud machine cannot reach ssh with a value an ordinary host would be refused. The
+    // username is the one exception: Freestyle's gateway authenticates `<vm-id>:<token>` (see
+    // `FreestyleProvider::ssh_target`), and `:` is not a `User` token character under that rule,
+    // which is what failed `connect` for a correct target in the task-14 live smoke. It is held
+    // to its own rule instead - see `validate_cloud_username`.
     crate::ssh::direct::validate_host(&ssh_host(machine))?;
+    if let Some(username) = &machine.username {
+        validate_cloud_username(username)?;
+    }
     // `ProxyCommand` is the one directive emitted as a raw command line rather than a quoted
     // value, so a newline in it would append directives of the provider's choosing to this conf.
     // The value comes from a provider CLI, i.e. from off the machine, so it is refused rather
@@ -319,7 +329,10 @@ fn ssh_host(machine: &MachineSsh) -> SshHost {
         id: machine.name.clone(),
         label: machine.name.clone(),
         hostname: machine.hostname.clone(),
-        username: machine.username.clone(),
+        // Validation only, and deliberately empty: a cloud provider may carry a credential in the
+        // username (Freestyle's `<vm-id>:<token>`), which this struct's rule refuses. The
+        // username is validated by `validate_cloud_username` instead.
+        username: None,
         port: machine.port,
         identity_file: machine.identity_file.clone(),
         jump_host: None,
@@ -347,6 +360,38 @@ fn validate_name(name: &str) -> Result<(), IpcError> {
     if !ok {
         return Err(invalid(
             "Cloud machine name must be a bare token of letters, digits, '.', '_' or '-'",
+        ));
+    }
+    Ok(())
+}
+
+/// The longest cloud username accepted. Freestyle's `<vm-id>:<token>` is a 35-character VM id, a
+/// `:` and an API token - hundreds of bytes of headroom below this - so the bound only stops a
+/// provider from handing ssh an unbounded value.
+const CLOUD_USERNAME_MAX: usize = 512;
+
+/// The one rule for a cloud-provided SSH username.
+///
+/// It cannot be `direct::validate_host`'s `User` rule: that refuses `:`, and Freestyle's gateway
+/// wants exactly `<vm-id>:<token>` as the username, with the token as the credential. The value
+/// still reaches ssh as a single `User` value in a quoted config line, so it is held to what that
+/// really is - one token with no whitespace, quote, control character or shell metacharacter:
+///
+/// - a leading `-` would turn the destination into an option or a config override;
+/// - `%` is left out because ssh expands `%`-tokens in config values and no provider login needs
+///   one;
+/// - `;`, `&`, `|`, `$`, `` ` ``, `/` and `\` are refused because a provider string that reaches
+///   a shell or a path must never look like syntax.
+fn validate_cloud_username(username: &str) -> Result<(), IpcError> {
+    let ok = !username.is_empty()
+        && username.len() <= CLOUD_USERNAME_MAX
+        && !username.starts_with('-')
+        && username.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '+' | '@' | '=')
+        });
+    if !ok {
+        return Err(invalid(
+            "Cloud SSH username must be one token without whitespace, quotes or control characters",
         ));
     }
     Ok(())
@@ -397,6 +442,9 @@ fn machine_conf_text(machine: &MachineSsh, files: &MachineFiles) -> String {
     text.push_str(&format!("Host {}\n", files.alias));
     text.push_str(&format!("  HostName {}\n", conf_value(&machine.hostname)));
     if let Some(user) = &machine.username {
+        // Quoted like every other value, so a username carrying `:` (Freestyle's
+        // `<vm-id>:<token>`) is one `User` value rather than a directive; quotes, backslashes and
+        // whitespace are already refused by `validate_cloud_username`.
         text.push_str(&format!("  User {}\n", conf_value(user)));
     }
     if let Some(port) = machine.port {
@@ -1633,6 +1681,141 @@ mod tests {
         assert!(text.contains("  BatchMode yes\n"), "{text}");
         assert!(text.contains("  StrictHostKeyChecking accept-new\n"), "{text}");
         assert_eq!(mode_of(&files.conf), 0o600);
+    }
+
+    /// Todo 21: a real Freestyle target must write files, not fail validation.
+    ///
+    /// Task 14's live smoke created a VM and then `connect` failed with `Invalid SSH hostname,
+    /// username, port or jump host`: `FreestyleProvider::ssh_target` puts the credential in the
+    /// *username* as `<vm-id>:<token>` at `<vm-id>.beta-ssh.freestyle.sh`, and the ordinary `User`
+    /// token rule refuses `:`. The target is correct and the rule had to be narrower, so this
+    /// fixture is the exact shape the provider builds.
+    #[test]
+    fn a_freestyle_ssh_target_writes_its_conf() {
+        let dir = tempfile::tempdir().unwrap();
+        // Composed exactly as `FreestyleProvider::ssh_target_for` composes it: the VM id in the
+        // host under `.beta-ssh.freestyle.sh`, and `<vm-id>:<token>` as the username.
+        let vm_id = "vm-8b09e5167bb24f98a3158f28261b1936";
+        let host = format!("{vm_id}.beta-ssh.freestyle.sh");
+        let user = format!("{vm_id}:fstok_abc123-XYZ.9");
+        let machine = MachineSsh {
+            name: "fx-smoke-freestyle".into(),
+            hostname: host.clone(),
+            username: Some(user.clone()),
+            port: Some(22),
+            // `SshIdentity::Agent`: the gateway authenticates the username, so there is no key.
+            identity_file: None,
+            pinned_host_key: None,
+            proxy_command: None,
+            certificate_file: None,
+        };
+        let files = write_machine_files_in(dir.path(), &machine)
+            .expect("a real Freestyle target must not be refused as an invalid host");
+        let text = std::fs::read_to_string(&files.conf).unwrap();
+        // Exact lines: the value is emitted quoted, and the `:` stays inside the one `User` value.
+        let hostname_line = format!("  HostName \"{host}\"\n");
+        assert!(
+            text.contains(&hostname_line),
+            "the hostname must be written verbatim: {text}"
+        );
+        let user_line = format!("  User \"{user}\"\n");
+        assert!(
+            text.contains(&user_line),
+            "the <vm-id>:<token> username must be written as one quoted value: {text}"
+        );
+        // One `User` line: the credential in the username appended no directive of its own.
+        assert_eq!(text.matches("  User ").count(), 1, "{text}");
+        assert!(text.contains("  Port 22\n"), "{text}");
+        // Nothing upstream of the username was loosened: the identity-less shape is Agent auth and
+        // the conf still pins the trust store, so the `:` is the only thing that changed.
+        assert!(!text.contains("  IdentityFile"), "{text}");
+        let pin_line = "  StrictHostKeyChecking accept-new\n";
+        assert!(text.contains(pin_line), "{text}");
+        assert_eq!(mode_of(&files.conf), 0o600);
+    }
+
+    /// The username rule admits `:` and nothing that could turn one value into syntax.
+    #[test]
+    fn a_cloud_username_is_one_token_and_malicious_ones_are_refused() {
+        // Accepted: the real Freestyle shape, and the plain logins other providers use.
+        for good in [
+            "vm-8b09e5167bb24f98a3158f28261b1936:fstok_abc123-XYZ.9",
+            "daytona",
+            "vscode",
+            "user.name_1-2+tag@realm=x",
+            "a:b:c",
+        ] {
+            assert!(
+                validate_cloud_username(good).is_ok(),
+                "{good:?} must be accepted"
+            );
+        }
+        // Refused: the forms that would reach ssh as an option, a second directive, a shell
+        // command, an argv split, or nothing at all.
+        for bad in [
+            "",
+            "-oProxyCommand=id",
+            "user\nProxyCommand id",
+            "user\rHost evil",
+            "user; rm -rf ~",
+            "user name",
+            "user\tid",
+            "user&whoami",
+            "user|id",
+            "user$(id)",
+            "user`id`",
+            "user/path",
+            "user\\path",
+            "user\"quoted\"",
+            "user'quoted'",
+            "user\u{0}id",
+            "user\u{7f}",
+            "us%er",
+            "üser",
+        ] {
+            assert!(
+                validate_cloud_username(bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        // The length bound is generous enough for a vm-id plus a token, and still a bound.
+        assert!(validate_cloud_username(&"a".repeat(CLOUD_USERNAME_MAX)).is_ok());
+        assert!(validate_cloud_username(&"a".repeat(CLOUD_USERNAME_MAX + 1)).is_err());
+    }
+
+    /// The rejection happens inside `write_machine_files_in`, i.e. before anything is written.
+    #[test]
+    fn a_malicious_cloud_username_never_reaches_a_written_conf() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [
+            "-oProxyCommand=id",
+            "user\nProxyCommand id",
+            "user; rm -rf ~",
+            "user name",
+            "",
+        ] {
+            let machine = MachineSsh {
+                name: "fx-bad-user".into(),
+                hostname: "vm-8b09e5167bb24f98a3158f28261b1936.beta-ssh.freestyle.sh".into(),
+                username: Some(bad.into()),
+                port: Some(22),
+                identity_file: None,
+                pinned_host_key: None,
+                proxy_command: None,
+                certificate_file: None,
+            };
+            let error = write_machine_files_in(dir.path(), &machine)
+                .expect_err("a malicious username must not reach the conf");
+            assert!(
+                error.message.contains("username"),
+                "the refusal must name the field for {bad:?}: {}",
+                error.message
+            );
+            assert!(
+                !dir.path().join("fx-bad-user.conf").exists(),
+                "nothing may be written for {bad:?}"
+            );
+        }
     }
 
     #[test]
