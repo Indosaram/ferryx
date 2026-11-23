@@ -890,6 +890,38 @@ mod tests {
     }
 
     #[test]
+    fn relative_ages_convert_to_instants() {
+        // Every unit the binary's own format table can emit (`<n> {s,m,h,d} ago`, found in the
+        // `tl` 0.5.165 string data, plus the two numeric-free forms), and nothing that is not one
+        // of them. Live cells observed: `9 sec ago`, `7 min ago`, `2 min ago`, `38 min ago`.
+        const NOW: i64 = 1_000_000_000_000;
+        let minute = 60_000i64;
+        for (cell, expected) in [
+            ("9 sec ago", NOW - 9_000),
+            ("7 min ago", NOW - 7 * minute),
+            ("38 min ago", NOW - 38 * minute),
+            ("2 h ago", NOW - 120 * minute),
+            ("1 d ago", NOW - 24 * 60 * minute),
+            ("just now", NOW),
+            ("in under a minute", NOW),
+            // Spellings a later release plausibly emits; the unit table already accepts them.
+            ("3 hours ago", NOW - 3 * 60 * minute),
+            ("2 days ago", NOW - 2 * 24 * 60 * minute),
+            (" 7 min ago ", NOW - 7 * minute),
+        ] {
+            assert_eq!(parse_relative_age(cell, NOW), Some(expected), "{cell:?}");
+        }
+        // `in 5 min` is a boot in progress, not an age: ageing it would place the create in the
+        // future and hide a real orphan.
+        for not_an_age in [
+            "", "-", "running", "5", "ago", "5 min", "in 5 min", "5 min ago extra",
+            "min ago", "5 fortnights ago",
+        ] {
+            assert_eq!(parse_relative_age(not_an_age, NOW), None, "{not_an_age:?}");
+        }
+    }
+
+    #[test]
     fn unparseable_age_fails_list_instead_of_disabling_the_reaper() {
         // D7: lifecycle's orphan gate is `created_at.is_some_and(...)`, so a `None` here means an
         // orphan is reported and never deleted. An age cell the parser cannot read must be a
