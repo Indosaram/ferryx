@@ -244,8 +244,18 @@ acquire_lock() {
   if command -v flock >/dev/null 2>&1; then
     # The descriptor stays open for the life of the script; the kernel drops the
     # lock when the process exits, so a killed install never leaves it held.
+    # Use portable `flock -n` in a retry loop rather than `-w`: BusyBox flock
+    # supports only `[-sxun]` and rejects `-w` (observed live on Blaxel).
     exec 9>"$FX_INSTALL_ROOT/install.lock"
-    flock -w 600 9 || fail 1 "another install held $FX_INSTALL_ROOT/install.lock for over 600s"
+    waited=0
+    while ! flock -n 9 2>/dev/null; do
+      if [ "$waited" -ge 600 ]; then
+        exec 9>&-
+        fail 1 "another install held $FX_INSTALL_ROOT/install.lock for over 600s"
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
     FX_LOCK_KIND="flock"
     FX_LOCK_OWNED=1
     FX_LOCK_ACQUIRED_AT="$(date +%s 2>/dev/null || echo 0)"
