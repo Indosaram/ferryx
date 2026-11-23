@@ -2392,7 +2392,7 @@ pub enum AccountCliCommand {
     Plan { json: bool, origin: Option<String> },
 }
 
-const ACCOUNT_USAGE: &str = "expected `ferryx account <enroll|login|plan>`\n  enroll: `ferryx account enroll --code <code> [--origin <url>]`\n  login:  `ferryx account login [--email <email>] [--origin <url>]`\n  plan:   `ferryx account plan [--json] [--origin <url>]` (reuses an existing account session: FERRYX_ACCOUNT_SESSION_TOKEN + FERRYX_ACCOUNT_SESSION_ORIGIN)";
+const ACCOUNT_USAGE: &str = "expected `ferryx account <enroll|login|plan>`\n  enroll: `ferryx account enroll (--code <code>|--code-file <path>) [--origin <url>]` (--code-file keeps the enrollment code out of argv and out of a process listing)\n  login:  `ferryx account login [--email <email>] [--origin <url>]`\n  plan:   `ferryx account plan [--json] [--origin <url>]` (reuses an existing account session: FERRYX_ACCOUNT_SESSION_TOKEN + FERRYX_ACCOUNT_SESSION_ORIGIN)";
 
 pub fn parse_account_cli<I, T>(args: I) -> Result<AccountCliCommand, String>
 where
@@ -2409,6 +2409,7 @@ where
     match args.get(2).map(String::as_str) {
         Some("enroll") => {
             let mut code = None;
+            let mut code_file = None;
             let mut origin = None;
             let mut index = 3;
             while index < args.len() {
@@ -2416,6 +2417,11 @@ where
                     "--code" if code.is_none() => {
                         let value = args.get(index + 1).ok_or("missing value for --code")?;
                         code = Some(value.clone());
+                        index += 2;
+                    }
+                    "--code-file" if code_file.is_none() => {
+                        let value = args.get(index + 1).ok_or("missing value for --code-file")?;
+                        code_file = Some(value.clone());
                         index += 2;
                     }
                     "--origin" if origin.is_none() => {
@@ -2426,7 +2432,16 @@ where
                     other => return Err(format!("unknown account option `{other}`")),
                 }
             }
-            let code = code.ok_or_else(|| ACCOUNT_USAGE.to_string())?;
+            // A box enrolls itself, so the code arrives in a file: argv is visible to every
+            // process on the machine (`ps`, the shell history) and would leak the one-use secret.
+            let code = match (code, code_file) {
+                (Some(_), Some(_)) => {
+                    return Err("--code and --code-file cannot be combined; pass the code once, through a file".into())
+                }
+                (Some(code), None) => code,
+                (None, Some(path)) => read_enrollment_code_file(&path)?,
+                (None, None) => return Err(ACCOUNT_USAGE.to_string()),
+            };
             if code.trim().is_empty() {
                 return Err("missing value for --code".into());
             }
@@ -2477,8 +2492,24 @@ where
     }
 }
 
-fn account_cli_origin(origin: Option<String>) -> Result<String, AccountCliError> {
-    match origin {
+/// Read an enrollment code from a file, trimming the newline an editor or a heredoc leaves.
+///
+/// The code is a one-use secret: it is read here rather than taken from argv so it never shows up
+/// in `ps`, in the shell history, or in a crash reporter's copy of the command line. Neither the
+/// code nor the file's contents appear in an error message; the path does, so the operator knows
+/// which file to fix.
+fn read_enrollment_code_file(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("cannot read --code-file {path}: {error}"))?;
+    let code = String::from_utf8(bytes)
+        .map_err(|_| format!("--code-file {path} is not UTF-8 text"))?;
+    let code = code.trim().to_string();
+    if code.is_empty() {
+        return Err(format!("--code-file {path} is empty; it must hold the enrollment code"));
+    }
+    Ok(code)
+}
+
+fn account_cli_origin(origin: Option<String>) -> Result<String, AccountCliError> {    match origin {
         Some(value) => crate::account::origin::normalize_account_origin(&value)
             .map_err(|error| AccountCliError::usage(error.to_string())),
         None => crate::account::origin::account_origin()
@@ -8556,6 +8587,93 @@ mod tests {
         assert!(parse_account_cli(["ferryx", "account", "enroll", "--code"]).is_err());
         assert!(parse_account_cli(["ferryx", "account", "enroll", "--code", "x", "--bogus"]).is_err());
         assert!(parse_account_cli(["ferryx", "pair", "list"]).is_err());
+    }
+
+    #[test]
+    fn account_enroll_cli_reads_the_code_from_a_file() {
+        // A box enrolls itself: the code arrives in a 0600 file, never in argv.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enrollment-code.txt");
+        std::fs::write(&path, "code-from-file\n").unwrap();
+        let path = path.to_str().unwrap();
+
+        assert_eq!(
+            parse_account_cli(["ferryx", "account", "enroll", "--code-file", path]).expect("parse"),
+            AccountCliCommand::Enroll {
+                code: "code-from-file".into(),
+                origin: None,
+            }
+        );
+        assert_eq!(
+            parse_account_cli([
+                "ferryx",
+                "account",
+                "enroll",
+                "--code-file",
+                path,
+                "--origin",
+                "https://account.example",
+            ])
+            .expect("parse"),
+            AccountCliCommand::Enroll {
+                code: "code-from-file".into(),
+                origin: Some("https://account.example".into()),
+            }
+        );
+
+        // A file that is only whitespace is as missing as a missing file.
+        let empty = dir.path().join("empty.txt");
+        std::fs::write(&empty, "  \n\t\n").unwrap();
+        let error = parse_account_cli([
+            "ferryx",
+            "account",
+            "enroll",
+            "--code-file",
+            empty.to_str().unwrap(),
+        ])
+        .expect_err("an empty code file");
+        assert!(error.contains("is empty"), "{error}");
+
+        // A missing value for the option itself is still a usage error.
+        assert!(parse_account_cli(["ferryx", "account", "enroll", "--code-file"]).is_err());
+    }
+
+    #[test]
+    fn account_enroll_cli_rejects_a_missing_code_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent-code.txt");
+        assert!(!path.exists());
+
+        let error = parse_account_cli([
+            "ferryx",
+            "account",
+            "enroll",
+            "--code-file",
+            path.to_str().unwrap(),
+        ])
+        .expect_err("a missing file must not enroll");
+
+        assert!(error.contains("cannot read --code-file"), "{error}");
+        assert!(error.contains("absent-code.txt"), "the message names the file: {error}");
+        assert!(!error.contains("\n"), "a one-line usage error: {error}");
+    }
+
+    #[test]
+    fn account_enroll_cli_rejects_code_with_code_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enrollment-code.txt");
+        std::fs::write(&path, "code-from-file\n").unwrap();
+        let path = path.to_str().unwrap();
+
+        for args in [
+            vec!["ferryx", "account", "enroll", "--code", "code-1", "--code-file", path],
+            vec!["ferryx", "account", "enroll", "--code-file", path, "--code", "code-1"],
+        ] {
+            let error = parse_account_cli(args).expect_err("both spellings at once");
+            assert!(error.contains("cannot be combined"), "{error}");
+            assert!(!error.contains("code-from-file"), "the refusal never echoes a code: {error}");
+            assert!(!error.contains("code-1"), "the refusal never echoes a code: {error}");
+        }
     }
 
     #[test]
