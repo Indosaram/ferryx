@@ -27,7 +27,7 @@ From the Wave 1 dispatch-mode spike evidence (`cloud-host` plan item 1, attempt 
 | --- | --- | --- | --- | --- | --- | --- |
 | `daytona` | T1 (`ssh`) | `Bridge` (`model-bridge.py`) | Yes | Account default 30m (Ferryx cap 6h) | $200 one-time credit | Direct egress to `hms` endpoint blocked (`000`); uses stateless `ssh -T` HTTP bridge on `127.0.0.1:18802` |
 | `freestyle` | T1 (`ssh`) | `Direct` (firewall allowlist) | Yes | None (Ferryx cap 6h; exec cap 300s) | Monthly: 200 vCPU-h, 400 GiB-h RAM, 60,000 GiB-h disk, 50 GB transfer | Create-time env persisted locally in `0600` records under `~/.ferryx/cloud-host/env/` |
-| `codespaces` | T1 (`ssh`, `gh` CLI) | `Direct` | Yes | 4h (`240m`) | Monthly Personal Free: 120 core-h, 15 GB-month storage | Uses `ProxyCommand` (`cs.<name>.main` has no public DNS); stops at free limit without payment method |
+| `codespaces` | T1 (`ssh`, `gh` CLI) | `Direct` | Yes | 4h (`240m`) | Monthly Personal Free: 120 core-h, 15 GB-month storage | Needs `FERRYX_CODESPACE_REPO=owner/repo`; uses `ProxyCommand` (`cs.<name>.main` has no public DNS); stops at free limit without payment method |
 | `instabox` | T1 (`ssh`, CLI) | `Direct` | Yes | 24h (Ferryx cap 6h) | 1 always-on slot (4 vCPU / 8 GB / 20 GB) | **1-slot limit** (`bong-i-1` in use); requires `CertificateFile`; refuses `ssh_target` on suspended machines instead of waking |
 | `tensorlake` | T1 (`ssh`, CLI) | `Direct` | Yes | 2h | Free tier (1 concurrent sandbox) | Account **approval pending** (`SKIPPED` until `tl` login is approved) |
 | `prized` | T2 (`relay`, REST) | `Direct` | Yes | 7d (Ferryx cap 6h; exec cap 600s) | $30 one-time credit | SSH is tunnel-only, so agent traffic uses T2 relay; needs key in `~/.config/compute-secrets.env` |
@@ -38,6 +38,18 @@ From the Wave 1 dispatch-mode spike evidence (`cloud-host` plan item 1, attempt 
 | `sprites` | T2 (`relay`, CLI) | `Direct` | Yes | None (Ferryx cap 6h) | Fly.io trial **$1** (7 days) | Stops after 5m without card; refuses create-time `env` (`env_unsupported`); one-shot exec has no remote kill handle on timeout |
 
 Provider API keys are read by variable name from `~/.config/compute-secrets.env` (with optional `export ` prefix stripped). Secret values never appear in argv, stdout, logs, catalog rows, or evidence files.
+
+### Codespaces prerequisites
+
+`gh codespace create` is repository-scoped, so `codespaces` needs `FERRYX_CODESPACE_REPO=owner/repo` naming a repository the signed-in `gh` account can create codespaces in; the adapter passes it as `-R`. Because `gh codespace create` fails in non-TTY subprocesses with `error getting machine: no terminal` when no machine type is specified, the adapter passes `-m basicLinux32gb` by default (overrideable via `FERRYX_CODESPACE_MACHINE`), alongside `--display-name`, `--idle-timeout`, and `--default-permissions`.
+
+GitHub must also be able to bill the owner for the machine:
+
+- **Personal account**: a payment method with a Codespaces spending limit above `$0`, or free monthly allowance left (120 core-hours, 15 GB-month storage on the Free plan).
+- **Organization repository**: Codespaces enabled for the repository (org policy plus repository setting) and the member permitted to use it; the org pays.
+- Either way the idle timeout is fixed at create (`240m` maximum) and cannot be extended afterwards.
+
+A refused create reports **every** meaningful line of `gh`'s output, because `gh` prints the billing assurance `Codespaces usage for this repository is paid for by <owner>` *before* the real error. A spending-limit, payment-required or Codespaces-not-enabled refusal is a `config` error (fix the account; a retry cannot help); an account already at its codespace maximum is a `conflict` error.
 
 ## CLI usage
 

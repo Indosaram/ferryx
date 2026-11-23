@@ -37,6 +37,27 @@
 //!
 //! The idle timeout is fixed at create: the REST API's `PATCH /user/codespaces/{name}` accepts
 //! only the machine type, display name and recent folders, so `extend_ttl` reports `Config`.
+//!
+//! **Prerequisites: a repository, a machine type, and a billable account.** A codespace always
+//! belongs to a repository, so `create` needs [`REPO_ENV`] (`FERRYX_CODESPACE_REPO=owner/repo`)
+//! naming one the signed-in `gh` account can create codespaces in; that value is what `-R`
+//! receives. In non-TTY execution (a daemon or piped subprocess), `gh codespace create` fails with
+//! `error getting machine type: error getting machine: no terminal` unless `-m`/`--machine` is
+//! passed explicitly, so `create` passes [`DEFAULT_MACHINE`] (`basicLinux32gb`, overrideable via
+//! [`MACHINE_ENV`]). The other create flags are `--display-name`, `--idle-timeout` and
+//! `--default-permissions`, all present in `gh codespace create --help` on 2.83.2.
+//!
+//! Codespaces is billed per core-hour, so the owner also has to be able to pay: the personal free
+//! allowance (120 core-hours and 15 GB-months of storage per month) or the org's spending limit.
+//! An account with no payment method, with Codespaces disabled for the repository, or over its
+//! spending limit fails the create **after** printing
+//! `Codespaces usage for this repository is paid for by <owner>` - an assurance line, not the
+//! error. `gh` writes the reason on the lines below it, which is why every failure here goes
+//! through [`super::cli_run::failure_full`] rather than [`super::cli_run::failure`]: the live
+//! smoke that motivated this lost the cause to the notice (task 14 evidence,
+//! `.omo/evidence/ferryx-cloud-host-sandbox/task-14-smoke.md`). A spending-limit or not-enabled
+//! refusal is an account setting, so [`super::cli_run::classify`] reports it as `Config`; an
+//! account at its codespace maximum is `Conflict`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -59,6 +80,11 @@ const CREATE_TIMEOUT: Duration = Duration::from_secs(900);
 const MAX_IDLE_MINUTES: u64 = 240;
 /// Environment variable naming the repository `create` provisions in, as `owner/repo`.
 pub const REPO_ENV: &str = "FERRYX_CODESPACE_REPO";
+/// Environment variable overriding the Codespaces machine type passed to `-m` / `--machine`.
+pub const MACHINE_ENV: &str = "FERRYX_CODESPACE_MACHINE";
+/// Default machine type passed to `gh codespace create -m` so non-TTY invocations do not fail
+/// trying to open an interactive machine-type picker (`error getting machine: no terminal`).
+const DEFAULT_MACHINE: &str = "basicLinux32gb";
 
 /// One row of `gh codespace list --json`.
 #[derive(Debug, Clone, Deserialize)]
@@ -87,23 +113,31 @@ pub struct CodespaceView {
 pub struct CodespacesProvider {
     /// `owner/repo` that `create` provisions in; `None` when the environment does not name one.
     repo: Option<String>,
+    /// Machine type passed to `-m` (`basicLinux32gb` by default, overrideable via [`MACHINE_ENV`]).
+    machine: String,
 }
 
 impl CodespacesProvider {
-    /// Read the repository from `FERRYX_CODESPACE_REPO`. A missing value is not an error here:
-    /// only `create` needs it, and it reports the missing setting itself.
+    /// Read the repository from `FERRYX_CODESPACE_REPO` and optional machine type from
+    /// `FERRYX_CODESPACE_MACHINE`. A missing repository is not an error here: only `create` needs
+    /// it, and it reports the missing setting itself.
     pub fn from_env() -> Self {
         let repo = std::env::var(REPO_ENV).ok().map(|value| value.trim().to_string());
-        Self { repo: repo.filter(|value| !value.is_empty()) }
+        let machine = std::env::var(MACHINE_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_MACHINE.to_string());
+        Self { repo: repo.filter(|value| !value.is_empty()), machine }
     }
 
     pub fn with_repo(repo: impl Into<String>) -> Self {
-        Self { repo: Some(repo.into()) }
+        Self { repo: Some(repo.into()), machine: DEFAULT_MACHINE.to_string() }
     }
 
     /// A provider instance that will refuse `create` because no repository is configured.
     pub fn without_repo() -> Self {
-        Self { repo: None }
+        Self { repo: None, machine: DEFAULT_MACHINE.to_string() }
     }
 
     fn repo_or_config(&self) -> Result<&str, SandboxError> {
@@ -279,13 +313,36 @@ async fn run(args: &[&str], timeout: Duration) -> Result<CliOutput, SandboxError
     cli_run::run(PROVIDER, EXE, args, timeout).await
 }
 
+/// Build the argv for `gh codespace create`. Always includes `-m <machine>` so non-TTY runs do
+/// not fail with `error getting machine: no terminal`.
+fn create_args<'a>(repo: &'a str, machine: &'a str, name: &'a str, idle: &'a str) -> Vec<&'a str> {
+    vec![
+        "codespace",
+        "create",
+        "-R",
+        repo,
+        "-m",
+        machine,
+        "--display-name",
+        name,
+        "--idle-timeout",
+        idle,
+        "--default-permissions",
+    ]
+}
+
+/// Convert `gh`'s exit into a [`SandboxError`], keeping every meaningful line of output.
+fn cli_failure(output: &CliOutput) -> SandboxError {
+    cli_run::failure_full(PROVIDER, EXE, output)
+}
+
 /// Run a read-only query and turn a non-zero exit into a typed error.
 async fn query(args: &[&str]) -> Result<String, SandboxError> {
     let output = run(args, QUERY_TIMEOUT).await?;
     if cli_run::succeeded(&output) {
         Ok(output.stdout)
     } else {
-        Err(cli_run::failure(PROVIDER, "gh", &output))
+        Err(cli_failure(&output))
     }
 }
 
@@ -345,21 +402,11 @@ impl SandboxProvider for CodespacesProvider {
         }
 
         let idle = idle_timeout_arg(request.ttl_seconds.unwrap_or(MAX_IDLE_MINUTES * 60));
-        let args = vec![
-            "codespace",
-            "create",
-            "-R",
-            repo,
-            "--display-name",
-            request.name.as_str(),
-            "--idle-timeout",
-            idle.as_str(),
-            "--default-permissions",
-        ];
+        let args = create_args(repo, self.machine.as_str(), request.name.as_str(), idle.as_str());
 
         let output = run(&args, CREATE_TIMEOUT).await?;
         if !cli_run::succeeded(&output) {
-            return Err(cli_run::failure(PROVIDER, "gh", &output));
+            return Err(cli_failure(&output));
         }
 
         // `gh codespace create` prints the new name on its last line, but that text is not a
@@ -397,7 +444,7 @@ impl SandboxProvider for CodespacesProvider {
         if cli_run::succeeded(&output) {
             Ok(())
         } else {
-            Err(cli_run::failure(PROVIDER, "gh", &output))
+            Err(cli_failure(&output))
         }
     }
 
@@ -409,7 +456,7 @@ impl SandboxProvider for CodespacesProvider {
         if cli_run::succeeded(&output) {
             Ok(())
         } else {
-            Err(cli_run::failure(PROVIDER, "gh", &output))
+            Err(cli_failure(&output))
         }
     }
 
@@ -418,7 +465,7 @@ impl SandboxProvider for CodespacesProvider {
         if cli_run::succeeded(&output) {
             Ok(())
         } else {
-            Err(cli_run::failure(PROVIDER, "gh", &output))
+            Err(cli_failure(&output))
         }
     }
 
@@ -458,7 +505,7 @@ impl SandboxProvider for CodespacesProvider {
         if !cli_run::succeeded(&output) {
             // No remote status in the output: ssh or gh itself failed (no session, no such
             // codespace, a network fault), so this is not the command's exit code.
-            return Err(cli_run::failure(PROVIDER, "gh", &output));
+            return Err(cli_failure(&output));
         }
         Ok(ExecResult {
             exit_code: Some(0),
@@ -622,6 +669,98 @@ mod tests {
         let error = parse_list("not json").expect_err("garbage must not parse");
         assert_eq!(error.kind, ErrorKind::Fatal);
         assert_eq!(error.provider_code, "list_parse_failed");
+    }
+
+    /// The failure that ended the task 14 live smoke at `gh_exit_1` with no reason: `gh codespace
+    /// create` prints the billing assurance first and the cause underneath it. Both must reach
+    /// `SandboxError.message`, because the reason is the part an operator can act on.
+    #[test]
+    fn create_failure_keeps_the_billing_notice_and_the_error_below_it() {
+        let output = CliOutput {
+            stdout: String::new(),
+            stderr: "\u{2713} Codespaces usage for this repository is paid for by Indosaram\n\
+                     HTTP 422: Validation Failed (https://api.github.com/user/codespaces)\n\
+                     Repository Indosaram/build-farm is not enabled for Codespaces\n"
+                .to_string(),
+            code: Some(1),
+        };
+        let error = cli_failure(&output);
+        assert_eq!(error.provider, PROVIDER);
+        assert_eq!(error.provider_code, "gh_exit_1");
+        assert!(
+            error.message.contains("paid for by Indosaram"),
+            "the notice gh printed must not be dropped: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("HTTP 422: Validation Failed"),
+            "the cause must survive the notice: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("not enabled for Codespaces"),
+            "every line of the reason is kept: {}",
+            error.message
+        );
+        // "not enabled for" is the account-side prerequisite: a setting to change, not a retry.
+        assert_eq!(error.kind, ErrorKind::Config);
+    }
+
+    #[test]
+    fn create_failure_single_line_and_stdout_only_still_report_cleanly() {
+        // One line on stderr: unchanged from the first-line behaviour, minus the wrapper.
+        let one_line = CliOutput {
+            stdout: String::new(),
+            stderr: "no such codespace: fx-cs-1\n".to_string(),
+            code: Some(1),
+        };
+        let error = cli_failure(&one_line);
+        assert_eq!(error.message, "no such codespace: fx-cs-1");
+        assert_eq!(error.kind, ErrorKind::NotFound);
+
+        // `gh` writes some failures to stdout (a device-flow prompt, `gh`'s own usage text).
+        let stdout_only = CliOutput {
+            stdout: "To get started with GitHub CLI, please run: gh auth login\n".to_string(),
+            stderr: String::new(),
+            code: Some(4),
+        };
+        let error = cli_failure(&stdout_only);
+        assert!(error.message.contains("gh auth login"), "{}", error.message);
+        assert_eq!(error.provider_code, "gh_exit_4");
+        assert_eq!(error.kind, ErrorKind::Config);
+
+        // Silence still produces a message rather than an empty `[fatal] codespaces: `.
+        let silent = CliOutput { stdout: String::new(), stderr: String::new(), code: Some(1) };
+        assert_eq!(cli_failure(&silent).message, "no output");
+    }
+
+    /// A spending-limit refusal is the other billing shape: the account cannot pay, so the create
+    /// must report `Config` with GitHub's own words rather than a bare `gh_exit_1`.
+    #[test]
+    fn create_spending_limit_refusal_is_config_with_the_reason_kept() {
+        let output = CliOutput {
+            stdout: String::new(),
+            stderr: "\u{2713} Codespaces usage for this repository is paid for by Indosaram\n\
+                     error creating codespace: HTTP 402: You have exceeded your spending limit\n"
+                .to_string(),
+            code: Some(1),
+        };
+        let error = cli_failure(&output);
+        assert_eq!(error.kind, ErrorKind::Config);
+        assert!(error.message.contains("exceeded your spending limit"), "{}", error.message);
+    }
+
+    #[test]
+    fn create_args_always_passes_machine_for_non_tty_runs() {
+        let args = create_args("Indosaram/build-farm", DEFAULT_MACHINE, "fx-smoke-codespaces", "15m");
+        assert!(args.windows(2).any(|w| w == ["-R", "Indosaram/build-farm"]));
+        assert!(
+            args.windows(2).any(|w| w == ["-m", "basicLinux32gb"]),
+            "missing -m makes non-TTY gh fail with 'error getting machine: no terminal': {args:?}"
+        );
+        assert!(args.windows(2).any(|w| w == ["--display-name", "fx-smoke-codespaces"]));
+        assert!(args.windows(2).any(|w| w == ["--idle-timeout", "15m"]));
+        assert!(args.contains(&"--default-permissions"));
     }
 
     #[tokio::test]
