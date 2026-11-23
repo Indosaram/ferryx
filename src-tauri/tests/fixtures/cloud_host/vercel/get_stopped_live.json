@@ -1,0 +1,42 @@
+{
+  "sandbox": {
+    "name": "fx-qa-probe-2",
+    "currentSessionId": "sbx_t5ZDjlNhGFQYFZL8LH0VPEUtIyCS",
+    "status": "stopped",
+    "statusUpdatedAt": 1795279190000,
+    "persistent": true,
+    "workloadType": "sandbox",
+    "region": "iad1",
+    "failoverRegions": [],
+    "vcpus": 2,
+    "memory": 4096,
+    "runtime": "node22",
+    "architecture": "amd64",
+    "timeout": 600000,
+    "expiryNotificationLeadTime": 120000,
+    "cwd": "/vercel/sandbox",
+    "tags": { "fx": "probe" },
+    "createdAt": 1795279119092,
+    "updatedAt": 1795279190000
+  },
+  "session": {
+    "id": "sbx_t5ZDjlNhGFQYFZL8LH0VPEUtIyCS",
+    "runtime": "node22",
+    "architecture": "amd64",
+    "requestedAt": 1795279119033,
+    "startedAt": 1795279119061,
+    "status": "stopped",
+    "vcpus": 2,
+    "memory": 4096,
+    "timeout": 600000,
+    "region": "iad1",
+    "cwd": "/vercel/sandbox",
+    "workloadType": "sandbox",
+    "createdAt": 1795279119033,
+    "updatedAt": 1795279190000,
+    "sourceSandboxName": "fx-qa-probe-2",
+    "projectId": "prj_c9I8MngZAtSWZT8nViUR4B7BFjNX"
+  },
+  "routes": [],
+  "resumed": false
+}

@@ -154,6 +154,10 @@ mime_guess = "2.0"
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 url = "2"
+# Vercel Sandbox's file API takes a gzipped tar (`fs/write`); both crates are already in the
+# graph through tauri-plugin-updater and zip, so this adds no new transitive code.
+flate2 = "1"
+tar = "0.4"
 chacha20poly1305 = "0.10"
 blake2 = "0.10"
 rand = "0.8"

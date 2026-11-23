@@ -1,0 +1,2 @@
+{"command":{"id":"cmd_1db096e102024c18b5e4ac9f6b29","name":"bash","args":["-lc","echo out-hi; echo err-hi >&2; exit 7"],"cwd":"/vercel/sandbox","sessionId":"sbx_t5ZDjlNhGFQYFZL8LH0VPEUtIyCS","startedAt":1795279119705,"exitCode":null}}
+{"command":{"id":"cmd_1db096e102024c18b5e4ac9f6b29","name":"bash","args":["-lc","echo out-hi; echo err-hi >&2; exit 7"],"cwd":"/vercel/sandbox","sessionId":"sbx_t5ZDjlNhGFQYFZL8LH0VPEUtIyCS","startedAt":1795279119705,"exitCode":7,"durationMs":16}}

@@ -1,0 +1,43 @@
+{
+  "sandbox": {
+    "name": "fx-qa-probe-4",
+    "currentSessionId": "sbx_Fus55CBBAmaO7jwhmHRpIBgJHyX9",
+    "status": "running",
+    "statusUpdatedAt": 1795280148842,
+    "persistent": true,
+    "workloadType": "sandbox",
+    "region": "iad1",
+    "failoverRegions": [],
+    "vcpus": 2,
+    "memory": 4096,
+    "runtime": "node22",
+    "architecture": "amd64",
+    "image": "vercel/sandbox/universal@sha256:c763fc77f9f2a1f3d317c006f17dbb6fa5640f03c154224b21c0496bbea9e27b",
+    "timeout": 300000,
+    "expiryNotificationLeadTime": 120000,
+    "cwd": "/vercel",
+    "tags": { "launcher": "ferryx", "fx": "fx-qa-probe-4-1795280148" },
+    "createdAt": 1795280148842,
+    "updatedAt": 1795280148843
+  },
+  "session": {
+    "id": "sbx_Fus55CBBAmaO7jwhmHRpIBgJHyX9",
+    "runtime": "node22",
+    "architecture": "amd64",
+    "requestedAt": 1795280148779,
+    "startedAt": 1795280148810,
+    "status": "running",
+    "vcpus": 2,
+    "memory": 4096,
+    "timeout": 300000,
+    "region": "iad1",
+    "cwd": "/vercel",
+    "workloadType": "sandbox",
+    "createdAt": 1795280148779,
+    "updatedAt": 1795280148830,
+    "interactivePort": 26661,
+    "sourceSandboxName": "fx-qa-probe-4",
+    "projectId": "prj_c9I8MngZAtSWZT8nViUR4B7BFjNX"
+  },
+  "routes": []
+}
