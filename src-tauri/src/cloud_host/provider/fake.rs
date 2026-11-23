@@ -7,9 +7,7 @@
 //! - `create` is idempotent per key: the same request returns the same id, and a different
 //!   request under a used key is a `Conflict`.
 //! - a fresh machine is `Provisioning` and turns `Ready` on its first `get`; `stop` passes
-//!   through `Stopping` and settles on `Stopped` at the next `get`. [`FakeProvider::with_stopped_on_create`]
-//!   flips that first state to `Stopped` (the Fly Sprites `cold`/`warm` shape) without changing
-//!   anything else: `get` still never wakes a machine there, and `exec` is the wake.
+//!   through `Stopping` and settles on `Stopped` at the next `get`.
 //! - `get` and `list` never wake a machine.
 //! - `delete` leaves `Deleted`, which `list` omits and every other call reports `NotFound`.
 //!
@@ -89,9 +87,6 @@ pub struct FakeProvider {
     /// `created_at` orders without a wall clock and a test never races a real clock.
     clock: AtomicI64,
     next_id: AtomicI64,
-    /// The Fly Sprites shape: a machine created here starts `Stopped` and is woken by `exec`,
-    /// not by `get`. `false` for every provider whose `Stopped` means "asleep until `resume`".
-    stopped_on_create: bool,
 }
 
 impl Default for FakeProvider {
@@ -131,18 +126,7 @@ impl FakeProvider {
             inner: Mutex::new(Inner::default()),
             clock: AtomicI64::new(CLOCK_BASE_MS),
             next_id: AtomicI64::new(1),
-            stopped_on_create: false,
         }
-    }
-
-    /// Behave like Fly Sprites for a newly created machine: it answers `Stopped` from the moment
-    /// it exists (a `cold`/`warm` Sprite), `get` keeps reporting that, and `exec` is what wakes it.
-    ///
-    /// This is the one shape where [`SandboxProvider::accepts_stopped_as_ready_on_create`] is true,
-    /// so a create path that insists on `Ready` can be proven to spend its budget here.
-    pub fn with_stopped_on_create(mut self) -> Self {
-        self.stopped_on_create = true;
-        self
     }
 
     /// Make the next call fail with `kind` (no state changes, nothing recorded).
@@ -250,10 +234,6 @@ impl SandboxProvider for FakeProvider {
         self.capabilities
     }
 
-    fn accepts_stopped_as_ready_on_create(&self) -> bool {
-        self.stopped_on_create
-    }
-
     async fn create(&self, request: CreateSandbox) -> Result<String, SandboxError> {
         if let Some(error) = self.injected() {
             return Err(error);
@@ -292,18 +272,12 @@ impl SandboxProvider for FakeProvider {
         let n = self.next_id.fetch_add(1, Ordering::SeqCst);
         let id = format!("fake-{n}");
         let created_at = self.tick();
-        // A cold/warm Sprite reports `Stopped` immediately; everything else is still coming up.
-        let state = if self.stopped_on_create {
-            SandboxState::Stopped
-        } else {
-            SandboxState::Provisioning
-        };
         inner.machines.insert(
             id.clone(),
             FakeMachine {
                 id: id.clone(),
                 name: request.name,
-                state,
+                state: SandboxState::Provisioning,
                 created_at,
                 ttl_seconds: request.ttl_seconds,
                 env: request.env,
@@ -428,20 +402,12 @@ impl SandboxProvider for FakeProvider {
         let mut inner = self.inner.lock();
         let machine = Self::find(&inner, sandbox_id)?;
         if machine.state != SandboxState::Ready {
-            // A cold/warm Sprite is woken by the request itself, which is exactly why a create
-            // that accepts `Stopped` as ready can still run its bootstrap. No other `Stopped`
-            // machine is wakeable without `resume`, so it stays a `Conflict`.
-            if !(self.stopped_on_create && machine.state == SandboxState::Stopped) {
-                return Err(SandboxError::new(
-                    ErrorKind::Conflict,
-                    "fake",
-                    "not_ready",
-                    format!("sandbox is {}", machine.state),
-                ));
-            }
-            if let Some(stored) = inner.machines.get_mut(sandbox_id) {
-                stored.state = SandboxState::Ready;
-            }
+            return Err(SandboxError::new(
+                ErrorKind::Conflict,
+                "fake",
+                "not_ready",
+                format!("sandbox is {}", machine.state),
+            ));
         }
         if let Some(stored) = inner.machines.get_mut(sandbox_id) {
             stored.execs.push(command.to_string());
@@ -643,43 +609,6 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Conflict);
         assert_eq!(error.provider_code, "not_ready");
         assert!(provider.execs_of(&id).is_empty());
-    }
-
-    /// Fly Sprites as it really is on create: `cold`/`warm`, i.e. `Stopped`, and the first request
-    /// for the machine is what starts it. A status read is still not a wake.
-    #[tokio::test]
-    async fn a_stopped_on_create_machine_starts_stopped_and_is_woken_by_exec() {
-        let provider = FakeProvider::new().with_stopped_on_create();
-        assert!(provider.accepts_stopped_as_ready_on_create());
-        let id = provider.create(request("fx-a-1")).await.expect("create");
-
-        assert_eq!(provider.get(&id).await.unwrap().state, SandboxState::Stopped);
-        assert_eq!(
-            provider.get(&id).await.unwrap().state,
-            SandboxState::Stopped,
-            "a status read must not wake it"
-        );
-        provider.exec(&id, "true", 30).await.expect("the first command wakes it");
-        assert_eq!(provider.get(&id).await.unwrap().state, SandboxState::Ready);
-        assert_eq!(provider.execs_of(&id), vec!["true".to_string()]);
-    }
-
-    /// The flag is opt-in, and opt-in only where it is true: every other provider's `Stopped` means
-    /// asleep until `resume`, so `exec` must keep refusing it.
-    #[tokio::test]
-    async fn stopped_counts_as_ready_on_create_only_when_asked_for() {
-        assert!(!FakeProvider::new().accepts_stopped_as_ready_on_create());
-        assert!(!FakeProvider::ssh().accepts_stopped_as_ready_on_create());
-        assert!(FakeProvider::new().with_stopped_on_create().accepts_stopped_as_ready_on_create());
-
-        let provider = FakeProvider::new();
-        let id = provider.create(request("fx-a-1")).await.expect("create");
-        provider.get(&id).await.expect("promote");
-        provider.stop(&id).await.expect("stop");
-        // Settle `Stopping` into `Stopped`: the state a paused machine really reports.
-        assert_eq!(provider.get(&id).await.expect("settle").state, SandboxState::Stopped);
-        let error = provider.exec(&id, "true", 30).await.expect_err("asleep is not workable");
-        assert_eq!(error.provider_code, "not_ready");
     }
 
     #[test]

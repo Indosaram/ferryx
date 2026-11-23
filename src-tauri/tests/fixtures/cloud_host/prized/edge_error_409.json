@@ -1,8 +1,0 @@
-{
-  "ok": false,
-  "error": {
-    "code": "box_not_running",
-    "message": "the box is suspended; POST /exec wakes it, files do not"
-  },
-  "state": "suspended"
-}

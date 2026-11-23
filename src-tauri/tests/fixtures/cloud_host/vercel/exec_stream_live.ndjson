@@ -1,5 +1,0 @@
-{"command":{"id":"cmd_15cd644aeab74fed8745a0e82223","name":"bash","args":["-lc","echo out-hi; echo err-hi >&2; id -un; echo HOME=$HOME"],"cwd":"/vercel/sandbox","sessionId":"sbx_t5ZDjlNhGFQYFZL8LH0VPEUtIyCS","startedAt":1795279139752,"exitCode":null}}
-{"data":"out-hi\n","stream":"stdout"}
-{"data":"err-hi\n","stream":"stderr"}
-{"data":"vercel-sandbox\nHOME=/home/vercel-sandbox\n","stream":"stdout"}
-{"command":{"id":"cmd_15cd644aeab74fed8745a0e82223","name":"bash","args":["-lc","echo out-hi; echo err-hi >&2; id -un; echo HOME=$HOME"],"cwd":"/vercel/sandbox","sessionId":"sbx_t5ZDjlNhGFQYFZL8LH0VPEUtIyCS","startedAt":1795279139752,"exitCode":0,"durationMs":10}}

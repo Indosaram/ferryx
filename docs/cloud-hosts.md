@@ -4,7 +4,7 @@ Disposable cloud sandboxes managed from `ferryx-cli` and exposed as local RPC so
 
 ## What it does
 
-- Provisions, lists, stops, resumes, and deletes sandboxes across eleven providers through one `SandboxProvider` trait (`src-tauri/src/cloud_host/provider/`).
+- Provisions, lists, stops, resumes, and deletes sandboxes across six providers through one `SandboxProvider` trait (`src-tauri/src/cloud_host/provider/`).
 - Bootstraps each Linux x86_64 box with a checksummed, pinned runtime (`omo-ai@5.1.79` / engine `2026.11.18-3`, pinned Node `v24.22.3` when image Node < 24) behind an install lock and `.install-complete` marker (`src-tauri/resources/cloud-host/bootstrap.sh`).
 - Pushes only filtered `hms` credentials (`~/.omo/agent/auth.json`, `models.json`, `settings.json`, all mode `0600`) — never OAuth tokens or other providers' keys.
 - Connects over two transports with no inbound port opened on T2 boxes:
@@ -29,13 +29,10 @@ From the Wave 1 dispatch-mode spike evidence (`cloud-host` plan item 1, attempt 
 | `freestyle` | T1 (`ssh`) | `Direct` (firewall allowlist) | Yes | None (Ferryx cap 6h; exec cap 300s) | Monthly: 200 vCPU-h, 400 GiB-h RAM, 60,000 GiB-h disk, 50 GB transfer | Create-time env persisted locally in `0600` records under `~/.ferryx/cloud-host/env/` |
 | `codespaces` | T1 (`ssh`, `gh` CLI) | `Direct` | Yes | 4h (`240m`) | Monthly Personal Free: 120 core-h, 15 GB-month storage | Needs `FERRYX_CODESPACE_REPO=owner/repo`; uses `ProxyCommand` (`cs.<name>.main` has no public DNS); stops at free limit without payment method |
 | `instabox` | T1 (`ssh`, CLI) | `Direct` | Yes | 24h (Ferryx cap 6h) | 1 always-on slot (4 vCPU / 8 GB / 20 GB) | **1-slot limit** (`bong-i-1` in use); requires `CertificateFile`; refuses `ssh_target` on suspended machines instead of waking |
-| `tensorlake` | T1 (`ssh`, CLI) | `Direct` | Yes | 2h | Free tier (1 concurrent sandbox) | Account **approval pending** (`SKIPPED` until `tl` login is approved) |
-| `prized` | T2 (`relay`, REST) | `Direct` | Yes | 7d (Ferryx cap 6h; exec cap 600s) | $30 one-time credit | SSH is tunnel-only, so agent traffic uses T2 relay; needs key in `~/.config/compute-secrets.env` |
 | `e2b` | T2 (`relay`, REST) | `Direct` | Yes | **1h** (`3600s`) | $100 one-time credit (10 concurrent) | Hard **1-hour** sandbox lifetime; exec timeout enforced in-sandbox |
 | `blaxel` | T2 (`relay`, REST) | `Direct` | Yes | 24h (Ferryx cap 6h) | Up to $200 one-time credit | Uses `BL_WORKSPACE` + `BL_API_KEY`; explicit `chmod` applied after multipart uploads |
-| `opencomputer` | T2 (`relay`, REST) | `Direct` | Yes | None (Ferryx cap 6h) | Free plan (2 vCPU / 2 GB / 3 GB disk; 10 credits) | Routes marked unverified until API key is provisioned |
-| `vercel` | T2 (`relay`, REST) | `Direct` | Yes | **45m** (`2700s`) | Hobby monthly: 5h active CPU, 420 GB-h RAM, 5,000 creates, 20 GB transfer | Requires valid Vercel token (`403` if expired) |
-| `sprites` | T2 (`relay`, CLI) | `Direct` | Yes | None (Ferryx cap 6h) | Fly.io trial **$1** (7 days) | Stops after 5m without card; refuses create-time `env` (`env_unsupported`); one-shot exec has no remote kill handle on timeout |
+
+*(Dropped low-quota/unavailable providers: Fly Sprites `$1`, Vercel Sandbox `5h CPU/mo`, OpenComputer `10 credits`, Tensorlake unapproved, Prized `$30`.)*
 
 Provider API keys are read by variable name from `~/.config/compute-secrets.env` (with optional `export ` prefix stripped). Secret values never appear in argv, stdout, logs, catalog rows, or evidence files.
 

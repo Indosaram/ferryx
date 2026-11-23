@@ -21,11 +21,6 @@ pub mod e2b;
 pub mod fake;
 pub mod freestyle;
 pub mod instabox;
-pub mod opencomputer;
-pub mod prized;
-pub mod sprites;
-pub mod tensorlake;
-pub mod vercel;
 
 mod cli_run;
 
@@ -239,21 +234,6 @@ impl std::error::Error for SandboxError {}
 #[async_trait::async_trait]
 pub trait SandboxProvider: Send + Sync {
     fn capabilities(&self) -> Capabilities;
-
-    /// True when a machine this provider just created may answer [`SandboxState::Stopped`] and
-    /// still be workable, because the first `write_file`/`exec` starts its runtime.
-    ///
-    /// Fly Sprites is the reason this exists: a new Sprite reports `cold` or `warm` (both mapped
-    /// to `Stopped`) until a request wakes it, and every request - including the `exec` the create
-    /// path makes as its next step - is that wake. A create path that insists on `Ready` therefore
-    /// spends its whole budget on a state the platform never leaves on its own.
-    ///
-    /// `false` by default, and it must stay that way for every other provider: there `Stopped`
-    /// means the machine is asleep and only [`SandboxProvider::resume`] brings it back, so calling
-    /// it ready would run a bootstrap against a box that cannot answer.
-    fn accepts_stopped_as_ready_on_create(&self) -> bool {
-        false
-    }
 
     /// Create (or return) the machine this idempotency key names; the returned id is the
     /// handle every other call takes.

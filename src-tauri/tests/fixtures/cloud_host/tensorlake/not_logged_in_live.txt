@@ -1,2 +1,0 @@
-You are not logged in and have not provided an API key.
-Run 'tl login' to authenticate, or see 'tl --help' for API key options.

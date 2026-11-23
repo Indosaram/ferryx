@@ -31,7 +31,7 @@ ferryx/
 | Headless PTY Daemon & Sockets | `src-tauri/src/daemon/` | UDS v5 server at `/tmp/ferryx-{uid}/daemon.sock`, flock sync |
 | Binary IPC & Command Layer | `src-tauri/src/ipc/` | Typed Tauri commands, 20-byte stream headers, `run_blocking` |
 | Remote Gateway & Auth | `src-tauri/src/remote/` | Axum server, 6-digit PIN pairing, active desktop session lock |
-| Cloud Host Sandboxes | `src-tauri/src/cloud_host/` | 11 provider adapters, pinned omo bootstrap, catalog/reaper, relay slots, `ferryx-cli cloud` |
+| Cloud Host Sandboxes | `src-tauri/src/cloud_host/` | 6 provider adapters, pinned omo bootstrap, catalog/reaper, relay slots, `ferryx-cli cloud` |
 | Terminal Ring Buffer & PTY | `src-tauri/src/terminal/` | `portable-pty`, 512 KiB ring buffer with `ReplayGap` detection |
 | Native Terminal Engine | `src-tauri/src/native_terminal/` | `libghostty-vt` FFI, WGPU child view rendering across OS targets |
 | Worktree Git Management | `src-tauri/src/worktree/` | `<prefix>/<ws-id>/<slug>` branch allocation (`naming.rs`), root jail safety |

@@ -1,3 +1,0 @@
-ID	Name	Status	Image	CPUs	Memory	Disk	GPUs	Created At
-8gfghorqbabhg5qx1bgj1	fx-t9-probe	suspended	tensorlake/ubuntu-minimal	1	1024 MiB	10240 MiB	-	7 min ago
-1 sandbox

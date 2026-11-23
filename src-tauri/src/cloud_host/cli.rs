@@ -14,7 +14,7 @@
 //!    here in memory to its `hms` key and pushed as a 0600 file over the file API (relay
 //!    transport) or `scp` over the per-machine conf (SSH transport). The bootstrap's own
 //!    environment is written to a 0600 file and sourced by the script, which is why a provider
-//!    that refuses create-time environment (Sprites) still bootstraps.
+//!    that refuses create-time environment (`codespaces`, `instabox`) still bootstraps.
 //! 2. **Every verb ends in a reconcile.** The reaper is the only thing that stops a forgotten
 //!    machine without the operator, so a verb that could leave the catalog stale also runs the
 //!    sweep, and a sweep failure is reported without hiding the verb's own outcome.
@@ -41,14 +41,9 @@
 //! | `daytona` | [`ModelEgress::Bridge`] | live 2026-11-21: egress to the endpoint is blocked (`000`), and its create API takes no network policy, so nothing can allowlist it at create time |
 //! | `codespaces` | [`ModelEgress::Direct`] | a GitHub-hosted VM with unfiltered outbound egress, and its create body has no network field. Task 14 confirms it on a live box |
 //! | `freestyle` | [`ModelEgress::Direct`] | the only provider whose create body takes a firewall: its one outbound rule (`{destination:{public:true}}`) *is* the allowlist-at-create answer, and it is required on every create |
-//! | `instabox` | [`ModelEgress::Direct`] | unfiltered egress on the fixed host; no allowlist call exists. Task 14 confirms it |
-//! | `tensorlake` | [`ModelEgress::Direct`] | unfiltered egress; no allowlist call exists. Task 14 confirms it |
+//! | `instabox` | [`ModelEgress::Direct`] | unfiltered egress on the fixed host; no allowlist call exists |
 //! | `e2b` | [`ModelEgress::Direct`] | Firecracker VM with the provider's default open egress; its create body has no network policy. Task 13 confirms it end to end |
-//! | `blaxel` | [`ModelEgress::Direct`] | open egress; no allowlist call exists. Task 14 confirms it |
-//! | `opencomputer` | [`ModelEgress::Direct`] | open egress; no allowlist call exists. Task 14 confirms it |
-//! | `prized` | [`ModelEgress::Direct`] | open egress; no allowlist call exists. Task 14 confirms it |
-//! | `sprites` | [`ModelEgress::Direct`] | open egress; no allowlist call exists. Task 14 confirms it |
-//! | `vercel` | [`ModelEgress::Direct`] | open egress; no allowlist call exists. Task 14 confirms it |
+//! | `blaxel` | [`ModelEgress::Direct`] | open egress; no allowlist call exists |
 //!
 //! A bridge is only possible where the transport is SSH: it runs over one `ssh -T` channel, so a
 //! relay-only provider (E2B, Blaxel, ...) can never be given one. That is why no relay provider in
@@ -96,8 +91,6 @@ use super::reaper::{HostReaper, ReaperScheduler};
 use super::provider::{
     blaxel::BlaxelProvider, codespaces::CodespacesProvider, daytona::DaytonaProvider,
     e2b::E2bProvider, freestyle::FreestyleProvider, instabox::InstaboxProvider,
-    opencomputer::OpenComputerProvider, prized::PrizedProvider, sprites::SpritesProvider,
-    tensorlake::TensorlakeProvider, vercel::VercelProvider,
 };
 use super::provider::{CreateSandbox, ExecResult, SandboxProvider, SandboxState, Transport};
 use super::slots::{SlotLease, SlotRegistry};
@@ -187,11 +180,6 @@ pub const MODEL_EGRESS: &[(&str, ModelEgress)] = &[
     ("e2b", ModelEgress::Direct),
     ("freestyle", ModelEgress::Direct),
     ("instabox", ModelEgress::Direct),
-    ("opencomputer", ModelEgress::Direct),
-    ("prized", ModelEgress::Direct),
-    ("sprites", ModelEgress::Direct),
-    ("tensorlake", ModelEgress::Direct),
-    ("vercel", ModelEgress::Direct),
 ];
 
 /// The egress mechanism for `provider`. An unknown name is `Direct`: the registry lookup in
@@ -400,11 +388,6 @@ pub fn registry_from_env() -> ProviderRegistry {
     registry.insert("e2b", std::sync::Arc::new(E2bProvider::from_env()));
     registry.insert("freestyle", std::sync::Arc::new(FreestyleProvider::from_env()));
     registry.insert("instabox", std::sync::Arc::new(InstaboxProvider::new()));
-    registry.insert("opencomputer", std::sync::Arc::new(OpenComputerProvider::from_env()));
-    registry.insert("prized", std::sync::Arc::new(PrizedProvider::from_env()));
-    registry.insert("sprites", std::sync::Arc::new(SpritesProvider::from_env()));
-    registry.insert("tensorlake", std::sync::Arc::new(TensorlakeProvider::new()));
-    registry.insert("vercel", std::sync::Arc::new(VercelProvider::from_env()));
     registry
 }
 
@@ -779,7 +762,7 @@ async fn create_with(
         idempotency_key: format!("fx-{name}-{}", unix_seconds()),
         name: name.to_string(),
         ttl_seconds: ttl,
-        // The bootstrap's environment travels separately as a 0600 file: Sprites refuses
+        // The bootstrap's environment travels separately as a 0600 file: CLI providers refuse
         // create-time environment and nothing here may put a value on a command line.
         env: BTreeMap::new(),
     };
@@ -1651,7 +1634,7 @@ impl Access {
 
 /// The bootstrap script and its environment, both pushed as files and then run with `set -a`.
 ///
-/// The environment is delivered this way rather than at create time because Sprites refuses
+/// The environment is delivered this way rather than at create time because CLI providers refuse
 /// create-time environment and `exec` has no environment parameter: one mechanism that every
 /// provider accepts beats two that differ. A value never appears on a command line.
 async fn bootstrap_box(access: &Access, role: Role, home: &str) -> Result<(), String> {
@@ -1684,7 +1667,7 @@ async fn bootstrap_box(access: &Access, role: Role, home: &str) -> Result<(), St
     );
     let result = access.run(&command, BOOTSTRAP_TIMEOUT_SECONDS).await?;
     if result.timed_out {
-        // Sprites' exec cannot kill a timed-out remote command, so an immediate retry would race
+        // An immediate retry would race an already-running bootstrap; nothing here retries at all.
         // the first bootstrap; nothing here retries at all.
         return Err(format!(
             "the bootstrap on the box timed out after {BOOTSTRAP_TIMEOUT_SECONDS}s"
@@ -2327,17 +2310,11 @@ async fn wait_ready_within(
     budget: Duration,
     poll: Duration,
 ) -> Result<(), String> {
-    // Asked once, before the loop: it is a property of the provider, not of the machine.
-    let stopped_is_ready = provider.accepts_stopped_as_ready_on_create();
     let deadline = Instant::now() + budget;
     loop {
         match provider.get(sandbox_id).await {
             Ok(info) => match info.state {
                 SandboxState::Ready => return Ok(()),
-                // A cold/warm Sprite is workable as it stands: the first exec starts it. Waiting
-                // for a `Ready` it never reports spent the whole budget and rolled back a machine
-                // that was healthy the moment the provider answered.
-                SandboxState::Stopped if stopped_is_ready => return Ok(()),
                 SandboxState::Error => {
                     return Err(format!(
                         "the provider reports {sandbox_id} in error: {}",
@@ -2763,11 +2740,6 @@ mod tests {
                 "e2b",
                 "freestyle",
                 "instabox",
-                "opencomputer",
-                "prized",
-                "sprites",
-                "tensorlake",
-                "vercel",
             ]
         );
         assert!(registry.get("nope").is_none());
@@ -2821,140 +2793,13 @@ mod housekeeping_tests {
         assert!(READY_POLL < READY_BUDGET);
     }
 
-    // -----------------------------------------------------------------------------------------
-    // A machine that is `Stopped` the moment it exists (Fly Sprites: `cold`/`warm`)
-    // -----------------------------------------------------------------------------------------
-
-    /// The steps double whose `wait_ready` is the **production** function. Everything else is
-    /// recorded and succeeds, so a test can drive the real [`run_steps`] order while the wait is
-    /// the thing under test.
-    struct RealWaitSteps<'a> {
-        provider: &'a dyn SandboxProvider,
-        sandbox_id: &'a str,
-        reached: parking_lot::Mutex<Vec<CreateStep>>,
-    }
-
-    impl<'a> RealWaitSteps<'a> {
-        fn new(provider: &'a dyn SandboxProvider, sandbox_id: &'a str) -> Self {
-            Self { provider, sandbox_id, reached: parking_lot::Mutex::new(Vec::new()) }
-        }
-
-        fn reached(&self) -> Vec<CreateStep> {
-            self.reached.lock().clone()
-        }
-
-        fn step(&self, step: CreateStep) -> Result<(), StepFailure> {
-            self.reached.lock().push(step);
-            Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProvisionSteps for RealWaitSteps<'_> {
-        async fn wait_ready(&self) -> Result<(), StepFailure> {
-            wait_ready(self.provider, self.sandbox_id).await.map_err(|error| {
-                StepFailure::new(format!("{}: {error}", CreateStep::WaitReady.as_str()))
-            })?;
-            self.step(CreateStep::WaitReady)
-        }
-
-        async fn connect(&self) -> Result<(), StepFailure> {
-            self.step(CreateStep::Connect)
-        }
-
-        async fn home(&self) -> Result<String, StepFailure> {
-            self.step(CreateStep::Home)?;
-            Ok("/home/sprite".to_string())
-        }
-
-        async fn bootstrap(&self, _role: Role, _home: &str) -> Result<(), StepFailure> {
-            self.step(CreateStep::Bootstrap)
-        }
-
-        async fn push_agent_files(&self, _home: &str) -> Result<(), StepFailure> {
-            self.step(CreateStep::PushAgentFiles)
-        }
-
-        async fn model_egress(&self, _home: &str) -> Result<ModelEgress, StepFailure> {
-            self.step(CreateStep::ModelEgress)?;
-            Ok(ModelEgress::Direct)
-        }
-
-        async fn enroll(&self) -> Result<Option<String>, StepFailure> {
-            self.step(CreateStep::Enroll)?;
-            Ok(None)
-        }
-
-        async fn ensure_host(&self) -> Result<(), StepFailure> {
-            self.step(CreateStep::EnsureHost)
-        }
-    }
-
-    /// The live defect of task 14: a fresh Sprite reports `cold`/`warm` (i.e. `Stopped`) and the
-    /// platform never says `Ready` until something asks the machine to run. `wait_ready` must hand
-    /// such a machine to the next step straight away - its first `exec` is the wake - instead of
-    /// burning the 300 s budget and rolling back a box that was healthy all along.
+    /// A stopped machine is asleep until `resume`, so `wait_ready` must never call it ready or
+    /// wake it on its own. Bounded, so the test is fast and never sleeps out the real budget.
     #[tokio::test]
-    async fn a_stopped_on_create_machine_reaches_bootstrap_without_waiting() {
-        let fake = std::sync::Arc::new(
-            crate::cloud_host::provider::fake::FakeProvider::new().with_stopped_on_create(),
-        );
-        let provider: std::sync::Arc<dyn SandboxProvider> = fake.clone();
-        let id = provider
-            .create(CreateSandbox {
-                idempotency_key: "fx-smoke-sprites-1".into(),
-                name: "fx-smoke-sprites".into(),
-                ttl_seconds: None,
-                env: BTreeMap::new(),
-            })
-            .await
-            .expect("created");
-        assert_eq!(
-            provider.get(&id).await.expect("get").state,
-            SandboxState::Stopped,
-            "this proof needs a machine that is stopped the moment it exists"
-        );
-
-        let steps = RealWaitSteps::new(provider.as_ref(), &id);
-        let before = fake.call_methods().len();
-        // Bounded far under `READY_BUDGET`: a `wait_ready` that keeps polling for a `Ready` this
-        // platform never reports fails here in two seconds instead of passing after five minutes.
-        let egress = tokio::time::timeout(
-            Duration::from_secs(2),
-            run_steps(&steps, Role::Relay, Transport::Relay),
-        )
-        .await
-        .expect("the create path waited for a `Ready` a cold Sprite never reports")
-        .expect("a stopped-on-create machine is workable as it stands");
-        assert_eq!(egress, ModelEgress::Direct);
-        // Every step ran, in order: the wait did not stop the pipeline, and bootstrap is behind it.
-        assert_eq!(steps.reached(), RELAY_STEPS.to_vec());
-        // The wait read the machine exactly once and accepted it, so there was nothing to time out.
-        assert_eq!(
-            fake.call_methods()[before..].to_vec(),
-            vec!["get"],
-            "the wait must accept the first `Stopped` instead of polling for a `Ready`"
-        );
-        assert!(!fake.call_methods().contains(&"resume"), "a wait must never resume");
-
-        // And the very first command on the machine - what the bootstrap starts with - runs while
-        // it answers `Stopped` in the provider's own terms, because that request is the wake.
-        let exec_provider: std::sync::Arc<dyn SandboxProvider> = fake.clone();
-        let access = relay_access(exec_provider, &id);
-        let result = access.run("sh -c 'printf FX_BOOTSTRAP_OK'", 30).await.expect("exec ran");
-        assert_eq!(result.exit_code, Some(0));
-        assert_eq!(fake.execs_of(&id), vec!["sh -c 'printf FX_BOOTSTRAP_OK'".to_string()]);
-    }
-
-    /// The other half of the rule: a provider that did not opt in keeps today's behaviour. Its
-    /// `Stopped` means asleep until `resume`, so a create that called it ready would bootstrap a
-    /// box that cannot answer. Bounded, so the test is fast and never sleeps out the real budget.
-    #[tokio::test]
-    async fn a_stopped_machine_of_a_normal_provider_is_not_ready() {
+    async fn a_stopped_machine_is_not_ready() {
         use crate::cloud_host::provider::fake::FakeProvider;
 
         let provider = FakeProvider::new();
-        assert!(!provider.accepts_stopped_as_ready_on_create());
         let id = provider
             .create(CreateSandbox {
                 idempotency_key: "fx-e2b-1".into(),
@@ -2972,11 +2817,10 @@ mod housekeeping_tests {
         let before = provider.call_methods().len();
         let error = wait_ready_within(&provider, &id, Duration::from_millis(50), Duration::from_millis(10))
             .await
-            .expect_err("a stopped machine of a normal provider is not ready");
+            .expect_err("a stopped machine is not ready");
         assert!(error.contains("did not become ready"), "{error}");
         assert!(error.contains(id.as_str()), "the message names the machine: {error}");
-        // It polled instead of deciding on the first read, and it never woke anything: a `Stopped`
-        // machine of a provider that did not opt in stays asleep until `resume`.
+        // It polled instead of deciding on the first read, and it never woke anything.
         let during: Vec<&'static str> = provider.call_methods()[before..].to_vec();
         assert!(
             during.iter().filter(|method| **method == "get").count() >= 2,
@@ -2986,11 +2830,10 @@ mod housekeeping_tests {
         assert_eq!(provider.get(&id).await.expect("get").state, SandboxState::Stopped);
     }
 
-    /// `NotFound` is decided on the very first read, whatever the provider says about `Stopped`: a
-    /// vanished machine must not be mistaken for a workable one.
+    /// `NotFound` is decided on the very first read: a vanished machine must fail immediately.
     #[tokio::test]
-    async fn a_deleted_machine_is_reported_even_when_stopped_is_accepted() {
-        let provider = crate::cloud_host::provider::fake::FakeProvider::new().with_stopped_on_create();
+    async fn a_deleted_machine_is_reported_immediately() {
+        let provider = crate::cloud_host::provider::fake::FakeProvider::new();
         let id = provider
             .create(CreateSandbox {
                 idempotency_key: "fx-gone-1".into(),
