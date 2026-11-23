@@ -601,8 +601,15 @@ start_host() {
   mkdir -p "$FX_RPC_DIR"
   chmod 700 "$FX_RPC_DIR" 2>/dev/null || true
   step "ensuring rpc daemon at $FX_RPC_SOCKET"
-  # The daemon outlives this script, so it must not inherit any lock descriptor.
-  "$FX_ENGINE_BIN" host ensure --socket "$FX_RPC_SOCKET" 9>&- >&2 || fail 1 "host ensure failed"
+  # The daemon outlives this script, so it must not inherit any lock descriptor
+  # or the caller's stdout/stderr pipes (E2B's envd holds Process/Start open until
+  # every writer to those pipes closes).
+  ensure_log="$FX_INSTALL_ROOT/host-ensure.log"
+  if ! "$FX_ENGINE_BIN" host ensure --socket "$FX_RPC_SOCKET" 9>&- </dev/null >"$ensure_log" 2>&1; then
+    cat "$ensure_log" >&2 2>/dev/null || true
+    fail 1 "host ensure failed"
+  fi
+  cat "$ensure_log" >&2 2>/dev/null || true
   waited=0
   while [ "$waited" -lt 15 ]; do
     status_rc=0
@@ -703,13 +710,21 @@ while :; do
 done
 LOOP
   chmod 700 "$loop"
+  # On a fresh box before `cloud create`'s enrollment step writes the leased slot
+  # identity, starting `ferryx-cli --daemon` here would generate a throwaway random
+  # machineId and hold daemon.lock before enroll runs. Install the supervisor loop
+  # now, and only launch it automatically once an enrolled identity is present.
+  if [ ! -f "$HOME/.ferryx/remote/identity.json" ] && [ ! -f "$HOME/.local/share/ferryx/remote/identity.json" ]; then
+    step "relay client installed; deferring daemon start until enrolled"
+    return 0
+  fi
   pid_file="$supervisor_dir/relay-loop.pid"
   if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null || echo 0)" 2>/dev/null; then
     step "relay client supervisor already running"
     return 0
   fi
   nohup env FX_FERRYX_CLI_BIN="$FERRYX_CLI_BIN" FX_FERRYX_CLI_LOG="$supervisor_dir/relay-loop.log" \
-    "$loop" 9>&- >/dev/null 2>&1 &
+    "$loop" 9>&- </dev/null >/dev/null 2>&1 &
   printf '%s\n' "$!" >"$pid_file"
   step "relay client supervised by nohup loop (pid $(cat "$pid_file"))"
 }

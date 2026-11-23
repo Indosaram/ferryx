@@ -2094,16 +2094,28 @@ async fn ssh_exec(
     }
 }
 
-/// Push one file into the box's home directory with `scp`, then enforce its mode.
+/// Format a remote path for an `ssh` shell command: an absolute path is POSIX-quoted as-is, while
+/// a home-relative path is anchored under `"$HOME/"`.
+#[cfg(any(unix, test))]
+fn remote_shell_path(path: &str) -> String {
+    if path.starts_with('/') {
+        quote_posix(path)
+    } else {
+        format!("\"$HOME/\"{}", quote_posix(path))
+    }
+}
+
+/// Push one file onto the box with `scp`, then enforce its mode.
 ///
 /// `scp` reads the same per-machine conf as `ssh`, so it inherits the pinned host key and the
 /// `ProxyCommand` a CodeSpace needs. The bytes come from a 0600 temporary file that is removed
-/// before this returns.
+/// before this returns. `remote_path` may be either absolute (as passed by `Access::push`) or
+/// home-relative.
 #[cfg(unix)]
 async fn scp_file(
     program: &str,
     files: &crate::ssh::socket_forward::MachineFiles,
-    home_relative: &str,
+    remote_path: &str,
     bytes: Vec<u8>,
     mode: u32,
 ) -> Result<(), String> {
@@ -2126,14 +2138,15 @@ async fn scp_file(
     }
     // The remote directory is created first: `scp` does not make intermediate directories, and a
     // fresh box has no `~/.ferryx-cloud` or `~/.omo/agent`.
-    if let Some(parent) = Path::new(home_relative).parent() {
+    if let Some(parent) = Path::new(remote_path).parent() {
         let parent = parent.to_string_lossy();
-        if !parent.is_empty() && parent != "." {
-            let command = format!("mkdir -p \"$HOME/{parent}\" && chmod 700 \"$HOME/{parent}\"");
+        if !parent.is_empty() && parent != "." && parent != "/" {
+            let parent_expr = remote_shell_path(&parent);
+            let command = format!("mkdir -p {parent_expr} && chmod 700 {parent_expr}");
             let result = ssh_exec(program, files, &command, 30).await?;
             if result.exit_code != Some(0) {
                 return Err(format!(
-                    "cannot create ~/{parent} on the box: {}",
+                    "cannot create {parent} on the box: {}",
                     tail(&result.stderr, 300)
                 ));
             }
@@ -2146,7 +2159,7 @@ async fn scp_file(
         "-F".to_string(),
         files.conf.to_string_lossy().into_owned(),
         local.to_string_lossy().into_owned(),
-        format!("{}:{}", files.alias, home_relative),
+        format!("{}:{}", files.alias, remote_path),
     ];
     let output = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
@@ -2155,17 +2168,18 @@ async fn scp_file(
         .map_err(|error| format!("cannot run scp: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "scp of {home_relative} failed: {}",
+            "scp of {remote_path} failed: {}",
             tail(&String::from_utf8_lossy(&output.stderr), 300)
         ));
     }
     // `scp` creates the file with the staging mode masked by the box's umask; the mode is only
     // certain once it is set explicitly.
-    let command = format!("chmod {mode:o} \"$HOME/{home_relative}\"");
+    let target_expr = remote_shell_path(remote_path);
+    let command = format!("chmod {mode:o} {target_expr}");
     let result = ssh_exec(program, files, &command, 30).await?;
     if result.exit_code != Some(0) {
         return Err(format!(
-            "cannot set the mode of ~/{home_relative} on the box: {}",
+            "cannot set the mode of {remote_path} on the box: {}",
             tail(&result.stderr, 300)
         ));
     }
