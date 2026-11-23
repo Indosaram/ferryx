@@ -47,13 +47,13 @@ pub const MHC_ASSET: &str = "mhc-linux-x86_64.tar.gz";
 
 /// Pinned ferryx-cli download for the relay role.
 ///
-/// Left empty on purpose: the Linux headless `ferryx-cli` that carries the relay
-/// socket route is only built by the final artifact task, which pins this URL and
-/// its sha256. Until then [`env_for`] omits both variables and the script fails
-/// loudly instead of running an unverified client.
-pub const FERRYX_CLI_URL: &str = "";
-/// Pinned sha256 of [`FERRYX_CLI_URL`]; see that constant for why it is empty.
-pub const FERRYX_CLI_SHA256: &str = "";
+/// Built from `feat/cloud-host` with `--no-default-features` targeting
+/// `x86_64-unknown-linux-gnu.2.31` (glibc floor `GLIBC_2.30`), carrying the
+/// `/api/v1/cloud/socket` relay stream route and `account enroll --code-file`.
+pub const FERRYX_CLI_URL: &str = "https://github.com/Indosaram/ferryx/releases/download/cloud-cli-20261123/ferryx-cli-linux-amd64-headless";
+/// Pinned sha256 of [`FERRYX_CLI_URL`].
+pub const FERRYX_CLI_SHA256: &str =
+    "54f093619d991789e1b0ce84354611900ed4ecfcdfb3003f4730d9168558fe66";
 
 /// Exit code: host is not Linux x86_64.
 pub const EXIT_UNSUPPORTED_PLATFORM: i32 = 10;
@@ -274,10 +274,22 @@ mod tests {
 
     #[test]
     fn relay_role_adds_the_cli_pins_only_once_they_are_pinned() {
-        let unpinned = env_for(Role::Relay, Pins::PINNED);
+        let unpinned = env_for(
+            Role::Relay,
+            Pins {
+                ferryx_cli_url: "",
+                ferryx_cli_sha256: "",
+                ..Pins::PINNED
+            },
+        );
         assert_eq!(unpinned[ENV_ROLE], "relay");
         assert!(!unpinned.contains_key(ENV_FERRYX_CLI_URL));
         assert!(!unpinned.contains_key(ENV_FERRYX_CLI_SHA256));
+
+        let shipped = env_for(Role::Relay, Pins::PINNED);
+        assert_eq!(shipped[ENV_ROLE], "relay");
+        assert_eq!(shipped[ENV_FERRYX_CLI_URL], FERRYX_CLI_URL);
+        assert_eq!(shipped[ENV_FERRYX_CLI_SHA256], FERRYX_CLI_SHA256);
 
         let pinned = env_for(
             Role::Relay,
@@ -310,8 +322,12 @@ mod tests {
         assert!(MHC_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(MHC_VERSION.starts_with('v'));
         assert!(MHC_MINISIGN_PUB.starts_with("RW"));
-        // A pinned CLI must pair a URL with its own checksum.
-        assert_eq!(FERRYX_CLI_URL.is_empty(), FERRYX_CLI_SHA256.is_empty());
+        // Relay CLI is pinned with a valid HTTPS URL and 64-char lowercase hex sha256.
+        assert!(FERRYX_CLI_URL.starts_with("https://"));
+        assert_eq!(FERRYX_CLI_SHA256.len(), 64);
+        assert!(FERRYX_CLI_SHA256
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]
