@@ -1,0 +1,7 @@
+{
+  "stdout": "x86_64\n",
+  "stderr": "",
+  "exitCode": 0,
+  "timed_out": false,
+  "command": "uname -m"
+}

@@ -1,0 +1,17 @@
+{
+  "command": "uname -m",
+  "completedAt": "Sat, 21 Nov 2026 09:41:12 GMT",
+  "exitCode": 0,
+  "keepAlive": false,
+  "logs": "",
+  "name": "fx-proc-1",
+  "pid": "1234",
+  "restartCount": 0,
+  "restartOnFailure": false,
+  "startedAt": "Sat, 21 Nov 2026 09:41:12 GMT",
+  "status": "completed",
+  "stderr": "",
+  "stdin": false,
+  "stdout": "x86_64\n",
+  "workingDir": "/home/user"
+}
