@@ -164,6 +164,50 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
   );
 }
 
+export interface CloudMachineRowProps {
+  /** The catalog name the operator used; the CLI's handle for this machine. */
+  name: string;
+  /** Registry key of the provider hosting it (`e2b`, `daytona`, ...). */
+  provider: string;
+  /** Normalized lifecycle state the catalog last recorded, e.g. `ready`. */
+  state: string;
+  sandboxId: string;
+  /** How agent traffic reaches it: `ssh` (forwarded socket) or `relay`. */
+  transport?: "ssh" | "relay";
+}
+
+/**
+ * A disposable cloud machine, read-only.
+ *
+ * Its lifecycle belongs to `ferryx-cli cloud` and the reaper - create, stop, resume and delete are
+ * not wired to any button here - so the row carries status and the provider badge and nothing the
+ * user can press. That is deliberate: a Disabled-looking Delete here would be a second, unaudited
+ * path to a billable resource.
+ */
+export function CloudMachineRow({ name, provider, state, sandboxId, transport }: CloudMachineRowProps) {
+  const stateClass = state === "ready" ? "text-status-success" : state === "error" ? "text-status-warning" : "text-muted-foreground";
+  return (
+    <div
+      role="listitem"
+      data-machine-id={`cloud:${name}`}
+      data-cloud-provider={provider}
+      className="space-y-1.5 rounded-lg border border-border bg-card/50 p-3"
+    >
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="truncate text-[13px] font-medium text-foreground">{name}</span>
+        <Badge variant="outline" className="h-4 shrink-0 px-1.5 py-0 text-[11px]" data-testid="cloud-provider-badge">{`cloud:${provider}`}</Badge>
+        <span role="status" data-code={state} className={`text-[12px] font-medium ${stateClass}`}>
+          {state}
+        </span>
+        {transport ? (
+          <span className="shrink-0 rounded border border-border/70 bg-muted/40 px-1.5 text-[11px] text-muted-foreground">{transport}</span>
+        ) : null}
+      </div>
+      <p className="truncate text-[11px] text-muted-foreground">{sandboxId}</p>
+    </div>
+  );
+}
+
 export interface PairedMachineRowProps extends PairedStatusInput {
   selected: boolean;
   busy: boolean;
