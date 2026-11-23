@@ -232,6 +232,7 @@ fn run_tool(program: &str, args: &[OsString]) -> Result<ToolOutput, ReaperError>
         })?;
     Ok(ToolOutput {
         success: output.status.success(),
+        #[cfg(target_os = "macos")]
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -240,6 +241,7 @@ fn run_tool(program: &str, args: &[OsString]) -> Result<ToolOutput, ReaperError>
 
 struct ToolOutput {
     success: bool,
+    #[cfg(target_os = "macos")]
     code: Option<i32>,
     stdout: String,
     stderr: String,

@@ -645,7 +645,7 @@ fn parse_exec_frames(bytes: &[u8]) -> Result<ExecResult, SandboxError> {
     let exit_code = saw_exit
         .then(|| bytes.last().copied())
         .flatten()
-        .map(|byte| i32::from(byte));
+        .map(i32::from);
     Ok(ExecResult {
         exit_code,
         stdout: String::from_utf8_lossy(&stdout).into_owned(),

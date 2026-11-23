@@ -270,7 +270,7 @@ impl SandboxProvider for PrizedProvider {
         let (status, text) =
             self.send(reqwest::Method::POST, &url, Some(body), Some(&request.idempotency_key)).await?;
         match status {
-            200 | 201 | 202 => Ok(parse_box(&text, "create")?.id),
+            200..=202 => Ok(parse_box(&text, "create")?.id),
             // Our own earlier create won the name: reuse it rather than starting a second box.
             409 => match self.find_by_name(&hostname_for(&request.name)).await? {
                 Some(box_id) => Ok(box_id),
@@ -693,7 +693,7 @@ fn status_error(status: u16, body: &str, call: &str) -> SandboxError {
         .unwrap_or_else(|| body.trim().to_string());
     let kind = match status {
         // 402 is a billing refusal the operator must lift; retrying it changes nothing.
-        401 | 402 | 403 => ErrorKind::Config,
+        401..=403 => ErrorKind::Config,
         404 => ErrorKind::NotFound,
         // `410 box_deleted`: the box is being deleted and cannot be recovered, so it is gone.
         410 => ErrorKind::NotFound,
