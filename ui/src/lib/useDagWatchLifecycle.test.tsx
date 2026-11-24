@@ -119,6 +119,25 @@ it("retries a rejected subscription without requiring a project change", async (
   expect(bridge.watchDagSshProject).toHaveBeenCalledTimes(2);
 });
 
+it("retries only the failing target, with growing backoff, and keeps healthy watchers", async () => {
+  vi.useFakeTimers();
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn<() => void>());
+  vi.mocked(bridge.watchDagSshProject).mockResolvedValue({ projectPath: key, runs: [] });
+  vi.mocked(bridge.watchDagPairedProject).mockRejectedValue(new Error("TIMEOUT"));
+  const paired = { kind: "pairedDaemon" as const, workspaceId: "daemon:x", remotePath: "/r" };
+  renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [target, paired], watchKey: "k" }));
+  await act(async () => {});
+  expect(bridge.watchDagPairedProject).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+  expect(bridge.watchDagPairedProject).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2999); });
+  expect(bridge.watchDagPairedProject).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(bridge.watchDagPairedProject).toHaveBeenCalledTimes(3);
+  expect(bridge.watchDagSshProject).toHaveBeenCalledTimes(1);
+  expect(bridge.unwatchDagProject).not.toHaveBeenCalled();
+});
+
 it("retries listener registration before opening subscriptions", async () => {
   vi.useFakeTimers();
   vi.mocked(bridge.listenDagRunUpdated)
