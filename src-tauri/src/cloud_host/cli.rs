@@ -1011,10 +1011,7 @@ async fn execute_prompt_on_machine(
         .ok_or_else(|| format!("unknown provider: {}", row.provider))?;
     let access = open_access(&provider, row).await?;
     dispatch_ready(&access).await?;
-    let remote_cwd = match cwd {
-        Some(dir) => dir.to_string(),
-        None => access.home().await?,
-    };
+    let remote_cwd = cwd.unwrap_or("/tmp").to_string();
     let socket_path = crate::paired_host::socket_forward::socket_path(&row.name)
         .map_err(|_| "cannot resolve the dispatch socket path".to_string())?;
 
