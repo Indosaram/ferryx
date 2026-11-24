@@ -75,11 +75,15 @@ ferryx-cli cloud delete <name>
 ferryx-cli cloud reconcile
 ```
 
-## Live verification status (2026-11-23)
+## Live verification status (2026-11-24)
 
 - **End-to-end verified (`PASS`):** `daytona` (T1 SSH + `model-bridge.py`, `daytona-ok`), `e2b` (T2 relay + auto slot enroll/re-pair, `e2b-ok`), and three-host parallel fan-out with the local Mac host (`local-ok`).
-- **One-cycle live smoke `FAIL` (tracked as follow-up todos 21–24, all rolled back to 0 leftovers):** `freestyle` (SSH host/user validation), `codespaces` (`gh codespace create` exit 1 on repo/billing), `blaxel` (BusyBox `flock -w` unsupported), `sprites` (`wait_ready` 300s timeout on initial `cold`/`warm` state).
-- **One-cycle live smoke `SKIPPED`:** `prized` (no key), `opencomputer` (no key), `vercel` (token 403), `instabox` (session expired; `bong-i-1` untouched), `tensorlake` (approval pending, 401).
+- **Second-round live smoke on the other 3 active providers (commit `5b28975d`, all rolled back/deleted to 0 leftovers):**
+  - `freestyle`: `create` + SSH bootstrap + `ensure_host` **PASS** (171s, Ubuntu glibc 2.39); `cloud socket` forward timed out at 30s (needs stream-local forward investigation).
+  - `codespaces`: `gh codespace create -m basicLinux32gb` **PASS**; next step `ssh -T` `$HOME` probe returned empty output and rolled back cleanly.
+  - `blaxel`: create + BusyBox `flock -n` bootstrap (`omo` + `ferryx-cli` download/sha256) **PASS** (76s); `enroll` exited 127 (`not found`) because Blaxel runs musl/BusyBox while the pinned `ferryx-cli` artifact is dynamically linked against glibc (`ld-linux-x86-64.so.2`).
+- **Skipped:** `instabox` (CLI session expired; `bong-i-1` untouched).
+- **Dropped (5 low-quota/unavailable providers removed in `5b28975d`):** `sprites`, `vercel`, `opencomputer`, `tensorlake`, `prized`.
 
 ### Exit codes
 
