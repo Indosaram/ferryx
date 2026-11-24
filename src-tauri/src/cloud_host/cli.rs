@@ -1093,17 +1093,51 @@ async fn execute_prompt_on_machine(
     Ok((session_id, reply))
 }
 
+async fn resolve_client_binary() -> Result<PathBuf, String> {
+    if let Ok(explicit) = std::env::var("FERRYX_CLOUD_CLIENT_BIN") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for name in ["mhc", "omo"] {
+            for dir in std::env::split_paths(&path_var) {
+                let candidate = dir.join(name);
+                if candidate.is_file() && !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    for candidate in &candidates {
+        if let Ok(out) = tokio::process::Command::new(candidate)
+            .arg("--version")
+            .output()
+            .await
+        {
+            if out.status.success() {
+                return Ok(candidate.clone());
+            }
+        }
+    }
+    Err("no working `mhc` or `omo` client binary found on PATH (set FERRYX_CLOUD_CLIENT_BIN)".into())
+}
+
 async fn run_omo_json(args: &[String]) -> Result<Value, String> {
-    let output = tokio::process::Command::new("omo")
+    let client = resolve_client_binary().await?;
+    let output = tokio::process::Command::new(&client)
         .args(args)
         .output()
         .await
-        .map_err(|error| format!("failed to run `omo`: {error}"))?;
+        .map_err(|error| format!("failed to run `{}`: {error}", client.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         return Err(format!(
-            "omo exited with {}: {}",
+            "{} exited with {}: {}",
+            client.display(),
             output.status.code().unwrap_or(-1),
             tail(&format!("{stderr}\n{stdout}"), 400)
         ));
@@ -2826,6 +2860,7 @@ fn should_suppress_reconcile_warning(
         "not_authenticated",
         "session expired",
         "not logged in",
+        "requires authentication",
         "unauthorized",
         "missing api key",
         "no such file or directory",
