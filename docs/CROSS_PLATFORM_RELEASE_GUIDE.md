@@ -10,7 +10,7 @@ separately to Cloudflare Workers (see [site migration](SITE_DOMAIN_MIGRATION.md)
 
 | Platform | Build host | Release artifact | Distribution |
 | --- | --- | --- | --- |
-| macOS arm64 + x86_64 | `macbook` | `Ferryx_universal.app.tar.gz` updater, `Ferryx_universal.dmg`, and `ferryx-cli-darwin-universal` | GitHub Releases/direct updater/CLI installer |
+| macOS arm64 only | `macbook` | `Ferryx_aarch64.app.tar.gz` updater, `Ferryx_aarch64.dmg`, and `ferryx-cli-darwin-arm64` | GitHub Releases/direct updater/CLI installer |
 | Linux x86_64 | `omaki` | `Ferryx_amd64.AppImage` updater, `Ferryx_amd64.deb`, and `ferryx-cli-linux-amd64` | GitHub Releases/direct download/CLI installer |
 | Windows x64 | `maho-win` | `Ferryx_x64.msix` | Microsoft Store package; Store submission is manual |
 | Windows x64 migration | `maho-win` | `Ferryx_x64-setup.exe` NSIS updater | GitHub Releases only when `--nsis-migration` is selected |
@@ -49,12 +49,12 @@ separately approved operations; a GitHub asset is not a Store submission.
 
 The canonical stable aliases are:
 
-- `Ferryx_universal.dmg`
-- `Ferryx_universal.app.tar.gz`
+- `Ferryx_aarch64.dmg`
+- `Ferryx_aarch64.app.tar.gz`
 - `Ferryx_amd64.AppImage`
 - `Ferryx_amd64.deb`
 - `ferryx-cli-linux-amd64`
-- `ferryx-cli-darwin-universal`
+- `ferryx-cli-darwin-arm64`
 - `Ferryx_x64.msix`
 - `Ferryx_x64-setup.exe` only for an explicit NSIS migration release
 - `latest.json` and `SHA256SUMS.txt`

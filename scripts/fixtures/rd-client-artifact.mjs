@@ -91,7 +91,7 @@ export function buildZip(entries) {
  */
 export function writeRdClientArtifact(dir, platform) {
   const [kind, name] = {
-    darwin: ['rd-client-darwin-universal', 'ferryx-rd-client-darwin-universal'],
+    darwin: ['rd-client-darwin-arm64', 'ferryx-rd-client-darwin-arm64'],
     linux: ['rd-client-linux-amd64', 'ferryx-rd-client-linux-amd64'],
     windows: ['rd-client-windows-amd64', 'ferryx-rd-client-windows-amd64.zip'],
   }[platform];

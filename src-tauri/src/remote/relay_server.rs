@@ -4837,6 +4837,7 @@ fn is_downloadable_artifact(artifact: &str) -> bool {
         "ferryx-cli"
             | "ferryx-cli-linux-amd64"
             | "ferryx-cli-linux-arm64"
+            | "ferryx-cli-darwin-arm64"
             | "ferryx-cli-darwin-universal"
             | "ferryx-cli-windows-amd64.exe"
     )

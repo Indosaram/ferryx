@@ -51,7 +51,7 @@ function sha256(bytes) {
 // Builds a sandbox: PATH shims for uname and curl, and a fixture dir served via file:// URLs.
 // The curl shim maps every requested URL to file://<fixtures>/<basename>, so the relay and the
 // GitHub release resolve to the same fixture bytes.
-function sandbox({ arch, binary, sums }) {
+function sandbox({ arch, binary, sums, os = "Linux" }) {
   const root = mkdtempSync(join(tmpdir(), "ferryx-install-test-"));
   sandboxes.push(root);
   const bin = join(root, "shim");
@@ -62,7 +62,7 @@ function sandbox({ arch, binary, sums }) {
 
   writeFileSync(
     join(bin, "uname"),
-    `#!/bin/sh\ncase "$1" in\n  -s) echo Linux ;;\n  -m) echo ${arch} ;;\n  *) echo Linux ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1" in\n  -s) echo ${os} ;;\n  -m) echo ${arch} ;;\n  *) echo ${os} ;;\nesac\n`,
   );
   writeFileSync(
     join(bin, "curl"),
@@ -121,12 +121,19 @@ for (const arch of ["aarch64", "arm64"]) {
   });
 }
 
+test("macOS Intel exits before attempting to install an arm64 binary", async () => {
+  const box = sandbox({ arch: "x86_64", os: "Darwin" });
+  const result = await runInstaller(box);
+  expect(result.code).toBe(2);
+  expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
+});
+
 test("Linux x86_64 with a matching checksum installs the binary", async () => {
   const binary = fakeLinuxAmd64Binary();
   const box = sandbox({
     arch: "x86_64",
     binary,
-    sums: `${sha256(Buffer.from("other"))}  ferryx-cli-darwin-universal\n${sha256(binary)}  ${ARTIFACT}\n`,
+    sums: `${sha256(Buffer.from("other"))}  ferryx-cli-darwin-arm64\n${sha256(binary)}  ${ARTIFACT}\n`,
   });
   const result = await runInstaller(box);
   expect(result.stderr).toBe("");

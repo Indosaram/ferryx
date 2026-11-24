@@ -75,7 +75,7 @@ function plan() {
 
 function writeAssetDir(dir) {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "Ferryx_universal.dmg"), "dmg bytes");
+  writeFileSync(join(dir, "Ferryx_aarch64.dmg"), "dmg bytes");
   writeFileSync(join(dir, "Ferryx_amd64.AppImage"), "appimage bytes");
   writeFileSync(join(dir, "ferryx-cli-linux-amd64"), "cli bytes");
   writeFileSync(join(dir, "latest.json"), "{}\n");
@@ -92,7 +92,7 @@ function receiptsFor(p) {
     {
       host: "macbook",
       completedAt: "2026-09-08T12:30:00.000Z",
-      artifacts: [{ kind: "dmg", name: "Ferryx_universal.dmg", bytes: 9, sha256: "b".repeat(64) }],
+      artifacts: [{ kind: "dmg", name: "Ferryx_aarch64.dmg", bytes: 9, sha256: "b".repeat(64) }],
     },
   ].map((r) => ({ ...r, runId: p.runId, commitSha: p.commitSha }));
 }
@@ -169,7 +169,7 @@ test("tampering one byte of an asset makes shasum -c and the verify CLI exit non
     const ok = spawnSync(process.execPath, [SCRIPT, "verify", "--dir", dir, "--pubkey", key.publicKey], { encoding: "utf8" });
     assert.equal(ok.status, 0, ok.stderr);
 
-    const target = join(dir, "Ferryx_universal.dmg");
+    const target = join(dir, "Ferryx_aarch64.dmg");
     const bytes = readFileSync(target);
     bytes[0] ^= 0x01;
     writeFileSync(target, bytes);
@@ -177,7 +177,7 @@ test("tampering one byte of an asset makes shasum -c and the verify CLI exit non
     assert.notEqual(verifyChecksumsWithHostTool(dir).status, 0);
     const bad = spawnSync(process.execPath, [SCRIPT, "verify", "--dir", dir, "--pubkey", key.publicKey], { encoding: "utf8" });
     assert.equal(bad.status, 1);
-    assert.match(bad.stderr, /Checksum mismatch for Ferryx_universal\.dmg/);
+    assert.match(bad.stderr, /Checksum mismatch for Ferryx_aarch64\.dmg/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -296,8 +296,8 @@ function writeRun(tmp, key) {
     cwd: app, env: { ...process.env, COPYFILE_DISABLE: "1" },
   });
   const files = {
-    "darwin/Ferryx_2026.908.1_universal.dmg": "dmg",
-    "darwin/ferryx-cli-darwin-universal": "mac cli",
+    "darwin/Ferryx_2026.908.1_aarch64.dmg": "dmg",
+    "darwin/ferryx-cli-darwin-arm64": "mac cli",
     "linux/Ferryx_2026.908.1_amd64.AppImage": "appimage",
     "linux/Ferryx_2026.908.1_amd64.deb": "deb",
     "linux/ferryx-cli-linux-amd64": "linux cli",
@@ -320,8 +320,8 @@ function writeRun(tmp, key) {
   const write = (host, list) => writeFileSync(join(receipts, `build-receipt-${host}.json`), JSON.stringify(receipt(host, list)));
   write("macbook", [
     art("macos-updater", "darwin/Ferryx.app.tar.gz", true, ["darwin-aarch64"]),
-    art("dmg", "darwin/Ferryx_2026.908.1_universal.dmg", false),
-    art("cli-darwin-universal", "darwin/ferryx-cli-darwin-universal", false),
+    art("dmg", "darwin/Ferryx_2026.908.1_aarch64.dmg", false),
+    art("cli-darwin-arm64", "darwin/ferryx-cli-darwin-arm64", false),
     writeRdClientArtifact(join(artifacts, "darwin"), "darwin"),
   ]);
   write("omaki", [

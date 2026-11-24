@@ -163,7 +163,7 @@ describe('analytics contract — download classification', () => {
     expect(classifyDownloadTarget('/docs/introduction/')).toBeNull();
     expect(classifyDownloadTarget('#features')).toBeNull();
     expect(classifyDownloadTarget('')).toBeNull();
-    expect(classifyDownloadTarget('https://github.com/evil/ferryx/releases/latest/download/Ferryx_universal.dmg')).toBeNull();
+    expect(classifyDownloadTarget('https://github.com/evil/ferryx/releases/latest/download/Ferryx_aarch64.dmg')).toBeNull();
     expect(classifyDownloadTarget('https://apps.microsoft.com.evil.example/detail/x')).toBeNull();
   });
 
@@ -185,7 +185,7 @@ describe('analytics contract — download classification', () => {
     const target = classifyDownloadTarget(PLATFORMS.macos.defaultAsset.url)!;
     expect(downloadEventParams(target, 'hero_primary')).toEqual({
       platform: 'macos',
-      asset_id: 'macos-universal',
+      asset_id: 'macos-arm64',
       destination: 'github_release_asset',
       link_location: 'hero_primary',
     });

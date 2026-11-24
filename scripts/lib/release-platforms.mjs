@@ -1380,18 +1380,22 @@ function nestedHelperBundles(appPath) {
 }
 
 /**
- * macOS FFmpeg payload: builds (or reuses cached) arm64 and x86_64 LGPL FFmpeg prefixes, stages
- * them as universal dylibs with @rpath install names, and returns the cargo env plus the
- * `tauri build -c` overlay that copies them into Contents/Frameworks. One universal build links
- * both slices, so FFMPEG_DIR is a link SDK of the arm64 headers (arch-neutral) and the staged
- * universal dylibs.
+ * Rejects non-Mach-O, Intel and multi-architecture release binaries.
  */
+export function assertMacosArm64(binaryPath, exec = execFileSync) {
+  const description = exec("file", ["-b", binaryPath], { encoding: "utf8" }).trim();
+  if (!/^Mach-O\b/.test(description) || !/\barm64\b/.test(description) || /x86_64|universal binary/.test(description)) {
+    throw new Error(`macOS binary must contain only arm64: ${binaryPath} (${description})`);
+  }
+}
+
+/** Stages the arm64 LGPL FFmpeg prefix and exposes its headers and dylibs as FFMPEG_DIR. */
 export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }) {
   const script = join(sourceDir, "scripts", "build-ffmpeg-lgpl.sh");
   const key = createHash("sha256").update(readFileSync(script)).digest("hex").slice(0, 16);
   mkdirSync(cacheRoot, { recursive: true });
   const prefixes = {};
-  for (const [triple, arch] of [["aarch64-apple-darwin", "arm64"], ["x86_64-apple-darwin", "x86_64"]]) {
+  for (const [triple, arch] of [["aarch64-apple-darwin", "arm64"]]) {
     const prefix = join(cacheRoot, `lgpl-${key}-${arch}`);
     if (!existsSync(join(prefix, "build-receipt.txt"))) {
       rmSync(prefix, { recursive: true, force: true });
@@ -1407,14 +1411,13 @@ export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }
   const stage = join(sourceDir, "scripts", "stage-ffmpeg.mjs");
   exec("bun", [
     stage,
-    "--target", "universal-apple-darwin",
+    "--target", "aarch64-apple-darwin",
     "--prefix", `aarch64-apple-darwin=${prefixes["aarch64-apple-darwin"]}`,
-    "--prefix", `x86_64-apple-darwin=${prefixes["x86_64-apple-darwin"]}`,
     "--prune",
   ], { cwd: sourceDir, stdio: "pipe" });
-  exec("bun", [stage, "--target", "universal-apple-darwin", "--check"], { cwd: sourceDir, stdio: "pipe" });
+  exec("bun", [stage, "--target", "aarch64-apple-darwin", "--check"], { cwd: sourceDir, stdio: "pipe" });
   // One -c file: the staged overlay plus the empty beforeBuildCommand of the bundling pass.
-  const payloadDir = join(sourceDir, FFMPEG_PAYLOAD_REL, "universal-apple-darwin");
+  const payloadDir = join(sourceDir, FFMPEG_PAYLOAD_REL, "aarch64-apple-darwin");
   const sdkDir = join(payloadDir, "sdk");
   rmSync(sdkDir, { recursive: true, force: true });
   mkdirSync(join(sdkDir, "lib"), { recursive: true });
@@ -1443,6 +1446,7 @@ export function verifyMacosFfmpegBundle({ appPath, payloadDir, exec = macExec })
   for (const name of Object.keys(manifest.runtime)) {
     const path = join(frameworks, name);
     if (!existsSync(path)) throw new Error(`FFmpeg dylib missing from the app bundle: Contents/Frameworks/${name}`);
+    assertMacosArm64(path, (command, args) => exec(command, args).stdout);
     const id = exec("otool", ["-D", path]).stdout.trim().split("\n").pop().trim();
     if (id !== `@rpath/${name}`) throw new Error(`${name} install name is ${id}, expected @rpath/${name}`);
   }
@@ -1632,13 +1636,13 @@ export async function buildHost({
         stdio: "pipe",
       });
 
-      // Verified mhc + bun for both slices of the universal app (Contents/Resources/mhc/<triple>)
-      execFileSync("bun", ["scripts/fetch-mhc.mjs", "--target", "universal-apple-darwin", "--prune"], {
+      // Verified mhc + bun for the arm64 app (Contents/Resources/mhc/<triple>)
+      execFileSync("bun", ["scripts/fetch-mhc.mjs", "--target", "aarch64-apple-darwin", "--prune"], {
         cwd: isolatedSource,
         stdio: "pipe",
       });
 
-      // Build Darwin universal
+      // Build Darwin arm64
       const cargoTargetDir = hostConfig.root
         ? join(hostConfig.root, "cargo-target")
         : join(workspaceDir, "cargo-target");
@@ -1670,14 +1674,12 @@ export async function buildHost({
         delete buildEnv.APPLE_PASSWORD;
       }
 
-      // Build Darwin universal binaries first (skip bundle)
+      // Build Darwin arm64 binaries first (skip bundle)
       const aarch64Rel = join(cargoTargetDir, "aarch64-apple-darwin", "release");
-      const x86Rel = join(cargoTargetDir, "x86_64-apple-darwin", "release");
-      const universalRel = join(cargoTargetDir, "universal-apple-darwin", "release");
 
       execFileSync(
         "bun",
-        ["tauri", "build", "--target", "universal-apple-darwin", "--no-bundle"],
+        ["tauri", "build", "--target", "aarch64-apple-darwin", "--no-bundle"],
         {
           cwd: isolatedSource,
           env: buildEnv,
@@ -1686,9 +1688,9 @@ export async function buildHost({
         },
       );
 
-      // The headless binaries ship standalone (ferryx-cli-darwin-universal) and must not load the
+      // The headless binaries ship standalone (ferryx-cli-darwin-arm64) and must not load the
       // FFmpeg dylibs that only the app bundle carries, so rebuild them without default features.
-      for (const triple of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
+      for (const triple of ["aarch64-apple-darwin"]) {
         execFileSync(
           "cargo",
           [
@@ -1711,21 +1713,10 @@ export async function buildHost({
         );
       }
 
-      // Ensure all workspace binaries used by the app bundle are universal lipo'd.
-      mkdirSync(universalRel, { recursive: true });
-      for (const binName of ["ferryx-cli", "ferryx-account", "ferryx-relay", "ferryx-rd-client"]) {
-        const aarch64Bin = join(aarch64Rel, binName);
-        const x86Bin = join(x86Rel, binName);
-        const universalBin = join(universalRel, binName);
-        if (existsSync(aarch64Bin) && existsSync(x86Bin)) {
-          execFileSync("lipo", ["-create", aarch64Bin, x86Bin, "-output", universalBin], { stdio: "pipe" });
-        }
-      }
-
-      // Pre-sign universal binaries with hardened runtime so Tauri bundler packages valid signed components
+      // Pre-sign arm64 binaries with hardened runtime so Tauri bundler packages valid signed components
       if (hostConfig.signingIdentity) {
         for (const binName of ["ferryx", "ferryx-cli", "ferryx-account", "ferryx-relay"]) {
-          const targetBin = join(universalRel, binName);
+          const targetBin = join(aarch64Rel, binName);
           if (existsSync(targetBin)) {
             execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, targetBin], {
               stdio: "pipe",
@@ -1734,7 +1725,7 @@ export async function buildHost({
         }
       }
 
-      // Run Tauri bundling now that all universal binaries exist.
+      // Run Tauri bundling now that all arm64 binaries exist.
       //
       // Only the .app is requested. finalizeMacosBundle rebuilds the DMG from the
       // app after signing, notarizing and stapling it (recreateDmgFromApp), so the
@@ -1742,11 +1733,11 @@ export async function buildHost({
       // bundle_dmg.sh, which drives Finder over AppleScript to draw the disk-image
       // window and fails outright over SSH with no GUI session:
       //   Error failed to bundle project error running bundle_dmg.sh
-      // That killed the whole Darwin build after a 20-minute universal compile.
+      // That killed the whole Darwin build after a 20-minute compile.
       execFileSync(
         "bun",
         [
-          "tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app",
+          "tauri", "build", "--target", "aarch64-apple-darwin", "--bundles", "app",
           "-c", ffmpeg.overlay,
         ],
         {
@@ -1760,7 +1751,7 @@ export async function buildHost({
       // Collect and verify macOS bundle artifacts
       const bundleDir = join(
         cargoTargetDir,
-        "universal-apple-darwin",
+        "aarch64-apple-darwin",
         "release",
         "bundle",
       );
@@ -1770,15 +1761,12 @@ export async function buildHost({
         throw new Error(`Expected macOS app bundle not found at ${appPath}`);
       }
 
-      // 1. Verify universal binary architectures with lipo
+      // 1. Verify the app is a single arm64 slice.
       const binaryPath = join(appPath, "Contents", "MacOS", "ferryx");
       if (!existsSync(binaryPath)) {
         throw new Error(`Executable binary not found at ${binaryPath}`);
       }
-      const lipoOut = execFileSync("lipo", ["-info", binaryPath], { encoding: "utf8" });
-      if (!lipoOut.includes("x86_64") || (!lipoOut.includes("arm64") && !lipoOut.includes("aarch64"))) {
-        throw new Error(`macOS binary is not a universal binary (lipo output: ${lipoOut.trim()})`);
-      }
+      assertMacosArm64(binaryPath);
 
       // 2. Verify Info.plist
       const plistPath = join(appPath, "Contents", "Info.plist");
@@ -1794,7 +1782,7 @@ export async function buildHost({
       }
       verifyMacosFfmpegBundle({
         appPath,
-        payloadDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "universal-apple-darwin"),
+        payloadDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "aarch64-apple-darwin"),
       });
 
       // 2a. Keeper payload. The plan ships supervised restart and the PTY keeper in ONE release and
@@ -1808,7 +1796,7 @@ export async function buildHost({
         sourceDir: isolatedSource,
         targetDir: cargoTargetDir,
         destDir: keeperDir,
-        triples: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+        triples: ["aarch64-apple-darwin"],
         appVersion: plan.appVersion,
         env: buildEnv,
         sourceDateEpoch: plan.sourceDateEpoch,
@@ -1844,21 +1832,20 @@ export async function buildHost({
       // instead of silently symbolicate nothing. Must precede finalizeMacosBundle, which seals the
       // exact bytes that are notarized.
       const dsymDir = join(runDir, "dsyms");
-      // One dSYM per shipped executable. The debug maps live in the per-architecture binaries rustc
-      // linked (rustc packs `<binary>.dSYM` beside each), not in the lipo'd universal file, so the
-      // bundle is built from the slices and covers both UUIDs in one archive entry.
+      // One dSYM per shipped executable, built from its single arm64 debug map.
       const shipped = [
-        { name: "ferryx", slices: [join(aarch64Rel, "ferryx"), join(x86Rel, "ferryx")], binary: join(appPath, "Contents", "MacOS", "ferryx") },
-        { name: "ferryx-cli", slices: [join(aarch64Rel, "ferryx-cli"), join(x86Rel, "ferryx-cli")], binary: join(universalRel, "ferryx-cli") },
-        { name: "ferryx-rd-client", slices: [join(aarch64Rel, "ferryx-rd-client"), join(x86Rel, "ferryx-rd-client")], binary: join(universalRel, "ferryx-rd-client") },
+        { name: "ferryx", slices: [join(aarch64Rel, "ferryx")], binary: join(appPath, "Contents", "MacOS", "ferryx") },
+        { name: "ferryx-cli", slices: [join(aarch64Rel, "ferryx-cli")], binary: join(aarch64Rel, "ferryx-cli") },
+        { name: "ferryx-rd-client", slices: [join(aarch64Rel, "ferryx-rd-client")], binary: join(aarch64Rel, "ferryx-rd-client") },
         // The keeper is a shipped executable too: a SIGSEGV in the process that owns every PTY
         // master is the other crash Phase 0 must be able to symbolicate.
-        { name: "ferryx-ptykeeper", slices: [join(cargoTargetDir, "aarch64-apple-darwin", "release", "ferryx-ptykeeper"), join(cargoTargetDir, "x86_64-apple-darwin", "release", "ferryx-ptykeeper")], binary: join(keeperResourceDir, "ferryx-ptykeeper") },
+        { name: "ferryx-ptykeeper", slices: [join(aarch64Rel, "ferryx-ptykeeper")], binary: join(keeperResourceDir, "ferryx-ptykeeper") },
       ].filter((entry) => isFile(entry.binary));
       const archived = shipped.map((entry) => {
         const slices = entry.slices.filter((slice) => isFile(slice));
         const outPath = join(dsymDir, `${entry.name}.dSYM`);
         const produced = produceDsymFromSlices({ slices: slices.length > 0 ? slices : [entry.binary], outPath });
+        if (produced.uuids.length !== 1) throw new Error(`${entry.name}: expected exactly one dSYM UUID`);
         return { ...entry, ...produced };
       });
       for (const entry of shipped) strippedForShipping(entry.binary);
@@ -1873,7 +1860,12 @@ export async function buildHost({
           });
         }
       }
-      const dsymGate = shipped.map((entry) => assertDsymGate({ binaryPath: entry.binary, dsymDir }));
+      const dsymGate = shipped.map((entry) => {
+        assertMacosArm64(entry.binary);
+        const gate = assertDsymGate({ binaryPath: entry.binary, dsymDir });
+        if (gate.binaryUuids.length !== 1) throw new Error(`${entry.name}: expected exactly one arm64 UUID`);
+        return gate;
+      });
       const relative = (path) => (path.startsWith(`${runDir}/`) ? path.slice(runDir.length + 1) : path);
 
       // 3-4. Re-sign all Mach-O binaries, notarize/staple the app, then rebuild
@@ -1887,7 +1879,7 @@ export async function buildHost({
       // The bundler no longer produces a DMG (see the --bundles app note above), so the
       // destination is named here and filled in by recreateDmgFromApp inside
       // finalizeMacosBundle, after the app is signed, notarized and stapled.
-      let dmgPath = join(dmgDir, "Ferryx_universal.dmg");
+      let dmgPath = join(dmgDir, "Ferryx_aarch64.dmg");
       if (existsSync(dmgDir)) {
         for (const file of readdirSync(dmgDir)) {
           if (file.endsWith(".dmg")) {
@@ -1963,12 +1955,12 @@ export async function buildHost({
       // <data>/dsyms or ~/ferryx-releases/dsyms.
       execFileSync(
         "tar",
-        ["--no-xattrs", "-czf", join(runDir, "Ferryx-universal.dSYM.tar.gz"), "-C", dsymDir, "."],
+        ["--no-xattrs", "-czf", join(runDir, "Ferryx-arm64.dSYM.tar.gz"), "-C", dsymDir, "."],
         { env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: "pipe" },
       );
 
       // 5. Create updater tar from verified (and stapled) .app, excluding AppleDouble
-      const updaterTarPath = join(artifactsOutDir, "Ferryx.app.tar.gz");
+      const updaterTarPath = join(artifactsOutDir, "Ferryx_aarch64.app.tar.gz");
       execFileSync(
         "tar",
         ["--no-xattrs", "-czf", updaterTarPath, "-C", macosDir, "Ferryx.app"],
@@ -1984,15 +1976,15 @@ export async function buildHost({
         verifyShippedKeeperDigest({ archivePath: updaterTarPath, expectedSha256: shippedKeeper.sha256 });
       }
       if (dmgPath && existsSync(dmgPath)) {
-        execFileSync("cp", [dmgPath, join(artifactsOutDir, "Ferryx_universal.dmg")]);
+        execFileSync("cp", [dmgPath, join(artifactsOutDir, "Ferryx_aarch64.dmg")]);
       }
-      const universalCli = join(universalRel, "ferryx-cli");
-      if (existsSync(universalCli)) {
-        execFileSync("cp", [universalCli, join(artifactsOutDir, "ferryx-cli-darwin-universal")]);
+      const arm64Cli = join(aarch64Rel, "ferryx-cli");
+      if (existsSync(arm64Cli)) {
+        execFileSync("cp", [arm64Cli, join(artifactsOutDir, "ferryx-cli-darwin-arm64")]);
       }
-      const universalRdClient = join(universalRel, "ferryx-rd-client");
-      if (existsSync(universalRdClient)) {
-        execFileSync("cp", [universalRdClient, join(artifactsOutDir, "ferryx-rd-client-darwin-universal")]);
+      const arm64RdClient = join(aarch64Rel, "ferryx-rd-client");
+      if (existsSync(arm64RdClient)) {
+        execFileSync("cp", [arm64RdClient, join(artifactsOutDir, "ferryx-rd-client-darwin-arm64")]);
       }
     } else {
       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";

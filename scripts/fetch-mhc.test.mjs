@@ -22,7 +22,6 @@ import {
 
 const TRIPLES = [
   "aarch64-apple-darwin",
-  "x86_64-apple-darwin",
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
   "x86_64-pc-windows-msvc",
@@ -161,9 +160,9 @@ test("pin.json pins mhc and bun for every desktop triple with sha256 values", ()
   }
 });
 
-test("resolveTargets expands universal-apple-darwin and rejects unpinned triples", () => {
+test("resolveTargets preserves a single arm64 target and rejects unpinned triples", () => {
   const pin = readPin();
-  assert.deepEqual(resolveTargets(["universal-apple-darwin"], pin), ["aarch64-apple-darwin", "x86_64-apple-darwin"]);
+  assert.deepEqual(resolveTargets(["aarch64-apple-darwin"], pin), ["aarch64-apple-darwin"]);
   assert.throws(() => resolveTargets(["riscv64gc-unknown-linux-gnu"], pin), /no pinned mhc\/bun asset/);
 });
 

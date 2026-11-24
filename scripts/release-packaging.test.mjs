@@ -22,8 +22,8 @@ test("renders cask and formula whose version and hashes match SHA256SUMS", () =>
   const cask = rendered["ferryx.rb"];
   assert.match(cask, /^cask "ferryx" do$/m);
   assert.match(cask, /^ {2}version "2026\.10\.24\.2"$/m);
-  assert.ok(cask.includes(`sha256 "${sums.get("Ferryx_universal.dmg")}"`));
-  assert.ok(cask.includes(`url "https://github.com/Indosaram/ferryx/releases/download/${TAG}/Ferryx_universal.dmg"`));
+  assert.ok(cask.includes(`sha256 "${sums.get("Ferryx_aarch64.dmg")}"`));
+  assert.ok(cask.includes(`url "https://github.com/Indosaram/ferryx/releases/download/${TAG}/Ferryx_aarch64.dmg"`));
 
   const formula = rendered["ferryx-cli.rb"];
   assert.match(formula, /^class FerryxCli < Formula$/m);
@@ -62,6 +62,6 @@ test("a missing asset in SHA256SUMS exits non-zero and writes nothing", () => {
 });
 
 test("rejects malformed checksum lines and invalid tags", () => {
-  assert.throws(() => renderHomebrewPackages({ checksums: "not-a-hash  Ferryx_universal.dmg\n", tag: TAG }), /Malformed/);
+  assert.throws(() => renderHomebrewPackages({ checksums: "not-a-hash  Ferryx_aarch64.dmg\n", tag: TAG }), /Malformed/);
   assert.throws(() => renderHomebrewPackages({ checksums: SUMS, tag: "2026.10.24" }), /Invalid release tag/);
 });

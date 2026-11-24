@@ -35,14 +35,14 @@ export const KIND_DEFINITIONS = Object.freeze({
     permittedHost: "macbook",
     isUpdater: true,
     expectedTargets: ["darwin-aarch64"],
-    stableAlias: "Ferryx_universal.app.tar.gz",
+    stableAlias: "Ferryx_aarch64.app.tar.gz",
     allowedExtensions: [".app.tar.gz"],
   },
   dmg: {
     permittedHost: "macbook",
     isUpdater: false,
     expectedTargets: [],
-    stableAlias: "Ferryx_universal.dmg",
+    stableAlias: "Ferryx_aarch64.dmg",
     allowedExtensions: [".dmg"],
   },
   appimage: {
@@ -80,12 +80,12 @@ export const KIND_DEFINITIONS = Object.freeze({
     stableAlias: "ferryx-cli-linux-amd64",
     allowedExtensions: ["ferryx-cli-linux-amd64", "ferryx-cli"],
   },
-  "cli-darwin-universal": {
+  "cli-darwin-arm64": {
     permittedHost: "macbook",
     isUpdater: false,
     expectedTargets: [],
-    stableAlias: "ferryx-cli-darwin-universal",
-    allowedExtensions: ["ferryx-cli-darwin-universal", "ferryx-cli"],
+    stableAlias: "ferryx-cli-darwin-arm64",
+    allowedExtensions: ["ferryx-cli-darwin-arm64", "ferryx-cli"],
   },
   // The remote-desktop client: remote hosts need it to drive a GUI over the paired tunnel.
   "rd-client-linux-amd64": {
@@ -95,12 +95,12 @@ export const KIND_DEFINITIONS = Object.freeze({
     stableAlias: "ferryx-rd-client-linux-amd64",
     allowedExtensions: ["ferryx-rd-client-linux-amd64", "ferryx-rd-client"],
   },
-  "rd-client-darwin-universal": {
+  "rd-client-darwin-arm64": {
     permittedHost: "macbook",
     isUpdater: false,
     expectedTargets: [],
-    stableAlias: "ferryx-rd-client-darwin-universal",
-    allowedExtensions: ["ferryx-rd-client-darwin-universal", "ferryx-rd-client"],
+    stableAlias: "ferryx-rd-client-darwin-arm64",
+    allowedExtensions: ["ferryx-rd-client-darwin-arm64", "ferryx-rd-client"],
   },
   // Windows needs the client and its FFmpeg DLL sidecars together: the client links FFmpeg
   // dynamically, so a bare .exe exits 0xC0000135 (STATUS_DLL_NOT_FOUND) on a host without a
@@ -459,7 +459,7 @@ export function parsePlan(value) {
  */
 export function requiredKinds(plan) {
   const p = typeof plan === "string" || !plan.schemaVersion ? parsePlan(plan) : plan;
-  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "rd-client-linux-amd64", "rd-client-darwin-universal", "rd-client-windows-amd64"];
+  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-arm64", "rd-client-linux-amd64", "rd-client-darwin-arm64", "rd-client-windows-amd64"];
   if (p.channels && p.channels.nsisMigration) {
     kinds.push("nsis");
   }
