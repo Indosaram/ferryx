@@ -333,6 +333,10 @@ async fn direct_ssh_real_transport_registration_and_pty() {
     let child_stdout = std::fs::read_to_string(dir.path().join("child_stdout.log")).unwrap();
     let child_stderr = std::fs::read_to_string(dir.path().join("child_stderr.log")).unwrap();
     let log = std::fs::read_to_string(&log_path).unwrap();
+    // Acceptance markers (`QA_MUX_*`) are evidence even on success.
+    for line in child_stdout.lines().filter(|line| line.starts_with("QA_MUX_")) {
+        println!("{line}");
+    }
     assert!(
         status.success(),
         "child stdout:\n{}\nchild stderr:\n{}\nsshd:\n{log}",
@@ -717,8 +721,11 @@ async fn exercise_child(root: &Path) {
         "unexpected error message: {shell_err}"
     );
 
-    phase!("Phase 8: Restart and session persistence restore");
     let retained = retained.unwrap();
+    phase!("Phase 7b: Many panes share one SSH transport; transport loss recovers all");
+    host_mux_fanout_and_transport_loss(&daemon, &response.workspace_id, &response.repo_root, &startup, &retained).await;
+
+    phase!("Phase 8: Restart and session persistence restore");
     machine_qa::exercise(&daemon, &retained, &host_store, false).await;
     let before = daemon.terminal_service.remote().details(&retained).unwrap();
     assert!(before.pid.is_some());
@@ -838,6 +845,174 @@ async fn exercise_child(root: &Path) {
         crate::ipc::IpcErrorCode::WorkspaceNotFound
     );
     phase!("Phase 10: Complete");
+}
+
+/// Children of this test process whose command line is an `ssh` client carrying helper traffic. The supervisor
+/// re-enters this binary, so the `ssh` processes are grandchildren; a full process-table scan
+/// filtered to the loopback port is the only portable view of them.
+fn loopback_ssh_clients(port: u16) -> Vec<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .expect("ps");
+    let port_flag = format!("-p {port}");
+    let port_opt = format!("Port={port}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            let command = line.trim_start().split_once(' ').map_or("", |(_, c)| c.trim_start());
+            (command.starts_with("ssh ") || command.starts_with("/usr/bin/ssh "))
+                && command.contains("127.0.0.1")
+                // The daemon's one-shot connection master (`ssh::master`, `-M -N`) runs no
+                // helper; it is a separate per-host process this design leaves in place.
+                && !command.contains("ControlMaster=yes")
+                && (command.contains(&port_flag) || command.contains(&port_opt) || command.contains(&format!(" {port} ")))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+async fn wait_for_marker(
+    history: &mut Vec<u8>,
+    events: &mut tokio::sync::broadcast::Receiver<Vec<u8>>,
+    marker: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !String::from_utf8_lossy(history).contains(marker) {
+            match events.recv().await {
+                Ok(chunk) => history.extend(chunk),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("SSH PTY output event: {e}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("marker {marker} never arrived; output: {}", String::from_utf8_lossy(history)));
+}
+
+/// Design acceptance for host multiplexing on a real sshd: many panes from one daemon ride one
+/// `ssh` client process, and killing that process recovers every pane with its output replayed
+/// from the helper ring buffer, through exactly one new `ssh` process.
+async fn host_mux_fanout_and_transport_loss(
+    daemon: &DaemonServer,
+    workspace_id: &str,
+    repo_root: &str,
+    startup: &TerminalStartup,
+    retained: &str,
+) {
+    const PANES: usize = 40;
+    let port = daemon
+        .terminal_service
+        .remote()
+        .details(retained)
+        .unwrap()
+        .descriptor
+        .config
+        .host
+        .port
+        .unwrap();
+    let mut panes = Vec::new();
+    for index in 0..PANES {
+        let id = daemon
+            .handle_spawn(
+                &format!("mux-fanout-{index}"),
+                workspace_id,
+                crate::daemon::session_service::SpawnOptions {
+                    worktree: None,
+                    cwd: Some(repo_root.to_string()),
+                    cols: 80,
+                    rows: 24,
+                    shell: None,
+                },
+                Some(startup.clone()),
+            )
+            .await
+            .expect("SSH PTY spawn for fan-out pane");
+        wait_remote_connected(daemon, &id).await;
+        panes.push(id);
+    }
+    for (index, id) in panes.iter().enumerate() {
+        let (mut history, mut events) = daemon.terminal_service.attach(id).unwrap();
+        // `\136` is `^`: the marker only appears in output, never in the echoed input.
+        daemon
+            .write_session_input(id, format!("printf '\\136MUX-BEFORE-{index}\\n'\n").into_bytes())
+            .await
+            .unwrap();
+        wait_for_marker(&mut history, &mut events, &format!("^MUX-BEFORE-{index}")).await;
+    }
+
+    let pids = crate::ssh::mux_client::live_transport_pids();
+    let clients = loopback_ssh_clients(port);
+    assert_eq!(
+        pids.len(),
+        1,
+        "one host mux for {} live panes on one host; ssh clients: {clients:#?}",
+        PANES + 1
+    );
+    assert_eq!(
+        clients.len(),
+        1,
+        "{} panes plus their DAG/control traffic must use exactly one ssh client: {clients:#?}",
+        PANES + 1
+    );
+    let transport = pids[0];
+    println!("QA_MUX_FANOUT panes={} ssh_clients=1 transport_pid={transport}", PANES + 1);
+
+    let mut states = Vec::new();
+    for id in panes.iter().chain(std::iter::once(&retained.to_string())) {
+        let updates = daemon.terminal_service.remote().subscribe(id).unwrap();
+        let generation = updates.borrow().generation;
+        states.push((id.clone(), updates, generation));
+    }
+    // SAFETY: `transport` is the pid of the ssh child this daemon's mux spawned and owns.
+    assert_eq!(unsafe { libc::kill(transport as libc::pid_t, libc::SIGKILL) }, 0);
+    // Recovered means connected again on a newer generation: panes are checked one by one, so a
+    // later pane may already have lost and regained its connection before it is looked at.
+    for (id, updates, before) in &mut states {
+        let before = *before;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            updates
+                .wait_for(|details| {
+                    details.generation > before
+                        && details.state == crate::terminal::remote::RemoteConnectionState::Connected
+                })
+                .await
+                .expect("remote session update");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let details = daemon.terminal_service.remote().details(id).unwrap();
+            panic!(
+                "pane {id} did not reconnect after transport loss: state={:?} attempts={} failure={:?} live_muxes={:?}",
+                details.state,
+                details.attempts,
+                details.failure,
+                crate::ssh::mux_client::live_transport_pids()
+            )
+        });
+    }
+
+    let after = crate::ssh::mux_client::live_transport_pids();
+    assert_eq!(after.len(), 1, "reconnects coalesce into one new mux: {after:?}");
+    assert_ne!(after[0], transport, "the killed transport is replaced");
+    let clients = loopback_ssh_clients(port);
+    assert_eq!(clients.len(), 1, "all panes recovered through one ssh client: {clients:#?}");
+
+    for (index, id) in panes.iter().enumerate() {
+        // Replay: a fresh attach after recovery still holds the pre-loss output.
+        let (mut replay, mut events) = daemon.terminal_service.attach(id).unwrap();
+        wait_for_marker(&mut replay, &mut events, &format!("^MUX-BEFORE-{index}")).await;
+        // And the PTY is the same live shell: new input runs in it.
+        daemon
+            .write_session_input(id, format!("printf '\\136MUX-AFTER-{index}\\n'\n").into_bytes())
+            .await
+            .unwrap();
+        wait_for_marker(&mut replay, &mut events, &format!("^MUX-AFTER-{index}")).await;
+    }
+    println!("QA_MUX_RECOVERED panes={} new_transport_pid={}", PANES + 1, after[0]);
+    for id in &panes {
+        daemon.handle_close(id).await.unwrap();
+    }
 }
 
 /// First remote spawn on a host without the version-qualified helper must

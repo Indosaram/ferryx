@@ -10,17 +10,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const HELPER_VERSION: &str = "2026.1117.1";
+pub const HELPER_VERSION: &str = "2026.1123.1";
 
 /// Capability tokens this helper can advertise, in handshake order. The last one
 /// is bound at runtime, so the handshake omits it when the listener is unavailable.
-pub const HELPER_CAPABILITIES: [&str; 5] = [
+pub const HELPER_CAPABILITIES: [&str; 6] = [
     "sshHelperV1",
     "dagStreamingV1",
     "dagSubscribeV1",
     AGENT_HOOK_CAPABILITY,
+    MUX_CAPABILITY,
     "agentStateV1",
 ];
+
+/// Advertised by helpers that run `bridge --mux`.
+pub const MUX_CAPABILITY: &str = "bridgeMuxV1";
 
 /// Advertised by helpers that answer `agent-hook <agent> <event>`. A host whose staged helper
 /// predates it (same version string, older build) never gets remote hooks that would fail.
@@ -58,6 +62,11 @@ pub fn run_with_io(
 
 #[cfg(windows)]
 mod process_windows;
+mod mux;
+pub use mux::{
+    read_mux_frame, write_mux_frame, Kind as MuxKind, MuxFrame, MUX_HELLO_MAGIC,
+    MUX_IDLE_TIMEOUT, MUX_PROTOCOL, MUX_SEGMENT,
+};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Endpoint {
@@ -995,10 +1004,31 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("start") => start(root,flag("--host-id").ok_or("INVALID_REQUEST: --host-id required")?),
         Some("daemon") => daemon(root,flag("--host-id").ok_or("INVALID_REQUEST: --host-id required")?),
+        Some("bridge") if args.iter().any(|arg|arg=="--mux") => mux::bridge_mux(&root,std::io::stdin(),std::io::stdout()),
         Some("bridge") if args.iter().any(|arg|arg=="--stdio") => bridge(&root,std::io::stdin(),std::io::stdout()),
-        _ => Err("Usage: ferryx-remote-helper start|daemon --root <private-root> --host-id <id> | bridge --stdio [--root <private-root>]".into()),
+        _ => Err("Usage: ferryx-remote-helper start|daemon --root <private-root> --host-id <id> | bridge --stdio|--mux [--root <private-root>]".into()),
     }
 }
+
+/// Starts a helper daemon on `root` serving every connection, for tests outside this module
+/// that need a real helper on the far side of a mux.
+#[cfg(test)]
+pub(crate) fn serve_test_daemon(root: &Path, host: &str) -> Arc<Runtime> {
+    let bound = bind_runtime(root, host.to_string()).unwrap();
+    let runtime = bound.runtime.clone();
+    std::thread::spawn(move || {
+        while let Ok((stream, _)) = bound.listener.accept() {
+            let runtime = bound.runtime.clone();
+            std::thread::spawn(move || {
+                let _ = serve(stream, runtime);
+            });
+        }
+    });
+    runtime
+}
+
+#[cfg(test)]
+pub(crate) use mux::bridge_mux_with_idle_timeout;
 
 #[cfg(test)]
 #[path = "helper_service_tests.rs"]

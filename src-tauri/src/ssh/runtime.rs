@@ -174,6 +174,22 @@ pub async fn detect_for(
     host: &SshHost,
     platform: Option<RemotePlatform>,
 ) -> Result<RemoteEnvironment, IpcError> {
+    if super::mux_client::enabled() {
+        if let Some(environment) = super::mux_client::cached_environment(host) {
+            if platform.is_none_or(|expected| expected == environment.platform) {
+                return Ok(environment);
+            }
+        }
+    }
+    let environment = detect_uncached(host, platform).await?;
+    super::mux_client::remember_environment(host, &environment);
+    Ok(environment)
+}
+
+async fn detect_uncached(
+    host: &SshHost,
+    platform: Option<RemotePlatform>,
+) -> Result<RemoteEnvironment, IpcError> {
     detect_with(host, platform, |executor, script, timeout| async move {
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
         direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
