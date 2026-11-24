@@ -122,6 +122,55 @@ fn catalog_tools() -> Vec<CatalogTool> {
             "Evaluate a script in a tab (needs an eval grant)",
             object_schema(json!({ "tab_id": { "type": "string" }, "script": { "type": "string" } }), &["tab_id", "script"]),
         ),
+        (
+            ToolId::Upload,
+            "upload",
+            "Attach a local file to an observed file input (needs one-shot file capability)",
+            object_schema(
+                json!({
+                    "tab_id": { "type": "string" },
+                    "path": { "type": "string" },
+                    "ref": { "type": "string" },
+                    "generation": { "type": "integer", "minimum": 1 },
+                }),
+                &["tab_id", "path", "ref"],
+            ),
+        ),
+        (
+            ToolId::NativeInput,
+            "native",
+            "Dispatch trusted native input on a desktop Chromium engine tab (needs one-shot native capability)",
+            object_schema(
+                json!({
+                    "tab_id": { "type": "string" },
+                    "action": {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "enum": ["key", "type", "click"] },
+                            "key": { "type": "string" },
+                            "text": { "type": "string" },
+                            "x": { "type": "number" },
+                            "y": { "type": "number" },
+                            "click_count": { "type": "integer", "minimum": 1, "maximum": 3 },
+                        },
+                        "required": ["kind"],
+                    },
+                }),
+                &["tab_id", "action"],
+            ),
+        ),
+        (
+            ToolId::RequestHelp,
+            "request_help",
+            "Hand tab control back to the desktop user without closing the tab",
+            object_schema(
+                json!({
+                    "tab_id": { "type": "string" },
+                    "reason": { "type": "string" },
+                }),
+                &["tab_id"],
+            ),
+        ),
     ]
 }
 
@@ -322,7 +371,16 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), names.len(), "tool names are unique: {names:?}");
         assert!(names.iter().all(|name| name.chars().all(|c| c.is_ascii_lowercase() || c == '_')));
-        for expected in ["browser_list", "browser_snapshot", "browser_act", "browser_navigate", "browser_request_grant"] {
+        for expected in [
+            "browser_list",
+            "browser_snapshot",
+            "browser_act",
+            "browser_navigate",
+            "browser_upload",
+            "browser_native_input",
+            "browser_request_help",
+            "browser_request_grant",
+        ] {
             assert!(names.contains(&expected), "{expected} is advertised: {names:?}");
         }
         assert!(tools.iter().all(|tool| tool["inputSchema"]["type"] == "object"));

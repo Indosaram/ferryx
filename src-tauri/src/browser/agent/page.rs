@@ -2,14 +2,153 @@
 //! engine's in-process DevTools API, a system webview tab through its webview. The observe/act
 //! entry points in `ipc::browser` call these instead of picking an engine themselves.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
+use base64::Engine as _;
+use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::browser::model::BrowserAutomationAction;
 use crate::browser::snapshot_source::{BrowserSnapshot, SnapshotOptions};
 use crate::browser::{BrowserError, BrowserManager};
+use crate::ipc::browser_cli::BrowserNativeInputAction;
 use crate::ipc::error::IpcError;
+
+/// Maximum size for a single agent file upload (plan C2: 32 MiB).
+pub const MAX_UPLOAD_BYTES: u64 = 32 * 1024 * 1024;
+
+static STAGED_UPLOADS: LazyLock<Mutex<HashMap<String, Vec<PathBuf>>>> = LazyLock::new(Default::default);
+
+/// Removes owned upload staging files created for `browser_id` (called on tab close,
+/// reclaim/handoff, or controller revocation).
+pub fn cleanup_upload_staging(browser_id: &str) {
+    let paths = STAGED_UPLOADS.lock().remove(browser_id).unwrap_or_default();
+    for path in paths {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[derive(Debug)]
+struct StagedUpload {
+    staged_path: PathBuf,
+    file_name: String,
+    mime: String,
+    bytes: Vec<u8>,
+    sha256: String,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn guess_mime(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("txt") => "text/plain",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("html" | "htm") => "text/html",
+        Some("csv") => "text/csv",
+        _ => "application/octet-stream",
+    }
+}
+
+fn stage_upload_blocking(browser_id: &str, raw_path: &str) -> Result<StagedUpload, BrowserError> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err(BrowserError::AutomationFailed("upload path cannot be empty".into()));
+    }
+    let canonical = std::fs::canonicalize(trimmed).map_err(|error| {
+        BrowserError::AutomationFailed(format!("cannot open upload file `{trimmed}`: {error}"))
+    })?;
+    let meta = std::fs::metadata(&canonical).map_err(|error| {
+        BrowserError::AutomationFailed(format!("cannot stat upload file `{trimmed}`: {error}"))
+    })?;
+    if !meta.is_file() {
+        return Err(BrowserError::AutomationFailed(format!(
+            "upload target `{trimmed}` is not a regular file"
+        )));
+    }
+    if meta.len() > MAX_UPLOAD_BYTES {
+        return Err(BrowserError::AutomationFailed(format!(
+            "upload file exceeds 32 MiB limit ({} bytes)",
+            meta.len()
+        )));
+    }
+    let bytes = std::fs::read(&canonical).map_err(|error| {
+        BrowserError::AutomationFailed(format!("cannot read upload file `{trimmed}`: {error}"))
+    })?;
+    if (bytes.len() as u64) > MAX_UPLOAD_BYTES {
+        return Err(BrowserError::AutomationFailed(format!(
+            "upload file exceeds 32 MiB limit ({} bytes)",
+            bytes.len()
+        )));
+    }
+    let sha256 = sha256_hex(&bytes);
+    let file_name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("upload.bin")
+        .to_string();
+    let mime = guess_mime(&canonical).to_string();
+
+    let stage_dir = std::env::temp_dir().join(format!("ferryx-upload-stage-{}", std::process::id()));
+    std::fs::create_dir_all(&stage_dir).map_err(|error| {
+        BrowserError::AutomationFailed(format!("cannot create upload staging dir: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&stage_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let safe_name: String = file_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .collect();
+    let staged_path = stage_dir.join(format!("{}-{safe_name}", uuid::Uuid::new_v4()));
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&staged_path).map_err(|error| {
+            BrowserError::AutomationFailed(format!("cannot create upload staging file: {error}"))
+        })?;
+        file.write_all(&bytes).map_err(|error| {
+            let _ = std::fs::remove_file(&staged_path);
+            BrowserError::AutomationFailed(format!("cannot write upload staging file: {error}"))
+        })?;
+    }
+    STAGED_UPLOADS
+        .lock()
+        .entry(browser_id.to_string())
+        .or_default()
+        .push(staged_path.clone());
+    Ok(StagedUpload {
+        staged_path,
+        file_name,
+        mime,
+        bytes,
+        sha256,
+    })
+}
 
 /// Whether the tab is served by the Chromium engine.
 pub fn is_engine_tab(browser_id: &str) -> bool {
@@ -102,6 +241,65 @@ pub async fn capture<R: tauri::Runtime>(
     }
     let state = manager.get_state(browser_id)?;
     crate::browser::capture_browser_snapshot(app, &state.webview_label, options).await
+}
+
+/// Validates and snapshots a local file (<= 32 MiB) into an owned staging file, then attaches it
+/// to the observed `<input type="file">` element: `DOM.setFileInputFiles` on Chromium engine tabs,
+/// `DataTransfer` fallback on system webview tabs.
+pub async fn upload_file<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    reference: &str,
+    expect: &str,
+    raw_path: &str,
+) -> Result<(String, u64, String), BrowserError> {
+    let bid = browser_id.to_string();
+    let path_owned = raw_path.to_string();
+    let staged = crate::ipc::run_blocking(move || Ok(stage_upload_blocking(&bid, &path_owned)))
+        .await
+        .map_err(|error| BrowserError::AutomationFailed(error.message))??;
+    let byte_len = staged.bytes.len() as u64;
+
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if is_engine_tab(browser_id) {
+        let staged_str = staged.staged_path.to_string_lossy().to_string();
+        if let Err(error) = super::cef_backend::upload_file(browser_id, reference, expect, &staged_str).await {
+            let _ = std::fs::remove_file(&staged.staged_path);
+            return Err(error);
+        }
+        return Ok((staged.file_name, byte_len, staged.sha256));
+    }
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&staged.bytes);
+    let script = super::observe::upload_webview_script(
+        reference,
+        expect,
+        &staged.file_name,
+        &staged.mime,
+        &b64,
+    );
+    let _ = std::fs::remove_file(&staged.staged_path);
+    super::service::recheck_act(browser_id)?;
+    super::observe::parse_act(&eval(app, manager, browser_id, script).await?)?;
+    Ok((staged.file_name, byte_len, staged.sha256))
+}
+
+/// Dispatches trusted native input on a Chromium engine tab; refuses honestly on system webviews
+/// where synthetic DOM events cannot be trusted.
+pub async fn native_input(
+    browser_id: &str,
+    action: &BrowserNativeInputAction,
+) -> Result<&'static str, BrowserError> {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if is_engine_tab(browser_id) {
+        super::cef_backend::native_input(browser_id, action).await?;
+        return Ok("trusted");
+    }
+    let _ = (browser_id, action);
+    Err(BrowserError::PlatformUnsupported(
+        "trusted native input requires a Chromium engine tab; use request_help to hand off to the user".into(),
+    ))
 }
 
 #[cfg(all(test, any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -436,5 +634,39 @@ mod tests {
             .expect_err("wrong generation");
         assert_eq!(stale.code, IpcErrorCode::BrowserStaleRef);
         assert_eq!(cdp.calls().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn upload_staging_snapshots_file_hash_and_cleans_up_on_tab_close() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("sample.txt");
+        let payload = b"ferryx-upload-verification-bytes";
+        std::fs::write(&file_path, payload).expect("write fixture");
+
+        let staged = stage_upload_blocking("tab-stage-test", file_path.to_str().unwrap())
+            .expect("valid file stages");
+        assert_eq!(staged.file_name, "sample.txt");
+        assert_eq!(staged.mime, "text/plain");
+        assert_eq!(staged.bytes, payload);
+        assert_eq!(staged.sha256, sha256_hex(payload));
+        assert!(staged.staged_path.exists());
+
+        cleanup_upload_staging("tab-stage-test");
+        assert!(!staged.staged_path.exists(), "owned staging file must be deleted on cleanup");
+
+        let dir_err = stage_upload_blocking("tab-stage-test", dir.path().to_str().unwrap())
+            .expect_err("directory must be refused");
+        assert!(matches!(dir_err, BrowserError::AutomationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn native_input_on_non_engine_tab_returns_platform_unsupported() {
+        let err = native_input(
+            "non-engine-tab-id",
+            &BrowserNativeInputAction::Key { key: "Tab".into() },
+        )
+        .await
+        .expect_err("non-engine tab must refuse trusted native input");
+        assert!(matches!(err, BrowserError::PlatformUnsupported(_)));
     }
 }

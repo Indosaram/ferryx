@@ -276,7 +276,7 @@ export async function startFixtures({ host = HOST, ports = PORTS } = {}) {
         case '/upload': return uploadPage();
         case '/__state': return json(snapshot());
         case '/events': return openSse(req, eventStreams, () => sseFrame('ready', { seq: state.seq, origin: self }));
-        case '/__control/stream': return openSse(req, controlStreams, null);
+        case '/__control/stream': return openSse(req, controlStreams, () => sseFrame('ready', { origin: self }));
         default: return new Response('not found', { status: 404 });
       }
     }

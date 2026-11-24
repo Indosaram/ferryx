@@ -27,7 +27,7 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Ops the pipe understands, named in its protocol errors.
 pub const PIPE_OPS: &str =
-    "list, open, observe, act, navigate, back, forward, reload, close, wait, eval, grant, await";
+    "list, open, observe, act, navigate, back, forward, reload, close, wait, eval, upload, native, request_help, grant, await";
 
 /// A frame that could not be read as a request.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -292,9 +292,44 @@ pub(crate) fn translate(op: &str, args: &Map<String, Value>) -> Result<Call, Cal
         "await" => {
             return Ok(Call::Agent(AgentRequest::Await { approval_id: required_string(args, "approval_id")? }))
         }
-        "upload" | "native" => {
-            return Err(CallError::new("UNSUPPORTED", format!("{op} is not advertised by this Ferryx build")))
+        "upload" => {
+            let reference = match optional_string(args, "ref")? {
+                Some(r) => r,
+                None => optional_string(args, "reference")?
+                    .ok_or_else(|| invalid("missing `ref`"))?,
+            };
+            let generation = match args.get("generation") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(
+                    value
+                        .as_u64()
+                        .ok_or_else(|| invalid("`generation` must be an unsigned integer"))?,
+                ),
+            };
+            R::Upload {
+                browser_id: tab_id(args)?,
+                path: required_string(args, "path")?,
+                reference,
+                generation,
+            }
         }
+        "native" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_object)
+                .ok_or_else(|| invalid("`action` must be an object"))?;
+            let native_action: crate::ipc::browser_cli::BrowserNativeInputAction =
+                serde_json::from_value(Value::Object(action.clone()))
+                    .map_err(|error| invalid(format!("invalid `action`: {error}")))?;
+            R::NativeInput {
+                browser_id: tab_id(args)?,
+                action: native_action,
+            }
+        }
+        "request_help" => R::RequestHelp {
+            browser_id: tab_id(args)?,
+            reason: optional_string(args, "reason")?,
+        },
         other => {
             return Err(CallError::new(
                 "PIPE_UNKNOWN_OP",
@@ -563,21 +598,62 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn unadvertised_and_unknown_ops_are_refused_before_dispatch() {
+    async fn upload_native_and_request_help_translate_and_unknown_ops_are_refused() {
+        let upload = translate(
+            "upload",
+            &args(json!({"tab_id": "b1", "path": "/tmp/a.txt", "ref": "d1.3"})),
+        )
+        .expect("upload translates");
+        assert_eq!(
+            upload,
+            Call::Browser(BrowserCliRequest::Upload {
+                browser_id: "b1".into(),
+                path: "/tmp/a.txt".into(),
+                reference: "d1.3".into(),
+                generation: None,
+            })
+        );
+
+        let native = translate(
+            "native",
+            &args(json!({"tab_id": "b1", "action": {"kind": "key", "key": "Tab"}})),
+        )
+        .expect("native translates");
+        assert_eq!(
+            native,
+            Call::Browser(BrowserCliRequest::NativeInput {
+                browser_id: "b1".into(),
+                action: crate::ipc::browser_cli::BrowserNativeInputAction::Key {
+                    key: "Tab".into(),
+                },
+            })
+        );
+
+        let help = translate(
+            "request_help",
+            &args(json!({"tab_id": "b1", "reason": "human sign-in"})),
+        )
+        .expect("request_help translates");
+        assert_eq!(
+            help,
+            Call::Browser(BrowserCliRequest::RequestHelp {
+                browser_id: "b1".into(),
+                reason: Some("human sign-in".into()),
+            })
+        );
+
         let fake = FakeTransport::default();
         let input = concat!(
-            "{\"id\":1,\"op\":\"upload\",\"path\":\"/tmp/a\",\"ref\":\"d1\"}\n",
-            "{\"id\":2,\"op\":\"native\",\"action\":\"key\"}\n",
-            "{\"id\":3,\"op\":\"teleport\"}\n",
-            "{\"id\":4}\n",
+            "{\"id\":1,\"op\":\"native\",\"tab_id\":\"b1\",\"action\":\"key\"}\n",
+            "{\"id\":2,\"op\":\"teleport\"}\n",
+            "{\"id\":3}\n",
         );
         let responses = run_lines(&fake, input.as_bytes(), MAX_FRAME_BYTES).await;
-        assert_eq!(responses.len(), 4);
-        assert_eq!(error_code(&responses[0]), "UNSUPPORTED");
-        assert_eq!(error_code(&responses[1]), "UNSUPPORTED");
-        assert_eq!(error_code(&responses[2]), "PIPE_UNKNOWN_OP");
-        assert_eq!(responses[3]["id"], 4);
-        assert_eq!(error_code(&responses[3]), BROWSER_CLI_REQUEST_INVALID);
+        assert_eq!(responses.len(), 3);
+        assert_eq!(error_code(&responses[0]), BROWSER_CLI_REQUEST_INVALID);
+        assert_eq!(error_code(&responses[1]), "PIPE_UNKNOWN_OP");
+        assert_eq!(responses[2]["id"], 3);
+        assert_eq!(error_code(&responses[2]), BROWSER_CLI_REQUEST_INVALID);
         assert!(fake.seen.borrow().is_empty());
         assert!(fake.agent_seen.borrow().is_empty());
     }

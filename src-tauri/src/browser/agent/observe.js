@@ -452,6 +452,28 @@
         if (M.scrollBy) call(M.scrollBy, el, [dict({ left: arg('x') || 0, top: arg('y') || 0, behavior: 'instant' })]);
         break;
       case 'type': typeInto(el, tag, '' + arg('text')); break;
+      case 'upload': {
+        if (tag !== 'input' || call(M.lower, '' + (call(M.inputType, el) || '')) !== 'file') {
+          return fail('unsupported', 'the element is not a file input');
+        }
+        var rawB64 = '' + (arg('base64') || '');
+        var fileName = '' + (arg('name') || 'upload.bin');
+        var fileMime = '' + (arg('mime') || 'application/octet-stream');
+        var bin = P.atob(rawB64);
+        var bytes = new P.Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i += 1) bytes[i] = call(M.charCode, bin, [i]);
+        var file = new P.File([bytes], fileName, dict({ type: fileMime }));
+        var dt = new P.DataTransfer();
+        dt.items.add(file);
+        var filesDesc = P.Object.getOwnPropertyDescriptor(P.HTMLInputElement.prototype, 'files');
+        if (!filesDesc || !filesDesc.set) {
+          return fail('unsupported', 'file input assignment is unavailable in this webview');
+        }
+        call(filesDesc.set, el, [dt.files]);
+        fire(el, 'input', 'Event');
+        fire(el, 'change', 'Event');
+        break;
+      }
       default: return fail('unsupported', 'unknown action');
     }
     return { ok: true };
@@ -486,7 +508,22 @@
     if (op.op === 'check') return check();
     if (op.op === 'observe') return observe(storeFor(true));
     var store = storeFor(false);
-    if (!store) return fail('stale', 'this document has not been observed; observe again');
+    if (!store) {
+      if (op.op === 'resolveFileInput') throw new P.Error('FERRYX_UPLOAD_ERR:stale:this document has not been observed; observe again');
+      return fail('stale', 'this document has not been observed; observe again');
+    }
+    if (op.op === 'resolveFileInput') {
+      var foundFile = resolve(store);
+      if (!foundFile.ok) {
+        throw new P.Error('FERRYX_UPLOAD_ERR:' + (foundFile.code || 'unknown') + ':' + (foundFile.message || 'file input lookup failed'));
+      }
+      var fileEl = foundFile.el;
+      var fileTag = tagOf(fileEl);
+      if (fileTag !== 'input' || call(M.lower, '' + (call(M.inputType, fileEl) || '')) !== 'file') {
+        throw new P.Error('FERRYX_UPLOAD_ERR:unsupported:the addressed element is not a file input');
+      }
+      return fileEl;
+    }
     return act(store);
   } finally {
     if (frame && M.remove) try { call(M.remove, frame); } catch (error) { /* page removed it */ }
