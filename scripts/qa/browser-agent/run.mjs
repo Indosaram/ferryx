@@ -1013,6 +1013,9 @@ const SCENARIO_BODIES = {
 
     const events = await ctx.subscribe(fixtures.origins.a);
     try {
+      // Subscribe to the page's control-stream readiness BEFORE opening /replace so an early
+      // EventSource open cannot be missed before we await it.
+      const controlReady = events.waitFor((r) => r.kind === 'page:control-ready', { label: 'replace control ready', timeoutMs: 30_000 });
       const opened = await ctx.cli(['open', '--url', `${fixtures.origins.a}/replace`]);
       const browserId = opened.json?.browser?.browserId ?? null;
       ev.assert('q5:open-/replace', typeof browserId === 'string', { expected: 'opened', observed: opened.json ?? opened.stderr.slice(0, 200) });
@@ -1030,8 +1033,7 @@ const SCENARIO_BODIES = {
 
       const targetRef = findRef(snapshot, (e) => String(e.name ?? '').trim() === 'Target action');
       const gen = actGeneration(snapshot);
-      // Await the page's control connection and subscribe to its replacement before triggering it.
-      await events.waitFor((r) => r.kind === 'page:control-ready', { label: 'replace control ready', timeoutMs: 15_000 });
+      await controlReady;
       await Promise.all([
         events.waitFor((r) => r.kind === 'page:node-replaced' && r.reason === 'control', { label: 'node replaced', timeoutMs: 15_000 }),
         fetch(`${fixtures.origins.a}/__control`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'replace' }) }),
@@ -1099,27 +1101,36 @@ const SCENARIO_BODIES = {
       // A postcondition the page can never satisfy must report applied:false, not a pass.
       const impossible = await pipe.session.send({ op: 'act', tab_id: browserId, generation: gen, action: { kind: 'click', ref: submitRef }, postcondition: textPostcondition('never-appears-9f3c', 2_000) }, { timeout: 30_000 });
       ev.assert('q6:impossible-postcondition', impossible.ok === true && impossible.result?.applied === false, { expected: 'applied:false', observed: impossible.error ?? impossible.result });
+
+      // Real request_help handoff on the opened tab: must succeed and block subsequent agent mutations.
+      const handedOff = await pipe.session.send({ op: 'request_help', tab_id: browserId, reason: 'qa handoff verification' });
+      ev.assert('q6:request_help-handoff', handedOff.ok === true && handedOff.result?.handedOff === true, { expected: 'handedOff:true', observed: handedOff.error ?? handedOff.result });
+      const afterHandoff = await pipe.session.send({ op: 'act', tab_id: browserId, generation: gen, action: { kind: 'click', ref: submitRef } });
+      ev.assert('q6:act-blocked-after-handoff', afterHandoff.ok === false, { expected: 'refusal after handoff', observed: afterHandoff.error ?? afterHandoff.result });
     } finally {
       exitCode = await pipe.close({ timeout: 15_000 }).catch(() => null);
       ev.assert('q6:stdout-frames-only', pipe.session.errors.length === 0, { expected: 'zero stdout decoder errors, including at EOF', observed: { errors: pipe.session.errors.map((e) => e.code) } });
     }
     ev.assert('q6:eof-exits-bounded', typeof exitCode === 'number', { expected: 'exit code after EOF', observed: exitCode });
 
-    // Subscribe before opening the dialog so its result cannot race the fixture-state read.
+    // Subscribe before triggering the dialog so its result cannot race the fixture-state read.
     const events = await ctx.subscribe(fixtures.origins.a);
     try {
-      const dialogOpen = await ctx.cli(['open', '--url', `${fixtures.origins.a}/dialog?open=1`]);
+      const dialogOpen = await ctx.cli(['open', '--url', `${fixtures.origins.a}/dialog`]);
       const dialogBrowser = dialogOpen.json?.browser?.browserId ?? null;
       ev.assert('q6:dialog-open', typeof dialogBrowser === 'string', { expected: 'session', observed: dialogOpen.json ?? dialogOpen.stderr.slice(0, 200) });
       if (dialogBrowser) {
-        // Same commit race as `open` above: a JS dialog only exists once the document runs, so wait
-        // for the load before asking the app which dialogs are pending.
         await ctx.cli(['wait', '--browser-id', dialogBrowser, '--load-state', 'load'], 30_000);
+        const policySet = await ctx.cli(['dialog', 'policy', '--browser-id', dialogBrowser, '--policy', 'auto-accept']);
+        ev.assert('q6:dialog-accept', policySet.code === 0, { expected: 'dialog policy accept set', observed: policySet.json ?? policySet.stderr.slice(0, 200) });
+        const dSnap = await ctx.cli(['snapshot', '--browser-id', dialogBrowser]);
+        const openBtn = refsNamed(dSnap.json, 'Open confirm', { role: 'button' })[0]?.reference ?? null;
+        const dGen = actGeneration(dSnap.json);
+        const dialogEvent = events.waitFor((r) => r.kind === 'dialog', { label: 'dialog resolved', timeoutMs: 15_000 });
+        await ctx.cli(['click', '--browser-id', dialogBrowser, '--generation', String(dGen), '--ref', openBtn]);
+        await dialogEvent;
         const pending = await ctx.cli(['dialog', 'list', '--browser-id', dialogBrowser]);
-        ev.assert('q6:dialog-pending-listed', pending.code === 0, { expected: 'dialog list answered', observed: pending.json ?? pending.stderr.slice(0, 200) });
-        const accepted = await ctx.cli(['dialog', 'accept', '--browser-id', dialogBrowser]);
-        ev.assert('q6:dialog-accept', accepted.code === 0, { expected: 'handled', observed: accepted.json ?? accepted.stderr.slice(0, 200) });
-        await events.waitFor((r) => r.kind === 'dialog', { label: 'dialog resolved', timeoutMs: 15_000 });
+        ev.assert('q6:dialog-pending-listed', pending.code === 0 && Array.isArray(pending.json?.dialogs) && pending.json.dialogs.length === 1, { expected: 'dialog list answered with 1 entry', observed: pending.json ?? pending.stderr.slice(0, 200) });
         const record = await fetch(`${fixtures.origins.a}/__state`).then((r) => r.json());
         ev.assert('q6:dialog-resolved-once', dialogResolvedOnce(record.dialogs), { expected: 'exactly one accepted dialog resolution', observed: record.dialogs });
       }
@@ -1175,10 +1186,64 @@ const SCENARIO_BODIES = {
       await pipe.close({ timeout: 10_000 }).catch(() => {});
     }
 
-    // Upload bytes never reached the fixture server: there is no surface to send them.
-    const uploads = fixtures.state().uploads;
-    ev.assert('q7:no-upload-recorded', noUploadsRecorded(uploads), { expected: 'an empty upload ledger', observed: uploads });
-    void uploadMatches;
+    // Unauthorized upload bytes never reached the fixture server before file-capability approval.
+    const uploadsBefore = fixtures.state().uploads;
+    ev.assert('q7:no-upload-recorded', noUploadsRecorded(uploadsBefore), { expected: 'an empty upload ledger before approval', observed: uploadsBefore });
+
+    // Real approved upload on /upload: approve one-shot browser.upload file capability, attach
+    // known bytes via pipe `upload`, submit, and verify exact SHA-256 and size on the fixture server.
+    const uploadPath = path.join(ctx.config.isolation.dataRoot, 'q7-upload.txt');
+    const uploadBytes = Buffer.from(`ferryx-q7-upload-proof-${Date.now()}\n`, 'utf8');
+    writeFileSync(uploadPath, uploadBytes);
+    const expectedSha = sha256(uploadBytes);
+    const uploadOpened = await ctx.cli(['open', '--url', `${fixtures.origins.a}/upload`]);
+    const uploadTab = uploadOpened.json?.browser?.browserId ?? null;
+    if (uploadTab) {
+      await ctx.cli(['wait', '--browser-id', uploadTab, '--load-state', 'load'], 30_000);
+      const snap = await ctx.cli(['snapshot', '--browser-id', uploadTab]);
+      const uploadSnap = snap.json?.snapshot ?? snap.json ?? null;
+      const uploadGen = uploadSnap?.generation ?? null;
+      const uploadEls = Array.isArray(uploadSnap?.elements) ? uploadSnap.elements : [];
+      const fileInputRef = uploadEls.find((e) => String(e?.tagName || '').toLowerCase() === 'input')?.reference ?? null;
+      const uploadBtnRef = refsNamed(uploadSnap, 'Upload', { role: 'button' })[0]?.reference ?? null;
+      ev.assert('q7:upload-form-observed', Boolean(fileInputRef && uploadBtnRef && typeof uploadGen === 'number'), { expected: 'file input and Upload button refs', observed: { fileInputRef, uploadBtnRef, uploadGen } });
+      if (fileInputRef && uploadBtnRef && typeof uploadGen === 'number') {
+        await grantScope(ctx, { tool: 'browser.upload', path: uploadPath });
+        const pipe2 = ctx.pipe();
+        try {
+          const uploaded = await pipe2.session.send({ op: 'upload', tab_id: uploadTab, path: uploadPath, ref: fileInputRef, generation: uploadGen }, { timeout: 30_000 });
+          ev.assert('q7:approved-upload-attached', uploaded.ok === true && uploaded.result?.sha256 === expectedSha, { expected: { ok: true, sha256: expectedSha }, observed: uploaded.error ?? uploaded.result });
+          const submitted = await pipe2.session.send({ op: 'act', tab_id: uploadTab, generation: uploadGen, action: { kind: 'click', ref: uploadBtnRef }, postcondition: textPostcondition('Uploaded', 15_000) }, { timeout: 30_000 });
+          ev.assert('q7:approved-upload-submitted', submitted.ok === true, { expected: 'submitted', observed: submitted.error ?? submitted.result });
+        } finally {
+          await pipe2.close({ timeout: 10_000 }).catch(() => {});
+        }
+        const uploadsAfter = fixtures.state().uploads;
+        ev.assert('q7:approved-upload-sha-matches', Array.isArray(uploadsAfter) && uploadsAfter.length === 1 && uploadMatches(uploadsAfter[0], expectedSha, uploadBytes.length), {
+          expected: { sha256: expectedSha, size: uploadBytes.length },
+          observed: uploadsAfter,
+        });
+      }
+    }
+
+    // Real approved native input: approve one-shot browser.native_input capability, dispatch Key Tab.
+    // On Chromium engine tabs this delivers trusted input; on system webviews it refuses honestly
+    // with BROWSER_PLATFORM_UNSUPPORTED (never fabricating trusted input).
+    await grantScope(ctx, { tool: 'browser.native_input' });
+    const pipe3 = ctx.pipe();
+    try {
+      const nativeApproved = await pipe3.session.send({ op: 'native', tab_id: form.browserId, action: { kind: 'key', key: 'Tab' } }, { timeout: 20_000 });
+      const engineTab = (ctx.config.engine ?? 'webview') === 'chromium';
+      const nativeOk = engineTab
+        ? (nativeApproved.ok === true && nativeApproved.result?.inputMode === 'trusted')
+        : (nativeApproved.ok === true || errorCode(nativeApproved) === 'BROWSER_PLATFORM_UNSUPPORTED' || errorCode(nativeApproved) === 'UNSUPPORTED');
+      ev.assert('q7:approved-native-honest', nativeOk, {
+        expected: engineTab ? 'ok with inputMode=trusted' : 'trusted dispatch or typed platform unsupported',
+        observed: nativeApproved.error ?? nativeApproved.result,
+      });
+    } finally {
+      await pipe3.close({ timeout: 10_000 }).catch(() => {});
+    }
   },
 
   // Q8: adjacent regressions on the surfaces this build does have: CLI navigation/snapshot stay

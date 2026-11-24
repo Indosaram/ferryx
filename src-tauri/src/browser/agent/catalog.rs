@@ -142,7 +142,10 @@ tool_ids! {
     WaitFunction => "browser.wait_function",
     Focus => "browser.focus",
     TabActivate => "browser.tab.activate",
+    NativeInput => "browser.native_input",
+    RequestHelp => "browser.request_help",
     Screenshot => "browser.screenshot",
+    Upload => "browser.upload",
     StateExport => "browser.state.export",
     StateImport => "browser.state.import",
     DownloadStart => "browser.download.start",
@@ -197,6 +200,10 @@ pub struct ToolSpec {
 
 const SCREENSHOT_UNSUPPORTED_REASON: &str =
     "native webview capture supports macOS, Windows and Linux only";
+const NATIVE_INPUT_UNSUPPORTED_REASON: &str =
+    "trusted native browser input supports macOS, Windows and Linux desktop engine tabs only";
+const UPLOAD_UNSUPPORTED_REASON: &str =
+    "browser file upload supports macOS, Windows and Linux desktop tabs only";
 
 const fn spec(
     id: ToolId,
@@ -259,6 +266,17 @@ impl ToolId {
             Self::WaitFunction => spec(self, S::Eval, true, Some(G::Eval), true),
             Self::Focus => spec(self, S::Native, false, None, false),
             Self::TabActivate => spec(self, S::Native, false, None, false),
+            Self::NativeInput => ToolSpec {
+                id: self,
+                scope: S::Native,
+                sensitive: false,
+                origin_grant: Some(G::Interact),
+                requires_lease: true,
+                support: PlatformSupport::DesktopOnly {
+                    reason: NATIVE_INPUT_UNSUPPORTED_REASON,
+                },
+            },
+            Self::RequestHelp => spec(self, S::Interact, false, None, false),
             Self::Screenshot => ToolSpec {
                 id: self,
                 scope: S::File,
@@ -267,6 +285,16 @@ impl ToolId {
                 requires_lease: false,
                 support: PlatformSupport::DesktopOnly {
                     reason: SCREENSHOT_UNSUPPORTED_REASON,
+                },
+            },
+            Self::Upload => ToolSpec {
+                id: self,
+                scope: S::File,
+                sensitive: true,
+                origin_grant: Some(G::Interact),
+                requires_lease: true,
+                support: PlatformSupport::DesktopOnly {
+                    reason: UPLOAD_UNSUPPORTED_REASON,
                 },
             },
             Self::StateExport => spec(self, S::File, true, Some(G::Eval), false),

@@ -174,6 +174,121 @@ pub async fn capture(browser_id: &str) -> Result<BrowserSnapshot, BrowserError> 
     Ok(BrowserSnapshot::new(bytes, SnapshotFormat::Png, width, height))
 }
 
+/// Resolves an observed `<input type="file">` in the isolated world and attaches `staged_path`
+/// through `DOM.setFileInputFiles`.
+pub async fn upload_file(
+    browser_id: &str,
+    reference: &str,
+    expect: &str,
+    staged_path: &str,
+) -> Result<(), BrowserError> {
+    let script = observe::resolve_file_input_script(reference, expect);
+    let mut attempt = 0;
+    let object_id = loop {
+        let context = isolated_context(browser_id).await?;
+        let params = json!({
+            "expression": script,
+            "contextId": context,
+            "returnByValue": false,
+            "awaitPromise": false,
+        });
+        match call(browser_id, "Runtime.evaluate", params).await {
+            Ok(result) => {
+                if let Some(details) = result.get("exceptionDetails") {
+                    let message = details
+                        .pointer("/exception/description")
+                        .and_then(Value::as_str)
+                        .or_else(|| details.get("text").and_then(Value::as_str))
+                        .unwrap_or("file input lookup failed");
+                    if let Some(rest) = message.split("FERRYX_UPLOAD_ERR:").nth(1) {
+                        let first_line = rest.lines().next().unwrap_or(rest);
+                        let mut parts = first_line.splitn(2, ':');
+                        let code = parts.next().unwrap_or("failed");
+                        let detail = parts.next().unwrap_or(first_line).to_string();
+                        return match code {
+                            "stale" | "changed" => Err(BrowserError::AutomationSnapshotStale),
+                            "unknown" => Err(BrowserError::AutomationTargetNotFound(detail)),
+                            _ => Err(BrowserError::AutomationFailed(detail)),
+                        };
+                    }
+                    return Err(BrowserError::AutomationFailed(message.to_string()));
+                }
+                let object_id = result
+                    .pointer("/result/objectId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        BrowserError::AutomationFailed("file input resolved to no DOM object".into())
+                    })?
+                    .to_string();
+                break object_id;
+            }
+            Err(BrowserError::AutomationFailed(message))
+                if attempt == 0 && cdp::is_lost_context(&message) =>
+            {
+                forget(browser_id);
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    recheck_act(browser_id)?;
+    call(
+        browser_id,
+        "DOM.setFileInputFiles",
+        json!({
+            "objectId": object_id,
+            "files": [staged_path],
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Dispatches trusted native input (key, text, or viewport click) over CDP.
+pub async fn native_input(
+    browser_id: &str,
+    action: &crate::ipc::browser_cli::BrowserNativeInputAction,
+) -> Result<(), BrowserError> {
+    use crate::ipc::browser_cli::BrowserNativeInputAction as N;
+    match action {
+        N::Key { key } => {
+            let parsed = crate::ipc::browser::parse_keypress(key)?;
+            recheck_act(browser_id)?;
+            for event in cdp::key_events(&parsed) {
+                call(browser_id, "Input.dispatchKeyEvent", event).await?;
+            }
+            Ok(())
+        }
+        N::Type { text } => {
+            recheck_act(browser_id)?;
+            observe::parse_act(
+                &eval_isolated(browser_id, observe::focused_credential_check_script()).await?,
+            )?;
+            recheck_act(browser_id)?;
+            call(browser_id, "Input.insertText", json!({ "text": text })).await?;
+            Ok(())
+        }
+        N::Click { x, y, click_count } => {
+            let (Some(x), Some(y)) = (x.as_f64(), y.as_f64()) else {
+                return Err(BrowserError::AutomationFailed(
+                    "native click needs finite numeric x and y".into(),
+                ));
+            };
+            if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+                return Err(BrowserError::AutomationFailed(
+                    "native click coordinates must be finite and non-negative".into(),
+                ));
+            }
+            let count = click_count.unwrap_or(1).clamp(1, 3);
+            recheck_act(browser_id)?;
+            for event in cdp::mouse_click_events(x, y, count) {
+                call(browser_id, "Input.dispatchMouseEvent", event).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// The shared snapshot trait for one engine tab, so screenshots to a file reuse the same
 /// writer as webview tabs. The label argument is ignored: the tab is fixed.
 pub struct EngineSnapshotSource<'a> {
@@ -623,5 +738,70 @@ mod tests {
         }
         assert_eq!(cdp.expressions().len(), 1, "only the point script ran");
         assert!(!cdp.methods().iter().any(|method| method.starts_with("Input.")));
+    }
+
+    #[tokio::test]
+    async fn upload_file_resolves_file_input_and_dispatches_set_file_input_files() {
+        let cdp = FakeCdp::start("upload", |method, _| {
+            world(method, 11).unwrap_or_else(|| match method {
+                "Runtime.evaluate" => Reply::Ok(json!({
+                    "result": { "type": "object", "subtype": "node", "objectId": "obj-file-1" }
+                })),
+                "DOM.setFileInputFiles" => Reply::Ok(json!({})),
+                _ => Reply::Ok(json!({})),
+            })
+        });
+        upload_file(&cdp.tab, "d1.5", "input\nbutton\nChoose File", "/tmp/staged-sample.txt")
+            .await
+            .expect("upload_file succeeds");
+        let calls = cdp.calls();
+        let set_files = calls
+            .iter()
+            .find(|(method, _)| method == "DOM.setFileInputFiles")
+            .expect("DOM.setFileInputFiles dispatched");
+        assert_eq!(set_files.1["objectId"], "obj-file-1");
+        assert_eq!(set_files.1["files"], json!(["/tmp/staged-sample.txt"]));
+    }
+
+    #[tokio::test]
+    async fn native_input_dispatches_trusted_key_click_and_refuses_password_type() {
+        use crate::ipc::browser_cli::BrowserNativeInputAction as N;
+        let cdp = FakeCdp::start("native-input", |method, params| {
+            world(method, 12).unwrap_or_else(|| match method {
+                "Runtime.evaluate" => {
+                    if params
+                        .get("expression")
+                        .and_then(Value::as_str)
+                        .is_some_and(|e| e.contains("BROWSER_CREDENTIAL_BLOCKED"))
+                    {
+                        evaluated(json!({ "ok": false, "code": "BROWSER_CREDENTIAL_BLOCKED" }))
+                    } else {
+                        evaluated(json!({ "ok": true }))
+                    }
+                }
+                _ => Reply::Ok(json!({})),
+            })
+        });
+        native_input(&cdp.tab, &N::Key { key: "Tab".into() }).await.expect("key");
+        native_input(
+            &cdp.tab,
+            &N::Click {
+                x: serde_json::Number::from(40),
+                y: serde_json::Number::from(60),
+                click_count: Some(1),
+            },
+        )
+        .await
+        .expect("click");
+        let err = native_input(&cdp.tab, &N::Type { text: "secret".into() })
+            .await
+            .expect_err("password focus must block native type");
+        assert!(matches!(
+            err,
+            BrowserError::Authority(super::super::AuthorityError::CredentialBlocked)
+        ));
+        assert!(cdp.methods().contains(&"Input.dispatchKeyEvent".to_string()));
+        assert!(cdp.methods().contains(&"Input.dispatchMouseEvent".to_string()));
+        assert!(!cdp.methods().contains(&"Input.insertText".to_string()));
     }
 }

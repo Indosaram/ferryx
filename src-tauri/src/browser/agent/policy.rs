@@ -239,6 +239,16 @@ pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, Autho
             out_path,
         } => Classification::new(ToolId::Screenshot, browser(browser_id))
             .with_file_path(Some(out_path.as_str())),
+        R::Upload {
+            browser_id, path, ..
+        } => Classification::new(ToolId::Upload, browser(browser_id))
+            .with_file_path(Some(path.as_str())),
+        R::NativeInput { browser_id, .. } => {
+            Classification::new(ToolId::NativeInput, browser(browser_id))
+        }
+        R::RequestHelp { browser_id, .. } => {
+            Classification::new(ToolId::RequestHelp, browser(browser_id))
+        }
         R::Cookies {
             browser_id, action, ..
         } => {
@@ -617,7 +627,10 @@ pub fn authorize(
                 | ToolId::RemoteAttach
                 | ToolId::Focus
                 | ToolId::TabActivate
+                | ToolId::NativeInput
+                | ToolId::RequestHelp
                 | ToolId::Screenshot
+                | ToolId::Upload
                 | ToolId::StateExport
                 | ToolId::StateImport
                 | ToolId::DownloadStart
@@ -856,6 +869,31 @@ mod tests {
                     out_path: "a.png".into(),
                 },
                 ToolId::Screenshot,
+            ),
+            (
+                BrowserCliRequest::Upload {
+                    browser_id: id(),
+                    path: "a.txt".into(),
+                    reference: "d1.1".into(),
+                    generation: None,
+                },
+                ToolId::Upload,
+            ),
+            (
+                BrowserCliRequest::NativeInput {
+                    browser_id: id(),
+                    action: crate::ipc::browser_cli::BrowserNativeInputAction::Key {
+                        key: "Tab".into(),
+                    },
+                },
+                ToolId::NativeInput,
+            ),
+            (
+                BrowserCliRequest::RequestHelp {
+                    browser_id: id(),
+                    reason: Some("captcha".into()),
+                },
+                ToolId::RequestHelp,
             ),
             (
                 BrowserCliRequest::Cookies {

@@ -114,6 +114,8 @@ pub fn focused_credential_check_script() -> &'static str {
 /// Focuses the addressed element and proves the focus actually landed on it. A page can move
 /// the focus in a focus handler, and trusted text insertion writes wherever the focus is, so a
 /// write meant for one element must never be dispatched to a different one.
+/// Focuses the addressed element and verifies that the page did not move focus elsewhere.
+/// Used before trusted text insertion on CEF tabs.
 pub fn focus_bind_script(reference: &str, expect: &str) -> String {
     script(json!({
         "op": "act",
@@ -121,6 +123,39 @@ pub fn focus_bind_script(reference: &str, expect: &str) -> String {
         "ref": reference,
         "expect": expect,
         "action": { "type": "focusBind" },
+    }))
+}
+
+/// Evaluates in the isolated world and returns the raw `<input type="file">` DOM element
+/// (for CDP `Runtime.evaluate(..., returnByValue: false)` -> `DOM.setFileInputFiles`).
+pub fn resolve_file_input_script(reference: &str, expect: &str) -> String {
+    script(json!({
+        "op": "resolveFileInput",
+        "isolated": true,
+        "ref": reference,
+        "expect": expect,
+    }))
+}
+
+/// Attaches verified file bytes to an `<input type="file">` via `DataTransfer` (native webview fallback).
+pub fn upload_webview_script(
+    reference: &str,
+    expect: &str,
+    name: &str,
+    mime: &str,
+    base64: &str,
+) -> String {
+    script(json!({
+        "op": "act",
+        "isolated": false,
+        "ref": reference,
+        "expect": expect,
+        "action": {
+            "type": "upload",
+            "name": name,
+            "mime": mime,
+            "base64": base64,
+        },
     }))
 }
 

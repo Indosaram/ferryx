@@ -241,6 +241,50 @@ pub enum BrowserCliRequest {
         #[serde(default)]
         profile: Option<String>,
     },
+    /// Attaches a local file to an observed `<input type="file">` element after one-shot
+    /// file-capability approval in app chrome.
+    #[serde(rename_all = "camelCase")]
+    Upload {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        path: String,
+        #[serde(alias = "ref")]
+        reference: String,
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// Dispatches trusted native input (key, text, or viewport click) on a desktop Chromium
+    /// engine tab after one-shot native-capability approval in app chrome.
+    #[serde(rename_all = "camelCase")]
+    NativeInput {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        action: BrowserNativeInputAction,
+    },
+    /// Hands tab control back to the desktop user (reclaiming the agent lease) without closing
+    /// the tab.
+    #[serde(rename_all = "camelCase")]
+    RequestHelp {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum BrowserNativeInputAction {
+    #[serde(alias = "keypress")]
+    Key { key: String },
+    Type { text: String },
+    #[serde(rename_all = "camelCase")]
+    Click {
+        x: serde_json::Number,
+        y: serde_json::Number,
+        #[serde(default)]
+        click_count: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1743,6 +1787,24 @@ pub enum BrowserCliResponse {
         path: String,
     },
     InboundUrlOpened,
+    #[serde(rename_all = "camelCase")]
+    Uploaded {
+        browser_id: String,
+        name: String,
+        bytes: u64,
+        sha256: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    NativeInputDispatched {
+        browser_id: String,
+        input_mode: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    HelpRequested {
+        browser_id: String,
+        handed_off: bool,
+        reason: Option<String>,
+    },
     Error {
         code: String,
         message: String,
@@ -3182,6 +3244,72 @@ async fn execute_request<R: tauri::Runtime>(
                     IpcErrorCode::InvalidArgument,
                     "an inbound URL must be http or https",
                 ))
+            }
+        }
+        BrowserCliRequest::Upload {
+            browser_id,
+            path,
+            reference,
+            generation,
+        } => {
+            let expected_generation = match generation {
+                Some(gen) => Ok(gen),
+                None => manager.get_state(&browser_id).map(|state| state.generation),
+            };
+            let expect = expected_generation
+                .and_then(|gen| manager.observed_ref(&browser_id, gen, &reference));
+            match expect {
+                Ok(expect) => {
+                    match crate::browser::agent::page::upload_file(
+                        app,
+                        manager,
+                        &browser_id,
+                        &reference,
+                        &expect,
+                        &path,
+                    )
+                    .await
+                    {
+                        Ok((name, bytes, sha256)) => BrowserCliResponse::Uploaded {
+                            browser_id,
+                            name,
+                            bytes,
+                            sha256,
+                        },
+                        Err(error) => error_response(error.into()),
+                    }
+                }
+                Err(error) => error_response(error.into()),
+            }
+        }
+        BrowserCliRequest::NativeInput { browser_id, action } => {
+            match manager.get_state(&browser_id) {
+                Ok(_) => match crate::browser::agent::page::native_input(&browser_id, &action).await
+                {
+                    Ok(input_mode) => BrowserCliResponse::NativeInputDispatched {
+                        browser_id,
+                        input_mode: input_mode.to_string(),
+                    },
+                    Err(error) => error_response(error.into()),
+                },
+                Err(error) => error_response(error.into()),
+            }
+        }
+        BrowserCliRequest::RequestHelp { browser_id, reason } => {
+            match manager.get_state(&browser_id) {
+                Ok(_) => {
+                    crate::browser::agent::service::request_help(
+                        app,
+                        &browser_id,
+                        reason.as_deref(),
+                    );
+                    BrowserCliResponse::HelpRequested {
+                        browser_id,
+                        handed_off: true,
+                        reason,
+                    }
+                }
+                Err(error) => error_response(error.into()),
             }
         }
         BrowserCliRequest::OpenFile { path, line, col } => {

@@ -703,13 +703,35 @@ pub fn desktop_touched(browser_id: &str) {
         // Reclaim ends the agent lease; a fill already holding a consumed grant must not
         // still be able to write after the desktop user took the tab back.
         CREDENTIAL_GRANTS.bump_generation();
+        super::page::cleanup_upload_staging(browser_id);
     }
+}
+
+/// An agent explicitly hands control of `browser_id` back to the desktop user without closing
+/// the tab. Reclaims the tab (ending any active agent lease and blocking further agent mutations
+/// until desktop chrome resumes) and notifies app chrome.
+pub fn request_help<R: tauri::Runtime>(app: &AppHandle<R>, browser_id: &str, reason: Option<&str>) {
+    {
+        let mut service = SERVICE.lock();
+        service.state.reclaim(browser_id);
+        CREDENTIAL_GRANTS.bump_generation();
+    }
+    super::page::cleanup_upload_staging(browser_id);
+    notify_approvals(app);
+    let _ = app.emit(
+        "browser-agent:help-requested",
+        serde_json::json!({
+            "browserId": browser_id,
+            "reason": reason,
+        }),
+    );
 }
 
 /// Forgets a closed tab's lease and reclaim mark.
 pub fn tab_closed(browser_id: &str) {
     SERVICE.lock().state.release_tab(browser_id);
     CREDENTIAL_GRANTS.bump_generation();
+    super::page::cleanup_upload_staging(browser_id);
 }
 
 fn desktop_only<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
