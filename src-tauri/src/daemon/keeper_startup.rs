@@ -163,12 +163,23 @@ pub struct KeeperStartupReport {
 /// The bundle directory that holds the keeper payload, derived from the running executable.
 ///
 /// A macOS app bundle lays the executable out at `Contents/MacOS/<exe>`, so the payload sits at
-/// `Contents/Resources/keeper`. A non-bundle binary (a `cargo run` daemon) has no such directory;
-/// that is not an error, it is the `PayloadAbsent` case the caller logs.
+/// `Contents/Resources/keeper`. The installed daemon runs from a staged generation's helper bundle
+/// (`<key>/Ferryx Daemon.app/Contents/MacOS/ferryx`), which has no Resources; its copy of the payload
+/// is `<key>/keeper`, written when the generation was staged. A non-bundle binary (a `cargo run`
+/// daemon) has neither; that is not an error, it is the `PayloadAbsent` case the caller logs.
 pub fn bundle_keeper_dir(executable: &Path) -> Option<PathBuf> {
     let macos_dir = executable.parent()?;
     let contents = macos_dir.parent()?;
-    (macos_dir.file_name()? == "MacOS").then(|| contents.join("Resources").join(BUNDLE_KEEPER_DIR))
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let resources = contents.join("Resources").join(BUNDLE_KEEPER_DIR);
+    if resources.is_dir() {
+        return Some(resources);
+    }
+    let generation = contents.parent()?.parent()?;
+    let staged = generation.join(crate::daemon::runtime_stage::KEEPER_PAYLOAD_DIR);
+    Some(if staged.is_dir() { staged } else { resources })
 }
 
 /// The occupancy answer retention needs: how many live sessions each generation owns, read from the
@@ -1037,6 +1048,28 @@ fn sha256_file(path: &Path) -> Result<String, KeeperStartupError> {
 mod tests {
     use super::*;
     use crate::daemon::keeper_client::KeeperClientError;
+
+    #[test]
+    fn a_staged_daemon_resolves_its_generations_keeper_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        // Given: an installed app with its payload, and a staged generation with its own copy.
+        let app = temp.path().join("Ferryx.app/Contents");
+        std::fs::create_dir_all(app.join("Resources").join(BUNDLE_KEEPER_DIR)).unwrap();
+        let generation = temp.path().join("daemon-runtime/1.0.0-00000001");
+        let staged = generation.join(crate::daemon::runtime_stage::KEEPER_PAYLOAD_DIR);
+        std::fs::create_dir_all(&staged).unwrap();
+        // When / Then: the app executable reads Resources; the staged helper reads its generation.
+        assert_eq!(
+            bundle_keeper_dir(&app.join("MacOS/ferryx")),
+            Some(app.join("Resources").join(BUNDLE_KEEPER_DIR))
+        );
+        assert_eq!(
+            bundle_keeper_dir(&generation.join("Ferryx Daemon.app/Contents/MacOS/ferryx")),
+            Some(staged)
+        );
+        // A binary outside any bundle has no payload directory.
+        assert_eq!(bundle_keeper_dir(&temp.path().join("bin/ferryx")), None);
+    }
     use crate::daemon::keeper_session::{
         OwnershipRecord, OwnershipStore, SessionOwner, KeeperSessionView,
     };
