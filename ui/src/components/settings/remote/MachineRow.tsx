@@ -174,36 +174,45 @@ export interface CloudMachineRowProps {
   sandboxId: string;
   /** How agent traffic reaches it: `ssh` (forwarded socket) or `relay`. */
   transport?: "ssh" | "relay";
+  onDelete?: () => void;
+  deleting?: boolean;
 }
 
-/**
- * A disposable cloud machine, read-only.
- *
- * Its lifecycle belongs to `ferryx-cli cloud` and the reaper - create, stop, resume and delete are
- * not wired to any button here - so the row carries status and the provider badge and nothing the
- * user can press. That is deliberate: a Disabled-looking Delete here would be a second, unaudited
- * path to a billable resource.
- */
-export function CloudMachineRow({ name, provider, state, sandboxId, transport }: CloudMachineRowProps) {
+export function CloudMachineRow({ name, provider, state, sandboxId, transport, onDelete, deleting }: CloudMachineRowProps) {
   const stateClass = state === "ready" ? "text-status-success" : state === "error" ? "text-status-warning" : "text-muted-foreground";
   return (
     <div
       role="listitem"
       data-machine-id={`cloud:${name}`}
       data-cloud-provider={provider}
-      className="space-y-1.5 rounded-lg border border-border bg-card/50 p-3"
+      className="flex items-start justify-between gap-2 rounded-lg border border-border bg-card/50 p-3"
     >
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="truncate text-[13px] font-medium text-foreground">{name}</span>
-        <Badge variant="outline" className="h-4 shrink-0 px-1.5 py-0 text-[11px]" data-testid="cloud-provider-badge">{`cloud:${provider}`}</Badge>
-        <span role="status" data-code={state} className={`text-[12px] font-medium ${stateClass}`}>
-          {state}
-        </span>
-        {transport ? (
-          <span className="shrink-0 rounded border border-border/70 bg-muted/40 px-1.5 text-[11px] text-muted-foreground">{transport}</span>
-        ) : null}
+      <div className="min-w-0 space-y-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="truncate text-[13px] font-medium text-foreground">{name}</span>
+          <Badge variant="outline" className="h-4 shrink-0 px-1.5 py-0 text-[11px]" data-testid="cloud-provider-badge">{`cloud:${provider}`}</Badge>
+          <span role="status" data-code={state} className={`text-[12px] font-medium ${stateClass}`}>
+            {state}
+          </span>
+          {transport ? (
+            <span className="shrink-0 rounded border border-border/70 bg-muted/40 px-1.5 text-[11px] text-muted-foreground">{transport}</span>
+          ) : null}
+        </div>
+        <p className="truncate text-[11px] text-muted-foreground">{sandboxId}</p>
       </div>
-      <p className="truncate text-[11px] text-muted-foreground">{sandboxId}</p>
+      {onDelete ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          aria-label={`Delete cloud box ${name}`}
+          disabled={deleting}
+          className="h-7 shrink-0 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+          onClick={onDelete}
+        >
+          {deleting ? "Deleting..." : "Delete"}
+        </Button>
+      ) : null}
     </div>
   );
 }

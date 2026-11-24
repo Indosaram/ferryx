@@ -81,7 +81,7 @@ impl DaytonaProvider {
 
     /// Key from `DAYTONA_API_KEY` only: the CLI keeps its own credential store.
     pub fn from_env() -> Self {
-        let token = std::env::var("DAYTONA_API_KEY").ok().filter(|value| !value.trim().is_empty());
+        let token = crate::cloud_host::secrets::load_var("DAYTONA_API_KEY");
         Self::new(token)
     }
 

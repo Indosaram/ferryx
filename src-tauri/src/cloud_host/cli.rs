@@ -88,6 +88,7 @@ use super::catalog::{Catalog, CatalogRow, CatalogStore};
 use super::enroll::{self, AttachProver, EnrollmentCodeIssuer, ProvePolicy};
 use super::lifecycle::{self, LifecycleError, ProviderRegistry};
 use super::reaper::{HostReaper, ReaperScheduler};
+use super::secrets;
 use super::provider::{
     blaxel::BlaxelProvider, codespaces::CodespacesProvider, daytona::DaytonaProvider,
     e2b::E2bProvider, freestyle::FreestyleProvider, instabox::InstaboxProvider,
@@ -194,6 +195,8 @@ pub fn model_egress(provider: &str) -> ModelEgress {
 }
 
 pub const CLOUD_USAGE: &str = "usage: ferryx-cli cloud <verb>\n  \
+run [--provider <p|auto>] [--name <n>] [--ttl 30m] [--cwd <dir>] [--model <m>] [--keep] [--json] --prompt <text>\n  \
+providers [--json]\n  \
 create --provider <p> --name <n> [--ttl 30m] [--json]\n  \
 list [--json]\n  \
 stop <name> | resume <name> | delete <name>\n  \
@@ -202,20 +205,29 @@ mhc <name> -- <args...>  (MODE=B: runs the engine on the box)\n  \
 exec <name> -- <cmd...>  (one-shot command on the box, exit code passthrough)\n  \
 reconcile                (the reaper entry calls this every 5 minutes)";
 
-/// One parsed `ferryx-cli cloud` invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloudCliCommand {
+    Help,
+    Providers { json: bool },
+    Run {
+        provider: Option<String>,
+        name: Option<String>,
+        ttl: Option<u64>,
+        cwd: Option<String>,
+        model: Option<String>,
+        prompt: String,
+        keep: bool,
+        json: bool,
+    },
     Create { provider: String, name: String, ttl: Option<u64>, json: bool },
     List { json: bool },
     Stop { name: String },
     Resume { name: String },
     Delete { name: String },
     Socket { name: String },
-    /// The detached holder `socket` starts; not in the usage text because an operator never runs it.
     Hold { name: String },
     Mhc { name: String, argv: Vec<String> },
     Exec { name: String, argv: Vec<String> },
-    /// Hidden: the scheduler entry runs it, and it is the only verb that does not end in a sweep.
     Reconcile,
 }
 
@@ -238,6 +250,74 @@ where
     // nothing after it to slice.
     let rest: &[String] = args.get(3..).unwrap_or(&[]);
     match verb {
+        "--help" | "-h" | "help" => Ok(CloudCliCommand::Help),
+        "providers" => {
+            let mut json = false;
+            for arg in rest {
+                match arg.as_str() {
+                    "--json" => json = true,
+                    other => return Err(format!("unknown cloud providers option `{other}`\n{CLOUD_USAGE}")),
+                }
+            }
+            Ok(CloudCliCommand::Providers { json })
+        }
+        "run" => {
+            let mut provider: Option<String> = None;
+            let mut name: Option<String> = None;
+            let mut ttl: Option<u64> = None;
+            let mut cwd: Option<String> = None;
+            let mut model: Option<String> = None;
+            let mut prompt: Option<String> = None;
+            let mut keep = false;
+            let mut json = false;
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--provider" if provider.is_none() => {
+                        let val = value_after(rest, index, "--provider")?;
+                        if val != "auto" {
+                            provider = Some(val);
+                        }
+                        index += 2;
+                    }
+                    "--name" if name.is_none() => {
+                        let val = value_after(rest, index, "--name")?;
+                        validate_name(&val)?;
+                        name = Some(val);
+                        index += 2;
+                    }
+                    "--ttl" if ttl.is_none() => {
+                        ttl = Some(parse_ttl(&value_after(rest, index, "--ttl")?)?);
+                        index += 2;
+                    }
+                    "--cwd" if cwd.is_none() => {
+                        cwd = Some(value_after(rest, index, "--cwd")?);
+                        index += 2;
+                    }
+                    "--model" if model.is_none() => {
+                        model = Some(value_after(rest, index, "--model")?);
+                        index += 2;
+                    }
+                    "--prompt" if prompt.is_none() => {
+                        prompt = Some(value_after_any(rest, index, "--prompt")?);
+                        index += 2;
+                    }
+                    "--keep" => {
+                        keep = true;
+                        index += 1;
+                    }
+                    "--json" => {
+                        json = true;
+                        index += 1;
+                    }
+                    other => return Err(format!("unknown cloud run option `{other}`\n{CLOUD_USAGE}")),
+                }
+            }
+            let prompt = prompt
+                .filter(|p| !p.trim().is_empty())
+                .ok_or_else(|| format!("missing --prompt\n{CLOUD_USAGE}"))?;
+            Ok(CloudCliCommand::Run { provider, name, ttl, cwd, model, prompt, keep, json })
+        }
         "create" => {
             let mut provider: Option<String> = None;
             let mut name: Option<String> = None;
@@ -324,6 +404,12 @@ fn value_after(args: &[String], index: usize, flag: &str) -> Result<String, Stri
         .ok_or_else(|| format!("missing value for {flag}\n{CLOUD_USAGE}"))
 }
 
+fn value_after_any(args: &[String], index: usize, flag: &str) -> Result<String, String> {
+    args.get(index + 1)
+        .cloned()
+        .ok_or_else(|| format!("missing value for {flag}\n{CLOUD_USAGE}"))
+}
+
 fn single_name(rest: &[String], verb: &str) -> Result<String, String> {
     match rest {
         [name] if !name.starts_with('-') => {
@@ -403,8 +489,19 @@ pub fn run_cloud_cli(command: CloudCliCommand) -> i32 {
 }
 
 async fn run(command: CloudCliCommand) -> i32 {
+    if matches!(command, CloudCliCommand::Help) {
+        println!("{CLOUD_USAGE}");
+        return EXIT_OK;
+    }
+    if let CloudCliCommand::Providers { json } = command {
+        return list_providers(json);
+    }
     let registry = registry_from_env();
     match command {
+        CloudCliCommand::Help | CloudCliCommand::Providers { .. } => EXIT_OK,
+        CloudCliCommand::Run { provider, name, ttl, cwd, model, prompt, keep, json } => {
+            run_task(&registry, provider.as_deref(), name.as_deref(), ttl, cwd.as_deref(), model.as_deref(), &prompt, keep, json).await
+        }
         CloudCliCommand::Create { provider, name, ttl, json } => {
             create(&registry, &provider, &name, ttl, json).await
         }
@@ -506,20 +603,23 @@ async fn run_steps<S: ProvisionSteps + ?Sized>(
     role: Role,
     transport: Transport,
 ) -> Result<ModelEgress, StepFailure> {
+    eprintln!("[cloud 1/5] waiting for sandbox ready...");
     steps.wait_ready().await?;
+    eprintln!("[cloud 2/5] connecting and pushing agent credentials...");
     steps.connect().await?;
     let home = steps.home().await?;
-    // Push the filtered agent config (auth/models/settings) BEFORE bootstrap starts the `omo`
-    // host daemon, so the daemon loads the `hms` provider and stripped settings on its very first
-    // launch instead of requiring a restart.
     steps.push_agent_files(&home).await?;
+    eprintln!("[cloud 3/5] bootstrapping omo runtime...");
     steps.bootstrap(role, &home).await?;
+    eprintln!("[cloud 4/5] configuring model egress...");
     let egress = steps.model_egress(&home).await?;
     if transport == Transport::Relay {
+        eprintln!("[cloud 5/5] enrolling relay host...");
         if let Some(detail) = steps.enroll().await? {
             eprintln!("{detail}");
         }
     } else {
+        eprintln!("[cloud 5/5] starting host daemon...");
         steps.ensure_host().await?;
     }
     Ok(egress)
@@ -708,6 +808,384 @@ impl ProvisionSteps for LiveSteps<'_> {
 // Verbs
 // ---------------------------------------------------------------------------------------------
 
+fn list_providers(json: bool) -> i32 {
+    let statuses = secrets::provider_statuses();
+    if json {
+        println!("{}", serde_json::to_string(&statuses).unwrap_or_else(|_| "[]".into()));
+    } else {
+        for status in &statuses {
+            let state = if status.configured { "ready" } else { "unconfigured" };
+            println!(
+                "{:<12} {:<12} {:<6} {}",
+                status.id, state, status.transport, status.free_quota
+            );
+        }
+    }
+    EXIT_OK
+}
+
+async fn provision_machine(
+    context: &CreateContext<'_>,
+    provider_name: &str,
+    name: &str,
+    ttl: Option<u64>,
+) -> Result<(CatalogRow, ModelEgress), (i32, String)> {
+    let CreateContext { registry, catalog, slots, scheduler } = *context;
+    let Some(provider) = registry.get(provider_name) else {
+        return Err((
+            EXIT_USAGE,
+            format!(
+                "unknown provider: {provider_name} (this build has: {})",
+                registry.names().join(", ")
+            ),
+        ));
+    };
+    let _ = sweep(registry, catalog).await;
+
+    let request = CreateSandbox {
+        idempotency_key: format!("fx-{name}-{}", unix_seconds()),
+        name: name.to_string(),
+        ttl_seconds: ttl,
+        env: BTreeMap::new(),
+    };
+    let created = lifecycle::create_with_scheduler(
+        provider.as_ref(),
+        provider_name,
+        request,
+        catalog,
+        slots,
+        scheduler,
+    )
+    .await
+    .map_err(|error| {
+        let code = match &error {
+            LifecycleError::UnknownProvider(_)
+            | LifecycleError::NotInCatalog(_)
+            | LifecycleError::AlreadyDeleted(_)
+            | LifecycleError::ProviderNotConfigured { .. } => EXIT_USAGE,
+            LifecycleError::Slot(super::slots::SlotError::NoFreeSlot) => EXIT_NO_RELAY_SLOT,
+            _ => EXIT_FAILURE,
+        };
+        (code, format!("{}: {error}", error.code()))
+    })?;
+    let row = created.row.clone();
+    let transport = row.transport;
+    let role = match transport {
+        Transport::Ssh => Role::Ssh,
+        Transport::Relay => Role::Relay,
+    };
+    eprintln!(
+        "created {} on {provider_name} ({:?}, sandbox {})",
+        row.name, transport, row.sandbox_id
+    );
+
+    let steps = LiveSteps::new(provider, provider_name, &row, created.slot.as_ref());
+    let egress = finish_create(*context, provider.as_ref(), &row, role, transport, &steps)
+        .await
+        .map_err(|failure| (failure.code, failure.detail))?;
+    Ok((row, egress))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_task(
+    registry: &ProviderRegistry,
+    explicit_provider: Option<&str>,
+    explicit_name: Option<&str>,
+    ttl: Option<u64>,
+    cwd: Option<&str>,
+    model: Option<&str>,
+    prompt: &str,
+    keep: bool,
+    json: bool,
+) -> i32 {
+    if DISPATCH_MODE != 'A' {
+        return fail(EXIT_REFUSED, "MODE_B: use ferryx-cli cloud mhc");
+    }
+    let candidates: Vec<String> = match explicit_provider {
+        Some(p) => vec![p.to_string()],
+        None => secrets::configured_providers_in_order()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    };
+    if candidates.is_empty() {
+        return fail(
+            EXIT_USAGE,
+            "no cloud provider configured: add an API key in Settings -> Remote or ~/.config/compute-secrets.env",
+        );
+    }
+
+    let catalog = match catalog_store() {
+        Ok(catalog) => catalog,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let slots = match SlotRegistry::default_location() {
+        Ok(slots) => slots,
+        Err(error) => return fail(EXIT_FAILURE, &error.to_string()),
+    };
+    let scheduler = match HostReaper::from_env() {
+        Ok(scheduler) => scheduler,
+        Err(error) => return fail(EXIT_FAILURE, &error.to_string()),
+    };
+    let context = CreateContext { registry, catalog: &catalog, slots: &slots, scheduler: &scheduler };
+
+    let mut provisioned: Option<(CatalogRow, ModelEgress)> = None;
+    let mut last_error: Option<(i32, String)> = None;
+    for (attempt, provider_name) in candidates.iter().enumerate() {
+        let machine_name = explicit_name
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("fx-run-{}-{attempt}", unix_seconds()));
+        eprintln!("[cloud] provisioning `{machine_name}` on {provider_name}...");
+        match provision_machine(&context, provider_name, &machine_name, ttl).await {
+            Ok(result) => {
+                provisioned = Some(result);
+                break;
+            }
+            Err((code, detail)) => {
+                eprintln!("[cloud] {provider_name} failed: {detail}");
+                last_error = Some((code, detail));
+            }
+        }
+    }
+
+    let (row, egress) = match provisioned {
+        Some(pair) => pair,
+        None => {
+            let (code, detail) = last_error.unwrap_or((EXIT_FAILURE, "all cloud providers failed".into()));
+            return fail(code, &detail);
+        }
+    };
+
+    let outcome = execute_prompt_on_machine(registry, &row, cwd, model, prompt).await;
+
+    if !keep {
+        eprintln!("[cloud] cleaning up `{}` on {}...", row.name, row.provider);
+        if let Some(provider) = registry.get(&row.provider) {
+            match lifecycle::delete_with_reaper(provider.as_ref(), &row.name, &catalog, &slots).await {
+                Ok(deleted) => {
+                    if deleted.reaper_removed {
+                        eprintln!("[cloud] reaper entry removed (no active boxes left)");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[cloud] cleanup failed for `{}`: {error}", row.name);
+                }
+            }
+        }
+    }
+    let _ = sweep(registry, &catalog).await;
+
+    match outcome {
+        Ok((session_id, reply)) => {
+            if json {
+                println!(
+                    "{}",
+                    json!({
+                        "machine": row.name,
+                        "provider": row.provider,
+                        "transport": transport_token(row.transport),
+                        "egress": egress.as_str(),
+                        "sessionId": session_id,
+                        "kept": keep,
+                        "reply": reply,
+                    })
+                );
+            } else {
+                println!("{reply}");
+            }
+            EXIT_OK
+        }
+        Err(detail) => fail(EXIT_FAILURE, &detail),
+    }
+}
+
+async fn execute_prompt_on_machine(
+    registry: &ProviderRegistry,
+    row: &CatalogRow,
+    cwd: Option<&str>,
+    model: Option<&str>,
+    prompt: &str,
+) -> Result<(String, String), String> {
+    let provider = registry
+        .get(&row.provider)
+        .ok_or_else(|| format!("unknown provider: {}", row.provider))?;
+    let access = open_access(&provider, row).await?;
+    dispatch_ready(&access).await?;
+    let remote_cwd = match cwd {
+        Some(dir) => dir.to_string(),
+        None => access.home().await?,
+    };
+    let socket_path = crate::paired_host::socket_forward::socket_path(&row.name)
+        .map_err(|_| "cannot resolve the dispatch socket path".to_string())?;
+
+    let mut holder_guard: Option<tokio::process::Child> = None;
+    if crate::paired_host::socket_forward::probe(&socket_path).await.is_err() {
+        eprintln!("[cloud] opening dispatch socket for `{}`...", row.name);
+        holder_guard = Some(spawn_scoped_holder(&row.name)?);
+        wait_for_socket(&socket_path, Duration::from_secs(30)).await?;
+    }
+
+    let socket_str = socket_path.to_string_lossy().to_string();
+    eprintln!("[cloud] running agent session on `{}` ({})...", row.name, row.provider);
+
+    let mut open_args = vec![
+        "host".to_string(),
+        "session".to_string(),
+        "open".to_string(),
+        "--socket".to_string(),
+        socket_str.clone(),
+        "--cwd".to_string(),
+        remote_cwd,
+        "--prompt".to_string(),
+        prompt.to_string(),
+        "--json".to_string(),
+    ];
+    if let Some(m) = model {
+        open_args.push("--model".to_string());
+        open_args.push(m.to_string());
+    }
+    let open_json = run_omo_json(&open_args).await?;
+    let session_id = extract_session_id(&open_json)
+        .ok_or_else(|| format!("omo host session open returned no session id: {open_json}"))?;
+
+    let wait_args = vec![
+        "host".into(),
+        "session".into(),
+        "wait".into(),
+        session_id.clone(),
+        "--until".into(),
+        "done".into(),
+        "--timeout".into(),
+        "300000".into(),
+        "--socket".into(),
+        socket_str.clone(),
+        "--json".into(),
+    ];
+    let _ = run_omo_json(&wait_args).await?;
+
+    let read_args = vec![
+        "host".into(),
+        "session".into(),
+        "read".into(),
+        session_id.clone(),
+        "--messages".into(),
+        "--socket".into(),
+        socket_str.clone(),
+        "--json".into(),
+    ];
+    let read_json = run_omo_json(&read_args).await?;
+    let reply = extract_assistant_text(&read_json).unwrap_or_else(|| read_json.to_string());
+
+    let close_args = vec![
+        "host".into(),
+        "session".into(),
+        "close".into(),
+        session_id.clone(),
+        "--socket".into(),
+        socket_str,
+        "--json".into(),
+    ];
+    let _ = run_omo_json(&close_args).await;
+
+    if let Some(mut child) = holder_guard {
+        let _ = child.kill().await;
+    }
+    Ok((session_id, reply))
+}
+
+async fn run_omo_json(args: &[String]) -> Result<Value, String> {
+    let output = tokio::process::Command::new("omo")
+        .args(args)
+        .output()
+        .await
+        .map_err(|error| format!("failed to run `omo`: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "omo exited with {}: {}",
+            output.status.code().unwrap_or(-1),
+            tail(&format!("{stderr}\n{stdout}"), 400)
+        ));
+    }
+    for line in stdout.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{') {
+            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+                return Ok(value);
+            }
+        }
+    }
+    serde_json::from_str::<Value>(stdout.trim())
+        .map_err(|error| format!("omo returned non-JSON output ({error}): {}", tail(&stdout, 300)))
+}
+
+fn extract_session_id(value: &Value) -> Option<String> {
+    for key in ["sessionId", "hostSessionId", "id"] {
+        if let Some(id) = value.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            return Some(id.to_string());
+        }
+    }
+    value
+        .get("session")
+        .and_then(|s| s.get("id").or_else(|| s.get("sessionId")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_assistant_text(value: &Value) -> Option<String> {
+    let items = value
+        .get("messages")
+        .or_else(|| value.get("entries"))
+        .and_then(Value::as_array)?;
+    for entry in items.iter().rev() {
+        let msg = entry.get("message").unwrap_or(entry);
+        let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+        if role != "assistant" {
+            continue;
+        }
+        if let Some(text) = msg.get("content").and_then(Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(parts) = msg.get("content").and_then(Value::as_array) {
+            let combined: Vec<&str> = parts
+                .iter()
+                .filter_map(|part| {
+                    if part.get("type").and_then(Value::as_str) == Some("text") {
+                        part.get("text").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let joined = combined.join("\n").trim().to_string();
+            if !joined.is_empty() {
+                return Some(joined);
+            }
+        }
+    }
+    None
+}
+
+fn spawn_scoped_holder(name: &str) -> Result<tokio::process::Child, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot find this executable: {error}"))?;
+    let mut command = tokio::process::Command::new(exe);
+    command
+        .args(["cloud", "socket", name, "--hold"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    command
+        .spawn()
+        .map_err(|error| format!("cannot start the socket holder: {error}"))
+}
+
 async fn create(
     registry: &ProviderRegistry,
     provider_name: &str,
@@ -731,8 +1209,6 @@ async fn create(
     create_with(&context, provider_name, name, ttl, json).await
 }
 
-/// Everything a create needs besides its arguments: one value so a test can point the whole path
-/// at a temp catalog, a temp slot pool and a scheduler that touches nothing.
 async fn create_with(
     context: &CreateContext<'_>,
     provider_name: &str,
@@ -740,73 +1216,11 @@ async fn create_with(
     ttl: Option<u64>,
     json: bool,
 ) -> i32 {
-    let CreateContext { registry, catalog, slots, scheduler } = *context;
-    // A provider this build does not have is refused before the sweep and before a slot is
-    // leased: a misspelt `--provider` must not cost a round trip to every configured provider.
-    let Some(provider) = registry.get(provider_name) else {
-        return fail(
-            EXIT_USAGE,
-            &format!(
-                "unknown provider: {provider_name} (this build has: {})",
-                registry.names().join(", ")
-            ),
-        );
+    let (row, egress) = match provision_machine(context, provider_name, name, ttl).await {
+        Ok(pair) => pair,
+        Err((code, detail)) => return fail(code, &detail),
     };
-    // Before anything is created: a row an earlier run left behind is settled first, so this
-    // create cannot race a sweep that would stop the machine it is about to bootstrap.
-    let _ = sweep(registry, catalog).await;
-
-    let request = CreateSandbox {
-        // The key names this attempt, so a retried create after a dropped response returns the
-        // same machine instead of a second billable one.
-        idempotency_key: format!("fx-{name}-{}", unix_seconds()),
-        name: name.to_string(),
-        ttl_seconds: ttl,
-        // The bootstrap's environment travels separately as a 0600 file: CLI providers refuse
-        // create-time environment and nothing here may put a value on a command line.
-        env: BTreeMap::new(),
-    };
-    let created = match lifecycle::create_with_scheduler(
-        provider.as_ref(),
-        provider_name,
-        request,
-        catalog,
-        slots,
-        scheduler,
-    )
-    .await
-    {
-        Ok(created) => created,
-        Err(error) => return failure_from_lifecycle(&error),
-    };
-    let row = created.row.clone();
     let transport = row.transport;
-    let role = match transport {
-        Transport::Ssh => Role::Ssh,
-        Transport::Relay => Role::Relay,
-    };
-    eprintln!(
-        "created {} on {provider_name} ({:?}, sandbox {})",
-        row.name, transport, row.sandbox_id
-    );
-
-    // One guard over every remaining step, including the wait for `ready`, the machine's own
-    // access, the engine install, the credentials, the model route and the relay enrollment.
-    let steps = LiveSteps::new(provider, provider_name, &row, created.slot.as_ref());
-    let egress = match finish_create(
-        *context,
-        provider.as_ref(),
-        &row,
-        role,
-        transport,
-        &steps,
-    )
-    .await
-    {
-        Ok(egress) => egress,
-        Err(failure) => return fail(failure.code, &failure.detail),
-    };
-
     if json {
         let mut value = row_json(&row, Some(SandboxState::Ready));
         if let Some(object) = value.as_object_mut() {
@@ -822,7 +1236,7 @@ async fn create_with(
         println!("egress    {}", egress.as_str());
         println!("socket    ferryx-cli cloud socket {}", row.name);
     }
-    let _ = sweep(registry, catalog).await;
+    let _ = sweep(context.registry, context.catalog).await;
     EXIT_OK
 }
 
@@ -2371,16 +2785,53 @@ async fn discard(context: &CreateContext<'_>, provider: &dyn SandboxProvider, na
     }
 }
 
-/// The sweep every verb ends with, at the wall clock.
 async fn sweep(
     registry: &ProviderRegistry,
     catalog: &CatalogStore,
 ) -> Result<lifecycle::ReconcileReport, LifecycleError> {
+    let active_providers: std::collections::BTreeSet<String> = catalog
+        .load()
+        .await
+        .map(|cat| {
+            cat.rows
+                .into_iter()
+                .filter(|r| !r.is_tombstone())
+                .map(|r| r.provider)
+                .collect()
+        })
+        .unwrap_or_default();
     let report = lifecycle::reconcile(catalog, registry).await?;
     for failure in &report.failures {
+        if should_suppress_reconcile_warning(failure, &active_providers) {
+            continue;
+        }
         eprintln!("reconcile: {} {}: {}", failure.provider, failure.name, failure.detail);
     }
     Ok(report)
+}
+
+fn should_suppress_reconcile_warning(
+    failure: &lifecycle::SweepFailure,
+    active_providers: &std::collections::BTreeSet<String>,
+) -> bool {
+    if !failure.name.is_empty() || active_providers.contains(&failure.provider) {
+        return false;
+    }
+    let detail = failure.detail.to_ascii_lowercase();
+    [
+        "missing_token",
+        "missing_workspace",
+        "repo_unset",
+        "cli_missing",
+        "not_authenticated",
+        "session expired",
+        "not logged in",
+        "unauthorized",
+        "missing api key",
+        "no such file or directory",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
 }
 
 async fn state_after(provider: &dyn SandboxProvider, row: &CatalogRow) -> SandboxState {
@@ -2457,12 +2908,6 @@ fn quote_posix(value: &str) -> String {
     crate::ssh::direct::quote_posix(value)
 }
 
-/// The Machines list's cloud rows: the catalog as it was last recorded.
-///
-/// Recorded state only - no `provider.get` per row. The settings list is drawn on every visit, and
-/// fanning out to eleven providers there would turn opening a pane into eleven network calls, some
-/// of which wake nothing but still cost a round trip. `ferryx-cli cloud list --json` is the view
-/// that joins live state, and it is the one an operator asks for deliberately.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_cloud_host_list() -> Result<Vec<Value>, String> {
@@ -2482,9 +2927,59 @@ pub async fn cmd_cloud_host_list() -> Result<Vec<Value>, String> {
                 "sandboxId": row.sandbox_id,
                 "state": row.state.to_string(),
                 "transport": transport_token(row.transport),
+                "slot": row.slot,
             })
         })
         .collect())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_cloud_host_providers() -> Result<Vec<secrets::ProviderStatus>, String> {
+    crate::ipc::run_blocking(|| Ok(secrets::provider_statuses()))
+        .await
+        .map_err(|error| error.message)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_cloud_host_set_secret(
+    key: String,
+    value: Option<String>,
+) -> Result<Vec<secrets::ProviderStatus>, String> {
+    crate::ipc::run_blocking(move || {
+        secrets::save_var(&key, value.as_deref())
+            .map_err(crate::ipc::error::IpcError::internal)?;
+        Ok(secrets::provider_statuses())
+    })
+    .await
+    .map_err(|error| error.message)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_cloud_host_delete(name: String) -> Result<(), String> {
+    validate_name(&name)?;
+    let registry = crate::ipc::run_blocking(|| Ok(registry_from_env()))
+        .await
+        .map_err(|error| error.message)?;
+    let catalog = catalog_store()?;
+    let slots = SlotRegistry::default_location().map_err(|error| error.to_string())?;
+    let current = catalog
+        .load()
+        .await
+        .map_err(|error| format!("cannot read the cloud catalog: {error:?}"))?;
+    let row = current
+        .row(&name)
+        .cloned()
+        .ok_or_else(|| format!("no cloud machine named {name} is in the catalog"))?;
+    let provider = registry
+        .get(&row.provider)
+        .ok_or_else(|| format!("unknown provider: {}", row.provider))?;
+    lifecycle::delete_with_reaper(provider.as_ref(), &name, &catalog, &slots)
+        .await
+        .map_err(|error| format!("{}: {error}", error.code()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3720,5 +4215,76 @@ mod housekeeping_tests {
         // keeps a hostile home directory out of the command.
         assert_eq!(quote_posix("/home/a b/model-bridge.py"), "'/home/a b/model-bridge.py'");
         assert_eq!(quote_posix("/home/it's/x"), "'/home/it'\\''s/x'");
+    }
+
+    #[test]
+    fn cloud_help_providers_and_run_parse_cleanly() {
+        assert_eq!(parse(&["ferryx-cli", "cloud", "--help"]), Ok(CloudCliCommand::Help));
+        assert_eq!(parse(&["ferryx-cli", "cloud", "-h"]), Ok(CloudCliCommand::Help));
+        assert_eq!(
+            parse(&["ferryx-cli", "cloud", "providers", "--json"]),
+            Ok(CloudCliCommand::Providers { json: true })
+        );
+        assert_eq!(
+            parse(&[
+                "ferryx-cli", "cloud", "run", "--provider", "auto", "--prompt", "echo hi", "--keep",
+            ]),
+            Ok(CloudCliCommand::Run {
+                provider: None,
+                name: None,
+                ttl: None,
+                cwd: None,
+                model: None,
+                prompt: "echo hi".into(),
+                keep: true,
+                json: false,
+            })
+        );
+        assert!(parse(&["ferryx-cli", "cloud", "run"]).is_err());
+    }
+
+    #[test]
+    fn reconcile_warning_suppression_keeps_active_and_real_errors() {
+        let mut active = std::collections::BTreeSet::new();
+        active.insert("daytona".to_string());
+
+        let unconfigured = lifecycle::SweepFailure {
+            provider: "e2b".into(),
+            name: String::new(),
+            detail: "list failed: e2b config (missing_token): no E2B key".into(),
+        };
+        assert!(should_suppress_reconcile_warning(&unconfigured, &active));
+
+        let active_provider_fail = lifecycle::SweepFailure {
+            provider: "daytona".into(),
+            name: String::new(),
+            detail: "list failed: daytona config (missing_token): no key".into(),
+        };
+        assert!(!should_suppress_reconcile_warning(&active_provider_fail, &active));
+
+        let server_error = lifecycle::SweepFailure {
+            provider: "e2b".into(),
+            name: String::new(),
+            detail: "list failed: HTTP 500 internal server error".into(),
+        };
+        assert!(!should_suppress_reconcile_warning(&server_error, &active));
+    }
+
+    #[test]
+    fn session_id_and_assistant_text_extractors_handle_omo_payloads() {
+        assert_eq!(
+            extract_session_id(&json!({"sessionId": "s-123"})).as_deref(),
+            Some("s-123")
+        );
+        assert_eq!(
+            extract_assistant_text(&json!({
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": [{"type": "text", "text": "hello cloud"}]}
+                ]
+            }))
+            .as_deref(),
+            Some("hello cloud")
+        );
     }
 }

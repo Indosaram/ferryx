@@ -1,7 +1,17 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CLOUD_HOST_LIST_COMMAND, MachineList, type CloudMachineSummary } from "./MachineList";
+import {
+  CLOUD_HOST_LIST_COMMAND,
+  MachineList,
+  type CloudMachineSummary,
+} from "./MachineList";
+import { CloudProvidersSection } from "./CloudProvidersSection";
+import {
+  CLOUD_HOST_PROVIDERS_COMMAND,
+  CLOUD_HOST_SET_SECRET_COMMAND,
+  type CloudProviderStatus,
+} from "../../../lib/cloudHost";
 
 // Cloud machines are rows read from `ferryx-cli cloud list --json`, shown read-only beside the
 // machines this Mac connects to. These tests pin the two properties that make the row safe to
@@ -138,5 +148,109 @@ describe("cloud machines in the machines list", () => {
 
     const ids = screen.getAllByRole("listitem").map(node => node.getAttribute("data-machine-id"));
     expect(ids).toEqual(["cloud:box-1", "ssh:local"]);
+  });
+
+  it("filters cloud rows by searchQuery", () => {
+    render(
+      <MachineList
+        {...baseProps}
+        searchQuery="daytona"
+        cloudMachines={[
+          cloud({ name: "box-e2b", provider: "e2b" }),
+          cloud({ name: "box-day", provider: "daytona" }),
+        ]}
+      >
+        {null}
+      </MachineList>,
+    );
+
+    expect(screen.getByText("box-day")).toBeInTheDocument();
+    expect(screen.queryByText("box-e2b")).not.toBeInTheDocument();
+  });
+
+  it("reloads cloud rows when cloudRefreshSignal increments", async () => {
+    let calls = 0;
+    invokeMock.mockImplementation(async (command: unknown) => {
+      if (command === CLOUD_HOST_LIST_COMMAND) {
+        calls += 1;
+        return calls === 1
+          ? []
+          : [{ name: "box-fresh", provider: "daytona", state: "ready", sandboxId: "sbx-new" }];
+      }
+      return [];
+    });
+
+    const { rerender } = render(<MachineList {...baseProps} cloudRefreshSignal={0}>{null}</MachineList>);
+    await waitFor(() => expect(calls).toBe(1));
+    expect(screen.queryByText("box-fresh")).not.toBeInTheDocument();
+
+    rerender(<MachineList {...baseProps} cloudRefreshSignal={1}>{null}</MachineList>);
+    await waitFor(() => expect(screen.getByText("box-fresh")).toBeInTheDocument());
+  });
+
+  it("wires the safety-valve delete button when onDeleteCloudMachine is provided", () => {
+    const onDelete = vi.fn();
+    render(
+      <MachineList {...baseProps} cloudMachines={[cloud()]} onDeleteCloudMachine={onDelete}>
+        {null}
+      </MachineList>,
+    );
+
+    const btn = screen.getByRole("button", { name: "Delete cloud box box-1" });
+    fireEvent.click(btn);
+    expect(onDelete).toHaveBeenCalledWith("box-1");
+  });
+});
+
+describe("CloudProvidersSection", () => {
+  const sampleProviders: CloudProviderStatus[] = [
+    {
+      id: "daytona",
+      label: "Daytona",
+      transport: "ssh",
+      freeQuota: "$200 credit (no card)",
+      configured: false,
+      secretKeys: ["DAYTONA_API_KEY"],
+      missingKeys: ["DAYTONA_API_KEY"],
+      note: "Default auto provider",
+    },
+    {
+      id: "e2b",
+      label: "E2B",
+      transport: "relay",
+      freeQuota: "$100 credit",
+      configured: true,
+      secretKeys: ["E2B_API_KEY"],
+      missingKeys: [],
+      note: "Fallback auto provider",
+    },
+  ];
+
+  it("saves a provider API key through cmd_cloud_host_set_secret and updates status", async () => {
+    invokeMock.mockImplementation(async (command: unknown) => {
+      if (command === CLOUD_HOST_PROVIDERS_COMMAND) return sampleProviders;
+      if (command === CLOUD_HOST_SET_SECRET_COMMAND) {
+        return sampleProviders.map((p) =>
+          p.id === "daytona" ? { ...p, configured: true, missingKeys: [] } : p,
+        );
+      }
+      return [];
+    });
+
+    render(<CloudProvidersSection />);
+
+    await waitFor(() => expect(screen.getByText("1 of 2 ready")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Set key/i }));
+    fireEvent.change(screen.getByLabelText("DAYTONA_API_KEY"), {
+      target: { value: "dtn_test_secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.getByText("2 of 2 ready")).toBeInTheDocument());
+    expect(invokeMock).toHaveBeenCalledWith(CLOUD_HOST_SET_SECRET_COMMAND, {
+      key: "DAYTONA_API_KEY",
+      value: "dtn_test_secret",
+    });
   });
 });

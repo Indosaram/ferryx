@@ -122,13 +122,10 @@ impl CodespacesProvider {
     /// `FERRYX_CODESPACE_MACHINE`. A missing repository is not an error here: only `create` needs
     /// it, and it reports the missing setting itself.
     pub fn from_env() -> Self {
-        let repo = std::env::var(REPO_ENV).ok().map(|value| value.trim().to_string());
-        let machine = std::env::var(MACHINE_ENV)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+        let repo = crate::cloud_host::secrets::load_var(REPO_ENV);
+        let machine = crate::cloud_host::secrets::load_var(MACHINE_ENV)
             .unwrap_or_else(|| DEFAULT_MACHINE.to_string());
-        Self { repo: repo.filter(|value| !value.is_empty()), machine }
+        Self { repo, machine }
     }
 
     pub fn with_repo(repo: impl Into<String>) -> Self {

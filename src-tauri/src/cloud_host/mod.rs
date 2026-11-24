@@ -28,6 +28,7 @@ pub mod enroll;
 pub mod lifecycle;
 pub mod provider;
 pub mod reaper;
+pub mod secrets;
 pub mod slots;
 
 /// The macOS launchd acceptance run for the reaper: an ignored test that drives the real

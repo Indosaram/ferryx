@@ -10,7 +10,8 @@ import { CommandPalette } from "./components/CommandPalette";
 import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
-import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, type WorktreeAgentLaunch } from "./components/ProjectDialogs";
+import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, type CloudRunLaunchOptions, type WorktreeAgentLaunch } from "./components/ProjectDialogs";
+import { buildCloudRunCommand } from "./lib/cloudHost";
 import { ExternalWorktreeImportDialog } from "./components/ExternalWorktreeImportDialog";
 import { useExternalWorktreePrompt } from "./state/useExternalWorktreePrompt";
 import { Sidebar } from "./components/Sidebar";
@@ -3440,6 +3441,48 @@ function WorkspaceApp({
     [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError],
   );
 
+  const handleLaunchCloudRun = useCallback(
+    async (owner: RegisteredProject, options: CloudRunLaunchOptions) => {
+      if (activeRemoteHostRef.current) return;
+      if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
+        handleSelectProject(owner);
+      }
+      const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
+      if (!targetWorktree) {
+        toast.warning("Open a local workspace first before starting a cloud run.");
+        return;
+      }
+      try {
+        await ensureTerminalEvents().catch(() => undefined);
+        const grid = await measureInitialGeometry({
+          kind: "newTab",
+          groupId: stateRef.current.layout.focusedGroupId ?? null,
+        }).catch(() => null);
+        const spawned = await spawnTerminalDetailed({
+          workspaceId: owner.workspaceId,
+          worktree: worktreeIdentity(targetWorktree),
+          cwd: targetWorktree.path,
+          ...initialGridFields(grid),
+        });
+        const label = options.provider ? `Cloud · ${options.provider}` : "Cloud";
+        const tabId = await openTab(targetWorktree, label, {
+          sessionId: spawned.sessionId,
+          daemonEpoch: spawned.daemonEpoch ?? null,
+          incarnation: spawned.session?.incarnation ?? null,
+        });
+        if (tabId === null) {
+          await closeTerminal(spawned.sessionId);
+          return;
+        }
+        const { fullCommand } = buildCloudRunCommand(options);
+        await writeTerminal({ sessionId: spawned.sessionId, data: `${fullCommand}\r` });
+      } catch (error) {
+        reportRuntimeError(error);
+      }
+    },
+    [handleSelectProject, openTab, reportRuntimeError],
+  );
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -5378,6 +5421,8 @@ function WorkspaceApp({
           agents={launchableAgents}
           defaultAgentId={agentSettings.defaultAgentId}
           onCreated={(worktree, launch) => handleWorktreeCreated(createTargetProject ?? activeProject, worktree, launch)}
+          onLaunchCloudRun={(options) => handleLaunchCloudRun(createTargetProject ?? activeProject, options)}
+          onOpenRemoteSettings={handleOpenSshSettings}
         />
       ) : null}
       {deleteTarget ? (

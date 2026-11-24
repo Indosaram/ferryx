@@ -2,9 +2,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowLeft,
+  Cloud,
   FolderGit2,
   FolderPlus,
   GitBranch,
+  Laptop,
   LoaderCircle,
   Radio,
   Settings,
@@ -14,6 +16,7 @@ import {
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { copyTextToClipboard } from "../lib/clipboard";
+import { listCloudProviders, type CloudProviderStatus } from "../lib/cloudHost";
 import { createPairedWorktreeActions, pairedActionMessage } from "../lib/pairedWorktreeActions";
 import { createRemoteWorktree, registerRemoteProject, toRegisteredProject } from "../lib/remoteProject";
 import { formatSshTarget, useSshHosts } from "../lib/sshHosts";
@@ -790,6 +793,12 @@ export function AddProjectDialog({
 /** Agent the new worktree should start in; omitted when the user picks "Shell only". */
 export type WorktreeAgentLaunch = { agentId: string };
 
+export type CloudRunLaunchOptions = {
+  prompt: string;
+  provider?: string;
+  keep?: boolean;
+};
+
 type AddWorktreeDialogProps = {
   project: RegisteredProject;
   onClose: () => void;
@@ -797,6 +806,8 @@ type AddWorktreeDialogProps = {
   /** Launchable agents (enabled and available), the same list the New Tab menu offers. */
   agents?: ReadonlyArray<{ name: string }>;
   defaultAgentId?: string | null;
+  onLaunchCloudRun?: (options: CloudRunLaunchOptions) => void | Promise<void>;
+  onOpenRemoteSettings?: () => void;
 };
 
 const EMPTY_REFS: ProjectRefs = { branches: [], tags: [] };
@@ -812,13 +823,21 @@ export function AddWorktreeDialog({
   onCreated,
   agents = NO_AGENTS,
   defaultAgentId = null,
+  onLaunchCloudRun,
+  onOpenRemoteSettings,
 }: AddWorktreeDialogProps) {
   const remoteTarget = project.target?.kind === "ssh" ? project.target : null;
   const isPaired = project.target?.kind === "pairedDaemon";
   const pairedActions = useMemo(() => isPaired ? createPairedWorktreeActions(project) : null, [project, isPaired]);
   const isRemote = remoteTarget !== null || isPaired;
   const isGitBacked = project.gitRoot !== null;
+  const offersCloudToggle = !isRemote && Boolean(onLaunchCloudRun);
   const { hosts } = useSshHosts();
+  const [executionMode, setExecutionMode] = useState<"local" | "cloud">("local");
+  const [cloudProviders, setCloudProviders] = useState<CloudProviderStatus[] | null>(null);
+  const [cloudPrompt, setCloudPrompt] = useState("");
+  const [cloudProvider, setCloudProvider] = useState("auto");
+  const [cloudKeep, setCloudKeep] = useState(false);
   const [refs, setRefs] = useState<ProjectRefs>(EMPTY_REFS);
   const [baseRef, setBaseRef] = useState("");
   const [agentId, setAgentId] = useState(() =>
@@ -910,8 +929,45 @@ export function AddWorktreeDialog({
     setCopyState((await copyTextToClipboard(issueContextText(issue))) ? "copied" : "failed");
   };
 
+  useEffect(() => {
+    if (!offersCloudToggle || executionMode !== "cloud") return;
+    let alive = true;
+    void listCloudProviders().then((rows) => {
+      if (alive) setCloudProviders(rows);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [offersCloudToggle, executionMode]);
+
+  const readyCloudProviders = useMemo(
+    () => (cloudProviders ?? []).filter((p) => p.configured),
+    [cloudProviders],
+  );
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (executionMode === "cloud" && onLaunchCloudRun) {
+      const trimmedPrompt = cloudPrompt.trim();
+      if (!trimmedPrompt || submitting || submitInFlight.current) return;
+      submitInFlight.current = true;
+      setSubmitting(true);
+      setError(null);
+      try {
+        await onLaunchCloudRun({
+          prompt: trimmedPrompt,
+          provider: cloudProvider === "auto" ? undefined : cloudProvider,
+          keep: cloudKeep,
+        });
+        onClose();
+      } catch (cause) {
+        setError(extractErrorMessage(cause, "Could not start the cloud run."));
+      } finally {
+        submitInFlight.current = false;
+        setSubmitting(false);
+      }
+      return;
+    }
     const trimmedSlug = slug.trim();
     // A ref guards the double click that lands before React re-renders; the
     // `submitting` state alone cannot, since both clicks see the same render.
@@ -981,7 +1037,113 @@ export function AddWorktreeDialog({
           </button>
         </div>
         <div className="space-y-3 p-3">
-          {isGitBacked ? (
+          {offersCloudToggle ? (
+            <div role="radiogroup" aria-label="Execution target" className="grid grid-cols-2 gap-1 rounded-md border border-border bg-muted/40 p-0.5">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={executionMode === "local"}
+                disabled={submitting}
+                className={`flex h-7 items-center justify-center gap-1.5 rounded text-[11px] font-medium transition-colors ${
+                  executionMode === "local"
+                    ? "bg-background text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => {
+                  setExecutionMode("local");
+                  setError(null);
+                }}
+              >
+                <Laptop className="size-3.5" />
+                Local
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={executionMode === "cloud"}
+                disabled={submitting}
+                className={`flex h-7 items-center justify-center gap-1.5 rounded text-[11px] font-medium transition-colors ${
+                  executionMode === "cloud"
+                    ? "bg-background text-foreground shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => {
+                  setExecutionMode("cloud");
+                  setError(null);
+                }}
+              >
+                <Cloud className="size-3.5" />
+                Cloud
+              </button>
+            </div>
+          ) : null}
+          {executionMode === "cloud" && offersCloudToggle ? (
+            <div className="space-y-3">
+              {cloudProviders !== null && readyCloudProviders.length === 0 ? (
+                <div className="space-y-2 rounded-md border border-border bg-muted/30 p-2.5">
+                  <p className="text-[11px] text-muted-foreground">
+                    No cloud provider key is configured yet. Add a Daytona or E2B key once in Remote Settings.
+                  </p>
+                  {onOpenRemoteSettings ? (
+                    <button
+                      type="button"
+                      className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:bg-accent"
+                      onClick={() => {
+                        onClose();
+                        onOpenRemoteSettings();
+                      }}
+                    >
+                      <Settings className="size-3" />
+                      Open Remote Settings
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              <label className="block space-y-1 text-[11px] text-muted-foreground">
+                <span>Task prompt</span>
+                <textarea
+                  aria-label="Cloud task prompt"
+                  rows={4}
+                  className="w-full resize-none rounded-md border border-input bg-background px-2.5 py-2 text-xs text-foreground outline-none focus:border-ring"
+                  value={cloudPrompt}
+                  disabled={submitting}
+                  placeholder="Describe the task to run in a disposable cloud box..."
+                  autoFocus
+                  onChange={(event) => setCloudPrompt(event.target.value)}
+                />
+              </label>
+              <label className="block space-y-1 text-[11px] text-muted-foreground">
+                <span>Provider</span>
+                <select
+                  aria-label="Cloud provider"
+                  className={fieldClass}
+                  value={cloudProvider}
+                  disabled={submitting}
+                  onChange={(event) => setCloudProvider(event.target.value)}
+                >
+                  <option value="auto">
+                    {readyCloudProviders.length > 0
+                      ? `Auto (${readyCloudProviders.map((p) => p.label).join(" → ")})`
+                      : "Auto (recommended)"}
+                  </option>
+                  {readyCloudProviders.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} ({p.freeQuota})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={cloudKeep}
+                  disabled={submitting}
+                  onChange={(event) => setCloudKeep(event.target.checked)}
+                />
+                <span>Keep cloud box running after task completes</span>
+              </label>
+            </div>
+          ) : isGitBacked ? (
             <>
               <label className="block space-y-1 text-[11px] text-muted-foreground">
                 <span>Worktree slug</span>
@@ -1131,9 +1293,17 @@ export function AddWorktreeDialog({
         </div>
         <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
           <button type="button" disabled={submitting} className="h-7 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45" onClick={onClose}>
-            {isGitBacked ? "Cancel" : "Close"}
+            {executionMode === "cloud" || isGitBacked ? "Cancel" : "Close"}
           </button>
-          {isGitBacked ? (
+          {executionMode === "cloud" && offersCloudToggle ? (
+            <button
+              type="submit"
+              disabled={submitting || !cloudPrompt.trim() || (cloudProviders !== null && readyCloudProviders.length === 0)}
+              className="h-7 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
+            >
+              {submitting ? "Starting..." : "Run in Cloud"}
+            </button>
+          ) : isGitBacked ? (
             <button
               type="submit"
               disabled={submitting || (!isRemote && loadingBranches) || !slug.trim()}

@@ -1,60 +1,26 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
 import { AlertCircle, Plus, Server } from "lucide-react";
+import {
+  CLOUD_HOST_LIST_COMMAND,
+  listCloudMachines,
+  type CloudMachineSummary,
+} from "../../../lib/cloudHost";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { CloudMachineRow } from "./MachineRow";
 
-/** One disposable cloud machine as the catalog records it (`ferryx-cli cloud list --json`). */
-export interface CloudMachineSummary {
-  name: string;
-  provider: string;
-  state: string;
-  sandboxId: string;
-  transport?: "ssh" | "relay";
-}
+export { CLOUD_HOST_LIST_COMMAND, type CloudMachineSummary };
 
-/** Mirrors `cloud_host::cli::cmd_cloud_host_list` in src-tauri. */
-export const CLOUD_HOST_LIST_COMMAND = "cmd_cloud_host_list";
-
-/**
- * The cloud rows, read once per mount.
- *
- * Read-only by construction: the catalog is written by `ferryx-cli cloud` and the reaper, so this
- * only ever reads it. A missing command (an older desktop binary) or an unreadable catalog yields
- * no rows rather than an error banner: the machine list is useful without them, and a broken
- * cloud catalog must not make the pane look broken. Outside Tauri it stays empty.
- */
-export function useCloudMachines(): CloudMachineSummary[] {
+export function useCloudMachines(refreshSignal = 0): CloudMachineSummary[] {
   const [machines, setMachines] = useState<CloudMachineSummary[]>([]);
   const load = useCallback(async () => {
-    if (!isTauri()) return;
-    try {
-      const rows = await invoke<CloudMachineSummary[]>(CLOUD_HOST_LIST_COMMAND);
-      setMachines(Array.isArray(rows) ? rows.filter(isCloudMachine) : []);
-    } catch {
-      setMachines([]);
-    }
+    setMachines(await listCloudMachines());
   }, []);
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, refreshSignal]);
   return machines;
-}
-
-/** Boundary validation: a row missing its provider or name cannot be labelled, so it is dropped. */
-function isCloudMachine(value: unknown): value is CloudMachineSummary {
-  if (!value || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
-  return (
-    typeof row.name === "string" &&
-    row.name.length > 0 &&
-    typeof row.provider === "string" &&
-    row.provider.length > 0 &&
-    typeof row.state === "string" &&
-    typeof row.sandboxId === "string"
-  );
 }
 
 export interface MachineListProps {
@@ -62,26 +28,43 @@ export interface MachineListProps {
   shown: number;
   searchQuery: string;
   actionError: string | null;
-  /** Whether an account session exists; only affects the copy, since pairing is automatic. */
   signedIn: boolean;
   onSearchChange: (value: string) => void;
   onAddMachine: () => void;
   onRefresh: () => void;
-  /**
-   * Cloud machines from the catalog, rendered read-only above the local ones.
-   *
-   * They are counted separately from `total`/`shown`: those two numbers describe the machines this
-   * Mac can connect to, and a cloud box is created, stopped and deleted by `ferryx-cli cloud` and
-   * the reaper rather than from this list. Omitted, the list reads them itself
-   * ([`useCloudMachines`]); pass an explicit array to render a fixed set.
-   */
   cloudMachines?: CloudMachineSummary[];
+  cloudRefreshSignal?: number;
+  onDeleteCloudMachine?: (name: string) => void | Promise<void>;
+  deletingCloudName?: string | null;
   children: ReactNode;
 }
 
-export function MachineList({ total, shown, searchQuery, actionError, signedIn, onSearchChange, onAddMachine, onRefresh, cloudMachines, children }: MachineListProps) {
-  const read = useCloudMachines();
-  const clouds = cloudMachines ?? read;
+export function MachineList({
+  total,
+  shown,
+  searchQuery,
+  actionError,
+  signedIn,
+  onSearchChange,
+  onAddMachine,
+  onRefresh,
+  cloudMachines,
+  cloudRefreshSignal = 0,
+  onDeleteCloudMachine,
+  deletingCloudName = null,
+  children,
+}: MachineListProps) {
+  const read = useCloudMachines(cloudRefreshSignal);
+  const rawClouds = cloudMachines ?? read;
+  const query = searchQuery.trim().toLowerCase();
+  const clouds = query
+    ? rawClouds.filter(
+        (m) =>
+          m.name.toLowerCase().includes(query) ||
+          m.provider.toLowerCase().includes(query) ||
+          m.sandboxId.toLowerCase().includes(query),
+      )
+    : rawClouds;
   return (
     <section aria-labelledby="remote-my-machines" className="space-y-3">
       <header className="flex flex-col gap-1 border-b border-border pb-2 sm:flex-row sm:items-end sm:justify-between">
@@ -135,6 +118,8 @@ export function MachineList({ total, shown, searchQuery, actionError, signedIn, 
               state={machine.state}
               sandboxId={machine.sandboxId}
               transport={machine.transport}
+              onDelete={onDeleteCloudMachine ? () => void onDeleteCloudMachine(machine.name) : undefined}
+              deleting={deletingCloudName === machine.name}
             />
           ))}
           {children}

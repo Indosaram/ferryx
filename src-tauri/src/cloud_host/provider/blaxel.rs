@@ -114,12 +114,9 @@ impl BlaxelProvider {
     /// Both credentials come from the environment: `BL_API_KEY` and `BL_WORKSPACE`. The image is
     /// `BL_IMAGE`, defaulting to Blaxel's own base image.
     pub fn from_env() -> Self {
-        let token = std::env::var("BL_API_KEY").ok().filter(|value| !value.trim().is_empty());
-        let workspace =
-            std::env::var("BL_WORKSPACE").ok().filter(|value| !value.trim().is_empty());
-        let image = std::env::var("BL_IMAGE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let token = crate::cloud_host::secrets::load_var("BL_API_KEY");
+        let workspace = crate::cloud_host::secrets::load_var("BL_WORKSPACE");
+        let image = crate::cloud_host::secrets::load_var("BL_IMAGE")
             .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
         Self::new(token, workspace, image)
     }

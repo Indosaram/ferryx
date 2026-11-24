@@ -174,14 +174,10 @@ impl E2bProvider {
     /// Key from `E2B_API_KEY`, template from `E2B_TEMPLATE` (default `base`), domain from
     /// `E2B_DOMAIN` (default `e2b.app`).
     pub fn from_env() -> Self {
-        let token = std::env::var("E2B_API_KEY").ok().filter(|value| !value.trim().is_empty());
-        let template = std::env::var("E2B_TEMPLATE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let token = crate::cloud_host::secrets::load_var("E2B_API_KEY");
+        let template = crate::cloud_host::secrets::load_var("E2B_TEMPLATE")
             .unwrap_or_else(|| "base".to_string());
-        let domain = std::env::var("E2B_DOMAIN")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let domain = crate::cloud_host::secrets::load_var("E2B_DOMAIN")
             .unwrap_or_else(|| "e2b.app".to_string());
         Self::new(token, template, domain)
     }
