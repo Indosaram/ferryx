@@ -43,7 +43,7 @@ def screen(session_id):
     f.write((json.dumps({"type": "handshake", "version": 6}) + "\n").encode())
     f.flush()
     f.readline()
-    f.write((json.dumps({"type": "attach", "sessionId": session_id, "afterSequence": "0"}) + "\n").encode())
+    f.write((json.dumps({"type": "attach", "sessionId": session_id, "afterSequence": 0}) + "\n").encode())
     f.flush()
     out = b""
     try:
