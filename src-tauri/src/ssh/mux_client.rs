@@ -24,7 +24,6 @@ use super::master::ConnectionKey;
 use super::runtime::RemoteEnvironment;
 use super::SshHost;
 use std::collections::HashMap;
-use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Weak};

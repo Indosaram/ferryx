@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { RegisteredProject, SshHost } from "../../lib/tauri";
+import type { RegisteredProject } from "../../lib/tauri";
+import type { SshHost } from "../../lib/types";
 import type { RemoteHostState } from "../../state/remoteHostStore";
 import { deduplicateSidebarProjects, normalizeMachineToken, resolveSshHostToPairedHost } from "./sidebarDedup";
 import { buildSidebarModel } from "./sidebarModel";
@@ -17,6 +18,8 @@ const remoteState: RemoteHostState = {
       machineId: "machine-pro",
       transport: "relay",
       authStatus: "paired",
+      grantScope: "machine",
+      generation: "1",
       online: true,
     },
   },

@@ -4752,6 +4752,9 @@ mod housekeeping_tests {
 
     #[test]
     fn cloud_help_providers_and_run_parse_cleanly() {
+        fn parse(words: &[&str]) -> Result<CloudCliCommand, String> {
+            parse_cloud_cli(words)
+        }
         assert_eq!(parse(&["ferryx-cli", "cloud", "--help"]), Ok(CloudCliCommand::Help));
         assert_eq!(parse(&["ferryx-cli", "cloud", "-h"]), Ok(CloudCliCommand::Help));
         assert_eq!(

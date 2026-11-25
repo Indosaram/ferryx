@@ -1,4 +1,5 @@
-import type { RegisteredProject, SshHost } from "../../lib/tauri";
+import type { RegisteredProject } from "../../lib/tauri";
+import type { SshHost } from "../../lib/types";
 import type { HostEndpoint, RemoteHostState } from "../../state/remoteHostStore";
 
 export function normalizeMachineToken(raw: string): string {
