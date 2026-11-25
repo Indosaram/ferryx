@@ -4,7 +4,7 @@ import type { RegisteredProject } from "../../lib/tauri";
 import { worktreeIdentity, type Worktree } from "../../lib/types";
 import type { RemoteHostState } from "../../state/remoteHostStore";
 
-export type SidebarHost = { readonly id: string; readonly label: string; readonly hostname?: string; readonly disabled?: boolean };
+export type SidebarHost = { readonly id: string; readonly label: string; readonly hostname?: string; readonly disabled?: boolean | null };
 
 /** Where host and machine names come from when a sidebar label is computed. */
 export type SidebarLabelContext = {
