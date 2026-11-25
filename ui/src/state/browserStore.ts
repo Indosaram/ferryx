@@ -55,6 +55,12 @@ export type BrowserStoreTab = {
   agentControlled?: boolean;
   private?: boolean;
   engine?: BrowserEngine;
+  /** Live host state mirrored from `browser_state_changed`; never persisted. */
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  /** Structured IPC code of a failed startup hydration; the tab offers reload instead. */
+  hydrationError?: string;
 };
 
 export type BrowserFolder = {
@@ -238,6 +244,20 @@ function sortTabs(tabs: Iterable<BrowserStoreTab>): BrowserStoreTab[] {
   return [...tabs].sort((left, right) => left.order - right.order || left.browserId.localeCompare(right.browserId));
 }
 
+/**
+ * Drops the fields that mirror the host's live session (navigation state, load state, a failed
+ * hydration) before writing to disk: they describe a webview that will not exist after a restart,
+ * so persisting them would restore a tab that claims to be loading - or broken - while healthy.
+ */
+function withoutLiveState(tab: BrowserStoreTab): BrowserStoreTab {
+  const persisted: BrowserStoreTab = { ...tab };
+  delete persisted.loading;
+  delete persisted.canGoBack;
+  delete persisted.canGoForward;
+  delete persisted.hydrationError;
+  return persisted;
+}
+
 function tabsInGroup(
   state: BrowserStoreState,
   spaceId: string,
@@ -282,7 +302,7 @@ export function createDefaultBrowserState(spaceId: string = DEFAULT_SPACE_ID): B
 }
 
 function serializeBrowserState(state: BrowserStoreState): string {
-  const tabs = sortTabs(Object.values(state.tabs).filter((tab) => !tab.private));
+  const tabs = sortTabs(Object.values(state.tabs).filter((tab) => !tab.private)).map(withoutLiveState);
   const persistedIds = new Set(tabs.map((tab) => tab.browserId));
   const splitAttachments: Record<string, BrowserSplitAttachment> = {};
   for (const [browserId, attachment] of Object.entries(state.splitAttachments)) {
@@ -668,6 +688,11 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
       if (worktreeTag) tab.worktreeTag = worktreeTag;
       const engine = input.engine ?? existing?.engine;
       if (engine) tab.engine = engine;
+      // Live host state is not an input: an upsert of an existing tab keeps what the session reported.
+      if (existing && typeof existing.loading === "boolean") tab.loading = existing.loading;
+      if (existing && typeof existing.canGoBack === "boolean") tab.canGoBack = existing.canGoBack;
+      if (existing && typeof existing.canGoForward === "boolean") tab.canGoForward = existing.canGoForward;
+      if (existing?.hydrationError) tab.hydrationError = existing.hydrationError;
 
       setState((current) => ({ ...current, tabs: { ...current.tabs, [browserId]: tab } }));
       return success(tab);
