@@ -1,5 +1,5 @@
 import type { RegisteredProject } from "../../lib/tauri";
-import type { SshHost } from "../../lib/sshHosts";
+import type { SidebarHost } from "./sidebarLabels";
 import type { HostEndpoint, RemoteHostState } from "../../state/remoteHostStore";
 
 export function normalizeMachineToken(raw: string): string {
@@ -26,7 +26,7 @@ function publishedOriginHost(origin: string): string | null {
 }
 
 export function resolveSshHostToPairedHost(
-  hosts: readonly SshHost[],
+  hosts: readonly SidebarHost[],
   remoteState: RemoteHostState,
 ): Map<string, string> {
   const map = new Map<string, string>();
@@ -71,7 +71,7 @@ export function resolveSshHostToPairedHost(
 
 export function deduplicateSidebarProjects(
   projects: RegisteredProject[],
-  hosts: readonly SshHost[],
+  hosts: readonly SidebarHost[],
   remoteState: RemoteHostState,
 ): RegisteredProject[] {
   const sshToPaired = resolveSshHostToPairedHost(hosts, remoteState);
