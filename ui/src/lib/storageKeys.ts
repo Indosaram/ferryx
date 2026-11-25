@@ -2,6 +2,8 @@ export const PROJECTS_STORAGE_KEY = "ferryx.projects";
 export const ACTIVE_PROJECT_STORAGE_KEY = "ferryx.active-project";
 export const SIDEBAR_OPEN_STORAGE_KEY = "ferryx.sidebar.open";
 export const SIDEBAR_WIDTH_STORAGE_KEY = "ferryx.sidebar.width";
+/** The desktop Activity Bar's last selected mode (`supervisor`, `worktrees`, `browser`, `remoteDesktop`). */
+export const ACTIVITY_MODE_STORAGE_KEY = "ferryx.activity.mode";
 export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedProjects";
 export const SIDEBAR_WORKTREE_ORDER_STORAGE_KEY = "ferryx.sidebar.worktreeOrder";
 export const TERMINAL_SETTINGS_STORAGE_KEY = "ferryx.terminal.settings";
@@ -32,6 +34,17 @@ export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
 /** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */
 export const ADVANCED_FEATURES_STORAGE_KEY = "ferryx.ui.advancedFeatures";
+
+/**
+ * The per-mode sidebar width key: `ferryx.sidebar.width.<mode>`.
+ *
+ * The mode is passed in rather than imported so this module keeps owning every key string while
+ * `sidebarPersistence.ts` owns what a mode is; a per-mode key is never a legacy counterpart of the
+ * shared `SIDEBAR_WIDTH_STORAGE_KEY`, so it stays out of `LEGACY_STORAGE_KEY_MAP`.
+ */
+export function sidebarWidthStorageKey(mode: string): string {
+  return `${SIDEBAR_WIDTH_STORAGE_KEY}.${mode}`;
+}
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],

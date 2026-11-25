@@ -1,8 +1,10 @@
 import { worktreeIdentity, type Worktree } from "./types";
 import {
+  ACTIVITY_MODE_STORAGE_KEY,
   getMigratedItem,
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
   SIDEBAR_WIDTH_STORAGE_KEY,
+  sidebarWidthStorageKey,
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "./storageKeys";
 
@@ -20,6 +22,29 @@ export const DEFAULT_SIDEBAR_RANGE: SidebarWidthRange = {
 
 /** The sidebar that carries the Supervisor panel: 380px, resizable between 320 and 480. */
 export const SUPERVISOR_SIDEBAR_RANGE: SidebarWidthRange = { min: 320, max: 480, initial: 380 };
+
+/**
+ * The four desktop Activity Bar modes, in rail order.
+ *
+ * The strings are the persisted values in `ferryx.activity.mode` AND the suffix of each per-mode
+ * width key (`ferryx.sidebar.width.<mode>`), so renaming one orphans a user's stored width: they
+ * are treated as a storage format, not internal identifiers.
+ */
+export const ACTIVITY_MODES = ["supervisor", "worktrees", "browser", "remoteDesktop"] as const;
+
+export type ActivityMode = (typeof ACTIVITY_MODES)[number];
+
+/**
+ * The width each mode's drawer remembers, kept per mode because the panels differ: the supervisor
+ * panel needs 320px before its sessions read well, while a browser sidebar of 380px would eat the
+ * page. Worktrees keep the historical range, so an upgrading user sees no jump.
+ */
+export const SIDEBAR_RANGE_BY_MODE: Record<ActivityMode, SidebarWidthRange> = {
+  supervisor: SUPERVISOR_SIDEBAR_RANGE,
+  worktrees: DEFAULT_SIDEBAR_RANGE,
+  browser: { min: 240, max: 420, initial: 300 },
+  remoteDesktop: { min: 240, max: 400, initial: 280 },
+};
 
 export type WorktreeOrder = Record<string, string[]>;
 
@@ -331,6 +356,70 @@ function notifySidebarPersistence() {
 
 export function clampSidebarWidth(width: number, range: SidebarWidthRange = DEFAULT_SIDEBAR_RANGE) {
   return Math.min(range.max, Math.max(range.min, Math.round(width)));
+}
+
+/** Where the rail starts when nothing was stored, or when the stored value is not a mode. */
+export const DEFAULT_ACTIVITY_MODE: ActivityMode = "worktrees";
+
+export function loadActivityMode(): ActivityMode {
+  try {
+    const raw = getMigratedItem(ACTIVITY_MODE_STORAGE_KEY);
+    return raw !== null && (ACTIVITY_MODES as readonly string[]).includes(raw)
+      ? (raw as ActivityMode)
+      : DEFAULT_ACTIVITY_MODE;
+  } catch {
+    return DEFAULT_ACTIVITY_MODE;
+  }
+}
+
+export function saveActivityMode(mode: ActivityMode): void {
+  try {
+    window.localStorage.setItem(ACTIVITY_MODE_STORAGE_KEY, mode);
+  } catch {
+    // A storage failure should not break mode switching for this session.
+  }
+}
+
+/**
+ * Copies the pre-Activity-Bar single width into the two modes that existed before it.
+ *
+ * Idempotent by construction: a per-mode key that is already present is never overwritten, so the
+ * first run seeds and every later run (a second window, a reload, a resize in between) is a no-op.
+ * The shared key is LEFT IN PLACE because the sidebar's current single-width loader still reads it;
+ * the per-mode keys take over when the Activity Bar is wired in, and the shared key becomes inert.
+ */
+function migrateLegacySidebarWidth(): void {
+  const storage = typeof window !== "undefined" ? window.localStorage : null;
+  if (!storage) return;
+  const legacy = getMigratedItem(SIDEBAR_WIDTH_STORAGE_KEY, storage);
+  const stored = Number(legacy);
+  if (legacy === null || !Number.isFinite(stored) || stored <= 0) return;
+  for (const mode of ["supervisor", "worktrees"] as const) {
+    const key = sidebarWidthStorageKey(mode);
+    if (storage.getItem(key) !== null) continue;
+    storage.setItem(key, String(clampSidebarWidth(stored, SIDEBAR_RANGE_BY_MODE[mode])));
+  }
+}
+
+/** The width this mode's drawer remembers, clamped to the mode's own range. */
+export function loadSidebarWidthForMode(mode: ActivityMode): number {
+  const range = SIDEBAR_RANGE_BY_MODE[mode];
+  try {
+    migrateLegacySidebarWidth();
+    const raw = window.localStorage.getItem(sidebarWidthStorageKey(mode));
+    const stored = Number(raw);
+    return raw !== null && Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored, range) : range.initial;
+  } catch {
+    return range.initial;
+  }
+}
+
+export function saveSidebarWidthForMode(mode: ActivityMode, width: number): void {
+  try {
+    window.localStorage.setItem(sidebarWidthStorageKey(mode), String(clampSidebarWidth(width, SIDEBAR_RANGE_BY_MODE[mode])));
+  } catch {
+    // A storage failure should not break pointer resizing for this session.
+  }
 }
 
 export function loadWorktreeOrder(): WorktreeOrder {
