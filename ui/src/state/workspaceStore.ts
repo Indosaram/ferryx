@@ -2573,6 +2573,7 @@ export function useWorkspaceStore({
   const laneRevisionsRef = useRef<Record<string, number>>({});
   const laneFrameRevisionRef = useRef(0);
   const laneFrameRowsRef = useRef<Record<string, number>>({});
+  const laneReadErrorNotifiedRef = useRef(false);
 
   const applyLaneLifecycleModel = useCallback((model: LaneLifecycleModel, fromRead = false) => {
     const rows: Record<string, LaneLifecycleState> = {};
@@ -2633,10 +2634,22 @@ export function useWorkspaceStore({
       const model = transport.reconcileIdentities
         ? await transport.reconcileIdentities(identities)
         : await transport.read();
+      laneReadErrorNotifiedRef.current = false;
       if (frameRevision === laneFrameRevisionRef.current) applyLaneLifecycleModel(model, true);
     } catch (error) {
+      const code =
+        error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+      if (code === "SUPERVISOR_STANDBY" || code === "SUPERVISOR_UNAVAILABLE") {
+        // Standby with no reachable holder or local hub stopped: keep local sidebar order quietly.
+        return;
+      }
       console.error("Lane lifecycle read failed.", error);
-      toast.error("Could not load lane state. Local sidebar order is retained.");
+      if (!laneReadErrorNotifiedRef.current) {
+        laneReadErrorNotifiedRef.current = true;
+        toast.error("Could not load lane state. Local sidebar order is retained.");
+      }
     }
   }, [applyLaneLifecycleModel]);
 
