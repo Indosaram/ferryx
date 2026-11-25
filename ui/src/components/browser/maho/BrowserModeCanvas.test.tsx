@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BROWSER_SPLIT_RATIO_STORAGE_KEY } from "../../../lib/storageKeys";
 import { browserViewportCoordinator } from "../../../lib/browserViewportCoordinator";
-import type { BrowserEngine } from "../../../lib/types";
+import type { BrowserEngine, BrowserTab } from "../../../lib/types";
 import {
   createBrowserStore,
   type BrowserStore,
@@ -27,6 +27,7 @@ import {
   readStoredSplitRatio,
   toBrowserPaneTab,
 } from "./BrowserModeCanvas";
+import { BrowserPane } from "../../BrowserPane";
 
 type RecordedPaneProps = {
   browserId: string;
@@ -91,6 +92,20 @@ vi.mock("../../BrowserPane", async (importOriginal) => {
 
 function makeStore(): BrowserStore {
   return createBrowserStore({ storage: null, now: () => 1_700_000_000_000 });
+}
+
+/** A standalone pane, standing in for the worktree split that owns the same browser. */
+function otherSurfaceTab(browserId: string): BrowserTab {
+  return {
+    kind: "browser",
+    id: browserId,
+    label: browserId,
+    browserId,
+    url: `https://${browserId}.example.com/`,
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+  };
 }
 
 function addTab(store: BrowserStore, browserId: string, overrides: Partial<UpsertBrowserTabInput> = {}): void {
@@ -161,22 +176,60 @@ describe("BrowserModeCanvas chrome", () => {
     expect(screen.queryByTestId("ferryx-toolbar")).toBeNull();
   });
 
-  it("hides every canvas pane when the mode is not on screen", async () => {
+  it("mounts no panes while the mode is off screen", () => {
     const store = makeStore();
     addTab(store, "github");
-    addTab(store, "docs");
-    store.touch("docs");
     store.touch("github");
 
     const { container } = render(canvas(store, { active: false }));
-    fireEvent.click(screen.getByRole("button", { name: "Split view" }));
 
-    expect(paneProps.calls.length).toBeGreaterThanOrEqual(2);
-    expect(paneProps.calls.every((call) => call.visible === false)).toBe(true);
-    for (const pane of panes(container)) expect(pane.dataset.visible).toBe("false");
+    // A hidden canvas must not mount a BrowserPane at all: a mount claims the browser's native
+    // surface from the coordinator and would hide a live worktree split showing the same tab.
+    expect(paneProps.calls).toEqual([]);
+    expect(panes(container)).toEqual([]);
+    expect(browserMocks.setBrowserVisible).not.toHaveBeenCalled();
+    expect(browserViewportCoordinator.getOwner("github")).toBeNull();
+  });
+});
 
-    await waitFor(() => expect(browserMocks.setBrowserVisible).toHaveBeenCalled());
-    expect(browserMocks.setBrowserVisible.mock.calls.some(([, visible]) => visible === true)).toBe(false);
+describe("BrowserModeCanvas surface ownership while hidden", () => {
+  it("never takes the surface from a visible pane showing the same browser", async () => {
+    const store = makeStore();
+    addTab(store, "shared");
+    store.touch("shared");
+
+    // The worktree split (or the mini pane) is on screen with this browser.
+    const split = render(<BrowserPane tab={otherSurfaceTab("shared")} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(browserViewportCoordinator.getOwner("shared")).not.toBeNull());
+    const splitOwner = browserViewportCoordinator.getOwner("shared");
+    await waitFor(() => expect(visibilityFor("shared")).toContain(true));
+
+    browserMocks.setBrowserVisible.mockClear();
+
+    // Browser mode is not on screen: it must not claim (and therefore hide) that surface.
+    render(canvas(store, { active: false }));
+    await act(async () => undefined);
+
+    expect(browserViewportCoordinator.getOwner("shared")).toEqual(splitOwner);
+    expect(visibilityFor("shared")).toEqual([]);
+
+    split.unmount();
+  });
+
+  it("hides once when the mode is turned off with no successor claiming the surface", async () => {
+    const store = makeStore();
+    addTab(store, "solo");
+    store.touch("solo");
+
+    const { rerender } = render(canvas(store));
+    await waitFor(() => expect(visibilityFor("solo")).toContain(true));
+
+    browserMocks.setBrowserVisible.mockClear();
+    rerender(canvas(store, { active: false }));
+
+    // Leaving the mode unmounts the pane, and its release is the one hide that should happen.
+    await waitFor(() => expect(visibilityFor("solo")).toEqual([false]));
+    expect(browserViewportCoordinator.getOwner("solo")).toBeNull();
   });
 });
 
@@ -267,6 +320,31 @@ describe("BrowserModeCanvas in-browser split", () => {
     const primary = browserViewportCoordinator.getOwner("browser-a");
     const secondary = browserViewportCoordinator.getOwner("browser-b");
     expect(primary?.surfaceId).not.toBe(secondary?.surfaceId);
+  });
+
+  it("swaps the panes without hiding either native surface", async () => {
+    const store = makeStore();
+    addTab(store, "browser-a");
+    addTab(store, "browser-b");
+    store.touch("browser-b");
+    store.touch("browser-a");
+
+    const { container } = render(canvas(store));
+    fireEvent.click(screen.getByRole("button", { name: "Split view" }));
+    await waitFor(() => {
+      expect(browserViewportCoordinator.getOwner("browser-a")).not.toBeNull();
+      expect(browserViewportCoordinator.getOwner("browser-b")).not.toBeNull();
+    });
+
+    browserMocks.setBrowserVisible.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Swap split panes" }));
+    await act(async () => undefined);
+
+    // The swap reorders two mounted panes; a remount would release each surface and hide it.
+    expect(paneBrowserIds(container)).toEqual(["browser-b", "browser-a"]);
+    expect(browserMocks.setBrowserVisible.mock.calls.filter(([, visible]) => visible === false)).toEqual([]);
+    expect(browserViewportCoordinator.getOwner("browser-a")).not.toBeNull();
+    expect(browserViewportCoordinator.getOwner("browser-b")).not.toBeNull();
   });
 
   it("persists the split ratio across a remount", () => {

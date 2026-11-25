@@ -182,11 +182,11 @@ export function BrowserModeCanvas({
   // Closing the active tab leaves the Space without one; claim the next most-recently-used tab
   // instead of leaving the canvas blank. An empty Space is handled by the empty state below.
   useEffect(() => {
-    if (activeTab) return;
+    if (!active || activeTab) return;
     const next = mruTabs[0];
     if (!next) return;
     store.touch(next.browserId);
-  }, [activeTab, mruTabs, store]);
+  }, [active, activeTab, mruTabs, store]);
 
   const splitCandidate = useMemo(
     () => mruTabs.find((tab) => tab.browserId !== activeTab?.browserId && tab.browserId !== secondaryBrowserId) ?? null,
@@ -250,12 +250,28 @@ export function BrowserModeCanvas({
     </div>
   ) : null;
 
+  // While the mode is off screen nothing here may touch a native surface. A mounted
+  // `BrowserPane` claims its browser from `browserViewportCoordinator` on mount, so a hidden
+  // canvas would take the surface away from a live worktree split (or the mini pane) showing the
+  // same `browserId` and hide it. The shell stays in the tree so the mode's slot does not jump;
+  // the panes come back - and re-claim - the moment the mode is shown again.
+  if (!active) {
+    return (
+      <section
+        data-testid="browser-mode-canvas"
+        data-active="false"
+        aria-hidden="true"
+        className="hidden h-full min-h-0 w-full"
+      />
+    );
+  }
+
   if (!activeTab && spaceTabs.length === 0) {
     return (
       <section
         data-testid="browser-mode-canvas"
         data-empty="true"
-        data-active={active ? "true" : "false"}
+        data-active="true"
         aria-label="Browser"
         className="flex h-full min-h-0 w-full flex-col bg-background"
       >
@@ -297,7 +313,7 @@ export function BrowserModeCanvas({
   return (
     <section
       data-testid="browser-mode-canvas"
-      data-active={active ? "true" : "false"}
+      data-active="true"
       data-split={secondaryPane ? "true" : "false"}
       aria-label="Browser"
       className="flex h-full min-h-0 w-full flex-col bg-background"
@@ -356,18 +372,21 @@ export function BrowserModeCanvas({
         <div ref={splitRowRef} className="flex min-h-0 min-w-0 flex-1" data-testid="browser-canvas-panes">
           {panes.map((pane, index) => (
             <div
-              key={`${pane.role}:${pane.tab.browserId}`}
+              // Keyed by the browser it draws, never by the pane slot: swapping the panes then
+              // moves two mounted `BrowserPane`s instead of unmounting both, and an unmount
+              // would release (hide) the surfaces the swap is supposed to keep on screen.
+              key={pane.tab.browserId}
               data-testid="browser-canvas-pane"
               data-role={pane.role}
               data-browser-id={pane.tab.browserId}
               data-engine={pane.tab.engine ?? "system"}
-              data-visible={active ? "true" : "false"}
+              data-visible="true"
               className="flex h-full min-h-0 min-w-0 flex-col"
               style={paneStyle(index)}
             >
               <BrowserPane
                 tab={toBrowserPaneTab(pane.tab)}
-                visible={active}
+                visible
                 chromeMode="maho-minimal"
                 surfacePriority={pane.role === "primary" ? 1 : 0}
                 onNavigate={(url) => onNavigate?.(pane.tab.browserId, url)}
