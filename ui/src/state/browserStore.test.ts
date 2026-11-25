@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { serializeWorkspaceState } from "../lib/sessionPersistence";
 import { BROWSER_STORE_MIGRATION_KEY, BROWSER_STORE_STORAGE_KEY } from "../lib/storageKeys";
+import { createBrowserPaneContent } from "../lib/types";
+import type { BrowserTab, LayoutState, TerminalSession, TerminalTab, Worktree } from "../lib/types";
+import type { WorkspaceState } from "./workspaceStore";
 import {
   createBrowserStore,
   createDefaultBrowserState,
@@ -434,6 +438,146 @@ describe("browserStore", () => {
       expect(migrated.getState()).toEqual(createDefaultBrowserState());
       expect(migrateLegacyBrowserTabs(null).tabs).toEqual({});
       expect(migrateLegacyBrowserTabs("nonsense").tabs).toEqual({});
+    });
+
+    it("migrates a real serialized session: standalone browser tab plus a worktree split browser leaf", () => {
+      // Given a live workspace with one standalone browser tab and one browser pane split inside
+      // a terminal tab of a worktree layout...
+      const worktree: Worktree = {
+        path: "/repo/feature",
+        head: "feature-head",
+        branch: "refs/heads/feature",
+        bare: false,
+        detached: false,
+        locked: null,
+        prunable: null,
+      };
+      const terminalTab: TerminalTab = {
+        kind: "terminal",
+        id: "tab-terminal",
+        label: "Terminal",
+        sessionId: "session-1",
+      };
+      const standaloneTab: BrowserTab = {
+        kind: "browser",
+        id: "tab-browser",
+        label: "Docs",
+        browserId: "browser-standalone",
+        url: "https://docs.test",
+        title: "Docs",
+        worktreePath: worktree.path,
+      };
+      const terminalSession: TerminalSession = {
+        id: "session-1",
+        cwd: worktree.path,
+        worktreePath: worktree.path,
+        workspaceId: "ws-1",
+        worktree: { wsId: "ws-1", slug: "feature" },
+        backendSessionId: "backend-1",
+        lifecycle: "working",
+      };
+      const splitLayout: LayoutState = {
+        tabs: [terminalTab],
+        activeTabId: "tab-terminal",
+        layoutsByTabId: {
+          "tab-terminal": {
+            root: {
+              type: "split",
+              direction: "horizontal",
+              ratio: 0.5,
+              first: { type: "leaf", leafId: "leaf-terminal" },
+              second: { type: "leaf", leafId: "leaf-browser" },
+            },
+            activeLeafId: "leaf-terminal",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-terminal": "session-1", "leaf-browser": "" },
+            contentsByLeafId: {
+              "leaf-terminal": { kind: "terminal", sessionId: "session-1" },
+              "leaf-browser": createBrowserPaneContent({
+                browserId: "browser-split",
+                url: "https://split.test",
+                title: "Split Page",
+                worktreePath: worktree.path,
+                worktreeLabel: "feature",
+              }),
+            },
+          },
+        },
+      };
+      const state: WorkspaceState = {
+        worktrees: [worktree],
+        activeWorktreePath: null,
+        sessions: { "session-1": terminalSession },
+        layout: {
+          tabs: [standaloneTab],
+          activeTabId: "tab-browser",
+          layoutsByTabId: {},
+        },
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        worktreeLayouts: { [worktree.path]: splitLayout },
+      };
+
+      // When the real serializer writes the session...
+      const persisted = serializeWorkspaceState("ws-1", "/repo", state);
+      const persistedTabs = persisted.workspaces["ws-1"].worktreeLayouts?.[worktree.path]?.tabs ?? [];
+      const terminalRecord = persistedTabs.find((tab) => tab.id === "tab-terminal");
+      // ...the split browser pane lands under the terminal tab's leaf map (v3 shape), not beside it.
+      expect(terminalRecord?.kind).toBe("terminal");
+      expect(terminalRecord?.terminal?.contentsByLeafId?.["leaf-browser"]).toMatchObject({
+        kind: "browser",
+        browser: { browserId: "browser-split" },
+      });
+
+      // Then the migration collects both browsers into Today with their worktree tags...
+      const migratedState = migrateLegacyBrowserTabs(persisted, { now: NOW });
+      const today = selectTodayTabs(migratedState, DEFAULT_SPACE_ID);
+      expect(today.map((tab) => tab.browserId).sort()).toEqual(["browser-split", "browser-standalone"]);
+      expect(today.find((tab) => tab.browserId === "browser-standalone")?.worktreeTag).toEqual({
+        workspaceId: "ws-1",
+        worktreePath: "/repo/feature",
+      });
+      expect(today.find((tab) => tab.browserId === "browser-split")?.worktreeTag).toEqual({
+        workspaceId: "ws-1",
+        worktreePath: "/repo/feature",
+        label: "feature",
+      });
+      // ...and the split leaf keeps pointing at the very same browserId.
+      expect(migratedState.splitAttachments).toEqual({
+        "browser-split": { workspaceId: "ws-1", tabId: "tab-terminal", leafId: "leaf-browser" },
+      });
+
+      // And migrating the same serialized session again is identical.
+      expect(migrateLegacyBrowserTabs(persisted, { now: NOW })).toEqual(migratedState);
+    });
+
+    it("reads v1 compatibility leaf maps stored directly on the tab and still deduplicates by browserId", () => {
+      const v1 = {
+        workspaceId: "ws-1",
+        layout: {
+          tabs: [
+            {
+              id: "tab-legacy",
+              label: "Legacy",
+              contentsByLeafId: {
+                "leaf-legacy": createBrowserPaneContent({
+                  browserId: "browser-legacy",
+                  url: "https://legacy.test",
+                  worktreePath: "/repo/legacy",
+                }),
+              },
+            },
+          ],
+        },
+      };
+      const state = migrateLegacyBrowserTabs(v1, { now: NOW });
+      expect(Object.keys(state.tabs)).toEqual(["browser-legacy"]);
+      expect(state.splitAttachments["browser-legacy"]).toEqual({
+        workspaceId: "ws-1",
+        tabId: "tab-legacy",
+        leafId: "leaf-legacy",
+      });
+      expect(migrateLegacyBrowserTabs(v1, { now: NOW })).toEqual(state);
     });
   });
 });

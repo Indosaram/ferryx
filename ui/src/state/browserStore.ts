@@ -1083,33 +1083,54 @@ function collectRawLegacyBrowsers(persisted: unknown): {
 } {
   const tabs: Array<LegacyBrowserRecord & { workspaceId: string; worktreePath?: string }> = [];
   const leaves: Array<{ workspaceId: string; tabId: string; leafId: string; browser: LegacyBrowserRecord }> = [];
+
+  /** Browser panes of one leaf map; `tabId` is the layout tab that owns them. */
+  const collectLeaves = (
+    workspaceId: string,
+    tabId: string,
+    contents: Record<string, unknown> | null,
+    layoutWorktreePath: string | null,
+  ) => {
+    if (!contents) return;
+    for (const [leafId, content] of Object.entries(contents)) {
+      const record = asRecord(content);
+      if (!record || record.kind !== "browser") continue;
+      const browser = readLegacyBrowser(record);
+      if (!browser) continue;
+      const path = browser.worktreePath ?? layoutWorktreePath ?? undefined;
+      leaves.push({
+        workspaceId,
+        tabId,
+        leafId,
+        browser: { ...browser, ...(path ? { worktreePath: path } : {}) },
+      });
+    }
+  };
+
   for (const { workspaceId, workspace } of legacyWorkspaces(persisted)) {
     for (const { worktreePath, layout } of legacyLayouts(workspace)) {
       for (const candidate of Array.isArray(layout.tabs) ? layout.tabs : []) {
         const record = asRecord(candidate);
-        if (!record || record.kind !== "browser") continue;
-        const browser = readLegacyBrowser(record);
-        if (!browser) continue;
-        const path = browser.worktreePath ?? worktreePath ?? undefined;
-        tabs.push({ ...browser, workspaceId, ...(path ? { worktreePath: path } : {}) });
-      }
-      for (const [tabId, value] of Object.entries(asRecord(layout.layoutsByTabId) ?? {})) {
-        const tabLayout = asRecord(value);
-        const contents = asRecord(tabLayout?.contentsByLeafId);
-        if (!contents) continue;
-        for (const [leafId, content] of Object.entries(contents)) {
-          const record = asRecord(content);
-          if (!record || record.kind !== "browser") continue;
+        if (!record) continue;
+        // Standalone browser tabs persist their identity on the tab record itself.
+        const standalone = record.kind === "browser" || asRecord(record.browser)?.browserId !== undefined;
+        if (standalone) {
           const browser = readLegacyBrowser(record);
           if (!browser) continue;
           const path = browser.worktreePath ?? worktreePath ?? undefined;
-          leaves.push({
-            workspaceId,
-            tabId,
-            leafId,
-            browser: { ...browser, ...(path ? { worktreePath: path } : {}) },
-          });
+          tabs.push({ ...browser, workspaceId, ...(path ? { worktreePath: path } : {}) });
+          continue;
         }
+        // A split browser pane lives on the owning terminal tab: v3 nests it under `terminal`,
+        // v1 compatibility records keep the same leaf map directly on the tab.
+        const tabId = readString(record.id);
+        if (!tabId) continue;
+        collectLeaves(workspaceId, tabId, asRecord(asRecord(record.terminal)?.contentsByLeafId), worktreePath);
+        collectLeaves(workspaceId, tabId, asRecord(record.contentsByLeafId), worktreePath);
+      }
+      // In-memory layouts keep the per-tab pane tree beside the tab list.
+      for (const [tabId, value] of Object.entries(asRecord(layout.layoutsByTabId) ?? {})) {
+        collectLeaves(workspaceId, tabId, asRecord(asRecord(value)?.contentsByLeafId), worktreePath);
       }
     }
   }
