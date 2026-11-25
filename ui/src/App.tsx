@@ -4401,8 +4401,10 @@ function WorkspaceApp({
         const worktree = worktreePath
           ? currentState.worktrees.find((candidate) => candidate.path === worktreePath)
           : undefined;
-        const workspaceId = worktreeIdentity(worktree ?? {})?.wsId ?? worktree?.workspaceId;
+        const identity = worktree ? worktreeIdentity(worktree) : null;
+        const workspaceId = identity?.wsId ?? worktree?.workspaceId;
         if (!worktreePath || !workspaceId) return;
+        const worktreeLabel = identity?.slug ?? tab.worktreeLabel;
         // A standalone browser tab has no pane leaves: the attachment names the tab itself so
         // `resolveBrowserTabSwitch` and `detachAllForWorkspace` can still find it.
         openBrowserInWorktreeSplit({
@@ -4411,7 +4413,7 @@ function WorkspaceApp({
           title: tab.title ?? null,
           workspaceId,
           worktreePath,
-          ...(worktree?.label ?? tab.worktreeLabel ? { worktreeLabel: worktree?.label ?? tab.worktreeLabel } : {}),
+          ...(worktreeLabel ? { worktreeLabel } : {}),
           tabId,
           leafId: "root",
         }, browserStore);
