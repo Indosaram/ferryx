@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import {
   mapClientPointToFrame,
   rdErrorMessage,
@@ -9,7 +9,7 @@ import {
   type RdInputEvent,
   type RdVideoFrame,
 } from "../lib/remoteDesktop";
-import { remoteDesktopStore, type RemoteDesktopSession } from "../state/remoteDesktopStore";
+import { remoteDesktopStore, useRemoteDesktopSession } from "../state/remoteDesktopStore";
 import { Button } from "./ui/button";
 
 export type RemoteDesktopPaneProps = {
@@ -28,21 +28,13 @@ const STATUS_LABEL: Record<RdConnectionState, string> = {
   ended: "Session ended",
 };
 
-function useSession(hostId: string): RemoteDesktopSession | null {
-  return useSyncExternalStore(
-    remoteDesktopStore.subscribe,
-    () => remoteDesktopStore.getSession(hostId),
-    () => null,
-  );
-}
-
 /**
  * Canvas view of one paired host's desktop. The session itself belongs to `remoteDesktopStore`, so
  * mounting, hiding or unmounting this pane only attaches or detaches the canvas: the connection
  * survives worktree and tab switches. Only the explicit Disconnect button tears it down.
  */
 export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: RemoteDesktopPaneProps) {
-  const session = useSession(hostId);
+  const session = useRemoteDesktopSession(hostId);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameSizeRef = useRef<{ width: number; height: number } | null>(null);
   const pendingFrameRef = useRef<RdVideoFrame | null>(null);
@@ -123,19 +115,13 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   }, []);
 
   // Hiding is not disconnecting: stop drawing, hand back the pointer, and let the far side know
-  // about keys it still believes are held.
+  // about keys it still believes are held. `inputEnabled` already folds `visible` in, so this one
+  // effect covers hidden, occluded and disconnected panes alike.
   useEffect(() => {
-    if (visible) return;
+    if (inputEnabled) return;
     pendingFrameRef.current = null;
     releasePointerCapture();
     releasePressedKeys();
-  }, [visible, releasePointerCapture, releasePressedKeys]);
-
-  useEffect(() => {
-    if (!inputEnabled) {
-      releasePointerCapture();
-      releasePressedKeys();
-    }
   }, [inputEnabled, releasePointerCapture, releasePressedKeys]);
 
   const sendPointerPosition = useCallback((clientX: number, clientY: number): boolean => {

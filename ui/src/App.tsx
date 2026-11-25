@@ -109,6 +109,9 @@ import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
 import { buildSetupProgress } from "./lib/setupProgress";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
+import { GlobalRemoteDesktopCanvas, liveRemoteDesktopSessionCount } from "./components/remoteDesktop/GlobalRemoteDesktopCanvas";
+import { RemoteDesktopActivitySidebar } from "./components/remoteDesktop/RemoteDesktopActivitySidebar";
+import { remoteDesktopStore } from "./state/remoteDesktopStore";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
@@ -1095,7 +1098,6 @@ function WorkspaceApp({
     createBrowserTab,
     openFilePreviewTab,
     openChangesTab,
-    openRemoteDesktopTab,
     adoptBrowserSession,
     adoptBackendSession,
     releaseTabsForMove,
@@ -2649,16 +2651,22 @@ function WorkspaceApp({
   // The Activity Bar's mode: the rail is always visible, so this (not the drawer width) decides what
   // the main area shows. Persisted per window under `ferryx.activity.mode`.
   const [activityMode, setActivityMode] = useState<ActivityMode>(loadActivityMode);
-  // Each mode's drawer remembers its own width. Browser and Remote Desktop have no drawer component
-  // yet (todos 8-17 fill them in); these read the same keys so their width survives that work.
+  // Each mode's drawer remembers its own width. The Browser and Remote Desktop drawers own their
+  // resize handles; these read the same keys so their width survives that work.
   const [browserDrawerWidth] = useState(() => loadSidebarWidthForMode("browser"));
-  const [remoteDesktopDrawerWidth] = useState(() => loadSidebarWidthForMode("remoteDesktop"));
+  // The Remote Desktop canvas shows one host at a time; the drawer and its tabs both select it.
+  const [remoteDesktopHostId, setRemoteDesktopHostId] = useState<string | null>(null);
+  const remoteDesktopSessionCount = useSyncExternalStore(
+    remoteDesktopStore.subscribe,
+    () => liveRemoteDesktopSessionCount(remoteDesktopStore.getState()),
+    () => 0,
+  );
   const selectActivityMode = useCallback((mode: ActivityMode) => {
     setActivityMode(mode);
     saveActivityMode(mode);
     // A mode with a drawer is useless with the drawer collapsed, so selecting it reveals the
     // drawer; `Cmd+B` still collapses it afterwards without touching the rail.
-    if ((mode === "supervisor" || mode === "worktrees") && !isSidebarOpen) {
+    if ((mode === "supervisor" || mode === "worktrees" || mode === "remoteDesktop") && !isSidebarOpen) {
       setIsSidebarOpen(true);
       persistSidebarOpen(true);
     }
@@ -3955,13 +3963,17 @@ function WorkspaceApp({
     setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
+  // Settings > Remote hands one machine to Remote Desktop mode: connect it in the keep-alive store
+  // and switch the shell there instead of opening a worktree tab that would unmount on switch.
   const handleOpenRemoteDesktop = useCallback((hostId: string, label: string) => {
     if (activeRemoteHostRef.current) return;
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
     setSettingsRemoteContext(undefined);
-    openRemoteDesktopTab(hostId, label);
-  }, [openRemoteDesktopTab]);
+    setRemoteDesktopHostId(hostId);
+    selectActivityMode("remoteDesktop");
+    void remoteDesktopStore.connect(hostId, label);
+  }, [selectActivityMode]);
   // Settings > Remote hands one machine to Add Project; the dialog routes pairedDaemon to its form.
   const handleOpenMachineProject = useCallback((target: MachineProjectTarget) => {
     if (activeRemoteHostRef.current) return;
@@ -5252,6 +5264,7 @@ function WorkspaceApp({
         supervisorBadgeTestId="collapsed-attention-badge"
         supervisorBadge={supervisorDecisionCount > 0 ? supervisorDecisionCount : null}
         worktreesBadge={worktreeAgentAttention > 0 ? worktreeAgentAttention : null}
+        remoteDesktopBadge={remoteDesktopSessionCount > 0 ? remoteDesktopSessionCount : null}
         sidebarOpen={isSidebarOpen}
         onToggleSidebar={toggleSidebar}
         onOpenResources={() => setIsResourcesOpen(true)}
@@ -5327,20 +5340,7 @@ function WorkspaceApp({
         </aside>
       ) : null}
       {isSidebarOpen && activityMode === "remoteDesktop" ? (
-        <aside
-          data-testid="activity-drawer-remote-desktop"
-          className="flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-worktree-sidebar text-worktree-sidebar-foreground"
-          style={{
-            width: `${remoteDesktopDrawerWidth}px`,
-            minWidth: `${SIDEBAR_RANGE_BY_MODE.remoteDesktop.min}px`,
-            maxWidth: `${SIDEBAR_RANGE_BY_MODE.remoteDesktop.max}px`,
-          }}
-        >
-          <div data-tauri-drag-region className="h-titlebar shrink-0" />
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 text-[11px] text-muted-foreground">
-            <p className="py-2">Paired machines and their connections open here.</p>
-          </div>
-        </aside>
+        <RemoteDesktopActivitySidebar activeHostId={remoteDesktopHostId} onSelectHost={setRemoteDesktopHostId} />
       ) : null}
 
       <main
@@ -5492,19 +5492,13 @@ function WorkspaceApp({
           </div>
         </section>
       ) : null}
-      {activityMode === "remoteDesktop" ? (
-        <section
-          data-testid="activity-canvas-remote-desktop"
-          className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
-        >
-          <div className="flex h-titlebar shrink-0 items-center border-b border-border px-3 text-[11px] text-muted-foreground">
-            Remote Desktop
-          </div>
-          <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
-            Connected machine canvases arrive with the Remote Desktop mode.
-          </div>
-        </section>
-      ) : null}
+      {/* Mounted in every mode: switching to a worktree or the browser only hides the canvas, so a
+          live remote desktop session never disconnects (GAP-7). */}
+      <GlobalRemoteDesktopCanvas
+        active={activityMode === "remoteDesktop"}
+        activeHostId={remoteDesktopHostId}
+        onSelectHost={setRemoteDesktopHostId}
+      />
 
       {isCommandPaletteOpen && !activeRemoteHost ? (
         <CommandPalette

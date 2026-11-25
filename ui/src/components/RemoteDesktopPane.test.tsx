@@ -140,8 +140,36 @@ describe("RemoteDesktopPane", () => {
     expect(drawImage).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a code-mapped error with a reconnect action", async () => {
-    invoke.mockImplementation(async (command: string) => {
+  it("releases the captured pointer by id when the pane is hidden", async () => {
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ close: vi.fn() })));
+    const view = render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
+    await waitFor(() => expect(remoteDesktopStore.getSession("host-1")?.rdSessionId).toBe("rd-1"));
+    const canvas = screen.getByTestId("remote-desktop-canvas") as HTMLCanvasElement;
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}) });
+    const setPointerCapture = vi.spyOn(canvas, "setPointerCapture");
+    const releasePointerCapture = vi.spyOn(canvas, "releasePointerCapture");
+    act(() => channels[0].onmessage(statusFrame("connected")));
+    act(() => channels[0].onmessage(videoFrame(400, 200)));
+    await waitFor(() => expect(drawImage).toHaveBeenCalledTimes(1));
+
+    fireEvent.pointerDown(canvas, { button: 0, clientX: 50, clientY: 25, pointerId: 7 });
+    await waitFor(() => expect(sentInputEvents()).toContainEqual({ kind: "mouseButton", button: 0, down: true }));
+    expect(setPointerCapture).toHaveBeenCalledTimes(1);
+    // jsdom may substitute MouseEvent for PointerEvent, so the id is read from the capture itself.
+    const capturedId = setPointerCapture.mock.calls[0]?.[0];
+
+    // Hiding hands the pointer back by the id the pane captured (and never disconnects).
+    view.rerender(<RemoteDesktopPane hostId="host-1" label="Studio" visible={false} />);
+
+    await waitFor(() => expect(releasePointerCapture).toHaveBeenCalledWith(capturedId));
+    expect(releasePointerCapture.mock.calls.map(([id]) => id)).toEqual([capturedId]);
+    expect(remoteDesktopStore.getSession("host-1")).toMatchObject({ status: "connected", rdSessionId: "rd-1" });
+    expect(invoke).not.toHaveBeenCalledWith("cmd_rd_disconnect", expect.anything());
+  });
+
+  it("shows a code-mapped error with a reconnect action", async () => {    invoke.mockImplementation(async (command: string) => {
       if (command === "cmd_rd_connect") throw { code: "RD_HOST_OFFLINE", message: "offline", details: {} };
       return undefined;
     });
