@@ -55,6 +55,12 @@ export type BrowserStoreTab = {
   agentControlled?: boolean;
   private?: boolean;
   engine?: BrowserEngine;
+  /** Live host state mirrored from `browser_state_changed`; never persisted. */
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  /** Structured IPC code of a failed startup hydration; the tab offers reload instead. */
+  hydrationError?: string;
 };
 
 export type BrowserFolder = {
@@ -238,6 +244,20 @@ function sortTabs(tabs: Iterable<BrowserStoreTab>): BrowserStoreTab[] {
   return [...tabs].sort((left, right) => left.order - right.order || left.browserId.localeCompare(right.browserId));
 }
 
+/**
+ * Drops the fields that mirror the host's live session (navigation state, load state, a failed
+ * hydration) before writing to disk: they describe a webview that will not exist after a restart,
+ * so persisting them would restore a tab that claims to be loading - or broken - while healthy.
+ */
+function withoutLiveState(tab: BrowserStoreTab): BrowserStoreTab {
+  const persisted: BrowserStoreTab = { ...tab };
+  delete persisted.loading;
+  delete persisted.canGoBack;
+  delete persisted.canGoForward;
+  delete persisted.hydrationError;
+  return persisted;
+}
+
 function tabsInGroup(
   state: BrowserStoreState,
   spaceId: string,
@@ -282,7 +302,7 @@ export function createDefaultBrowserState(spaceId: string = DEFAULT_SPACE_ID): B
 }
 
 function serializeBrowserState(state: BrowserStoreState): string {
-  const tabs = sortTabs(Object.values(state.tabs).filter((tab) => !tab.private));
+  const tabs = sortTabs(Object.values(state.tabs).filter((tab) => !tab.private)).map(withoutLiveState);
   const persistedIds = new Set(tabs.map((tab) => tab.browserId));
   const splitAttachments: Record<string, BrowserSplitAttachment> = {};
   for (const [browserId, attachment] of Object.entries(state.splitAttachments)) {
@@ -299,7 +319,9 @@ function serializeBrowserState(state: BrowserStoreState): string {
     spaces: sortSpaces(state.spaces),
     folders: sortFolders(state.folders),
     tabs,
-    archive: state.archive.filter((entry) => !entry.tab.private),
+    archive: state.archive
+      .filter((entry) => !entry.tab.private)
+      .map((entry) => ({ ...entry, tab: withoutLiveState(entry.tab) })),
     mru: state.mru.filter((browserId) => persistedIds.has(browserId)).slice(0, MAX_MRU_ENTRIES),
     activeSpaceId: state.spaces[state.activeSpaceId] ? state.activeSpaceId : sortSpaces(state.spaces)[0]?.id ?? DEFAULT_SPACE_ID,
     activeBrowserIdBySpace,
@@ -668,6 +690,11 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
       if (worktreeTag) tab.worktreeTag = worktreeTag;
       const engine = input.engine ?? existing?.engine;
       if (engine) tab.engine = engine;
+      // Live host state is not an input: an upsert of an existing tab keeps what the session reported.
+      if (existing && typeof existing.loading === "boolean") tab.loading = existing.loading;
+      if (existing && typeof existing.canGoBack === "boolean") tab.canGoBack = existing.canGoBack;
+      if (existing && typeof existing.canGoForward === "boolean") tab.canGoForward = existing.canGoForward;
+      if (existing?.hydrationError) tab.hydrationError = existing.hydrationError;
 
       setState((current) => ({ ...current, tabs: { ...current.tabs, [browserId]: tab } }));
       return success(tab);
@@ -681,7 +708,11 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
       const archived = !tab.private;
       commit({
         ...next,
-        archive: archived ? [{ tab, archivedAt: now(), reason: "closed" }, ...next.archive] : next.archive,
+        // An archived tab is not a live session: its runtime fields describe a webview that no
+        // longer exists, so restoring it must not resurrect a stale loading or error state.
+        archive: archived
+          ? [{ tab: withoutLiveState(tab), archivedAt: now(), reason: "closed" }, ...next.archive]
+          : next.archive,
       });
       return success({ tab, archived });
     },
@@ -818,7 +849,7 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
         mru: prev.mru.filter((browserId) => !removedIds.has(browserId)),
         miniBrowserId: prev.miniBrowserId && removedIds.has(prev.miniBrowserId) ? null : prev.miniBrowserId,
         archive: [
-          ...doomed.map((tab) => ({ tab, archivedAt: stamp, reason: "cleared" as const })),
+          ...doomed.map((tab) => ({ tab: withoutLiveState(tab), archivedAt: stamp, reason: "cleared" as const })),
           ...prev.archive,
         ],
       });
