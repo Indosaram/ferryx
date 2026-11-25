@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 function readSource(relativeUrl: string) {
-  return readFileSync(new URL(relativeUrl, import.meta.url), "utf8");
+  // Normalize CRLF so index-based assertions hold on Windows checkouts too.
+  return readFileSync(new URL(relativeUrl, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 }
 
 describe("workspace shell theme contract", () => {

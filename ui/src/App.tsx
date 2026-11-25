@@ -1081,7 +1081,7 @@ function WorkspaceApp({
     recoveredFromHmr,
     agents,
     tabActivity,
-    worktreeActivity,
+    worktreeActivity = {},
     attentionBySessionId = NO_ATTENTION,
     unreadBadgeCount: unreadBadgeCountFromStore,
     activityNotificationTargets,
