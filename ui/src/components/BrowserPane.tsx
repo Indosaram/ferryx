@@ -22,8 +22,6 @@ import {
   onBrowserDownloadUpdated,
   onBrowserShortcutRequested,
   openExternalUrl,
-  setBrowserBounds,
-  setBrowserVisible,
   type BrowserDisplayError,
   type BrowserFindResult,
   type BrowserShortcutAction,
@@ -38,6 +36,11 @@ import {
 } from "../lib/browserLibrary";
 import { PRIVATE_BROWSER_PROFILE, useBrowserSettings } from "../lib/browserSettings";
 import { goBackInBrowserTab, goForwardInBrowserTab, useBrowserTabNavigation } from "../lib/browserTabNavigation";
+import {
+  browserViewportCoordinator,
+  type BrowserViewportHandle,
+  type BrowserViewportOperation,
+} from "../lib/browserViewportCoordinator";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserBookmarkBar } from "./BrowserBookmarkBar";
@@ -57,6 +60,13 @@ interface BrowserPaneProps {
   onNavigate: (url: string) => void;
   onReload: (options?: BrowserReloadOptions) => void;
   designFeedbackTargets?: DesignFeedbackTarget[];
+  /** Who wins the native surface when several panes render the same browser: the last claim wins,
+   * and a claim is made on mount (or when `tab.browserId` changes). A host that switches this
+   * pane's priority remounts the pane instead of mutating the prop in place. */
+  surfacePriority?: number;
+  /** `maho-minimal` drops the Ferryx-branded chrome (toolbar, bookmark bar, vault bar) for a host
+   * that draws its own; the functional rows (find, downloads, errors, shelf) stay. */
+  chromeMode?: "default" | "maho-minimal";
 }
 
 type BrowserStateChangedPayload = {
@@ -106,15 +116,35 @@ function parseErrorCode(err: unknown): string {
   return extractBrowserErrorCode(err);
 }
 
+// One identity per mount: a handoff to another pane of the same browser is a different surface,
+// so it must be distinguishable from this one even when both are worktree splits.
+let browserPaneSurfaceCounter = 0;
+function nextSurfaceId(): string {
+  browserPaneSurfaceCounter += 1;
+  return `browser-pane-${browserPaneSurfaceCounter}`;
+}
+
 export function BrowserPane({
   tab,
   visible = true,
   onNavigate,
   onReload,
   designFeedbackTargets = [],
+  surfacePriority = 0,
+  chromeMode = "default",
 }: BrowserPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  // The native browser surface outlives every React node here, so this pane's claim on it is
+  // mount-scoped and resolved against the other surfaces of the same browser by the coordinator.
+  const surfaceIdRef = useRef<string | null>(null);
+  if (surfaceIdRef.current === null) surfaceIdRef.current = nextSurfaceId();
+  const viewportRef = useRef<BrowserViewportHandle | null>(null);
+  // Read only when this pane claims (mount, or a different `tab.browserId`): a re-claim of the
+  // same browser would release the old handle first, and that release would hide the surface
+  // this pane is about to re-assert. A host that changes priority remounts the pane.
+  const surfacePriorityRef = useRef(surfacePriority);
+  surfacePriorityRef.current = surfacePriority;
   const findInputRef = useRef<HTMLInputElement>(null);
   const [liveTab, setLiveTab] = useState<BrowserTab>(tab);
   // Mod+L reaches Ferryx while Ferryx has keyboard focus; a Chromium tab draws its own address
@@ -165,6 +195,7 @@ export function BrowserPane({
   // be restored only if this owner is itself visible. Mirrors NativeTerminalPane's occlusion fix.
   const surfaceVisible = useNativeTerminalVisibility();
   const maskAwareVisible = visible && surfaceVisible && libraryView === null;
+  const showBrandedChrome = chromeMode !== "maho-minimal";
   // A Chromium tab draws its own toolbar, whose back/forward only knows the engine's history.
   // After a restart that history is empty, so the tab's saved stack is offered here and the
   // back/forward shortcuts (which the hidden Ferryx toolbar would handle) are served by the pane.
@@ -450,35 +481,43 @@ export function BrowserPane({
 
 
   useEffect(() => {
+    // Claiming happens before the geometry effect runs, so the geometry below always drives the
+    // surface this pane owns. A successor's claim supersedes this one, and releasing an already
+    // superseded handle emits nothing: that is what keeps a split <-> fullscreen <-> mini move
+    // from hiding the webview the new owner just revealed.
+    const handle = browserViewportCoordinator.claim(
+      tab.browserId,
+      surfaceIdRef.current ?? "",
+      surfacePriorityRef.current,
+    );
+    viewportRef.current = handle;
+    return () => {
+      if (viewportRef.current === handle) viewportRef.current = null;
+      handle.release();
+    };
+  }, [tab.browserId]);
+
+  useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
-    // A show that races its own bounds update is what makes the child webview cover the
-    // wrong region: `boundsSeq` marks the newest geometry request, so only the reveal that
-    // belongs to the latest acknowledged frame is allowed to run.
     let disposed = false;
-    let boundsSeq = 0;
 
-    const updateVisibility = (nextVisible: boolean) => {
-      void setBrowserVisible(tab.browserId, nextVisible)
-        .then(() => {
-          if (!disposed && nextVisible) {
-            setDisplayError(null);
-          }
-        })
-        .catch((error: unknown) => {
-          if (disposed) return;
-          setDisplayError({
-            operation: "visibility",
-            code: parseErrorCode(error),
-          });
-        });
+    const reportFailure = (error: unknown, operation: BrowserViewportOperation) => {
+      if (disposed) return;
+      setDisplayError({
+        operation,
+        code: parseErrorCode(error),
+      });
     };
 
     const updateBounds = () => {
+      // Read the handle at call time: a re-claim (browser or priority change) replaces it while
+      // this effect stays mounted, and geometry must always drive the pane's current claim.
+      const handle = viewportRef.current;
+      if (!handle) return;
       if (!maskAwareVisible || liveTab.loadError) {
-        boundsSeq += 1;
-        updateVisibility(false);
+        void handle.hide(reportFailure);
         return;
       }
 
@@ -492,25 +531,21 @@ export function BrowserPane({
       // On macOS the child webview is a sibling NSView stacked above the app WKWebView, and
       // the native terminal surface sits below that webview. An opaque child shown before its
       // frame matches this pane therefore paints over app chrome and blanks whatever terminal
-      // occupies the stale rect, which no DOM z-index can undo. Reveal only after the backend
-      // has acknowledged the geometry.
-      const seq = ++boundsSeq;
-      void setBrowserBounds(tab.browserId, {
-        x: rect.x,
-        y: clampedY,
-        width: rect.width,
-        height: clampedHeight,
-      })
-        .then(() => {
-          if (disposed || seq !== boundsSeq) return;
-          updateVisibility(true);
-        })
-        .catch((error: unknown) => {
-          if (disposed || seq !== boundsSeq) return;
-          setDisplayError({
-            operation: "bounds",
-            code: parseErrorCode(error),
-          });
+      // occupies the stale rect, which no DOM z-index can undo. The coordinator reveals it only
+      // after the backend acknowledged this frame, and only if this pane still owns the surface.
+      void handle
+        .syncBoundsAndShow(
+          {
+            x: rect.x,
+            y: clampedY,
+            width: rect.width,
+            height: clampedHeight,
+          },
+          reportFailure,
+        )
+        .then((shown) => {
+          if (disposed || !shown) return;
+          setDisplayError(null);
         });
     };
 
@@ -523,12 +558,11 @@ export function BrowserPane({
 
     return () => {
       disposed = true;
-      boundsSeq += 1;
       updateBoundsRef.current = () => undefined;
       resizeObserver.disconnect();
       window.removeEventListener("resize", updateBounds);
-      // Native child webviews outlive React DOM nodes; cleanup also covers Fast Refresh remounts.
-      updateVisibility(false);
+      // Hiding is the owner's release, not this effect's cleanup: an effect re-run must never
+      // hide a surface another pane already claimed.
     };
   }, [liveTab.loadError, tab.browserId, maskAwareVisible]);
 
@@ -668,11 +702,12 @@ export function BrowserPane({
             <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" />
           </div>
         ) : null}
-        {/* A Chromium tab draws its own toolbar (address bar, extensions, menu) inside the pane. */}
-        {liveTab.engine === "chromium" ? null : (
+        {/* A Chromium tab draws its own toolbar (address bar, extensions, menu) inside the pane;
+            a minimal-chrome host draws its own chrome around it. */}
+        {liveTab.engine === "chromium" || !showBrandedChrome ? null : (
           <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} openTabs={openTabs} />
         )}
-        {liveTab.engine === "chromium" || !browserSettings.showBookmarkBar ? null : (
+        {liveTab.engine === "chromium" || !showBrandedChrome || !browserSettings.showBookmarkBar ? null : (
           <BrowserBookmarkBar tree={bookmarkTree} onOpen={onNavigate} />
         )}
         {chromiumEngine && (navigation.restoredBack || navigation.restoredForward) ? (
@@ -774,7 +809,9 @@ export function BrowserPane({
           </div>
         ) : null}
         <BrowserEngineFallbackNotice browserId={tab.browserId} />
-        <BrowserVaultBar browserId={liveTab.browserId} url={liveTab.url} loading={Boolean(liveTab.loading)} />
+        {showBrandedChrome ? (
+          <BrowserVaultBar browserId={liveTab.browserId} url={liveTab.url} loading={Boolean(liveTab.loading)} />
+        ) : null}
         {paneAlert ? (
           <div
             role="alert"
