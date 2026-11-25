@@ -93,13 +93,15 @@ function Harness({
     <div>
       <MahoControlActivityChip activity={activity} />
       <MahoAgentTasksSection activity={activity} onSelectTab={onSelectTab} />
-      {activity.controlledBrowserIds.map((browserId) => (
-        <MahoTabBorrowChip
-          key={browserId}
-          browserId={browserId}
-          controllerLabel={activity.controllerLabelFor(browserId)}
-        />
-      ))}
+      <div data-testid="tab-row-chips">
+        {activity.controlledBrowserIds.map((browserId) => (
+          <MahoTabBorrowChip
+            key={browserId}
+            browserId={browserId}
+            controllerLabel={activity.controllerLabelFor(browserId)}
+          />
+        ))}
+      </div>
       {bannerBrowserId ? <MahoAgentControlledBanner activity={activity} browserId={bannerBrowserId} /> : null}
       <span data-testid="badge-count">{activity.badgeCount}</span>
     </div>
@@ -142,7 +144,10 @@ describe("useBrowserAgentActivity surfaces", () => {
     expect(within(section).getByText("Docs")).toBeInTheDocument();
     expect(within(section).getByTestId("maho-agent-tasks-count")).toHaveTextContent("1");
 
-    expect(view.getByTestId("maho-tab-borrow-chip")).toHaveTextContent("qa-agent");
+    // The tab row's own chip, outside the Agent Tasks section.
+    const rowChips = within(view.getByTestId("tab-row-chips"));
+    expect(rowChips.getByTestId("maho-tab-borrow-chip")).toHaveTextContent("qa-agent");
+    expect(rowChips.getByTestId("maho-tab-borrow-chip")).toHaveAttribute("data-browser-id", "docs");
 
     const banner = await view.findByTestId("maho-agent-controlled-banner");
     expect(banner).toHaveAttribute("data-browser-id", "docs");
@@ -157,7 +162,7 @@ describe("useBrowserAgentActivity surfaces", () => {
 
     expect(view.getByTestId("badge-count")).toHaveTextContent("0");
     expect(view.queryByTestId("maho-control-activity-chip")).toBeNull();
-    expect(view.queryByTestId("maho-tab-borrow-chip")).toBeNull();
+    expect(within(view.getByTestId("tab-row-chips")).queryByTestId("maho-tab-borrow-chip")).toBeNull();
     expect(view.queryByTestId("maho-agent-controlled-banner")).toBeNull();
     expect(within(view.getByTestId("maho-agent-tasks")).getByText("No agent activity")).toBeInTheDocument();
   });
