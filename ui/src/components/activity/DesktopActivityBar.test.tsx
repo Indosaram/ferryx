@@ -91,7 +91,7 @@ describe("DesktopActivityBar", () => {
     expect(screen.getByTestId("activity-mode-supervisor-badge")).toHaveTextContent("3");
     expect(screen.getByTestId("activity-mode-worktrees-badge")).toBeEmptyDOMElement();
     expect(screen.queryByTestId("activity-mode-browser-badge")).toBeNull();
-    expect(screen.getByTestId("activity-mode-remote-desktop-badge")).toHaveTextContent("99+");
+    expect(screen.getByTestId("activity-mode-remoteDesktop-badge")).toHaveTextContent("99+");
     // The name stays the mode's own; the count rides along as a description.
     const supervisorTab = screen.getByRole("tab", { name: "Supervisor" });
     const describedBy = supervisorTab.getAttribute("aria-describedby");
@@ -118,13 +118,13 @@ describe("DesktopActivityBar", () => {
 
   it("toggles only the drawer from the rail and keeps the mode selection", () => {
     const onToggleSidebar = vi.fn();
-    const { rerender } = render(<Harness sidebarOpen onToggleSidebar />);
+    const { rerender } = render(<Harness sidebarOpen onToggleSidebar={() => onToggleSidebar()} />);
 
     fireEvent.click(screen.getByTestId("activity-drawer-toggle"));
     expect(onToggleSidebar).toHaveBeenCalledOnce();
     expect(screen.getByTestId("mode")).toHaveTextContent("worktrees");
 
-    rerender(<Harness sidebarOpen={false} onToggleSidebar />);
+    rerender(<Harness sidebarOpen={false} onToggleSidebar={() => onToggleSidebar()} />);
     expect(screen.getByRole("button", { name: "Show sidebar" })).toHaveAttribute("aria-expanded", "false");
   });
 
@@ -146,7 +146,6 @@ describe("DesktopActivityBar", () => {
 
   it("keeps the rail's buttons out of the drag region", () => {
     render(<Harness sidebarOpen onToggleSidebar={() => undefined} />);
-
     for (const tab of activityTabs()) expect(tab).toHaveClass("no-drag");
     expect(screen.getByTestId("activity-drawer-toggle")).toHaveClass("no-drag");
   });
