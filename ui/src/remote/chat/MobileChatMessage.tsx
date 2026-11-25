@@ -218,6 +218,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
     return (
       <article
         aria-label={turnLabel}
+        data-message-role="user"
         className={cn(
           "mb-5 flex flex-col items-end gap-1 max-w-[88%] ml-auto",
           className
@@ -226,6 +227,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         <ReferenceTurnUsage meta={referenceMeta} />
         <div
           data-testid="user-message-bubble"
+          data-user-message-bubble=""
           className="min-w-0 gap-2 rounded-2xl border border-chat-border px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
         >
           <p className="whitespace-pre-wrap">{copyText}</p>

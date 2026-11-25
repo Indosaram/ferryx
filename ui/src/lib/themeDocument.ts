@@ -5,6 +5,17 @@ export type ThemeDocumentV1 = {
   base: "dark" | "light";
   tokens: Record<string, string>;
   css?: string;
+  /** Optional opposite-appearance token overrides so one theme can support both light and dark. */
+  variants?: Partial<Record<"dark" | "light", Record<string, string>>>;
+  /** Optional 61-role T3 Code color map for lossless editing and export. */
+  roles?: Partial<Record<string, string>>;
+  variantRoles?: Partial<Record<"dark" | "light", Partial<Record<string, string>>>>;
+  /** Optional seed colors used by the OKLCH palette generator. */
+  seed?: { canvas: string; accent: string };
+  /** Optional extension/collection provenance (e.g. OpenVSX or curated group). */
+  collection?: { id: string; label: string };
+  /** "app" applies CSS app-wide via T3-style remote-fetch sanitizer; default ("chat") uses chat-only scoping. */
+  cssScope?: "chat" | "app";
 };
 
 export type ThemeValidationError = { path: string; message: string };
@@ -167,8 +178,12 @@ export function parseThemeDocument(raw: unknown): ThemeDocumentResult {
     return { ok: false, errors: [{ path: "$", message: "Expected a theme document object." }] };
   }
   const source = raw as Record<string, unknown>;
+  const knownFields = new Set([
+    "version", "id", "name", "base", "tokens", "css",
+    "variants", "roles", "variantRoles", "seed", "collection", "cssScope",
+  ]);
   for (const key of Object.keys(source)) {
-    if (!["version", "id", "name", "base", "tokens", "css"].includes(key)) error(key, "Unknown theme document field.");
+    if (!knownFields.has(key)) error(key, "Unknown theme document field.");
   }
   if (source.version !== 1) error("version", "Expected theme document version 1.");
   if (typeof source.id !== "string" || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(source.id)) error("id", "Use 2-64 lowercase letters, digits or hyphens, starting with a letter or digit.");
@@ -192,11 +207,81 @@ export function parseThemeDocument(raw: unknown): ThemeDocumentResult {
       }
     }
   }
-  if (source.css !== undefined && (typeof source.css !== "string" || new TextEncoder().encode(source.css).length > 32 * 1024)) error("css", "Expected CSS text of at most 32 KiB (UTF-8).");
+  const cssScope = source.cssScope === "app" || source.cssScope === "chat" ? source.cssScope : undefined;
+  if (source.cssScope !== undefined && !cssScope) error("cssScope", 'Expected "chat" or "app".');
+  const maxCssBytes = cssScope === "app" ? 100_000 : 32 * 1024;
+  if (source.css !== undefined && (typeof source.css !== "string" || new TextEncoder().encode(source.css).length > maxCssBytes)) {
+    error("css", cssScope === "app" ? "Expected CSS text of at most 100,000 bytes (UTF-8)." : "Expected CSS text of at most 32 KiB (UTF-8).");
+  }
+  let variants: Partial<Record<"dark" | "light", Record<string, string>>> | undefined;
+  if (source.variants !== undefined) {
+    if (!source.variants || typeof source.variants !== "object" || Array.isArray(source.variants)) {
+      error("variants", "Expected a variants object.");
+    } else {
+      variants = {};
+      for (const [mode, vTokens] of Object.entries(source.variants as Record<string, unknown>)) {
+        if (mode !== "dark" && mode !== "light") {
+          error(`variants.${mode}`, 'Expected "dark" or "light".');
+          continue;
+        }
+        if (!vTokens || typeof vTokens !== "object" || Array.isArray(vTokens)) {
+          error(`variants.${mode}`, "Expected a colour token object.");
+          continue;
+        }
+        const validated: Record<string, string> = {};
+        for (const [k, v] of Object.entries(vTokens as Record<string, unknown>)) {
+          if (THEME_TOKEN_ALLOWLIST.has(k) && typeof v === "string" && parseThemeColor(v)) {
+            validated[k] = v;
+          }
+        }
+        variants[mode] = validated;
+      }
+    }
+  }
+  let roles: Partial<Record<string, string>> | undefined;
+  if (source.roles !== undefined && source.roles && typeof source.roles === "object" && !Array.isArray(source.roles)) {
+    roles = {};
+    for (const [k, v] of Object.entries(source.roles as Record<string, unknown>)) {
+      if (typeof v === "string" && parseThemeColor(v)) roles[k] = v;
+    }
+  }
+  let variantRoles: Partial<Record<"dark" | "light", Partial<Record<string, string>>>> | undefined;
+  if (source.variantRoles !== undefined && source.variantRoles && typeof source.variantRoles === "object" && !Array.isArray(source.variantRoles)) {
+    variantRoles = {};
+    for (const [mode, vRoles] of Object.entries(source.variantRoles as Record<string, unknown>)) {
+      if ((mode === "dark" || mode === "light") && vRoles && typeof vRoles === "object" && !Array.isArray(vRoles)) {
+        const cleaned: Partial<Record<string, string>> = {};
+        for (const [k, v] of Object.entries(vRoles as Record<string, unknown>)) {
+          if (typeof v === "string" && parseThemeColor(v)) cleaned[k] = v;
+        }
+        variantRoles[mode] = cleaned;
+      }
+    }
+  }
+  let seed: { canvas: string; accent: string } | undefined;
+  if (source.seed !== undefined && source.seed && typeof source.seed === "object" && !Array.isArray(source.seed)) {
+    const s = source.seed as Record<string, unknown>;
+    if (typeof s.canvas === "string" && typeof s.accent === "string" && parseThemeColor(s.canvas) && parseThemeColor(s.accent)) {
+      seed = { canvas: s.canvas, accent: s.accent };
+    }
+  }
+  let collection: { id: string; label: string } | undefined;
+  if (source.collection !== undefined && source.collection && typeof source.collection === "object" && !Array.isArray(source.collection)) {
+    const c = source.collection as Record<string, unknown>;
+    if (typeof c.id === "string" && typeof c.label === "string") {
+      collection = { id: c.id, label: c.label };
+    }
+  }
   if (errors.length === 0 && (source.base === "dark" || source.base === "light")) errors.push(...contrastErrors(source.base, colors));
   if (errors.length) return { ok: false, errors };
   return { ok: true, doc: {
     version: 1, id: source.id as string, name: source.name as string, base: source.base as "dark" | "light", tokens,
     ...(source.css === undefined ? {} : { css: source.css as string }),
+    ...(variants ? { variants } : {}),
+    ...(roles ? { roles } : {}),
+    ...(variantRoles ? { variantRoles } : {}),
+    ...(seed ? { seed } : {}),
+    ...(collection ? { collection } : {}),
+    ...(cssScope ? { cssScope } : {}),
   } };
 }

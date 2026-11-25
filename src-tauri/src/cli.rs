@@ -12,6 +12,7 @@ pub mod supervisor_engine;
 pub mod supervisor_goal;
 pub mod supervisor_dispatch;
 pub mod supervisor_request;
+pub mod theme;
 
 pub use billing::AccountCliError;
 pub use direct_trust::{

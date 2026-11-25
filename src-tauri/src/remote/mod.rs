@@ -42,6 +42,7 @@ pub(crate) mod session_api;
 mod ssh;
 pub mod state;
 pub mod terminal_wire;
+pub(crate) mod theme_api;
 pub mod workspace_api;
 pub mod workspace_catalog;
 

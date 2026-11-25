@@ -626,6 +626,7 @@ export function Sidebar({
   return (
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveDrag(null)}>
       <aside
+        data-slot="sidebar"
         className="relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
         style={{ width: `${width}px`, minWidth: `${widthRange.min}px`, maxWidth: `${widthRange.max}px` }}
       >

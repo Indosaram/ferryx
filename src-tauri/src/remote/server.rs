@@ -9833,6 +9833,11 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(super::repo_discovery::repositories),
         )
         .route("/api/v1/resources", get(super::resources_api::read))
+        .route("/api/v1/themes", get(super::theme_api::list_themes))
+        .route(
+            "/api/v1/themes/{themeId}/background",
+            get(super::theme_api::get_theme_background),
+        )
         .route("/api/v1/pair/exchange", post(pair_exchange))
         .route(
             "/api/v1/sessions",

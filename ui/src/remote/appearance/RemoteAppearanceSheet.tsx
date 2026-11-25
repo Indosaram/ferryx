@@ -1,8 +1,15 @@
 import { Palette } from "lucide-react";
 import { useState } from "react";
 import { cycleAppearanceTheme, openAppearanceSurface } from "../../lib/appearanceCommands";
-import { useAppearanceSettings, type AppearanceAccent, type AppearanceTheme } from "../../lib/appearanceSettings";
+import {
+  useAppearanceSettings,
+  usePublishedEnvironmentThemes,
+  type AppearanceAccent,
+  type AppearanceTheme,
+} from "../../lib/appearanceSettings";
 import { scopeCustomCss, type CustomCssError } from "../../lib/customThemeCss";
+import { CURATED_THEMES } from "../../lib/themePalettes";
+import { parseAnyThemeImport } from "../../lib/vscodeThemeImport";
 import { MobileSheet } from "../chat/MobileSheet";
 
 const CONTROL = "min-h-11 w-full rounded-lg border border-chat-border bg-chat-surface px-3 text-base text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -27,8 +34,13 @@ export function RemoteAppearanceButton({ open, onOpen }: { open: boolean; onOpen
 
 function AppearanceControls() {
   const { settings, invalidThemes, updateSettings } = useAppearanceSettings();
+  const publishedThemes = usePublishedEnvironmentThemes();
   const [css, setCss] = useState(settings.customCss);
   const [errors, setErrors] = useState<CustomCssError[]>([]);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importJson, setImportJson] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+
   return (
     <div className="space-y-4 px-2 pb-3">
       <label className="block space-y-1 text-sm text-chat-foreground">
@@ -36,56 +48,232 @@ function AppearanceControls() {
         <select
           aria-label="Theme"
           className={CONTROL}
-          value={settings.activeCustomThemeId ? `custom:${settings.activeCustomThemeId}` : settings.theme}
+          value={
+            settings.activeCustomThemeId &&
+            settings.customThemes.some((t) => t.id === settings.activeCustomThemeId)
+              ? `custom:${settings.activeCustomThemeId}`
+              : settings.theme
+          }
           onChange={(event) => {
             const value = event.target.value;
-            updateSettings(value.startsWith("custom:")
-              ? { activeCustomThemeId: value.slice(7) }
-              : { theme: value as AppearanceTheme, activeCustomThemeId: null });
+            updateSettings(
+              value.startsWith("custom:")
+                ? { activeCustomThemeId: value.slice(7), themeHalves: undefined }
+                : { theme: value as AppearanceTheme, activeCustomThemeId: null, themeHalves: undefined },
+            );
           }}
         >
           <optgroup label="Built-in themes">
-            {THEMES.map((theme) => <option key={theme} value={theme}>{theme[0].toUpperCase() + theme.slice(1)}</option>)}
+            {THEMES.map((theme) => (
+              <option key={theme} value={theme}>
+                {theme[0].toUpperCase() + theme.slice(1)}
+              </option>
+            ))}
           </optgroup>
           {settings.customThemes.length > 0 ? (
             <optgroup label="Saved themes">
-              {settings.customThemes.map((theme) => <option key={theme.id} value={`custom:${theme.id}`}>{theme.name}</option>)}
+              {settings.customThemes.map((theme) => (
+                <option key={theme.id} value={`custom:${theme.id}`}>
+                  {theme.name}
+                </option>
+              ))}
             </optgroup>
           ) : null}
         </select>
       </label>
-      <button type="button" className={CONTROL} onClick={() => cycleAppearanceTheme(settings, updateSettings)}>Cycle theme</button>
+
+      <div className="space-y-1.5">
+        <p className="text-sm text-chat-foreground">Curated T3 Code themes</p>
+        <div className="grid grid-cols-2 gap-2">
+          {CURATED_THEMES.map((curated) => {
+            const active = settings.activeCustomThemeId === curated.id;
+            return (
+              <button
+                key={curated.id}
+                type="button"
+                aria-pressed={active}
+                className={`${CONTROL} ${active ? "border-primary font-medium" : ""}`}
+                onClick={() => updateSettings({ activeCustomThemeId: curated.id, themeHalves: undefined })}
+              >
+                {curated.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {publishedThemes.length > 0 ? (
+        <div className="space-y-1.5">
+          <p className="text-sm text-chat-foreground">Environment themes</p>
+          <div className="space-y-2">
+            {publishedThemes.map(({ doc }) => {
+              const active = settings.activeCustomThemeId === doc.id;
+              return (
+                <button
+                  key={doc.id}
+                  type="button"
+                  aria-pressed={active}
+                  className={`${CONTROL} ${active ? "border-primary font-medium" : ""}`}
+                  onClick={() => updateSettings({ activeCustomThemeId: doc.id, themeHalves: undefined })}
+                >
+                  {doc.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      <button type="button" className={CONTROL} onClick={() => cycleAppearanceTheme(settings, updateSettings)}>
+        Cycle theme
+      </button>
+
       <label className="block space-y-1 text-sm text-chat-foreground">
         <span>Accent</span>
-        <select aria-label="Accent" className={CONTROL} value={settings.accentColor} onChange={(event) => updateSettings({ accentColor: event.target.value as AppearanceAccent })}>
-          {ACCENTS.map((accent) => <option key={accent} value={accent}>{accent[0].toUpperCase() + accent.slice(1)}</option>)}
+        <select
+          aria-label="Accent"
+          className={CONTROL}
+          value={settings.accentColor}
+          onChange={(event) => updateSettings({ accentColor: event.target.value as AppearanceAccent })}
+        >
+          {ACCENTS.map((accent) => (
+            <option key={accent} value={accent}>
+              {accent[0].toUpperCase() + accent.slice(1)}
+            </option>
+          ))}
         </select>
       </label>
+
+      <div>
+        <button
+          type="button"
+          className={CONTROL}
+          aria-expanded={importOpen}
+          onClick={() => setImportOpen((prev) => !prev)}
+        >
+          {importOpen ? "Hide theme import" : "Import T3 / VS Code theme"}
+        </button>
+        {importOpen ? (
+          <div className="mt-2 space-y-2">
+            <label className="block space-y-1 text-sm text-chat-foreground">
+              <span>Theme JSON or VS Code JSONC</span>
+              <textarea
+                aria-label="Import theme JSON"
+                className={`${CONTROL} min-h-28 py-3 font-mono`}
+                value={importJson}
+                onChange={(event) => setImportJson(event.target.value)}
+                spellCheck={false}
+                autoCapitalize="none"
+              />
+            </label>
+            {importError ? (
+              <p role="alert" className="text-sm text-destructive">
+                {importError}
+              </p>
+            ) : null}
+            <button
+              type="button"
+              className={CONTROL}
+              onClick={() => {
+                const parsed = parseAnyThemeImport(importJson);
+                if (!parsed.ok) {
+                  setImportError(parsed.errors.map((e) => `${e.path}: ${e.message}`).join("; "));
+                  return;
+                }
+                setImportError(null);
+                setImportJson("");
+                setImportOpen(false);
+                updateSettings({
+                  customThemes: [
+                    ...settings.customThemes.filter((t) => t.id !== parsed.doc.id),
+                    parsed.doc,
+                  ],
+                  activeCustomThemeId: parsed.doc.id,
+                  themeHalves: undefined,
+                });
+              }}
+            >
+              Import &amp; apply theme
+            </button>
+          </div>
+        ) : null}
+      </div>
+
       {invalidThemes.map((row, index) => (
         <div key={index} role="alert" className="rounded-lg border border-chat-border p-3 text-sm text-chat-foreground">
           <p>Saved appearance could not be loaded. The built-in theme remains available.</p>
-          <ul>{row.errors.map((error, errorIndex) => <li key={errorIndex}>{error.path}: {error.message}</li>)}</ul>
+          <ul>
+            {row.errors.map((error, errorIndex) => (
+              <li key={errorIndex}>
+                {error.path}: {error.message}
+              </li>
+            ))}
+          </ul>
         </div>
       ))}
+
       <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-chat-foreground">
-        <input type="checkbox" className="size-5" checked={settings.renderMath} onChange={(event) => updateSettings({ renderMath: event.target.checked })} />
+        <input
+          type="checkbox"
+          className="size-5"
+          checked={settings.renderMath}
+          onChange={(event) => updateSettings({ renderMath: event.target.checked })}
+        />
         Render math in chat
       </label>
-      <form className="space-y-2" onSubmit={(event) => {
-        event.preventDefault();
-        const result = scopeCustomCss(css, settings.activeCustomThemeId ?? "custom-css");
-        if (!result.ok) { setErrors(result.errors); return; }
-        setErrors([]);
-        updateSettings({ customCss: css });
-      }}>
+
+      <form
+        className="space-y-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const result = scopeCustomCss(css, settings.activeCustomThemeId ?? "custom-css");
+          if (!result.ok) {
+            setErrors(result.errors);
+            return;
+          }
+          setErrors([]);
+          updateSettings({ customCss: css });
+        }}
+      >
         <label className="block space-y-1 text-sm text-chat-foreground">
           <span>Custom CSS</span>
-          <textarea aria-label="Custom CSS" aria-describedby="remote-custom-css-hint" aria-invalid={errors.length > 0} className={`${CONTROL} min-h-28 py-3 font-mono`} value={css} onChange={(event) => setCss(event.target.value)} spellCheck={false} autoCapitalize="none" />
+          <textarea
+            aria-label="Custom CSS"
+            aria-describedby="remote-custom-css-hint"
+            aria-invalid={errors.length > 0}
+            className={`${CONTROL} min-h-28 py-3 font-mono`}
+            value={css}
+            onChange={(event) => setCss(event.target.value)}
+            spellCheck={false}
+            autoCapitalize="none"
+          />
         </label>
-        <p id="remote-custom-css-hint" className="text-sm text-chat-foreground-secondary">Applies only inside chat, after the saved theme's CSS. Appearance controls stay outside chat.</p>
-        {errors.length > 0 ? <ul role="alert" className="text-sm text-chat-foreground">{errors.map((error, index) => <li key={index}>{error.path}: {error.message}</li>)}</ul> : null}
-        <button type="submit" className={CONTROL}>Apply custom CSS</button>
-        <button type="button" className={CONTROL} onClick={() => { setCss(""); setErrors([]); updateSettings({ customCss: "" }); }}>Remove custom CSS</button>
+        <p id="remote-custom-css-hint" className="text-sm text-chat-foreground-secondary">
+          Applies only inside chat, after the saved theme&apos;s CSS. Appearance controls stay outside chat.
+        </p>
+        {errors.length > 0 ? (
+          <ul role="alert" className="text-sm text-chat-foreground">
+            {errors.map((error, index) => (
+              <li key={index}>
+                {error.path}: {error.message}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <button type="submit" className={CONTROL}>
+          Apply custom CSS
+        </button>
+        <button
+          type="button"
+          className={CONTROL}
+          onClick={() => {
+            setCss("");
+            setErrors([]);
+            updateSettings({ customCss: "" });
+          }}
+        >
+          Remove custom CSS
+        </button>
       </form>
     </div>
   );

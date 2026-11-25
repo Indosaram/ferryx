@@ -49,6 +49,7 @@ pub mod session;
 mod shortcut_dispatch;
 pub mod ssh;
 pub mod terminal;
+pub mod theme;
 pub mod util;
 #[cfg(feature = "desktop")]
 pub mod window_registry;
@@ -2026,6 +2027,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_preferences,
         cmd_terminal_apply_overrides,
         cmd_terminal_set_appearance,
+        cmd_terminal_set_theme_palette,
+        cmd_theme_list_environment,
+        cmd_theme_set_environment,
+        cmd_theme_clear_environment,
+        cmd_theme_read_background,
         cmd_native_terminal_attach,
         cmd_native_terminal_attach_viewer,
         cmd_native_terminal_detach,

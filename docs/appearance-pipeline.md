@@ -194,10 +194,32 @@ These are references to the delivered test assertions, not a new test-run receip
 This documentation-only change was checked by source reading and cited-path
 existence checks; it did not execute tests or a live appearance change.
 
+## T3 Code parity extensions
+
+In addition to the legacy `ThemeDocumentV1` / chat-scoped CSS pipeline documented above,
+Ferryx ships full T3 Code theme customization parity across desktop, remote/mobile, and CLI:
+
+- **OKLCH palette engine & curated themes** (`ui/src/lib/themePalettes.ts`):
+  - `createVividThemeColors(appearance, canvas, accent)` derives all 61 T3 Code color roles in OKLCH with WCAG contrast guarantees and maps them onto Ferryx tokens (`themeColorsToFerryxTokens`) plus native terminal colors (`themeColorsToTerminalPalette`).
+  - Ships all 5 curated dual-mode T3 Code presets (`t3-chat`, `grove`, `ocean`, `ember`, `iris`) with radial preview circles (`ThemePreviewCircles.tsx`) and independent light/dark theme halves (`themeHalves: { light?, dark? }`).
+- **T3 Code & VS Code theme import + OpenVSX search** (`ui/src/lib/vscodeThemeImport.ts`, `ui/src/lib/openVsxThemes.ts`, `ThemeImportDialog.tsx`, `ThemeSearchSection.tsx`):
+  - `parseAnyThemeImport()` auto-detects Ferryx v1, T3 Code full v1, T3 Code shorthand (`{ name, appearance, canvas, accent, colors?, variants?, css? }`), and VS Code `.json`/`.jsonc` themes.
+  - `serializeToT3ThemeFile()` exports standard T3 Code v1 JSON.
+  - OpenVSX search extracts themes directly from `.vsix` archives without external ZIP dependencies.
+- **App-wide safe Custom CSS & stable selectors** (`ui/src/lib/themeCss.ts`, `ThemeCssEditor.tsx`):
+  - Themes authored with `cssScope: "app"` (visual editor, T3 Code import, environment themes) apply CSS app-wide after built-in styles via `applyAppThemeCss()`, stripping remote fetches (`@import`, `image-set()`, `src()`, non-`data:`/`#id` `url()`, fetch escapes) while supporting `.dark`, `:root:not(.dark)`, `@keyframes`, `!important`, `var(--theme-background-image)`, and stable `data-slot` / `data-*` hooks (`THEME_CSS_HOOKS`).
+  - Border/input alpha companions (`--border-alpha`, `--input-alpha`, `--sidebar-border-alpha`, `--worktree-sidebar-border-alpha`) are derived from custom token alpha and restored on reset; `.remote-app-root` receives a mirrored custom-token stylesheet so custom themes apply equally on remote/mobile.
+- **Visual Theme Editor & live element inspector** (`ThemeEditorPanel.tsx`, `ThemeColorPicker.tsx`, `themeInspector.ts`):
+  - Quick OKLCH Canvas/Accent editor, dual light/dark variant authoring, 6-group advanced token editor, live DOM element picker ("Pick from app"), and live preview with exact rollback on Cancel.
+- **Command Palette & Remote parity** (`CommandPalette.tsx`, `RemoteAppearanceSheet.tsx`):
+  - Interactive Command Palette theme picker with live hover preview across built-in, curated, environment, and saved custom themes.
+  - Mobile/remote sheet supports curated themes, environment themes, and T3/VS Code JSON/JSONC import with 44px touch targets.
+- **Environment themes, wallpapers, native terminal palette & CLI** (`src-tauri/src/theme/mod.rs`, `src-tauri/src/ipc/theme.rs`, `src-tauri/src/remote/theme_api.rs`, `src-tauri/src/cli/theme.rs`):
+  - Publishes/reads JSON themes from `<data_dir>/themes/` (`FERRYX_THEMES_DIR`) with atomic writes and sidecar background images (`<id>.{jpg,jpeg,png,webp}`, <= 16 MiB) exposed via Tauri IPC (`cmd_theme_*`) and authenticated remote HTTP endpoints (`GET /api/v1/themes`, `GET /api/v1/themes/{themeId}/background`).
+  - Native terminal renderer accepts custom terminal palette overrides via `cmd_terminal_set_theme_palette`.
+  - `ferryx-cli theme <show|set|clear|guide>` (also catalogued in `ferryx-cli api describe theme`) lets users and coding agents inspect, publish, switch, and clear environment themes.
+
 ## Explicit non-goals
 
-This pipeline is a local settings/document mechanism. A theme registry,
-server-published themes and wallpaper-derived colours are outside its contract.
-Scoped CSS is not an app-chrome styling API. Native terminal rendering is not a
-consumer of the user token map; the bridge synchronizes only the effective
-light/dark side through the existing terminal preference call.
+Server-side remote CSS fetching (`@import`, external `url()`, `image-set()`) remains
+blocked at runtime to prevent screen-content exfiltration.

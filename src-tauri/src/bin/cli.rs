@@ -7,7 +7,7 @@ use ferryx_lib::cli::{
     run_direct_trust_cli, run_open_cli, run_pair_cli, run_remote_cli, AccountCliError, LaunchMode,
 };
 
-const USAGE: &str = "ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|daemon crash-report [--ips <path>] [--dsym <dir>] [--out <dir>] [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|cloud <create|list|stop|resume|delete|socket|exec|reconcile>|pair|remote|direct-trust|browser|file cp <src> <dst> [--json]|api <list|describe <command>>|--daemon>";
+const USAGE: &str = "ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|daemon crash-report [--ips <path>] [--dsym <dir>] [--out <dir>] [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|cloud <create|list|stop|resume|delete|socket|exec|reconcile>|pair|remote|direct-trust|browser|file cp <src> <dst> [--json]|theme <show|set|clear|guide>|api <list|describe <command>>|--daemon>";
 
 fn main() {
     #[cfg(unix)]
@@ -39,6 +39,9 @@ fn main() {
     let group = args.get(1).map(String::as_str).filter(|arg| CLI_GROUPS.contains(arg));
     if group == Some("api") {
         std::process::exit(run_api_cli(&args));
+    }
+    if group == Some("theme") {
+        std::process::exit(ferryx_lib::cli::theme::run_theme_cli(&args));
     }
     // Before the generic `supervisor` dispatch: `supervisor engine` has its own parser.
     if group == Some("supervisor") && args.get(2).is_some_and(|arg| arg == "engine") {
