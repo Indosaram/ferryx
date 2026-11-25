@@ -1,0 +1,276 @@
+/* Maho browser-mode chrome.
+ *
+ * Everything here is scoped to `[data-maho-space]` or a `--maho-*` custom
+ * property, so none of it can leak into the terminal, the sidebar, or the rest of
+ * the app. Every color falls back to a Ferryx semantic token, which means an
+ * un-themed Maho surface looks exactly like the surrounding app and only a Space
+ * adds its own tint.
+ *
+ * Layout numbers repeat `MAHO_LAYOUT_TOKENS` in mahoTokens.ts. `mahoTokens.test.ts`
+ * parses this file and pins both sides, so a change on either side fails the
+ * suite instead of silently drifting.
+ */
+
+.maho-sidebar {
+  /* Geometry fallbacks (Maho dp values). */
+  --maho-rail-width: 288px;
+  --maho-rail-radius: 18px;
+  --maho-section-radius: 12px;
+  --maho-section-spacing: 7px;
+  --maho-top-region-spacing: 8px;
+  --maho-content-inset: 4px;
+  --maho-rail-inset-top: 6px;
+  --maho-rail-inset-left: 8px;
+  --maho-rail-inset-bottom: 8px;
+  --maho-rail-inset-right: 8px;
+  --maho-row-inset-top: 2px;
+  --maho-row-inset-left: 7px;
+  --maho-row-inset-bottom: 2px;
+  --maho-row-inset-right: 7px;
+  --maho-top-bar-height: 21px;
+  --maho-top-bar-button-size: 20px;
+  --maho-top-bar-button-radius: 8px;
+  --maho-top-bar-icon-size: 16px;
+  --maho-control-indicator-height: 32px;
+  --maho-control-indicator-radius: 10px;
+  --maho-search-pill-height: 35px;
+  --maho-search-pill-radius: 10px;
+  --maho-library-rail-width: 92px;
+  --maho-library-rail-item-width: 80px;
+  --maho-library-rail-item-radius: 12px;
+  --maho-library-rail-item-spacing: 4px;
+  --maho-library-rail-icon-size: 24px;
+  --maho-library-overlay-width: 380px;
+  --maho-gradient-span: 380px;
+  --maho-favorites-columns: 4;
+  --maho-favorite-tile-height: 47px;
+  --maho-favorite-tile-radius: 12px;
+  --maho-favorite-tile-spacing: 6px;
+  --maho-favorite-glyph-size: 16px;
+  --maho-favorite-glyph-container: 28px;
+  --maho-row-height: 36px;
+  --maho-row-radius: 6px;
+  --maho-row-icon-size: 17px;
+  --maho-action-row-height: 42px;
+  --maho-footer-row-height: 32px;
+  --maho-footer-control-size: 28px;
+  --maho-dot-size: 15px;
+  --maho-dot-indicator-size: 11px;
+
+  /* Space palette fallbacks: the app's own palette until a Space tints the frame.
+     `spacePaletteCssVars()` overrides every one of these on the themed container. */
+  --maho-space-gradient: none;
+  --maho-space-gradient-from: var(--sidebar);
+  --maho-space-gradient-to: var(--sidebar);
+  --maho-space-surface: var(--sidebar);
+  --maho-space-surface-hover: var(--surface-hover);
+  --maho-space-foreground: var(--sidebar-foreground);
+  --maho-space-muted-foreground: var(--muted-foreground);
+  --maho-space-accent: var(--sidebar-primary);
+
+  display: flex;
+  flex-direction: column;
+  width: var(--maho-rail-width);
+  border-radius: var(--maho-rail-radius);
+  color: var(--maho-space-foreground);
+  background-color: var(--maho-space-surface);
+  /* One gradient span for every surface that paints a Space palette, so the rail
+     and the library overlay of one Space resolve to the same tint at the same
+     screen position (kThemedBackgroundGradientSpanDp). */
+  background-image: var(--maho-space-gradient);
+  background-size: var(--maho-gradient-span) var(--maho-gradient-span);
+}
+
+.maho-top-bar {
+  display: flex;
+  align-items: center;
+  height: var(--maho-top-bar-height);
+  padding: 0 1px 1px;
+  gap: 0;
+}
+
+.maho-top-bar__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--maho-top-bar-button-size);
+  height: var(--maho-top-bar-button-size);
+  border-radius: var(--maho-top-bar-button-radius);
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-top-bar__button:hover {
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-foreground);
+}
+
+.maho-top-bar__button svg {
+  width: var(--maho-top-bar-icon-size);
+  height: var(--maho-top-bar-icon-size);
+}
+
+.maho-search-pill {
+  display: flex;
+  align-items: center;
+  height: var(--maho-search-pill-height);
+  padding: 0 2px;
+  border-radius: var(--maho-search-pill-radius);
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-control-indicator {
+  display: inline-flex;
+  align-items: center;
+  height: var(--maho-control-indicator-height);
+  border-radius: var(--maho-control-indicator-radius);
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-foreground);
+}
+
+.maho-row {
+  display: flex;
+  align-items: center;
+  height: var(--maho-row-height);
+  padding: var(--maho-row-inset-top) var(--maho-row-inset-right) var(--maho-row-inset-bottom)
+    var(--maho-row-inset-left);
+  border-radius: var(--maho-row-radius);
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-row:hover {
+  background-color: var(--maho-space-surface-hover);
+}
+
+.maho-row[data-selected="true"] {
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-foreground);
+}
+
+.maho-row__icon svg {
+  width: var(--maho-row-icon-size);
+  height: var(--maho-row-icon-size);
+}
+
+.maho-action-row {
+  display: flex;
+  align-items: center;
+  height: var(--maho-action-row-height);
+}
+
+.maho-favorites {
+  display: grid;
+  grid-template-columns: repeat(var(--maho-favorites-columns), minmax(0, 1fr));
+  gap: var(--maho-favorite-tile-spacing);
+  padding: 6px 4px;
+}
+
+.maho-favorite-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: var(--maho-favorite-tile-height);
+  border-radius: var(--maho-favorite-tile-radius);
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-favorite-tile:hover {
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-foreground);
+}
+
+.maho-favorite-tile__glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--maho-favorite-glyph-container);
+  height: var(--maho-favorite-glyph-container);
+  border-radius: 10px;
+  background-color: var(--maho-space-surface-hover);
+}
+
+.maho-favorite-tile__glyph svg {
+  width: var(--maho-favorite-glyph-size);
+  height: var(--maho-favorite-glyph-size);
+}
+
+.maho-library-rail {
+  display: flex;
+  flex-direction: column;
+  width: var(--maho-library-rail-width);
+  padding: 14px 0;
+  gap: var(--maho-library-rail-item-spacing);
+  background-color: var(--maho-space-surface);
+}
+
+.maho-library-rail__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: var(--maho-library-rail-item-width);
+  border-radius: var(--maho-library-rail-item-radius);
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-library-rail__item:hover {
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-foreground);
+}
+
+.maho-library-rail__item svg {
+  width: var(--maho-library-rail-icon-size);
+  height: var(--maho-library-rail-icon-size);
+}
+
+.maho-footer {
+  display: flex;
+  align-items: center;
+  height: var(--maho-footer-row-height);
+  padding: 1px 8px;
+}
+
+.maho-footer__control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--maho-footer-control-size);
+  height: var(--maho-footer-control-size);
+  border-radius: 14px;
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-footer__control:hover {
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-foreground);
+}
+
+.maho-space-dot {
+  width: var(--maho-dot-size);
+  height: var(--maho-dot-size);
+}
+
+.maho-space-dot__indicator {
+  width: var(--maho-dot-indicator-size);
+  height: var(--maho-dot-indicator-size);
+  border-radius: 9999px;
+  /* The Space swatch is artwork, not a neutral glyph: it keeps the Space color
+     even when a row is muted. */
+  background-color: var(--maho-space-accent);
+}
+
+.maho-accent {
+  color: var(--maho-space-accent);
+}
+
+/* Reduced motion: Maho's sidebar reveal/hover animations go to zero duration
+   rather than a shorter one. */
+@media (prefers-reduced-motion: reduce) {
+  .maho-sidebar,
+  .maho-sidebar * {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}
