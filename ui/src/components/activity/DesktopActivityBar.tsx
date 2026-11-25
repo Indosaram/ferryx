@@ -123,7 +123,7 @@ export function DesktopActivityBar({
 
   // Automatic activation: an arrow key both moves focus and selects, which is the WAI-ARIA
   // pattern for a tablist whose panels are always mounted.
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>, index: number) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>, index: number) => {
     let nextIndex: number | null = null;
     if (event.key === "ArrowDown" || event.key === "ArrowRight") nextIndex = (index + 1) % ACTIVITY_BAR_MODES.length;
     else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
