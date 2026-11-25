@@ -731,41 +731,92 @@ impl RoleMachine {
         }
     }
 
-    /// Paused after a release: a query naming another holder at a fence above the released
-    /// one (the reservation was consumed) names it in the role and the snapshot and resumes
-    /// auto-acquire. A free, still-reserved or own lease changes nothing.
+    /// Applies a lease query answer while standby.
+    ///
+    /// - Paused after a release (`!auto_acquire`): a query naming another holder at a fence above
+    ///   the released one (the reservation was consumed) names it in the role and snapshot and
+    ///   resumes auto-acquire. A free, still-reserved or own lease changes nothing.
+    /// - Active standby (`auto_acquire`, e.g. a `hub_stopped` machine querying instead of
+    ///   auto-acquiring): tracks the reported holder (or clears a stale holder when free) without
+    ///   ever promoting to Holder.
     fn on_query_ack(&mut self, ack: LeaseAck, out: &mut Vec<Action>) {
-        if self.auto_acquire || !self.leased() || !matches!(self.role, Role::Standby { .. }) {
+        if !self.leased() || !matches!(self.role, Role::Standby { .. }) {
             return;
         }
-        let LeaseAck::Refused {
-            holder_machine_id: Some(holder),
-            holder_label,
-            fence: Some(fence),
-            account_machine_count,
-            ..
-        } = ack
-        else {
-            return;
-        };
-        if holder == self.self_machine_id || self.released_fence.is_some_and(|released| fence <= released) {
+        if !self.auto_acquire {
+            let LeaseAck::Refused {
+                holder_machine_id: Some(holder),
+                holder_label,
+                fence: Some(fence),
+                account_machine_count,
+                ..
+            } = ack
+            else {
+                return;
+            };
+            if holder == self.self_machine_id
+                || self.released_fence.is_some_and(|released| fence <= released)
+            {
+                return;
+            }
+            self.auto_acquire = true;
+            self.released_fence = None;
+            let snapshot = PersistedLease {
+                last_role: LastRole::Standby,
+                last_fence: fence,
+                account_machine_count: account_machine_count.or(self.snapshot.account_machine_count),
+                holder_machine_id: Some(holder.clone()),
+                lease_capable: true,
+            };
+            self.role = Role::Standby {
+                holder_machine_id: Some(holder),
+                holder_label,
+                fence: Some(fence),
+            };
+            self.set_snapshot(snapshot, out);
             return;
         }
-        self.auto_acquire = true;
-        self.released_fence = None;
-        let snapshot = PersistedLease {
-            last_role: LastRole::Standby,
-            last_fence: fence,
-            account_machine_count: account_machine_count.or(self.snapshot.account_machine_count),
-            holder_machine_id: Some(holder.clone()),
-            lease_capable: true,
-        };
-        self.role = Role::Standby {
-            holder_machine_id: Some(holder),
-            holder_label,
-            fence: Some(fence),
-        };
-        self.set_snapshot(snapshot, out);
+        match ack {
+            LeaseAck::Refused {
+                holder_machine_id: Some(holder),
+                holder_label,
+                fence,
+                account_machine_count,
+                ..
+            } if holder != self.self_machine_id => {
+                let snapshot = PersistedLease {
+                    last_role: LastRole::Standby,
+                    last_fence: fence.unwrap_or(self.snapshot.last_fence),
+                    account_machine_count: account_machine_count
+                        .or(self.snapshot.account_machine_count),
+                    holder_machine_id: Some(holder.clone()),
+                    lease_capable: true,
+                };
+                self.role = Role::Standby {
+                    holder_machine_id: Some(holder),
+                    holder_label,
+                    fence,
+                };
+                self.set_snapshot(snapshot, out);
+            }
+            LeaseAck::Released | LeaseAck::Refused { holder_machine_id: None, .. } => {
+                let snapshot = PersistedLease {
+                    last_role: LastRole::Standby,
+                    holder_machine_id: None,
+                    lease_capable: true,
+                    ..self.snapshot.clone()
+                };
+                self.role = Role::standby_unknown();
+                self.set_snapshot(snapshot, out);
+            }
+            LeaseAck::Unavailable { reason_code } if reason_code == lease::LEASE_UNSUPPORTED => {
+                let role = Role::Unleased {
+                    reason: RELAY_LEASE_UNSUPPORTED.to_string(),
+                };
+                self.stand_down(role, StandDownReason::RelayLeaseUnsupported, out);
+            }
+            _ => {}
+        }
     }
 
     /// `send`: send the release of the held fence (false when the relay already released it).
@@ -1552,6 +1603,37 @@ mod tests {
             assert_eq!(m.role(), &Role::standby_unknown(), "{ack:?}");
         }
         assert_eq!(m.handle(Event::Tick, clock.at(100)), vec![Action::SendQuery]);
+    }
+
+    #[test]
+    fn query_ack_updates_holder_for_standby_without_promoting() {
+        let clock = Clock::new();
+        let persisted = PersistedLease {
+            last_role: LastRole::Standby,
+            last_fence: 1,
+            account_machine_count: Some(2),
+            holder_machine_id: None,
+            lease_capable: true,
+        };
+        let (mut m, _) = RoleMachine::new(RoleConfig::default(), "mach-a", true, Some(persisted), clock.at(0));
+        assert_eq!(m.role(), &Role::standby_unknown());
+
+        let out = m.handle(Event::QueryAck { ack: held_by("mach-b", 4) }, clock.at(5));
+        assert!(!out.iter().any(|a| matches!(a, Action::StartHub | Action::StopHub { .. })));
+        assert_eq!(
+            m.role(),
+            &Role::Standby {
+                holder_machine_id: Some("mach-b".into()),
+                holder_label: Some("Studio".into()),
+                fence: Some(4),
+            }
+        );
+        assert_eq!(m.snapshot().holder_machine_id.as_deref(), Some("mach-b"));
+
+        let cleared = m.handle(Event::QueryAck { ack: LeaseAck::Released }, clock.at(10));
+        assert!(!cleared.iter().any(|a| matches!(a, Action::StartHub)));
+        assert_eq!(m.role(), &Role::standby_unknown());
+        assert_eq!(m.snapshot().holder_machine_id, None);
     }
 
     #[test]
