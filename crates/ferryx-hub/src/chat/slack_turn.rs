@@ -577,13 +577,13 @@ pub fn apply_commitments(report: &mut crate::report_gate::Report, commitments: C
     }
 }
 
-/// Returns `true` when the reply was withheld because it only promised work the commitment
-/// ledger now owns; the owner's message then shows that the work is pending, not done.
-/// The owner-facing line for a turn whose prompt the engine never acknowledged.
-fn ack_failure_notice() -> String {
+/// The one notice of a turn the hub truly cannot deliver: no resume lane could be queued, so
+/// the message will not be answered unless the owner sends it again. States what happened and
+/// what the owner should do, with no internal name in it.
+fn undeliverable_notice() -> String {
     format!("\u{26a0}\u{fe0f} {}", crate::locale::text(
-        "엔진 수신 확인을 받지 못했어요; 근본 원인은 알 수 없어요",
-        "acknowledgement not received; underlying cause unknown",
+        "메시지를 엔진에 전달하지 못했고 자동 재시도도 걸지 못했어요. 잠시 뒤 다시 보내 주세요.",
+        "I couldn't hand the message to the engine or schedule an automatic retry. Please send it again in a moment.",
     ))
 }
 
@@ -684,7 +684,7 @@ async fn notify_ack_failure_for(
     }
     let reply_key = SessionKey::new("slack", None::<String>, channel, turn.reply_thread.clone(), "owner").storage_key();
     let queued = sqlx::query("INSERT INTO chat_outbox(session_key, platform, text, created_at) VALUES(?, 'slack', ?, ?)")
-        .bind(&reply_key).bind(ack_failure_notice()).bind(&now)
+        .bind(&reply_key).bind(undeliverable_notice()).bind(&now)
         .execute(pool).await
         .map(|done| done.last_insert_rowid());
     let (state, outbox_id, notice) = match queued {
@@ -1160,7 +1160,15 @@ pub async fn run_session_turn(
         let owner_turn = owner_turn_id(&turn)
             .unwrap_or_else(|| format!("dashboard:{}", uuid::Uuid::new_v4()));
         let resumed = schedule_resume_for(pool, &turn, &failure, &owner_turn).await;
-        match notify_ack_failure_for(pool, &turn, &owner_turn, &result).await {
+        // A turn the hub already queued for resume is still owed an answer: warning the owner
+        // now would report a failure the hub itself is about to repair. Only a turn that has
+        // no resume lane left is undeliverable, and only that one gets the notice.
+        let remaining = if resumed {
+            None
+        } else {
+            notify_ack_failure_for(pool, &turn, &owner_turn, &result).await
+        };
+        match remaining {
             Some(AckNotice::Queued(outbox_id)) => {
                 tracing::info!(session = %storage_key, outbox_id, "ack failure notice queued");
             }
@@ -1170,9 +1178,14 @@ pub async fn run_session_turn(
             Some(AckNotice::Uncertain) => {
                 tracing::error!(session = %storage_key, "ack failure notice state uncertain");
             }
+            // A queued resume is the hub's own retry lane: it says nothing to the owner.
+            None if resumed => {}
             None => {
-                let notice = if resumed {
-                    omo_client::owner_resume_text(&failure, RESUME_AFTER_MINUTES)
+                // Nothing will answer this turn unless the owner sends it again. A prompt the
+                // engine never acknowledged says that plainly; any other failure keeps its own
+                // reason, which is the only thing the owner can act on.
+                let notice = if failure.contains(omo_client::TURN_START_ACK_TIMEOUT) {
+                    undeliverable_notice()
                 } else {
                     omo_client::owner_failure_text(&failure)
                 };
@@ -1392,9 +1405,15 @@ async fn schedule_resume_for(pool: &SqlitePool, turn: &SessionTurn, failure: &st
         return false;
     }
     let now = chrono::Utc::now();
-    // A turn whose outcome is unknown may already have run: it is recorded for the operator
-    // and never resumed, so its side effects are not repeated.
-    if omo_client::is_ambiguous_failure(failure) {
+    // An ACK timeout is the one ambiguous outcome the hub recovers from by itself: the engine
+    // emitted no frame of any kind for the whole window (no ACK, no turn start, no busy), so
+    // the prompt most likely never began a run. It is re-delivered once through the resume
+    // lane, exactly like a definite failure, and a resume that fails again is not resumed
+    // again. Every other ambiguous outcome may already have produced side effects, so it is
+    // recorded for the operator and never resumed.
+    if omo_client::is_ambiguous_failure(failure)
+        && !failure.contains(omo_client::TURN_START_ACK_TIMEOUT)
+    {
         let recorded = sqlx::query(
             "INSERT OR IGNORE INTO lane_events(lane_key, lead_session_key, kind, body, created_at, release_at, source_event_id) VALUES(NULL,?,'owner_turn_ambiguous',?,?,?,?)",
         )
@@ -2633,7 +2652,7 @@ mod tests {
         assert_eq!(ack_notices(&pool).await, vec![("queued".to_owned(), Some(id))]);
         let text: String = sqlx::query_scalar("SELECT text FROM chat_outbox WHERE id=?")
             .bind(id).fetch_one(&pool).await.unwrap();
-        assert_eq!(text, ack_failure_notice());
+        assert_eq!(text, undeliverable_notice());
         assert_eq!(outbox_count(&pool).await, 1);
     }
 
@@ -2665,21 +2684,24 @@ mod tests {
     async fn the_resumed_owner_turn_shares_the_one_ack_notice() {
         let pool = crate::storage::memory().await.unwrap();
         let turn = ack_turn("1.0");
-        // An ACK timeout is ambiguous: recorded for the operator, never resumed.
-        assert!(!schedule_resume(&pool, &turn, omo_client::TURN_START_ACK_TIMEOUT).await);
-        assert!(matches!(notify_ack_failure(&pool, &turn, &ack_timeout()).await, Some(AckNotice::Queued(_))));
-        let (body, source): (String, String) = sqlx::query_as("SELECT body, source_event_id FROM lane_events")
-            .fetch_one(&pool).await.unwrap();
-        assert_eq!(source, "owner-turn-ambiguous:1.0");
-        let kind: String = sqlx::query_scalar("SELECT kind FROM lane_events").fetch_one(&pool).await.unwrap();
-        assert_eq!(kind, "owner_turn_ambiguous");
-        // The lane dispatcher's resumed turn: no status_ts, identity only in the event text.
+        // An ACK timeout is the ambiguous outcome the hub re-delivers by itself: it is queued
+        // on the resume lane exactly like a definite failure, so the owner is never warned
+        // about a turn the hub is already repairing.
+        assert!(schedule_resume(&pool, &turn, omo_client::TURN_START_ACK_TIMEOUT).await);
+        let (body, source, kind): (String, String, String) = sqlx::query_as(
+            "SELECT body, source_event_id, kind FROM lane_events",
+        )
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(kind, "owner_reply_failed");
+        assert_eq!(source, "owner-turn:1.0");
+        // The resumed turn is the same owner turn: any notice it would raise is the same one.
         let resumed = SessionTurn {
             status_ts: None,
             text: format!("[LANE_EVENT]\n- owner_reply_failed: {body}"),
             ..turn.clone()
         };
         assert_eq!(owner_turn_id(&resumed).as_deref(), Some("1.0"));
+        assert!(matches!(notify_ack_failure(&pool, &resumed, &ack_timeout()).await, Some(AckNotice::Queued(_))));
         assert_eq!(notify_ack_failure(&pool, &resumed, &ack_timeout()).await, Some(AckNotice::Duplicate));
         assert_eq!(outbox_count(&pool).await, 1);
         assert_eq!(ack_notices(&pool).await.len(), 1);
@@ -2690,10 +2712,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!("ferryx-ack-notice-{}.db", uuid::Uuid::new_v4()));
         let pool = crate::storage::connect(&path).await.unwrap();
         let turn = ack_turn("1.0");
-        // An ACK timeout is ambiguous: recorded for the operator, never resumed.
-        assert!(!schedule_resume(&pool, &turn, omo_client::TURN_START_ACK_TIMEOUT).await);
-        assert!(matches!(notify_ack_failure(&pool, &turn, &ack_timeout()).await, Some(AckNotice::Queued(_))));
+        assert!(schedule_resume(&pool, &turn, omo_client::TURN_START_ACK_TIMEOUT).await);
         let body: String = sqlx::query_scalar("SELECT body FROM lane_events").fetch_one(&pool).await.unwrap();
+        assert!(matches!(notify_ack_failure(&pool, &turn, &ack_timeout()).await, Some(AckNotice::Queued(_))));
         crate::storage::close_fully(&pool).await;
         let pool = crate::storage::connect(&path).await.unwrap();
         let resumed = SessionTurn { status_ts: None, text: format!("[LANE_EVENT]\n- owner_reply_failed: {body}"), ..turn };

@@ -102,6 +102,9 @@ drop.addEventListener('drop',(e)=>{e.preventDefault();const d=e.dataTransfer,x=d
     ["/print.html", { body: page("qa-print", "PRINTPAGE"), type: "text/html" }],
     // A plain page whose only use is to test that a URL typed through the address bar lands.
     ["/qa/probe.html", { body: page("qa-probe", "PROBEPAGE"), type: "text/html" }],
+    // G10: an inbound link lands on a page whose heading names the gap, so the screenshot of the
+    // opened tab is readable evidence on its own.
+    ["/qa/g10.html", { body: page("qa-g10", "G10INBOUND"), type: "text/html" }],
     ["/doc.pdf", { body: makePdf(), type: "application/pdf" }],
   ]);
 }
@@ -553,7 +556,12 @@ async function visit(ctx, url, expect, timeout = 20000) {
   // Typing only reaches the app while it owns the keyboard; a visit that cannot prove it still
   // types, but records the miss so the failure names the lost focus instead of the page.
   const foreground = await waitForAppForeground(ctx);
-  const landed = () => ctx.sessions().list.some((entry) => entry.visible !== false && (entry.url ?? "").split(/[?#]/)[0].endsWith(path));
+  // The URL is the proof, not the visibility flag. On macOS `visible` is the frontend pane's own
+  // state, and it stays `false` for every tab even while that tab paints (maho-mac 2026-11-22 run
+  // mfr9: /qa/second.html rendered "SECONDTAB" on screen while both tabs read visible:false, so a
+  // `visible !== false` gate failed a navigation that had in fact landed). The page text waited
+  // for below is the second, independent proof that the visited URL is what is showing.
+  const landed = () => ctx.sessions().list.some((entry) => (entry.url ?? "").split(/[?#]/)[0].endsWith(path));
   let ok = false;
   let attempts = 0;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1200,6 +1208,81 @@ function printUiSeen(ctx) {
   return wanted.filter((needle) => words.some((word) => word.includes(needle)));
 }
 
+/**
+ * Bring a browser tab to the front and confirm it with the tab list. Both ways to add a tab (the
+ * chord and the "+" menu) leave it in the background, so a `visit()` right after would type its
+ * URL into a tab that is not showing and the navigation would never land.
+ */
+async function revealBrowserTab(ctx, browserId) {
+  if (!browserId) return false;
+  const shown = () => ctx.sessions().list.find((entry) => entry.browserId === browserId)?.visible === true;
+  // `visible` is written by the frontend pane and drops back to false on its own (maho-mac
+  // 2026-11-22: a switched tab read true, then both tabs read false while still painting), so a
+  // single switch-and-wait loses the race. Retry: the tab only has to be frontmost long enough
+  // for the next visit's keystrokes to reach it, and one observed `true` is the proof.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (shown()) return true;
+    ctx.cli("tab", "switch", "--browser-id", browserId);
+    if (await until(shown, 4000, 400)) return true;
+  }
+  return false;
+}
+
+/**
+ * Opens a browser tab from the tab strip: the chord first, the "+" menu only if it does nothing.
+ *
+ * The chord (tab.newBrowser, Mod+Shift+B) is one keystroke and needs no OCR, but with a browser tab
+ * focused it REUSES that tab instead of adding one (maho-mac L5b report, 2026-11-09), so the tab
+ * list is what decides: no new browserId within 8s means it was a reuse and the menu has to open the
+ * tab. The order matters for correctness, not speed: `daily-g1-tabs` runs before
+ * `settings-enable-advanced`, and the previous menu-first version matched the menu's first item and
+ * broke CI run 45067277189 (see below).
+ *
+ * The "+" menu's items are New Terminal, New Chat, New Browser Tab, New Markdown, ... The old code
+ * clicked the topmost /^new$/i, which is the "New" of "New Terminal": that opened a TERMINAL tab and
+ * left it focused, stealing focus from the browser tab, so G2/G3/G13/G8 all failed on macOS and
+ * Linux CI (run 45067277189). The item is matched by its own word "Browser" now, inside the menu
+ * region under the "+", and a miss closes the menu so it cannot cover the next step.
+ *
+ * Returns { ok, via, before, after, plus, item }: `plus` is where the "+" was clicked and `item`
+ * where the menu's "Browser" word was, so a miss names the step that failed.
+ *
+ * The tab also has to be revealed. Both entry points add the tab in the background: the chord from
+ * a terminal tab and the "+" menu alike left it `visible: false` on maho-mac (2026-11-22, tabs 1
+ * and 2 both false), and every later `visit()` then typed its URL into an unfocused tab and the
+ * navigation never landed. A new tab is brought to the front here, the way clicking it would.
+ */
+async function newBrowserTabViaMenu(ctx, { timeout = 12000 } = {}) {
+  const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
+  const appeared = () => ctx.sessions().list.find((entry) => !before.has(entry.browserId)) ?? null;
+
+  // 1. The chord. A browser tab holding focus turns this into a reuse, which shows up as no new
+  // browserId; only that case falls through to the menu.
+  await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
+  const viaChord = await until(appeared, 8000);
+  if (viaChord) {
+    return { ok: true, via: "shortcut", revealed: await revealBrowserTab(ctx, viaChord.browserId), before: [...before], after: viaChord.browserId, plus: null, item: null };
+  }
+
+  // 2. The tab strip's "+" menu. Exclude the sidebar's top-left "+" so its project menu
+  // cannot win the topmost OCR match.
+  const plus = await clickWord(ctx, (text) => text === "+", { timeout: 6000, pick: "topmost", where: (word) => word.left > 240 });
+  const menuRow = plus
+    // The menu drops from the button: its rows are below it and share its column, so a stray
+    // "Browser" elsewhere on screen (a tab title, the toolbar) is never the item.
+    ? (word) => word.top >= plus[1] - 10 && Math.abs(word.left - plus[0]) <= 300
+    : null;
+  const item = plus ? await clickWord(ctx, (text) => /^browser$/i.test(text), { timeout: 5000, pick: "topmost", where: menuRow }) : null;
+  if (item) {
+    const opened = await until(appeared, timeout);
+    if (opened) return { ok: true, via: "+ menu", revealed: await revealBrowserTab(ctx, opened.browserId), before: [...before], after: opened.browserId, plus, item };
+  }
+  // No "Browser" item (Advanced features off, or the menu did not open): close it, or it covers the
+  // app chrome the next step clicks.
+  if (plus) ctx.host.key({ key: "Escape" });
+  return { ok: false, via: "none", revealed: false, before: [...before], after: null, plus, item };
+}
+
 // ---------------------------------------------------------------- before the restart (webview)
 export async function dailyWebviewBefore(ctx) {
   const { fixtureBase, siteB } = ctx;
@@ -1212,7 +1295,7 @@ export async function dailyWebviewBefore(ctx) {
   const daily = ctx.state.daily;
 
   // G1: tab A walks a -> b -> c; tab B is a second tab.
-  await run(ctx, "daily-g1-tabs", "Tab A: /qa/a, /qa/b, /qa/c through the address bar; Mod+Shift+B opens tab B on /qa/second", async () => {
+  await run(ctx, "daily-g1-tabs", "Tab A: /qa/a, /qa/b, /qa/c through the address bar; the tab strip '+' menu (New Browser Tab) opens tab B on /qa/second", async () => {
     ctx.host.focus();
     let list = ctx.sessions().list;
     if (!list.length) {
@@ -1220,6 +1303,7 @@ export async function dailyWebviewBefore(ctx) {
       // instead of typing URLs into nothing.
       await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
       list = (await until(() => (ctx.sessions().list.length ? ctx.sessions().list : null), 20000)) ?? [];
+      await revealBrowserTab(ctx, list.at(-1)?.browserId ?? null);
       await sleep(3000);
     }
     daily.tabA = (list.find((entry) => entry.engine === "system") ?? list.at(-1))?.browserId ?? null;
@@ -1227,12 +1311,15 @@ export async function dailyWebviewBefore(ctx) {
     for (const [path, word] of [["/qa/a.html", "ALPHAPAGE"], ["/qa/b.html", "BRAVOPAGE"], ["/qa/c.html", "CHARLIEPAGE"]]) {
       seen.push(await visit(ctx, `${fixtureBase}${path}`, word));
     }
-    await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
-    const tabB = await until(() => ctx.sessions().list.find((entry) => entry.browserId !== daily.tabA)?.browserId, 20000);
+    // A second tab through the "+" menu, never the chord: Mod+Shift+B reuses the current tab once
+    // a browser tab holds focus, so the restart below would compare one tab with itself.
+    const second = await newBrowserTabViaMenu(ctx);
+    daily.second_tab = second;
+    const tabB = second.after;
     daily.tabB = tabB ?? null;
     await sleep(3000);
-    seen.push(await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB"));
-    return { ok: seen.every(Boolean) && Boolean(tabB), seen, tabA: daily.tabA, tabB };
+    if (tabB) seen.push(await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB"));
+    return { ok: seen.every(Boolean) && Boolean(tabB), seen, tabA: daily.tabA, tabB, second };
   });
 
   // G2: bookmark (Mod+D), bar item, omnibox mix, history page, folders.
@@ -2066,6 +2153,183 @@ export async function dailyWebviewAfter(ctx) {
     ctx.cli("close", "--browser-id", privateTab.browserId);
     return { ok: g11.checks.private_tab_opened && g11.checks.private_cookie_not_shared && g11.checks.private_not_in_history };
   });
+}
+
+/**
+ * The QA bundle identifier of `ctx.bundle`, or null when this is not a QA build.
+ *
+ * Ownership of a process the harness did not spawn is proven by the bundle identifier of the QA
+ * build (`com.ferryx.app.qa.*`), never by a process name: resolving by name would also match the
+ * production app. The production identifier itself is refused here, not adopted.
+ */
+function qaBundleId(ctx, bundle) {
+  if (ctx.platform !== "darwin" || !bundle) return null;
+  const result = ctx.run("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIdentifier", join(bundle, "Contents", "Info.plist")], { timeout: 15000 });
+  const id = result.ok ? result.stdout.trim() : "";
+  return id && id !== "com.ferryx.app" ? id : null;
+}
+
+/**
+ * The GUI pids of `bundleId`, with the `--daemon` child dropped: it runs the same executable and
+ * carries the same bundle identifier, but owns no window and no tab list.
+ */
+function bundleGuiPids(ctx, bundleId) {
+  if (!bundleId) return [];
+  const listed = ctx.host.osa(`tell application "System Events" to get unix id of every process whose bundle identifier is "${bundleId}"`);
+  if (!listed.ok) return [];
+  return listed.stdout.split(/,\s*/).map(Number).filter(Number.isFinite).filter((pid) => {
+    const argv = ctx.run("ps", ["-o", "command=", "-p", String(pid)]).stdout;
+    return Boolean(argv) && !/--daemon\b/.test(argv);
+  });
+}
+
+/**
+ * Adopts the instance LaunchServices cold-started for the delivery, so the window helpers and the
+ * tab checks address it.
+ *
+ * It has to run AFTER `host.openUrl` returned: before the delivery there is no process to adopt,
+ * and polling then only burned the step's time. `until` polls once a second (never in a spin),
+ * because a cold start boots the app, its daemon and the web UI before the process is visible.
+ * `gha-ui-audit.mjs` keeps its own `adoptColdStart`, but that one cannot work here: the `until`
+ * it calls was never imported into its module, so it rejected with a ReferenceError every time
+ * and the cold start was left unadopted. This is the same lookup with a helper that exists.
+ */
+async function adoptColdStart(ctx, bundle, before) {
+  const bundleId = qaBundleId(ctx, bundle);
+  if (!bundleId) return { ok: false, stderr: "cannot resolve a QA bundle identifier, so no process is adopted" };
+  const found = await until(() => bundleGuiPids(ctx, bundleId).find((pid) => !before.has(pid)) ?? null, 90000, 1000);
+  if (!found) return { ok: false, bundle_id: bundleId, stderr: "no new QA app process appeared" };
+  ctx.host.pid = found;
+  return { ok: true, pid: found, bundle_id: bundleId };
+}
+
+/**
+ * Stops the adopted cold start by exact pid, and only while it still belongs to the QA bundle, so
+ * a recycled pid is never signalled. Teardown only stops what it spawned (`app`) plus the pids in
+ * its own adoption list, so an instance adopted here has to be stopped here or it is leaked.
+ */
+async function stopAdopted(ctx, adopted) {
+  if (!adopted?.ok) return { ok: true, stopped: false, reason: "nothing adopted" };
+  const signalled = (signal) => {
+    try {
+      process.kill(adopted.pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const alive = () => bundleGuiPids(ctx, adopted.bundle_id).includes(adopted.pid);
+  if (!alive()) return { ok: true, stopped: false, pid: adopted.pid, reason: "already gone" };
+  // A signal that never left this process (the pid went away, or the kernel refused it) is not
+  // evidence the app stopped, so both the signal and the outcome are recorded separately.
+  const via = [];
+  if (signalled("SIGTERM")) via.push("SIGTERM");
+  let gone = await until(() => !alive(), 15000, 1000);
+  if (!gone) {
+    if (signalled("SIGKILL")) via.push("SIGKILL");
+    gone = await until(() => !alive(), 10000, 1000);
+  }
+  return { ok: gone, stopped: gone, pid: adopted.pid, via: via.length ? via.join("+") : "no signal delivered", still_running: !gone };
+}
+
+/**
+ * G10: an inbound http link handed to the app by the OS. On macOS that is `open -a <bundle> <url>`,
+ * which LaunchServices delivers to the running app as a kAEGetURL Apple Event, or which cold-starts
+ * the app when none is running.
+ *
+ * The check is a browser tab that was not listed before the delivery and whose URL carries the
+ * unique marker this step put in the link, so a tab from any other step cannot satisfy it.
+ *
+ * `open` exits 0 whether or not the app opened anything (it only reports that LaunchServices
+ * accepted the request), so its status is recorded as the delivery half but decides nothing.
+ *
+ * Isolation is the constraint that shapes this step:
+ * - The running case must not spawn a second instance. The app pid before and after the delivery
+ *   is recorded, and a changed pid fails the step: a second instance would not share the tab list.
+ * - The closed case cold-starts the app from launchd, which DROPS the caller's environment. It is
+ *   therefore only run when `open` supports `--env`, and every FERRYX_* dir plus HOME is passed
+ *   through it, because without them the new process would use the real user profile and could
+ *   attach to the production daemon. When `--env` is unavailable the case is refused and recorded
+ *   as such instead of starting an unisolated app.
+ */
+export async function dailyInbound(ctx, { bundle, marker, closed = false, env = null }) {
+  const key = closed ? "closed" : "running";
+  const g10 = gap(ctx, "g10", ["running_open_a_url_delivered", "running_tab_opened_by_inbound", "running_single_instance", "closed_open_a_url_delivered", "closed_tab_opened_by_inbound"]);
+  // Refusing is a recorded outcome, not a pass: the closed case never claims what it did not do.
+  // `openSupportsEnv()` cannot answer here: it inspects `open --help`, whose usage goes to stderr
+  // and is cut to 2000 characters by `run()`, while macOS 26 prints the `--env` line at offset
+  // 2226 (maho-mac 2026-11-22 run mfrA refused the case although `open --env FOO=bar` exits 0).
+  // The full usage is read here instead, so no probe `open` is issued against the app.
+  const openHasEnv = async () => {
+    if (ctx.host.openSupportsEnv?.()) return true;
+    return new Promise((resolve) => {
+      const child = spawn("open", ["--help"]);
+      let usage = "";
+      child.stdout.on("data", (chunk) => (usage += chunk));
+      child.stderr.on("data", (chunk) => (usage += chunk));
+      child.on("error", () => resolve(false));
+      child.on("close", () => resolve(/--env\b/.test(usage)));
+    });
+  };
+  if (closed && !(await openHasEnv())) {
+    g10.closed_case = "refused-no-env-isolation";
+    return run(ctx, "daily-g10-closed", "Refused: this `open` has no --env, so a cold start could not be kept in the isolation dirs", async () => ({ ok: false, stderr: "refused-no-env-isolation" }));
+  }
+  return run(ctx, closed ? "daily-g10-closed" : "daily-g10-running", closed
+    ? "Quit the app, then `open --env <isolated dirs> -a <bundle> <url>`: the cold-started app shows the link in a browser tab"
+    : "With the app running, `open -a <bundle> <url>`: the link opens in a new browser tab of the same instance", async () => {
+    const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
+    const url = `${ctx.fixtureBase}/qa/g10.html?${marker}`;
+    g10[`before_${key}`] = [...before];
+    // The pid that owns the tab list now. A delivery that starts a second instance changes it.
+    const pidBefore = ctx.host.pid ?? null;
+    // Pids of the QA build alive right before the delivery; a cold start adds one they do not have.
+    let pidsBeforeDelivery = null;
+    if (closed) {
+      // Quit like a user and wait for the pid to be gone, so the next `open` is a cold start.
+      const quit = await ctx.quitApp?.();
+      g10.quit = quit ?? null;
+      pidsBeforeDelivery = new Set(bundleGuiPids(ctx, qaBundleId(ctx, bundle)));
+    }
+    const delivered = ctx.host.openUrl(bundle, url, closed ? env : null);
+    g10[`open_${key}`] = {
+      url,
+      ok: delivered.ok,
+      status: delivered.status,
+      stderr: (delivered.stderr ?? "").slice(0, 400),
+      env_keys: delivered.env_keys ?? [],
+      args: delivered.args ?? [],
+    };
+    // The cold start exists only now that LaunchServices accepted the delivery, so it is adopted
+    // after the `open` and before any tab poll: every window helper and every check below needs
+    // its pid. Awaiting it is what makes the adoption fail visibly instead of silently.
+    let adopted = null;
+    if (closed) {
+      adopted = await adoptColdStart(ctx, bundle, pidsBeforeDelivery);
+      g10.closed_adopt = adopted;
+    }
+    // A cold start has to boot the app, its daemon and the web UI before a tab can exist.
+    const waitMs = closed ? 120000 : 30000;
+    const opened = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && (entry.url ?? "").includes(marker)) ?? null, waitMs, 1500);
+    g10[`opened_${key}`] = opened ?? null;
+    g10.checks[`${key}_tab_opened_by_inbound`] = Boolean(opened);
+    // The delivery half: what the OS-facing call reported. Kept separate from the tab so a run
+    // says whether the link never arrived or arrived and was not turned into a tab.
+    g10.checks[`${key}_open_a_url_delivered`] = Boolean(delivered.ok);
+    if (!closed) {
+      // A second instance would answer `open` but never share this tab list, so the pid that owns
+      // the list must be the one from before the delivery.
+      const pidAfter = ctx.host.pid ?? null;
+      g10.running_pids = { before: pidBefore, after: pidAfter };
+      g10.checks.running_single_instance = Boolean(pidBefore) && pidBefore === pidAfter;
+    }
+    g10[`tabs_after_${key}`] = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url }));
+    // The cold-started instance is not `app`, so nothing in teardown stops it; leaving it running
+    // also leaks a second QA instance that the next `open -a` could deliver to (the mfrB run found
+    // five such leftovers). It is stopped here, after every measurement above is recorded.
+    if (closed) g10.closed_cleanup = await stopAdopted(ctx, adopted);
+    return { ok: Boolean(opened), url, opened: opened ?? null, delivered: { ok: delivered.ok, status: delivered.status, env_keys: delivered.env_keys ?? [] } };
+  }, closed ? { capMs: 420000 } : {});
 }
 
 // ---------------------------------------------------------------- Chromium engine tabs

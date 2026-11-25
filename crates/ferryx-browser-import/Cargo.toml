@@ -10,6 +10,12 @@ publish = false
 # browser-engine-protocol: src-tauri uses it as a path dependency.
 [workspace]
 
+[features]
+# Exposes the COM decrypt seam (`decrypt::win_app_bound::COM_DECRYPT_OVERRIDE`) so a dependent
+# crate's tests can force the app-bound refusal path without a browser, its elevation service,
+# or a real profile. Enabled only through a dev-dependency; release builds never see it.
+testing = []
+
 [lib]
 name = "ferryx_browser_import"
 path = "src/lib.rs"

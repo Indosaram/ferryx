@@ -18,7 +18,7 @@ export const DEFAULT_REPO = "Indosaram/ferryx";
 
 /** Rendered file name -> template file and the release asset whose hash it pins. */
 export const HOMEBREW_PACKAGES = Object.freeze([
-  Object.freeze({ name: "ferryx.rb", template: "ferryx.rb", asset: "Ferryx_universal.dmg" }),
+  Object.freeze({ name: "ferryx.rb", template: "ferryx.rb", asset: "Ferryx_aarch64.dmg" }),
   Object.freeze({ name: "ferryx-cli.rb", template: "ferryx-cli.rb", asset: "ferryx-cli-linux-amd64" }),
 ]);
 export const HOMEBREW_PACKAGE_NAMES = Object.freeze(HOMEBREW_PACKAGES.map((pkg) => pkg.name));

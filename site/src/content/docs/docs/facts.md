@@ -38,7 +38,7 @@ change remain under the Sustainable Use License (SUL-1.0). Read the license for 
 
 | Platform | Package | Requirement |
 | :--- | :--- | :--- |
-| macOS | Universal DMG (Apple Silicon and Intel), signed and notarised | macOS 10.15+ |
+| macOS | arm64 DMG (Apple Silicon), signed and notarised | macOS 10.15+ |
 | Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed with automatic updates; or `Ferryx_x64-setup.exe` direct installer (not code-signed) | Windows 10/11 x64 with WebView2 |
 | Linux | AppImage (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
 | Linux | Debian/Ubuntu `.deb` (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |

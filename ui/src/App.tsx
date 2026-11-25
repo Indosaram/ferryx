@@ -40,6 +40,7 @@ import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { startInboundUrlDelivery } from "./lib/inboundUrls";
 import { printBrowser, stepBrowserZoom } from "./lib/browserSystem";
 import { useBrowserLibrarySync } from "./lib/browserLibrarySync";
 import { listen } from "@tauri-apps/api/event";
@@ -97,6 +98,8 @@ import {
 import { showNotificationPermissionHint } from "./lib/notificationPermissionHint";
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
+import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
+import { buildSetupProgress } from "./lib/setupProgress";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
@@ -116,6 +119,7 @@ import {
   ACTIVE_PROJECT_STORAGE_KEY,
   getMigratedItem,
   PROJECTS_STORAGE_KEY,
+  SETUP_PROGRESS_HINT_STORAGE_KEY,
   SIDEBAR_OPEN_STORAGE_KEY,
 } from "./lib/storageKeys";
 import {
@@ -195,7 +199,7 @@ import { startParkedRemoteRecovery } from "./lib/parkedRemoteRecovery";
 import { reconnectLocalSession, replaceExitedShellSession, restartPaneSession } from "./lib/shellReplacement";
 import { initialGridFields, measureInitialGeometry } from "./lib/initialPtyGeometry";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
-import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult, type WorkspaceAction } from "./state/workspaceStore";
+import { workspaceReducer, requestLocalRecoveryAdmission, localRecoveryBlockReason, type LocalRecoveryAdmissionResult, type WorkspaceAction } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
 import { staticTabLabel } from "./lib/tabTitle";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
@@ -1078,6 +1082,7 @@ function WorkspaceApp({
     markWorktreeUnread,
     subscribeTerminalBell,
     subscribeActivityNotification,
+    subscribeSessionActivitySeen,
     parkedActivityVersion,
     openTab,
     createBrowserTab,
@@ -1190,6 +1195,16 @@ function WorkspaceApp({
       ownsSession: true,
     });
   }), [subscribeActivityNotification]);
+
+  useEffect(
+    () =>
+      subscribeSessionActivitySeen
+        ? subscribeSessionActivitySeen((event) => {
+            coordinatorRef.current?.withdrawForSession(event.workspaceId, event.sessionId);
+          })
+        : undefined,
+    [subscribeSessionActivitySeen],
+  );
 
   // The supervisor snapshot feeds the setup banner and the panes' supervision; start it once.
   useEffect(() => { void startSupervisorFeed(); }, []);
@@ -2304,7 +2319,12 @@ function WorkspaceApp({
         }).then((outcome) => {
           if (!outcome || !live || settled || !checkCurrent()) return;
           if (outcome.blocked || outcome.staleTuple) {
-            settle({ kind: "blocked", reason: "identity_conflict" });
+            // A block carries the owner's own reason (a revoked pairing, a control conflict, a
+            // protocol rejection); a stale tuple is a genuine identity mismatch. Naming the real
+            // cause is the difference between an actionable message and "identity conflict" for
+            // every distinct failure.
+            const reason = localRecoveryBlockReason(outcome.blockedCode);
+            settle({ kind: "blocked", reason });
           } else if (outcome.affirmativeExit) {
             // retry_owned matched the exact (backend, epoch, incarnation) tuple before reporting
             // exit: the remote process is gone. Recover the pane on the same host.
@@ -2579,6 +2599,21 @@ function WorkspaceApp({
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
   const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
   const [onboardingDoneSteps, setOnboardingDoneSteps] = useState<readonly OnboardingStepId[]>([]);
+  // Populated once per launch so the sidebar can show setup progress after the first project.
+  const [setupProgressCtx, setSetupProgressCtx] = useState<OnboardingContext | null>(null);
+  // Mirrors what the wizard persisted, so the sidebar panel re-derives when a step is recorded
+  // instead of reading storage from a memo that cannot observe the write.
+  const [onboardingRecordedSteps, setOnboardingRecordedSteps] = useState<readonly OnboardingStepId[]>(
+    () => loadOnboardingState().completedSteps
+  );
+  // A dismissed setup panel is permanent until the wizard is rerun (Settings > Permissions).
+  const [setupProgressDismissed, setSetupProgressDismissed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SETUP_PROGRESS_HINT_STORAGE_KEY) === "dismissed";
+    } catch {
+      return false;
+    }
+  });
   // A local project added from the wizard's first-project step reopens the wizard on the
   // "try" step, which offers to create a first worktree there with the default agent.
   const [onboardingAddedProject, setOnboardingAddedProject] = useState<RegisteredProject | null>(null);
@@ -4214,6 +4249,14 @@ function WorkspaceApp({
         supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
+      setOnboardingRecordedSteps(loadOnboardingState().completedSteps);
+      // Re-read the dismissal so "Show Welcome Setup" (which clears the key) brings the sidebar
+      // panel back on the same event that reopens the wizard.
+      try {
+        setSetupProgressDismissed(window.localStorage.getItem(SETUP_PROGRESS_HINT_STORAGE_KEY) === "dismissed");
+      } catch {
+        // Storage unavailable: keep whatever state this launch already resolved.
+      }
       setOnboardingInitialStepIndex(0);
       setOnboardingSteps(wizardSteps(ctx));
     };
@@ -4432,6 +4475,36 @@ function WorkspaceApp({
       unlisten?.();
     };
   }, [createBrowserTab, reportRuntimeError]);
+
+  // An http(s) link handed to Ferryx by the OS (Ferryx set as the default browser, so `open -a`
+  // and a link click in another app arrive as an Apple Event) is queued by the backend and
+  // announced with an empty event. Nothing opened it before: the queue could be drained but never
+  // was, so the link was delivered and silently lost. Every window runs this, which is safe
+  // because the take is atomic on the backend: the first window to drain gets the URL and the
+  // others get nothing, so the focused window opens it once and no duplicate tab can appear.
+  const inboundOpenRef = useRef<(url: string) => void>((url) => {
+    void createBrowserTab(url).catch(reportRuntimeError);
+  });
+  inboundOpenRef.current = (url) => {
+    void createBrowserTab(url).catch(reportRuntimeError);
+  };
+  const inboundDeliveryRef = useRef<ReturnType<typeof startInboundUrlDelivery> | null>(null);
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    const delivery = startInboundUrlDelivery({
+      canDrain: () => !activeRemoteHostRef.current,
+      open: (url) => inboundOpenRef.current(url),
+    });
+    inboundDeliveryRef.current = delivery;
+    return () => {
+      delivery.dispose();
+      inboundDeliveryRef.current = null;
+    };
+  }, [isNativeRuntime]);
+
+  useEffect(() => {
+    if (!activeRemoteHost) inboundDeliveryRef.current?.trigger();
+  }, [activeRemoteHost]);
 
   useEffect(() => {
     const onOpenFilePreview = (event: Event) => {
@@ -5003,6 +5076,56 @@ function WorkspaceApp({
   const { preset: shortcutPreset } = useShortcutPreset();
   useShortcuts(shortcutHandlers, { overrides: shortcutOverrides, preset: shortcutPreset });
 
+  const setupProgressItems = useMemo(() => {
+    if (!setupProgressCtx) return [];
+    return buildSetupProgress(
+      { ...setupProgressCtx, agents: resolvedAgents, projectCount: projects.length },
+      onboardingRecordedSteps
+    );
+  }, [onboardingRecordedSteps, projects.length, resolvedAgents, setupProgressCtx]);
+
+  const dismissSetupProgress = useCallback(() => {
+    setSetupProgressDismissed(true);
+    try {
+      window.localStorage.setItem(SETUP_PROGRESS_HINT_STORAGE_KEY, "dismissed");
+    } catch {
+      // A read-only storage area only costs the dismissal, never the panel itself.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isNativeRuntime || !isPrimary || activeRemoteHost) return;
+    let cancelled = false;
+    const refresh = () => {
+      void Promise.all([
+        getCliLauncherStatus().catch(() => null),
+        getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
+        getSetupStatus(),
+      ]).then(([cli, enrollment, devices, setup]) => {
+        if (cancelled) return;
+        setSetupProgressCtx({
+          permissions: null,
+          agents: resolvedAgentsRef.current,
+          cli,
+          projectCount: projectsRef.current.length,
+          accountLinked: enrollment?.enrolled === true,
+          pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
+          supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
+        });
+      });
+    };
+    refresh();
+    // Refreshing on focus catches goals satisfied in another window (CLI install, pairing, sign-in)
+    // without polling; the wizard's own open event covers the in-app path.
+    const events = ["focus", OPEN_ONBOARDING_EVENT] as const;
+    for (const name of events) window.addEventListener(name, refresh);
+    return () => {
+      cancelled = true;
+      for (const name of events) window.removeEventListener(name, refresh);
+    };
+  }, [activeRemoteHost, isNativeRuntime, isPrimary, projects.length, resolvedAgents]);
+
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
     ? `${registrationError.code}: ${registrationError.message}`
@@ -5082,6 +5205,17 @@ function WorkspaceApp({
           onOpenResources={() => setIsResourcesOpen(true)}
 
           onFocusSupervisorSession={handleFocusSupervisorSession}
+          footerSlot={
+            !activeRemoteHost && setupProgressCtx && !setupProgressDismissed ? (
+              <SetupProgressPanel
+                items={setupProgressItems}
+                onDismiss={dismissSetupProgress}
+                onOpenSetup={() => {
+                  window.dispatchEvent(new CustomEvent(OPEN_ONBOARDING_EVENT));
+                }}
+              />
+            ) : null
+          }
           onToggle={toggleSidebar}
         />
       ) : (
@@ -5285,7 +5419,9 @@ function WorkspaceApp({
             doneSteps={onboardingDoneSteps}
             agents={resolvedAgents}
             isMac={isMacShortcutPlatform()}
-            onStepCompleted={(step) => markOnboardingStepsCompleted([step])}
+            onStepCompleted={(step) => {
+              setOnboardingRecordedSteps(markOnboardingStepsCompleted([step]).completedSteps);
+            }}
             onFinish={() => {
               setOnboardingAddedProject(null);
               setOnboardingSteps(null);

@@ -153,6 +153,10 @@ BUILD_FROM_SOURCE_URL="https://github.com/Indosaram/ferryx/blob/main/CONTRIBUTIN
 ARCH="$(uname -m)"
 case "$ARCH" in
   x86_64|amd64)
+    if [ "$PLATFORM_OS" = "darwin" ]; then
+      echo "Error: macOS requires Apple Silicon (arm64); build from source: ${BUILD_FROM_SOURCE_URL}" >&2
+      exit 2
+    fi
     PLATFORM_ARCH="amd64"
     ;;
   aarch64|arm64)
@@ -168,11 +172,11 @@ case "$ARCH" in
     ;;
 esac
 
-# 3. Determine download artifact name (Linux is amd64 only; macOS ships one universal binary)
+# 3. Determine download artifact name (Linux is amd64 only; macOS is arm64 only)
 if [ "$PLATFORM_OS" = "linux" ]; then
   ARTIFACT_NAME="ferryx-cli-linux-amd64"
 elif [ "$PLATFORM_OS" = "darwin" ]; then
-  ARTIFACT_NAME="ferryx-cli-darwin-universal"
+  ARTIFACT_NAME="ferryx-cli-darwin-arm64"
 fi
 
 # 4. Resolve download URLs

@@ -9,7 +9,8 @@ use crate::browser::{
     BrowserProfileId, BrowserSessionSummary, BrowserShortcutRequestedPayload, BrowserState,
     BrowserStateChangedPayload, CreateBrowserRequest, ImportBrowserCookiesRequest,
     ImportBrowserCookiesResult, ImportInstalledBrowserCookiesRequest,
-    ImportInstalledBrowserCookiesResult, LogicalRect, SnapshotOptions, BROWSER_CLEAR_FIND_SCRIPT,
+    ImportInstalledBrowserCookiesResult, InstalledCookieImportBlock, LogicalRect, SnapshotOptions,
+    BROWSER_CLEAR_FIND_SCRIPT,
     BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_ELEMENT_PICKED_EVENT, BROWSER_LINK_CLICKED_EVENT,
     BROWSER_OPEN_REQUESTED_EVENT, BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
@@ -2702,7 +2703,7 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
         )
         .map_err(|import_err| {
             IpcError::new(IpcErrorCode::BrowserCookieImportFailed, import_err.to_string())
-                .with_details(serde_json::json!({ "reason": import_err.reason.as_str() }))
+                .with_details(import_err.details())
         })
     })
     .await?;
@@ -2734,10 +2735,26 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
     }
 
     let skipped_count = read_result.skipped;
+    // A profile whose `v10` rows import while the browser refuses its app-bound key returns `Ok`;
+    // the named block rides along so the shell can say why the rest were skipped.
+    let blocked = installed_cookie_import_block(read_result.blocked);
 
     Ok(ImportInstalledBrowserCookiesResult {
         imported_count: cookies.len(),
         skipped_count,
+        blocked,
+    })
+}
+
+/// The wire shape of one named block: the failure's wire `reason`, how many rows it cost, and
+/// its measured HRESULT when it came from one.
+fn installed_cookie_import_block(
+    blocked: Option<crate::browser::import::installed_cookies::InstalledCookieImportError>,
+) -> Option<InstalledCookieImportBlock> {
+    blocked.map(|blocked| InstalledCookieImportBlock {
+        reason: blocked.reason.as_str().to_string(),
+        skipped_count: blocked.rows.unwrap_or_default(),
+        hresult: blocked.hresult.map(|hresult| format!("0x{hresult:08X}")),
     })
 }
 
@@ -4512,6 +4529,49 @@ mod tests {
         assert!(!frame_holds_focus(200, 100));
         assert!(!frame_holds_focus(0, 100));
         assert!(!frame_holds_focus(0, 0));
+    }
+
+    /// The mixed v10-imported / v20-refused outcome: the command returns `Ok` with a positive
+    /// `importedCount` **and** the named refusal, instead of dropping it and leaving only a count.
+    #[test]
+    fn a_mixed_import_keeps_the_app_bound_refusal_alongside_the_imported_rows() {
+        use crate::browser::import::installed_cookies::{
+            InstalledCookieImportError, InstalledCookieImportFailureReason,
+        };
+
+        let blocked = installed_cookie_import_block(Some(InstalledCookieImportError {
+            reason: InstalledCookieImportFailureReason::AppBoundKeyRefused,
+            message: "app-bound-key-refused: the browser refused its app-bound key".into(),
+            hresult: Some(0x8004_A007),
+            rows: Some(2),
+        }))
+        .expect("a named refusal is carried into the result, not dropped on the success path");
+        assert_eq!(blocked.reason, "app-bound-key-refused");
+        assert_eq!(blocked.skipped_count, 2, "the block names how many rows it cost");
+        assert_eq!(blocked.hresult.as_deref(), Some("0x8004A007"));
+
+        let result = ImportInstalledBrowserCookiesResult {
+            imported_count: 3,
+            skipped_count: 2,
+            blocked: Some(blocked),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["importedCount"], 3);
+        assert_eq!(json["blocked"]["reason"], "app-bound-key-refused");
+        assert_eq!(json["blocked"]["skippedCount"], 2);
+        assert_eq!(json["blocked"]["hresult"], "0x8004A007");
+
+        // An import with nothing blocked keeps the original wire shape exactly.
+        assert!(installed_cookie_import_block(None).is_none());
+        let clean = ImportInstalledBrowserCookiesResult {
+            imported_count: 3,
+            skipped_count: 2,
+            blocked: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&clean).unwrap(),
+            r#"{"importedCount":3,"skippedCount":2}"#
+        );
     }
 
     #[cfg(target_os = "linux")]

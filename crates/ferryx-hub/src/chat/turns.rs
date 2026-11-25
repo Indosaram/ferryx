@@ -181,6 +181,7 @@ mod tests {
             messages: Vec::new(),
             approval: false,
             live: true,
+            silent_prompt: false,
         })
         .await;
         let config = OmoClientConfig::new(binary);

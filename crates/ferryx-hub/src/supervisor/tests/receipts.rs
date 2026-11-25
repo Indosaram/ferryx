@@ -461,7 +461,11 @@ async fn paired_goal(pool: &SqlitePool) -> (String, String) {
     (goal_id, request_id)
 }
 
-fn host_waits(control: &RecordingControl) -> Vec<(Option<String>, String, String, Option<String>, u64)> {
+/// One recorded `Wait`: the host it went to, its session, its `until`, its instance and its
+/// `after` sequence.
+type HostWait = (Option<String>, String, String, Option<String>, u64);
+
+fn host_waits(control: &RecordingControl) -> Vec<HostWait> {
     control
         .ops()
         .into_iter()

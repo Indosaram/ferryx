@@ -4,7 +4,7 @@ use crate::terminal::{PtyError, PtyManager, PtySession, TerminalSignal};
 use crate::worktree::manager::WorktreeManager;
 use parking_lot::Mutex;
 use portable_pty::CommandBuilder;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
 
@@ -699,22 +699,24 @@ impl TerminalService {
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
 
-    pub(crate) fn spawn_in_worktree_with_id(
+    /// Spawn into a worktree already resolved by the caller, so the managed workspace id and
+    /// canonical path are not looked up a second time through git.
+    pub(crate) fn spawn_in_worktree_resolved(
         &self,
         session_id: String,
         cmd: CommandBuilder,
         cols: u16,
         rows: u16,
-        worktree_manager: &WorktreeManager,
-        worktree_path: &Path,
+        canonical_worktree: PathBuf,
+        workspace_id: Option<String>,
     ) -> Result<(String, watch::Receiver<()>), PtyError> {
-        let (session_id, pty_rx) = self.pty_manager.spawn_in_worktree_with_id(
+        let (session_id, pty_rx) = self.pty_manager.spawn_in_worktree_resolved(
             session_id,
             cmd,
             cols,
             rows,
-            worktree_manager,
-            worktree_path,
+            canonical_worktree,
+            workspace_id,
         )?;
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }

@@ -35,7 +35,7 @@ const STORE_PLAN = {
   appVersion: "2026.908.1",
   msixVersion: "2026.908.1.0",
   channels: { store: true, nsisMigration: false },
-  requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+  requiredTargets: ["darwin-aarch64", "linux-x86_64"],
   toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
   sourceDateEpoch: 1788868800,
   createdAt: "2026-09-08T12:00:00.000Z",
@@ -354,7 +354,7 @@ test("verify: detects tampered artifacts and altered receipts", async () => {
       appVersion: "2026.908.1",
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
@@ -418,7 +418,7 @@ test("publish: full pipeline with fake gh executable and byte verification", asy
       appVersion: "2026.908.1",
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
@@ -426,7 +426,7 @@ test("publish: full pipeline with fake gh executable and byte verification", asy
     writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan));
 
     // Create authentic publish files
-    const file1 = join(publishDir, "Ferryx_universal.dmg");
+    const file1 = join(publishDir, "Ferryx_aarch64.dmg");
     const file2 = join(publishDir, "latest.json");
     writeFileSync(file1, "DMG_CONTENT_E2E");
     writeFileSync(file2, JSON.stringify({ version: plan.appVersion }));
@@ -434,7 +434,7 @@ test("publish: full pipeline with fake gh executable and byte verification", asy
     // SHA256SUMS.txt
     const hash1 = createHash("sha256").update(readFileSync(file1)).digest("hex");
     const hash2 = createHash("sha256").update(readFileSync(file2)).digest("hex");
-    const sums = `${hash1}  Ferryx_universal.dmg\n${hash2}  latest.json\n`;
+    const sums = `${hash1}  Ferryx_aarch64.dmg\n${hash2}  latest.json\n`;
     writeFileSync(join(publishDir, "SHA256SUMS.txt"), sums);
 
     writeIntegrityState(runDir, plan, publishDir);
@@ -552,7 +552,7 @@ process.exit(1);
     // Verify storage state is undrafted
     const finalState = JSON.parse(readFileSync(join(storageDir, `${plan.tag}.json`), "utf8"));
     assert.equal(finalState.isDraft, false);
-    assert.ok(finalState.assets.includes("Ferryx_universal.dmg"));
+    assert.ok(finalState.assets.includes("Ferryx_aarch64.dmg"));
     assert.ok(finalState.assets.includes("latest.json"));
     assert.ok(finalState.assets.includes("SHA256SUMS.txt"));
   } finally {
@@ -594,7 +594,7 @@ test("verify-remote: verifies release availability against local HTTP server", a
       appVersion: "2026.908.1",
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",

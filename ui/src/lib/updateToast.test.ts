@@ -12,6 +12,7 @@ import { DISMISSED_UPDATE_VERSION_STORAGE_KEY } from "./storageKeys";
 let statusSubscriber: ((status: any) => void) | null = null;
 const mockDownloadAndInstallUpdate = vi.fn().mockResolvedValue(undefined);
 const mockCancelUpdateDownload = vi.fn().mockResolvedValue(undefined);
+const mockApplyStagedUpdate = vi.fn().mockResolvedValue(undefined);
 const mockRelaunchApp = vi.fn().mockResolvedValue(undefined);
 let updateState = "available";
 
@@ -26,6 +27,7 @@ vi.mock("./updater", () => ({
   }),
   downloadAndInstallUpdate: () => mockDownloadAndInstallUpdate(),
   cancelUpdateDownload: () => mockCancelUpdateDownload(),
+  applyStagedUpdate: () => mockApplyStagedUpdate(),
   getUpdateStatus: () => ({ state: updateState }),
   relaunchApp: () => mockRelaunchApp(),
   updatesManagedExternally: () => mockUpdatesManagedExternally(),
@@ -72,6 +74,7 @@ describe("updateToast", () => {
     mockUpdatesManagedExternally.mockResolvedValue(false);
     mockDownloadAndInstallUpdate.mockResolvedValue(undefined);
     mockCancelUpdateDownload.mockResolvedValue(undefined);
+    mockApplyStagedUpdate.mockResolvedValue(undefined);
     updateState = "available";
     statusSubscriber = null;
   });
@@ -177,6 +180,48 @@ describe("updateToast", () => {
         expect.objectContaining({
           id: UPDATE_TOAST_ID,
           duration: 8000,
+        }),
+      );
+    });
+
+    it("offers a restart once the download is staged, never installing on its own", () => {
+      handleUpdateStatusChange(
+        { state: "staged", version: "2026.830.3", downloadProgress: 1 },
+        storage,
+      );
+
+      expect(mockToast.info).toHaveBeenCalledWith(
+        "Update ready to restart",
+        expect.objectContaining({
+          id: UPDATE_TOAST_ID,
+          description: "Ferryx v2026.830.3 is downloaded. Sessions won't be interrupted.",
+          duration: Infinity,
+          action: expect.objectContaining({ label: "Restart to update" }),
+        }),
+      );
+      expect(mockDownloadAndInstallUpdate).not.toHaveBeenCalled();
+      expect(mockRelaunchApp).not.toHaveBeenCalled();
+
+      mockToast.info.mock.calls[0][1].action.onClick();
+      expect(mockApplyStagedUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps offering the restart for a version the user dismissed as available", () => {
+      saveDismissedUpdateVersion("2026.830.3", storage);
+
+      handleUpdateStatusChange({ state: "staged", version: "2026.830.3" }, storage);
+
+      expect(mockToast.info).toHaveBeenCalledTimes(1);
+      expect(mockToast.info.mock.calls[0][0]).toBe("Update ready to restart");
+    });
+
+    it("describes a staged download without a version", () => {
+      handleUpdateStatusChange({ state: "staged" }, storage);
+
+      expect(mockToast.info).toHaveBeenCalledWith(
+        "Update ready to restart",
+        expect.objectContaining({
+          description: "Update downloaded. Sessions won't be interrupted.",
         }),
       );
     });

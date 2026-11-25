@@ -9,6 +9,7 @@ pub mod helper_runtime;
 pub mod helper_setup;
 pub mod manual;
 pub mod master;
+pub mod mux_client;
 pub mod operations;
 pub mod password;
 pub mod projects;

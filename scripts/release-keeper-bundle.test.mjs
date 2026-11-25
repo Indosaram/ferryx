@@ -3,7 +3,7 @@
 // The release promise is narrow and structural: a shipped macOS app carries a runnable
 // `Contents/Resources/keeper/ferryx-ptykeeper` whose recorded version, protocol and digest match
 // the bytes beside them. Each case below breaks exactly one of those facts and requires the
-// refusal, so none of them can regress into a warning. `cargo` and `lipo` are injected, so no real
+// refusal, so none of them can regress into a warning. Build commands are injected, so no real
 // build runs: the negative cases need only files that are the wrong size, mode or content.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -105,7 +105,7 @@ function writeStaged(dir, { version = "2026.1115.1", crateVersion = "0.1.0", pay
         protocolMinor: 0,
         sha256: sha256(bytes),
         bytes: bytes.length,
-        architectures: ["aarch64", "x86_64"],
+        architectures: ["aarch64"],
       },
       null,
       2,
@@ -144,58 +144,18 @@ test("keeperProtocol reads both protocol numbers and refuses an unreadable libra
   refusal("KEEPER_PROTOCOL_UNREADABLE", () => keeperProtocol(root));
 });
 
-test("stageKeeper lipos several slices and records the digest of the staged bytes", (t) => {
+test("stageKeeper rejects multiple slices", (t) => {
   const root = fixture(t);
-  const sliceA = join(root, "arm");
-  const sliceB = join(root, "x86");
-  writeFileSync(sliceA, "arm-slice");
-  writeFileSync(sliceB, "x86-slice");
-
-  const calls = [];
-  const exec = (command, args) => {
-    calls.push([command, ...args].join(" "));
-    // Model lipo writing a universal file, so the digest describes that and not a slice.
-    writeFileSync(args[args.length - 1], "universal");
-    return { status: 0, stdout: "", stderr: "" };
-  };
-  const destDir = join(root, "staged");
-  const staged = stageKeeper({
-    destDir,
-    slices: [sliceA, sliceB],
-    version: "2026.1115.1",
-    crateVersion: "0.1.0",
-    protocol: { major: 1, minor: 0 },
-    triples: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
-    exec,
-  });
-
-  assert.deepEqual(calls, [`lipo -create ${sliceA} ${sliceB} -output ${join(destDir, KEEPER_BINARY_NAME)}`]);
-  assert.equal(staged.manifest.sha256, sha256("universal"));
-  assert.deepEqual(staged.manifest.architectures, ["aarch64", "x86_64"]);
-  assert.equal(staged.manifest.protocolMajor, 1);
-  assert.equal(staged.manifest.version, "2026.1115.1");
-  assert.equal(staged.manifest.crateVersion, "0.1.0");
-  // The staged binary must be runnable: the daemon execs it directly.
-  assert.notEqual(statSync(join(destDir, KEEPER_BINARY_NAME)).mode & 0o111, 0);
-
-  refusal("KEEPER_NO_SLICES", () =>
-    stageKeeper({
-      destDir: join(root, "empty"),
-      slices: [],
-      version: "2026.1115.1",
-      protocol: { major: 1, minor: 0 },
-    }),
-  );
-
-  // A name the daemon could not treat as a version is refused at packaging, not at the user's
-  // first upgrade. `buildKeeperUniversal` supplies the app version, so this only catches a caller
-  // that passes something else -- e.g. a label, or nothing at all.
-  refusal("KEEPER_VERSION_UNREADABLE", () =>
-    stageKeeper({ destDir: join(root, "bad"), slices: [sliceA], version: "keeper", protocol: { major: 1, minor: 0 } }),
-  );
+  refusal("KEEPER_MULTIPLE_SLICES", () => stageKeeper({
+    destDir: join(root, "staged"), slices: ["arm", "other"],
+    version: "2026.1115.1", protocol: { major: 1, minor: 0 },
+  }));
+  refusal("KEEPER_NO_SLICES", () => stageKeeper({
+    destDir: join(root, "empty"), slices: [], version: "2026.1115.1", protocol: { major: 1, minor: 0 },
+  }));
 });
 
-test("stageKeeper copies a single slice without invoking lipo", (t) => {
+test("stageKeeper copies a single slice without invoking build tools", (t) => {
   const root = fixture(t);
   const slice = join(root, "host");
   writeFileSync(slice, "host-bytes");
@@ -210,7 +170,7 @@ test("stageKeeper copies a single slice without invoking lipo", (t) => {
       return { status: 0 };
     },
   });
-  assert.equal(invoked, false, "a single slice must not be lipo'd");
+  assert.equal(invoked, false, "a single slice must be copied");
   assert.equal(staged.manifest.sha256, sha256("host-bytes"));
 });
 
@@ -229,10 +189,6 @@ test("buildKeeperUniversal builds each triple and stages the result", (t) => {
       writeFileSync(out, `slice-${triple}`);
       return { status: 0, stdout: "", stderr: "" };
     }
-    if (command === "lipo") {
-      writeFileSync(args[args.length - 1], "universal-keeper");
-      return { status: 0, stdout: "", stderr: "" };
-    }
     throw new Error(`unexpected command ${command}`);
   };
 
@@ -240,17 +196,17 @@ test("buildKeeperUniversal builds each triple and stages the result", (t) => {
     sourceDir: root,
     targetDir,
     destDir: join(root, "staged"),
-    triples: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+    triples: ["aarch64-apple-darwin"],
     appVersion: "2026.1115.1",
     exec,
     sourceDateEpoch: 1763000000,
   });
 
-  assert.equal(commands.filter((c) => c.startsWith("cargo build")).length, 2);
+  assert.equal(commands.filter((c) => c.startsWith("cargo build")).length, 1);
   assert.ok(commands.some((c) => c.includes("--manifest-path") && c.includes("crates/ferryx-ptykeeper/Cargo.toml")));
   assert.equal(built.manifest.version, "2026.1115.1");
   assert.equal(built.manifest.crateVersion, "0.1.0");
-  assert.equal(built.manifest.sha256, sha256("universal-keeper"));
+  assert.equal(built.manifest.sha256, sha256("slice-aarch64-apple-darwin"));
   refusal("KEEPER_NO_TARGETS", () =>
     buildKeeperUniversal({
       sourceDir: root,

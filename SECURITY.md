@@ -56,7 +56,7 @@ Ferryx releases are built on operator-controlled machines, not on hosted CI. Eve
 
 | Host | Builds |
 | --- | --- |
-| `macbook` (macOS, release coordinator) | universal updater archive, `Ferryx_universal.dmg`, `ferryx-cli-darwin-universal`; also assembles, signs and publishes the release |
+| `macbook` (macOS, release coordinator) | arm64 updater archive, `Ferryx_aarch64.dmg`, `ferryx-cli-darwin-arm64`; also assembles, signs and publishes the release |
 | `omaki` (Linux x86_64) | `Ferryx_amd64.AppImage`, `Ferryx_amd64.deb`, `ferryx-cli-linux-amd64` |
 | `maho-win` (Windows x64) | `Ferryx_x64.msix`, and the NSIS installer when it is shipped |
 

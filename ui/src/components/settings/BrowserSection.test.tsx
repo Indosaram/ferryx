@@ -184,6 +184,27 @@ describe("BrowserSection installed cookie import", () => {
     });
   });
 
+  it("shows the app-bound refusal on a mixed import that still imported cookies", async () => {
+    vi.mocked(browserTauri.importInstalledBrowserCookies).mockResolvedValueOnce({
+      importedCount: 12,
+      skippedCount: 3,
+      blocked: { reason: "app-bound-key-refused", skippedCount: 3, hresult: "0x8004A007" },
+    });
+
+    render(<BrowserSection />);
+
+    const chromeButtons = screen.getAllByRole("button", { name: "Import from Chrome" });
+    fireEvent.click(chromeButtons[0]);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Imported 12 cookies (3 skipped) - app-bound-key-refused (0x8004A007): Chrome refused to release its app-bound cookies to Ferryx, so those were skipped; sign in again on the sites that need them.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("on Windows, points to the Import browser data flow instead of the per-profile buttons", () => {
     vi.mocked(platform.isInstalledBrowserCookieImportSupported).mockReturnValue(false);
     vi.mocked(platform.isMacHost).mockReturnValue(false);

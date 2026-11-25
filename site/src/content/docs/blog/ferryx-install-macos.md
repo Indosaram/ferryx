@@ -1,25 +1,25 @@
 ---
 title: "Installing Ferryx on macOS: DMG, Gatekeeper, Notarization"
-description: "Download the universal DMG, clear Gatekeeper warnings, and understand notarization prompts on first launch. Claims map to Ferryx docs and cited sources only."
+description: "Download the arm64 DMG, clear Gatekeeper warnings, and understand notarization prompts on first launch. Claims map to Ferryx docs and cited sources only."
 ---
 
-**Installing Ferryx on macOS: DMG, Gatekeeper, Notarization.** Download the universal DMG, clear Gatekeeper warnings, and understand notarization prompts on first launch. Claims map to Ferryx docs and cited sources only.
+**Installing Ferryx on macOS: DMG, Gatekeeper, Notarization.** Download the arm64 DMG, clear Gatekeeper warnings, and understand notarization prompts on first launch. Claims map to Ferryx docs and cited sources only.
 
 ![ferryx-install-macos cover](/images/blog/ferryx-install-macos/cover.png)
 
 ## Download and verify
 
-Ferryx ships one universal DMG for Apple Silicon and Intel Macs, macOS 10.15 or later. It is signed with a Developer ID and notarized by Apple, so it installs without disabling Gatekeeper.
+Ferryx ships one arm64 DMG for Apple Silicon Macs, macOS 10.15 or later. It is signed with a Developer ID and notarized by Apple, so it installs without disabling Gatekeeper.
 
-1. Download [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest).
+1. Download [Ferryx_aarch64.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_aarch64.dmg) and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest).
 2. Check the download before you open it. In the folder holding both files, run `shasum -a 256 -c SHA256SUMS.txt --ignore-missing`. The DMG line must read `OK`.
-3. Optional: confirm Apple's verdict yourself with `spctl -a -vvv -t install Ferryx_universal.dmg`. A good download reports `accepted` and `source=Notarized Developer ID`. The release process runs this same check on every published DMG and refuses to publish one that fails it.
+3. Optional: confirm Apple's verdict yourself with `spctl -a -vvv -t install Ferryx_aarch64.dmg`. A good download reports `accepted` and `source=Notarized Developer ID`. The release process runs this same check on every published DMG and refuses to publish one that fails it.
 
 ## Gatekeeper prompts
 
 Gatekeeper steps for the notarized DMG:
 
-1. Double-click `Ferryx_universal.dmg`. macOS mounts it and Gatekeeper checks the notarization. On a slow or offline network, the first open can pause for a few seconds while that check runs.
+1. Double-click `Ferryx_aarch64.dmg`. macOS mounts it and Gatekeeper checks the notarization. On a slow or offline network, the first open can pause for a few seconds while that check runs.
 2. Drag **Ferryx** onto the **Applications** shortcut in the DMG window, then eject the DMG.
 3. Open Ferryx from Applications or Launchpad. The first launch shows the standard prompt that Ferryx is "an app downloaded from the Internet." Click **Open**. This prompt appears once per installed copy.
 4. If macOS instead says Apple cannot check the app for malicious software, or that it "is damaged and can't be opened," the copy did not come intact from the release page. Delete it, download again, and repeat the checksum step. Do not run `xattr -cr` or turn off Gatekeeper. A notarized build never needs either.
@@ -44,7 +44,7 @@ Updates installed from inside Ferryx are signed and notarized the same way, so t
 
 ## How this fits Ferryx today
 
-Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
+Ferryx ships calendar-versioned releases for macOS (arm64 DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
 ![Installing Ferryx on macOS: DMG, Gatekeeper, Notarization illustration](/images/blog/ferryx-install-macos/body-1.png)
 

@@ -150,6 +150,14 @@ pub enum ImportError {
     Locked(String),
     #[error("encryption key unavailable: {0}")]
     KeyUnavailable(String),
+    /// The browser's elevation service answered and refused its app-bound key. The `v10` DPAPI
+    /// key cannot open `v20` data, so this is reported instead of degraded into a generic
+    /// decryption failure. `hresult` is the measured COM status (`0x8004A007` on any caller that
+    /// is not the browser's own image).
+    #[error(
+        "the browser refused its app-bound key (HRESULT 0x{hresult:08X}); its app-bound cookies cannot be decrypted"
+    )]
+    AppBoundKeyRefused { hresult: u32 },
     #[error("decompression failed: {0}")]
     DecompressFailed(String),
 }
@@ -164,9 +172,22 @@ impl ImportError {
             Self::PermissionDenied(_) => "permission-denied",
             Self::Locked(_) => "locked",
             Self::KeyUnavailable(_) => "key-unavailable",
+            Self::AppBoundKeyRefused { .. } => "app-bound-key-refused",
             Self::Io(_) => "io",
             Self::Parse(_) | Self::DecompressFailed(_) => "parse",
             Self::UnsupportedScheme(_) => "unsupported",
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl From<crate::decrypt::win_app_bound::AppBoundKeyError> for ImportError {
+    fn from(error: crate::decrypt::win_app_bound::AppBoundKeyError) -> Self {
+        match error {
+            crate::decrypt::win_app_bound::AppBoundKeyError::Refused { hresult } => {
+                Self::AppBoundKeyRefused { hresult }
+            }
+            other => Self::KeyUnavailable(other.to_string()),
         }
     }
 }

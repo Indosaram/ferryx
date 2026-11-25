@@ -171,7 +171,15 @@ fn chromium_passwords(
     parse_chromium_passwords_with(profile_dir, |blob| {
         let payload = blob.get(3..)?;
         if blob.starts_with(b"v20") {
-            let decryptor = v20.get_or_init(|| WindowsAppBoundDecryptor::for_browser(name, &local_state).ok());
+            // A refusal here is the elevation service's answer, not a bad password: it is
+            // reported once for the whole file rather than as one generic decrypt miss per row.
+            let decryptor = v20.get_or_init(|| {
+                WindowsAppBoundDecryptor::for_browser(name, &local_state)
+                    .inspect_err(|error| {
+                        tracing::warn!(browser = name, %error, "app-bound password key refused")
+                    })
+                    .ok()
+            });
             decryptor.as_ref()?.decrypt_cookie(payload).ok()
         } else {
             v10.decrypt_cookie(payload).ok()

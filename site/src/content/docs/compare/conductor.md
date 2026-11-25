@@ -3,7 +3,7 @@ title: "Ferryx vs Conductor: A Conductor Alternative on Windows and Linux"
 description: Conductor is macOS only. Compare it with Ferryx on platforms, local worktrees, session survival, agent support, and Conductor Cloud's paid sandboxes.
 ---
 
-The first question most people ask about [Conductor](https://www.conductor.build/) has a documented answer: it doesn't run on your machine unless that machine is a Mac. Conductor's install page states plainly, *"Conductor is not available for Windows or Linux yet"* ([conductor.build/docs/installation](https://www.conductor.build/docs/installation), checked 2026-10-24). [Ferryx](https://github.com/Indosaram/ferryx) ships a macOS universal DMG, an x64 Windows installer, and x86_64 AppImage and .deb packages for Linux, so the same workspace runs on all three.
+The first question most people ask about [Conductor](https://www.conductor.build/) has a documented answer: it doesn't run on your machine unless that machine is a Mac. Conductor's install page states plainly, *"Conductor is not available for Windows or Linux yet"* ([conductor.build/docs/installation](https://www.conductor.build/docs/installation), checked 2026-10-24). [Ferryx](https://github.com/Indosaram/ferryx) ships a macOS arm64 DMG, an x64 Windows installer, and x86_64 AppImage and .deb packages for Linux, so the same workspace runs on all three.
 
 That's the practical difference. The rest of this page covers what Conductor actually is, since its headline and its shipping product emphasise different things, and where the two tools genuinely diverge.
 

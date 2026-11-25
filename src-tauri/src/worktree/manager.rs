@@ -705,18 +705,41 @@ impl WorktreeManager {
         slug: &str,
     ) -> Result<Option<Worktree>, WorktreeError> {
         Self::format_branch_name(ws_id, slug)?;
+        // Collect the candidates that exist and are inside the root jail first, so a miss costs no
+        // git call at all.
+        let mut candidates = Vec::new();
         for dir in self.managed_dirs() {
             let target = self.managed_path_in(dir, ws_id, slug);
             if !target.exists() {
                 continue;
             }
-            let canonical = match self.canonical_allowed_path(&target) {
-                Ok(path) => path,
+            match self.canonical_allowed_path(&target) {
+                Ok(path) => candidates.push(path),
                 Err(WorktreeError::PathOutsideWorkspace { .. })
                 | Err(WorktreeError::WorktreeNotFound { .. }) => continue,
                 Err(error) => return Err(error),
-            };
-            match inspect_worktree(&canonical) {
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        // One `git worktree list --porcelain` covers every candidate. Probing each one with
+        // `inspect_worktree` instead costs two git subprocesses per managed dir (measured
+        // 110-160 ms each on a warm cache) and is paid on every worktree-backed terminal spawn.
+        // A listing failure falls back to per-candidate inspection so behaviour is unchanged when
+        // the repository itself cannot be listed.
+        let listed = self.list_worktrees().ok();
+        if let Some(listed) = &listed {
+            for canonical in &candidates {
+                if let Some(worktree) = listed.iter().find(|worktree| worktree.path == *canonical) {
+                    return Ok(Some(worktree.clone()));
+                }
+            }
+        }
+        // Git does not record one of these directories as a worktree (for example a checkout whose
+        // admin files were removed). Inspect them directly so the error behaviour is unchanged.
+        for canonical in &candidates {
+            match inspect_worktree(canonical) {
                 Ok(worktree) => return Ok(Some(worktree)),
                 Err(WorktreeError::GitError { .. }) => continue,
                 Err(error) => return Err(error),

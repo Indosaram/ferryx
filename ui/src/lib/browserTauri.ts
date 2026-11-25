@@ -283,6 +283,7 @@ export type BrowserCookieImportFailureReason =
   | "keychain-denied"
   | "no-cookies"
   | "unsupported-platform"
+  | "app-bound-key-refused"
   | "cookie-import-failed";
 
 export type BrowserCookieImportErrorPayload = {
@@ -318,6 +319,10 @@ export function getBrowserCookieImportActionableMessage(
       return "Browser profile directory or cookie database was not found.";
     case "no-cookies":
       return "No importable cookies found in the selected profile.";
+    case "app-bound-key-refused":
+      // The browser's elevation service refuses its app-bound key to any caller but Chrome
+      // itself, so its app-bound cookies cannot be read on this machine. The rest still import.
+      return "Chrome refused to release its app-bound cookies to Ferryx, so those were skipped; sign in again on the sites that need them.";
     case "unsupported-platform":
       return "Installed browser cookie import is not supported on this platform.";
     case "cookie-import-failed":
@@ -325,6 +330,37 @@ export function getBrowserCookieImportActionableMessage(
     default:
       return null;
   }
+}
+
+/** One class of rows an import left unapplied even though the import succeeded: today the
+ * browser refusing its app-bound (`v20`) key while the profile's `v10` cookies still imported. */
+export type InstalledBrowserCookiesImportBlock = {
+  reason: BrowserCookieImportFailureReason | string;
+  /** How many rows the block left unapplied. */
+  skippedCount?: number;
+  /** The measured COM status behind the block, `0x`-prefixed. */
+  hresult?: string | null;
+};
+
+export type InstalledBrowserCookiesImportResult = {
+  importedCount: number;
+  skippedCount: number;
+  /** Absent when nothing was blocked; the reason the rest of the rows were skipped when present. */
+  blocked?: InstalledBrowserCookiesImportBlock | null;
+};
+
+/** The user-facing reason a successful import still skipped rows, or `null` when none were.
+ * The refusal reaches the shell as typed data on the success path, so it must never be dropped. */
+export function describeInstalledCookieImportBlock(
+  blocked: InstalledBrowserCookiesImportBlock | null | undefined,
+): string | null {
+  if (!blocked || typeof blocked !== "object") return null;
+  const reason = typeof blocked.reason === "string" ? blocked.reason.trim() : "";
+  if (!reason) return null;
+  const actionable = getBrowserCookieImportActionableMessage(reason);
+  const hresult = typeof blocked.hresult === "string" && blocked.hresult.trim() ? ` (${blocked.hresult.trim()})` : "";
+  const prefix = `${reason}${hresult}`;
+  return actionable ? `${prefix}: ${actionable}` : prefix;
 }
 
 export function formatBrowserCookieImportError(err: unknown): string {
@@ -525,8 +561,8 @@ export async function importInstalledBrowserCookies(
   profileId: string,
   source: "chrome" | "edge",
   sourceProfile?: string,
-): Promise<{ importedCount: number; skippedCount: number }> {
-  return invoke<{ importedCount: number; skippedCount: number }>(
+): Promise<InstalledBrowserCookiesImportResult> {
+  return invoke<InstalledBrowserCookiesImportResult>(
     "cmd_browser_import_installed_cookies",
     {
       request: {

@@ -56,7 +56,7 @@ fn respond(stream: &mut TcpStream, body: &[u8]) {
 }
 
 fn manifest_for(base: &str, version: &str, signature: &str) -> String {
-    let artifact_url = format!("{base}/Ferryx_universal.app.tar.gz");
+    let artifact_url = format!("{base}/Ferryx_aarch64.app.tar.gz");
     let platform = json!({ "signature": signature, "url": artifact_url });
     json!({
         "version": version,
@@ -64,7 +64,6 @@ fn manifest_for(base: &str, version: &str, signature: &str) -> String {
         "pub_date": "2026-08-26T00:00:00Z",
         "platforms": {
             "darwin-aarch64": platform,
-            "darwin-x86_64": platform,
             "windows-x86_64": platform,
             "linux-x86_64": platform,
         }

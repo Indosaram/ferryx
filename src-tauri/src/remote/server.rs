@@ -2630,12 +2630,14 @@ async fn machine_terminal_upgrade(
                 socket,
                 session,
                 attachment,
-                generation,
-                input_generation,
-                lease.cancelled.clone(),
                 GatewaySocketContext { device, state: Arc::clone(&state) },
-                Arc::clone(&resized),
-                render_grid,
+                MachineSocketScope {
+                    generation,
+                    input_generation,
+                    fenced: lease.cancelled.clone(),
+                    resized: Arc::clone(&resized),
+                    render_grid,
+                },
             );
             tokio::select! {
                 biased;
@@ -2838,17 +2840,31 @@ struct GatewaySocketContext {
     state: Arc<RemoteGatewayState>,
 }
 
+/// The admitted machine socket's identity and options: the generations it speaks for, the fence
+/// that revokes it, the shared restore-debt flag and whether the grid is mirrored. Grouped so the
+/// handler's signature stays readable; every field crosses the admission boundary together.
+struct MachineSocketScope {
+    generation: u64,
+    input_generation: u64,
+    fenced: tokio::sync::watch::Receiver<bool>,
+    resized: Arc<std::sync::atomic::AtomicBool>,
+    render_grid: bool,
+}
+
 async fn handle_machine_terminal_socket(
     socket: WebSocket,
     session: crate::remote::machine_protocol::Session,
     attachment: crate::terminal::output_hub::machine_output::MachineAttachment,
-    generation: u64,
-    input_generation: u64,
-    mut fenced: tokio::sync::watch::Receiver<bool>,
     context: GatewaySocketContext,
-    resized: Arc<std::sync::atomic::AtomicBool>,
-    render_grid: bool,
+    scope: MachineSocketScope,
 ) {
+    let MachineSocketScope {
+        generation,
+        input_generation,
+        mut fenced,
+        resized,
+        render_grid,
+    } = scope;
     let GatewaySocketContext { device, state } = context;
     use crate::remote::protocol::MachineTerminalControl;
     use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};

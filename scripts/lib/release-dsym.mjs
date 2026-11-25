@@ -196,7 +196,7 @@ export function assertDsymGate({ binaryPath, dsymDir, exec = null }) {
 /**
  * Builds one dSYM bundle from a binary's per-architecture slices and reports what it holds.
  *
- * `lipo` produces the universal binary, but the debug maps live in the per-architecture binaries
+ * A multi-architecture linker produces a combined binary, but the debug maps live in the per-architecture binaries
  * rustc linked, so `dsymutil` is given those and writes a single bundle holding one DWARF file per
  * slice -- exactly the bundle the UUID gate needs to cover every architecture. With one slice this
  * is the plain one-binary case. Verified against the real toolchain: one bundle, one function table

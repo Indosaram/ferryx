@@ -101,6 +101,7 @@ const native = {
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
   dispatchNotification: vi.fn().mockResolvedValue(undefined),
+  withdrawNotification: vi.fn().mockResolvedValue(undefined),
   playNotificationSound: vi.fn().mockResolvedValue(undefined),
   onNotificationActivated: vi.fn(async (cb: () => void) => {
     notificationActivationListener = cb;
@@ -216,6 +217,7 @@ vi.mock("./lib/tauri", () => ({
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
   dispatchNotification: native.dispatchNotification,
+  withdrawNotification: native.withdrawNotification,
   playNotificationSound: native.playNotificationSound,
   onNotificationActivated: native.onNotificationActivated,
   takeNotificationActivations: native.takeNotificationActivations,
@@ -268,6 +270,15 @@ function emitActivityTargets(): void {
   for (const target of currentActivityTargets) {
     for (const listener of activityListeners) listener({ ...target, previousState: "working" });
   }
+}
+
+/**
+ * The store acknowledges a session the user came back to (input, pane focus, tab activation)
+ * through this feed, and the window that announced it has to pull its banner back down.
+ */
+const sessionActivitySeenListeners = new Set<(event: { workspaceId: string; sessionId: string }) => void>();
+function emitSessionActivitySeen(workspaceId: string, sessionId: string): void {
+  for (const listener of sessionActivitySeenListeners) listener({ workspaceId, sessionId });
 }
 
 const markTabUnread = vi.fn();
@@ -488,6 +499,8 @@ describe("App notification coordinator wiring", () => {
     native.onRemoteSelectionRequested.mockReset();
     native.onRemoteSelectionRequested.mockResolvedValue(() => {});
     native.dispatchNotification.mockReset();
+    native.withdrawNotification.mockReset();
+    native.withdrawNotification.mockResolvedValue(undefined);
     native.playNotificationSound.mockReset();
     markTabUnread.mockReset();
     markWorktreeUnread.mockReset();
@@ -502,6 +515,7 @@ describe("App notification coordinator wiring", () => {
     activationQueue = [];
     bellListeners.clear();
     activityListeners.clear();
+    sessionActivitySeenListeners.clear();
     currentActivityTargets = [];
 
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -516,6 +530,10 @@ describe("App notification coordinator wiring", () => {
       subscribeActivityNotification: (listener: (event: ActivityNotificationEvent) => void) => {
         activityListeners.add(listener);
         return () => { activityListeners.delete(listener); };
+      },
+      subscribeSessionActivitySeen: (listener: (event: { workspaceId: string; sessionId: string }) => void) => {
+        sessionActivitySeenListeners.add(listener);
+        return () => { sessionActivitySeenListeners.delete(listener); };
       },
       markTabUnread,
       markWorktreeUnread,
@@ -902,6 +920,36 @@ describe("App notification coordinator wiring", () => {
     expect(native.playNotificationSound).not.toHaveBeenCalled();
     expect(markTabUnread).not.toHaveBeenCalled();
     expect(markWorktreeUnread).not.toHaveBeenCalled();
+  });
+
+  it("withdraws the banner it raised once the user acknowledges that session", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    currentActivityTargets = [
+      {
+        workspaceId: "default",
+        workspaceLabel: "default",
+        sessionId: "sess-1",
+        tabId: "tab-1",
+        worktreePath: "/repo/main",
+        worktreeLabel: "main",
+        agentLabel: "codex",
+        terminalTitle: "codex run",
+        state: "done",
+      },
+    ];
+
+    await act(async () => { render(<App />); });
+    await nativeFocusTrackingReady;
+    nativeFocusChanged?.({ payload: false });
+    await act(async () => { emitActivityTargets(); });
+    expect(native.dispatchNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { workspaceId: "default", sessionId: "sess-1" } }),
+    );
+    expect(native.withdrawNotification).not.toHaveBeenCalled();
+
+    // Coming back to the pane acknowledges the session, and the banner announcing it must go.
+    await act(async () => { emitSessionActivitySeen("default", "sess-1"); });
+    expect(native.withdrawNotification).toHaveBeenCalledWith({ workspaceId: "default", sessionId: "sess-1" });
   });
 
   describe("supervisor panel navigation and the collapsed badge", () => {

@@ -15,10 +15,12 @@ const { groupOf } = await import("../lib/attentionGroup");
 const { NotificationCoordinator } = await import("../lib/notificationCoordinator");
 const { DEFAULT_NOTIFICATION_SETTINGS } = await import("../lib/notificationSettings");
 const { dispatchNotification } = await import("../lib/tauri");
-const { clearWorkspaceSnapshot } = await import("./workspaceSnapshotCache");
+const { clearWorkspaceSnapshot, setWorkspaceSnapshot } = await import("./workspaceSnapshotCache");
 const { clearHmrWorkspaceState } = await import("./hmrWorkspaceState");
-const { selectGlobalUnreadBadgeCount, useWorkspaceStore } = await import("./workspaceStore");
+const { selectGlobalUnreadBadgeCount, useWorkspaceStore, workspaceReducer } = await import("./workspaceStore");
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
+type WorkspaceAction = import("./workspaceStore").WorkspaceAction;
+type SessionActivitySeenEvent = import("./workspaceStore").SessionActivitySeenEvent;
 type Group = "needsYou" | "unread" | "working" | "seen";
 
 const worktree: Worktree = {
@@ -184,5 +186,92 @@ describe("desktop notifications from the attention group", () => {
     } as never));
     expect(decisions).toEqual([true, false]);
     expect(dispatchNotification).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("releasing unseen attention recalls its banner", () => {
+  /** A mounted store plus the coordinator wiring App installs for seen events. */
+  function seenHarness() {
+    const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "ws", initialWorktrees: [worktree] }));
+    act(() => result.current.restoreWorkspace(fourPanes()));
+    const recalled: import("../lib/types").NotificationTarget[] = [];
+    const coordinator = new NotificationCoordinator({
+      isWindowFocused: () => false,
+      isNotificationLeader: () => true,
+      getSettings: () => ({ ...DEFAULT_NOTIFICATION_SETTINGS, enabled: true, agentTaskComplete: true }),
+      withdrawNotification: vi.fn(async (target) => { recalled.push(target); }),
+    });
+    const seen: SessionActivitySeenEvent[] = [];
+    result.current.subscribeSessionActivitySeen((event) => {
+      seen.push(event);
+      coordinator.withdrawForSession(event.workspaceId, event.sessionId);
+    });
+    return { result, seen, recalled };
+  }
+
+  /** A real reducer edge: a background pane finishes unseen, exactly as a title report would. */
+  function leaveUnseen(result: { current: ReturnType<typeof useWorkspaceStore> }, tabId: string, sessionId: string) {
+    act(() => result.current.dispatchWorkspaceAction({
+      type: "SESSION_SCREEN_ACTIVITY", tabId, sessionId, state: "blocked", ruleId: "approval",
+    } as WorkspaceAction));
+  }
+
+  it("activating the tab of a waiting pane emits the seen event and recalls its banner", () => {
+    const { result, seen, recalled } = seenHarness();
+    leaveUnseen(result, "tab-2", "s2");
+    act(() => result.current.activateTab("tab-2"));
+    expect(seen).toEqual([{ workspaceId: "ws", sessionId: "s2" }]);
+    expect(recalled).toEqual([expect.objectContaining({ workspaceId: "ws", sessionId: "s2" })]);
+  });
+
+  it("a pane interaction acknowledges the completion through the store and recalls it", () => {
+    const { result, seen, recalled } = seenHarness();
+    leaveUnseen(result, "tab-2", "s2");
+    act(() => { window.dispatchEvent(new CustomEvent("ferryx:session-interacted", { detail: { sessionId: "s2" } })); });
+    expect(seen).toEqual([{ workspaceId: "ws", sessionId: "s2" }]);
+    expect(recalled).toEqual([expect.objectContaining({ workspaceId: "ws", sessionId: "s2" })]);
+  });
+
+  it("a parked project's acknowledgment names that project, not the mounted one", () => {
+    const { result, seen } = seenHarness();
+    const parked = fourPanes();
+    parked.workspaceId = "ws-2";
+    const unseen = workspaceReducer({ ...parked, activityBySessionId: {} }, {
+      type: "SESSION_SCREEN_ACTIVITY", tabId: "tab-2", sessionId: "s2", state: "blocked", ruleId: "approval",
+    } as WorkspaceAction);
+    setWorkspaceSnapshot("ws-2", unseen);
+    // A non-acknowledging owner action lets the store observe the parked snapshot first.
+    act(() => result.current.markTabUnread("tab-1", "ws-2"));
+    expect(seen).toEqual([]);
+    act(() => result.current.markSessionActivitySeen("s2", "ws-2"));
+    expect(seen).toEqual([{ workspaceId: "ws-2", sessionId: "s2" }]);
+  });
+
+  it("a pane whose attention was already seen releases nothing when it is activated", () => {
+    const { result, seen } = seenHarness();
+    leaveUnseen(result, "tab-2", "s2");
+    // Read it once: this release is the only one the store may report for that episode.
+    act(() => result.current.activateTab("tab-2"));
+    expect(seen).toEqual([{ workspaceId: "ws", sessionId: "s2" }]);
+    act(() => result.current.activateTab("tab-1"));
+    act(() => result.current.activateTab("tab-2"));
+    expect(seen).toEqual([{ workspaceId: "ws", sessionId: "s2" }]);
+  });
+
+  it("switching to another project releases nothing it moved out of view", () => {
+    const { result, rerender } = renderHook(
+      (props: { workspaceId: string }) =>
+        useWorkspaceStore({ workspaceId: props.workspaceId, initialWorktrees: [worktree] }),
+      { initialProps: { workspaceId: "ws" } },
+    );
+    const seen: SessionActivitySeenEvent[] = [];
+    result.current.subscribeSessionActivitySeen((event) => { seen.push(event); });
+    act(() => result.current.restoreWorkspace(fourPanes()));
+    leaveUnseen(result, "tab-2", "s2");
+    expect(seen).toEqual([]);
+    rerender({ workspaceId: "ws-3" });
+    // The unseen pane moved into the parked cache; moving is not reading.
+    expect(seen).toEqual([]);
+    expect(result.current.state.activityBySessionId).toEqual({});
   });
 });

@@ -302,7 +302,11 @@ async fn negotiate(
         .map_err(|_| machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED"))?;
 
     manager.udp_binds.fetch_add(1, Ordering::AcqRel);
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.map_err(|_| unavailable())?;
+    let socket = crate::paired_host::direct::bind_direct_socket(
+        crate::paired_host::direct::preferred_local_port(),
+    )
+    .await
+    .map_err(|_| unavailable())?;
     let public_endpoint = tokio::time::timeout(
         manager.config.stun_deadline,
         host_task::discover(&socket, &manager.config.stun_servers),

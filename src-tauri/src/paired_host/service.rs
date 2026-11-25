@@ -64,7 +64,9 @@ mod native_transport_tests {
             tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(2);
         let router = axum::Router::new()
             .route("/api/v1/pair/exchange", post(|Json(input): Json<serde_json::Value>| async move {
-                let pin = input["pin"].as_str().unwrap();
+                // The real direct gateway deserializes `PairExchangeRequest`, whose field is
+                // `code`; a fixture that reads `pin` let a mismatch in the client ship.
+                let pin = input["code"].as_str().expect("direct gateway requires code");
                 Json(json!({"token": pin, "machineId": if pin == "other" { "b" } else { "a" },
                     "device": {"id":"fixture", "name":"fixture", "permission":"control", "accessScope":"machine", "createdAt":1, "lastSeenAt":1}}))
             }))
@@ -197,6 +199,67 @@ mod native_transport_tests {
         assert!(!serde_json::to_string(&details)
             .unwrap()
             .contains("0123456789abcdef"));
+    }
+
+    /// Direct pairing posts to the machine's own gateway, whose `PairExchangeRequest`
+    /// deserializes `code`. Sending only `pin` (which the relay accepts) made every direct
+    /// pairing fail with a 422 that surfaced as a generic invalid-input refusal.
+    #[tokio::test]
+    async fn direct_pairing_posts_the_code_field_the_gateway_deserializes() {
+        let root = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        let seen_tx = Arc::new(std::sync::Mutex::new(Some(seen_tx)));
+        let router = axum::Router::new().route(
+            "/api/v1/pair/exchange",
+            axum::routing::post(move |axum::Json(input): axum::Json<serde_json::Value>| {
+                let seen_tx = Arc::clone(&seen_tx);
+                async move {
+                    // Mirror the real handler: the body must deserialize a `code` string.
+                    let code = input["code"]
+                        .as_str()
+                        .expect("direct gateway requires `code`")
+                        .to_owned();
+                    let _ = seen_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .map(|tx| tx.send(input.clone()));
+                    axum::Json(serde_json::json!({
+                        "token": "issued-token",
+                        "machineId": "machine-direct",
+                        "code": code,
+                        "device": {
+                            "id": "device-direct",
+                            "name": "Ferryx Desktop",
+                            "permission": "control",
+                            "accessScope": "machine",
+                            "createdAt": 1,
+                            "lastSeenAt": 1,
+                        },
+                    }))
+                }
+            }),
+        );
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move { axum::serve(listener, router).await });
+        let service = PairedHostService::open_test_loopback(root.path().join("data"));
+        // Reachability/capability probes are not what this test asserts, so let them 404 and
+        // only require that the exchange itself carried `code`.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.pair(PairRequest {
+                relay_origin: origin,
+                pin: Secret("abc123".into()),
+                display_label: "direct".into(),
+            }),
+        )
+        .await;
+        let body = seen_rx.await.expect("the gateway saw a pair exchange");
+        tasks.abort_all();
+        assert_eq!(body["code"].as_str(), Some("abc123"));
+        assert_eq!(body["pin"].as_str(), Some("abc123"));
     }
 }
 
@@ -881,7 +944,10 @@ impl PairedHostService {
         let exchanged: Exchange = self.json(self.http.post(format!("{origin}/api/v1/pair/exchange"))
             .header("content-type", "application/json")
             .header(super::secure_http::CLIENT_BUILD_HEADER, super::secure_http::CLIENT_BUILD)
-            .body(serde_json::to_vec(&serde_json::json!({"pin": request.pin.0, "deviceName": "Ferryx Desktop"})).map_err(|_| ServiceError::invalid())?)).await?;
+            // The relay reads `pin`; the direct gateway's `PairExchangeRequest` requires
+            // `code`, so send both. `normalize_origin` admits a loopback http origin only
+            // under the insecure opt-in, which is exactly the direct-pairing path.
+            .body(serde_json::to_vec(&serde_json::json!({"pin": request.pin.0, "code": request.pin.0, "deviceName": "Ferryx Desktop"})).map_err(|_| ServiceError::invalid())?)).await?;
         let (grant_scope, advertised_origins) = self
             .authenticate(&origin, &exchanged.machine_id, &exchanged.token.0)
             .await?;

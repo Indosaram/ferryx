@@ -226,7 +226,10 @@ pub enum PendingInputEntry {
     Absent,
     /// The row this pane owns, whether it was recorded under a pane-scoped key or, by a journal
     /// written before that identity existed, under the bare public id.
-    Owned(PendingInput),
+    ///
+    /// Boxed because `PendingInput` is several hundred bytes and the other variants carry none:
+    /// an unboxed copy would grow every `Absent`/`Elsewhere` answer to the row's size.
+    Owned(Box<PendingInput>),
     /// This public id is durable for other panes only. Those rows belong to those panes and this
     /// caller may neither read nor write them.
     Elsewhere,
@@ -513,7 +516,7 @@ pub fn open_observed(
         // a different card, so this pane starts its own instead of refusing the read or, worse,
         // adopting the other pane's answer.
         let own = match existing {
-            PendingInputEntry::Owned(record) => Some(record),
+            PendingInputEntry::Owned(record) => Some(*record),
             PendingInputEntry::Absent | PendingInputEntry::Elsewhere => None,
         };
         let before = own.clone();
@@ -594,7 +597,7 @@ fn claim_locked(
             // Another pane's card under the same public id. It is not this caller's to answer, and
             // it must never be replayed or settled on this caller's behalf.
             PendingInputEntry::Elsewhere => return (None, false, Claim::AlreadyAnswered),
-            PendingInputEntry::Owned(record) => record,
+            PendingInputEntry::Owned(record) => *record,
         };
         if record.session_id != session_id {
             return (None, false, Claim::AlreadyAnswered);
@@ -666,9 +669,10 @@ pub fn record_for_session(
     now: u64,
 ) -> Result<(), String> {
     journal.update_pending_input_for_session(prompt_id, session_id, move |existing| {
-        let PendingInputEntry::Owned(mut record) = existing else {
+        let PendingInputEntry::Owned(record) = existing else {
             return (None, false, Err(unavailable()));
         };
+        let mut record = *record;
         let changed = record_one(&mut record, outcome, now);
         (Some(record), changed, Ok(()))
     })?
@@ -741,10 +745,10 @@ pub fn dismiss_ambiguous_for_screen(
         let PendingInputEntry::Owned(record) = existing else {
             return (None, false, Err("PROMPT_NOT_FOUND".into()));
         };
+        let mut record = *record;
         if record.session_id != session_id || record.screen_revision != screen_revision {
             return (Some(record), false, Err("PROMPT_CONFLICT".into()));
         }
-        let mut record = record;
         match dismiss_ambiguous_record(&mut record, now) {
             Ok(changed) => (Some(record), changed, Ok(())),
             Err(error) => (Some(record), false, Err(error)),

@@ -393,6 +393,65 @@ fn ssh_helper_setup_probe_classifies_ready_marker_as_installed() {
 }
 
 #[test]
+fn ssh_helper_setup_probe_reads_stdout_sentinels_when_exit_status_is_lost() {
+    // A server that reports every command as exit 0 hands back the sentinel as plain stdout.
+    assert_eq!(
+        classify_probe_result(Ok(b"FERRYX_ERR_HELPER_MISSING\n")),
+        HelperProbeState::Missing
+    );
+    assert_eq!(
+        classify_probe_result(Ok(b"FERRYX_ERR_HELPER_NOT_EXECUTABLE\r\n")),
+        HelperProbeState::Missing
+    );
+
+    let location = HelperLocation {
+        executable: "/home/u/.ferryx/helper".into(),
+        root: "/home/u/.ferryx/root".into(),
+    };
+    let missing_err = parse_ensure_started_output(b"FERRYX_ERR_HELPER_MISSING\n", &location)
+        .expect_err("stdout missing sentinel must fail ensure_started");
+    assert_eq!(missing_err.code, IpcErrorCode::CliExecutableNotFound);
+    assert_eq!(
+        missing_err.details.as_ref().and_then(|d| d.get("stage")).and_then(|v| v.as_str()),
+        Some("helper_missing")
+    );
+    let perm_err = parse_ensure_started_output(b"FERRYX_ERR_HELPER_NOT_EXECUTABLE\n", &location)
+        .expect_err("stdout not-executable sentinel must fail ensure_started");
+    assert_eq!(perm_err.code, IpcErrorCode::Unsupported);
+    assert_eq!(
+        perm_err.details.as_ref().and_then(|d| d.get("stage")).and_then(|v| v.as_str()),
+        Some("helper_permissions")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_helper_setup_posix_scripts_print_missing_sentinel_on_stdout() {
+    let location = HelperLocation {
+        executable: "/nonexistent-ferryx/helper".into(),
+        root: "/nonexistent-ferryx/root".into(),
+    };
+    let env = RemoteEnvironment {
+        platform: RemotePlatform::Posix,
+        executor: RemoteExecutor::Sh,
+        version: "Linux".into(),
+        home: "/home/u".into(),
+        temp: "/tmp".into(),
+        git: true,
+    };
+    let output = std::process::Command::new("sh")
+        .args(["-c", &probe_ready_script(&env, &location)])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(127));
+    assert_eq!(stdout_sentinel(&output.stdout), Some("FERRYX_ERR_HELPER_MISSING"));
+    assert_eq!(
+        classify_probe_result(Ok(&output.stdout)),
+        HelperProbeState::Missing
+    );
+}
+
+#[test]
 fn ssh_helper_setup_probe_classifies_missing_sentinel_as_missing() {
     let err = IpcError::new(
         IpcErrorCode::IoError,

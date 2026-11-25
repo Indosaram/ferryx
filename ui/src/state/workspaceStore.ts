@@ -92,6 +92,24 @@ export type LocalRecoveryAdmissionResult =
       "PAIRED_HOST_INVALID_RESPONSE" | "PAIRED_HOST_MIGRATION_PENDING" | "UNSUPPORTED_PROTOCOL" }
   | { kind: "exited" }
   | { kind: "cancelled" };
+/** The block reasons `retry_owned` can report from a paired owner, verbatim from the daemon. */
+const PAIRED_BLOCK_REASONS = [
+  "SESSION_EXPIRED", "CONTROL_CONFLICT", "STALE_GENERATION", "PAIRED_HOST_STALE_GENERATION",
+  "PAIRED_HOST_UNAUTHORIZED", "UNAUTHORIZED", "PERMISSION_DENIED", "PAIRED_HOST_WRONG_MACHINE",
+  "PAIRED_HOST_INVALID_RESPONSE", "PAIRED_HOST_MIGRATION_PENDING", "UNSUPPORTED_PROTOCOL",
+] as const;
+type LocalRecoveryBlockReason = Extract<LocalRecoveryAdmissionResult, { kind: "blocked" }>["reason"];
+/**
+ * Map an owner's raw block code onto a block reason. A code this build does not know is still a
+ * real failure, so it keeps its own name rather than collapsing into `identity_conflict`; the
+ * pane shows whatever it is given.
+ */
+export function localRecoveryBlockReason(code: string | null | undefined): LocalRecoveryBlockReason {
+  if (!code) return "identity_conflict";
+  return (PAIRED_BLOCK_REASONS as readonly string[]).includes(code)
+    ? (code as LocalRecoveryBlockReason)
+    : "identity_conflict";
+}
 type LocalRecoveryOwner = { workspaceId: string; sessionId: string; captured: TerminalSession;
   scheduler: RecoveryScheduler; admitting: boolean; requesters: Set<(result: LocalRecoveryAdmissionResult) => void> };
 const localRecoveryOwners = new Map<string, LocalRecoveryOwner>();
@@ -991,6 +1009,17 @@ export function useWorkspaceStore({
   const bellListenersRef = useRef(new Set<(sessionId: string, tabId: string, target?: ActivityNotificationTarget) => void>());
   const activityListenersRef = useRef(new Set<(event: ActivityNotificationEvent) => void>());
   const mountedWorkspaceIdRef = useRef(workspaceId);
+  /** Acknowledgment subscribers: the notification coordinator recalls the banner they name. */
+  const sessionSeenListenersRef = useRef(new Set<(event: SessionActivitySeenEvent) => void>());
+  /**
+   * The unseen attention every workspace showed on the previous run, so an acknowledgment is
+   * diffed rather than declared. `workspaceId` guards a project switch: a snapshot moving between
+   * mounted and parked is navigation, not a read, so the first run after it only re-baselines.
+   */
+  const sessionSeenBaselineRef = useRef<{
+    workspaceId: string;
+    unseenByWorkspaceId: Map<string, Set<string>>;
+  } | null>(null);
   // Snapshots of parked workspaces live outside React state, so a change there has to be announced
   // for the sidebar's cross-workspace activity to recompute.
   const [parkedActivityVersion, setParkedActivityVersion] = useState(0);
@@ -1150,6 +1179,46 @@ export function useWorkspaceStore({
     setHmrWorkspaceState(owner, next);
     bumpParkedActivity();
   }, [dispatch, bumpParkedActivity]);
+
+  // A release is the one attention edge the daemon cannot report: only the user's own read can
+  // tell a delivered banner that it is stale. Diffing the unseen set per workspace covers every
+  // path that clears attention -- MARK_SESSION_ACTIVITY_SEEN (pane interaction and native focus),
+  // acknowledgeTabCompletions (tab activation and pane focus) and RESET_AGENT_STATE -- without
+  // teaching the reducer a second responsibility it would have to keep in sync forever.
+  const mountedActivityBySessionId = renderedState.activityBySessionId;
+  const mountedActivityWorkspaceId = renderedState.workspaceId ?? workspaceId;
+  useEffect(() => {
+    const unseenByWorkspaceId = new Map<string, Set<string>>();
+    const collectUnseen = (ownerWorkspaceId: string, activityBySessionId: WorkspaceState["activityBySessionId"]) => {
+      const unseen = new Set<string>();
+      for (const [sessionId, activity] of Object.entries(activityBySessionId ?? {})) {
+        if ((activity.state === "waiting" || activity.state === "done") && !activity.seen) unseen.add(sessionId);
+      }
+      unseenByWorkspaceId.set(ownerWorkspaceId, unseen);
+    };
+    collectUnseen(mountedActivityWorkspaceId, mountedActivityBySessionId);
+    for (const [ownerWorkspaceId, snapshot] of listWorkspaceSnapshots()) {
+      if (ownerWorkspaceId !== mountedActivityWorkspaceId) collectUnseen(ownerWorkspaceId, snapshot.activityBySessionId);
+    }
+
+    const previous = sessionSeenBaselineRef.current;
+    sessionSeenBaselineRef.current = { workspaceId: mountedActivityWorkspaceId, unseenByWorkspaceId };
+    // A project switch moves a snapshot between the mounted state and the parked cache; that is
+    // navigation, not a read, so the first run after it only re-establishes the baseline.
+    if (!previous || previous.workspaceId !== mountedActivityWorkspaceId) return;
+
+    for (const [ownerWorkspaceId, previouslyUnseen] of previous.unseenByWorkspaceId) {
+      const stillUnseen = unseenByWorkspaceId.get(ownerWorkspaceId);
+      // A workspace that vanished from view (closed project) released nothing the user read.
+      if (!stillUnseen) continue;
+      for (const sessionId of previouslyUnseen) {
+        if (stillUnseen.has(sessionId)) continue;
+        for (const listener of [...sessionSeenListenersRef.current]) {
+          listener({ workspaceId: ownerWorkspaceId, sessionId });
+        }
+      }
+    }
+  }, [mountedActivityBySessionId, mountedActivityWorkspaceId, parkedActivityVersion]);
 
   useLayoutEffect(() => {
     localRecoveryAdmissions.set(workspaceId, dispatch);
@@ -2731,6 +2800,11 @@ export function useWorkspaceStore({
     return () => { activityListenersRef.current.delete(listener); };
   }, []);
 
+  const subscribeSessionActivitySeen = useCallback((listener: (event: SessionActivitySeenEvent) => void) => {
+    sessionSeenListenersRef.current.add(listener);
+    return () => { sessionSeenListenersRef.current.delete(listener); };
+  }, []);
+
   const createBrowserTab = useCallback(
     async (url = "http://localhost:3000", label?: string, options?: { worktreePath?: string; profileId?: string; browserId?: string; opener?: { browserId: string; handle: string } }) => {
       const capturedWorktreePath = options?.worktreePath ?? stateRef.current.activeWorktreePath ?? undefined;
@@ -3223,6 +3297,7 @@ export function useWorkspaceStore({
     updateSessionTitleActivity,
     subscribeTerminalBell,
     subscribeActivityNotification,
+    subscribeSessionActivitySeen,
     parkedActivityVersion,
     markTabUnread: (tabId: string, owner?: string) => dispatchToOwner({ type: "MARK_TAB_UNREAD", tabId }, owner),
     clearTabUnread: (tabId: string) => dispatch({ type: "CLEAR_TAB_UNREAD", tabId }),
@@ -3573,6 +3648,12 @@ export type ActivityNotificationEvent = ActivityNotificationTarget & {
   group?: AttentionGroup;
   previousGroup?: AttentionGroup;
 };
+
+/**
+ * A pane whose unseen attention the user has now released. The notification coordinator recalls
+ * the banner it named, so this names the owning workspace rather than the mounted one.
+ */
+export type SessionActivitySeenEvent = { workspaceId: string; sessionId: string };
 
 /** Match ProjectHeader labels without tying parked-workspace events to the active project. */
 export function selectNotificationWorkspaceLabel(state: WorkspaceState): string | undefined {

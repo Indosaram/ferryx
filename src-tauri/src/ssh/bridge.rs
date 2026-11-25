@@ -526,9 +526,48 @@ impl std::os::unix::io::AsRawFd for BridgeStdoutStream {
     }
 }
 
+pub enum BridgeWriterStream {
+    Child(tokio::process::ChildStdin),
+    Mux(tokio::io::WriteHalf<super::mux_client::MuxStream>),
+}
+
+impl AsyncWrite for BridgeWriterStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            BridgeWriterStream::Child(c) => Pin::new(c).poll_write(cx, buf),
+            BridgeWriterStream::Mux(m) => Pin::new(m).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            BridgeWriterStream::Child(c) => Pin::new(c).poll_flush(cx),
+            BridgeWriterStream::Mux(m) => Pin::new(m).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            BridgeWriterStream::Child(c) => Pin::new(c).poll_shutdown(cx),
+            BridgeWriterStream::Mux(m) => Pin::new(m).poll_shutdown(cx),
+        }
+    }
+}
+
 pub enum BridgeReaderStream {
     Child(BridgeStdoutStream),
     Prefetched(tokio::io::Chain<std::io::Cursor<Vec<u8>>, BridgeStdoutStream>),
+    Mux(tokio::io::ReadHalf<super::mux_client::MuxStream>),
 }
 
 impl AsyncRead for BridgeReaderStream {
@@ -540,6 +579,7 @@ impl AsyncRead for BridgeReaderStream {
         match self.get_mut() {
             BridgeReaderStream::Child(c) => Pin::new(c).poll_read(cx, buf),
             BridgeReaderStream::Prefetched(p) => Pin::new(p).poll_read(cx, buf),
+            BridgeReaderStream::Mux(m) => Pin::new(m).poll_read(cx, buf),
         }
     }
 }
@@ -550,6 +590,7 @@ impl std::os::unix::io::AsRawFd for BridgeReaderStream {
         match self {
             BridgeReaderStream::Child(c) => c.as_raw_fd(),
             BridgeReaderStream::Prefetched(p) => p.get_ref().1.as_raw_fd(),
+            BridgeReaderStream::Mux(_) => -1,
         }
     }
 }
@@ -886,7 +927,7 @@ impl BridgeChildHandle {
 
 /// A single framed SSH bridge connection managing an owned SSH child process.
 pub struct BridgeConnection {
-    writer: Option<BufWriter<tokio::process::ChildStdin>>,
+    writer: Option<BufWriter<BridgeWriterStream>>,
     reader: Option<BufReader<BridgeReaderStream>>,
     child_guard: Option<BridgeChildGuard>,
     #[cfg(unix)]
@@ -916,18 +957,69 @@ impl BridgeConnection {
         env: &RemoteEnvironment,
         location: &HelperLocation,
     ) -> Result<Self, BridgeError> {
+        if super::mux_client::enabled() {
+            if let super::mux_client::Acquired::Stream(stream) =
+                super::mux_client::open_stream(host, env, location).await?
+            {
+                return Ok(Self::from_mux_stream(stream));
+            }
+        }
         let plan = direct::bridge_plan(host, env, location)?;
+        Self::spawn_plan(&plan).await
+    }
+
+    /// One helper connection carried as a channel of the host's shared mux.
+    pub(crate) fn from_mux_stream(stream: super::mux_client::MuxStream) -> Self {
+        let (reader, writer) = tokio::io::split(stream);
+        Self {
+            writer: Some(BufWriter::new(BridgeWriterStream::Mux(writer))),
+            reader: Some(BufReader::new(BridgeReaderStream::Mux(reader))),
+            child_guard: None,
+            #[cfg(unix)]
+            stderr_fd: None,
+            stderr_capture: Arc::new(std::sync::Mutex::new(Vec::new())),
+            stderr_task: None,
+            #[cfg(test)]
+            stdout_eof_tx: None,
+            #[cfg(test)]
+            stderr_capture_notify: Arc::new(tokio::sync::Notify::new()),
+            prefetched_bytes: Vec::new(),
+            captured_stderr_prefix: Vec::new(),
+            closed: false,
+            poisoned: false,
+            paused: false,
+            detached: false,
+        }
+    }
+
+    /// Hands the transport's stdio to a caller that speaks its own framing (the host mux);
+    /// the connection keeps the child guard, so dropping it still ends the transport.
+    pub(crate) fn take_streams(
+        &mut self,
+    ) -> Option<(BufWriter<BridgeWriterStream>, BufReader<BridgeReaderStream>)> {
+        Some((self.writer.take()?, self.reader.take()?))
+    }
+
+    /// Waits a bounded time for the transport's stderr to drain, then returns it.
+    pub(crate) async fn drained_stderr(&mut self) -> String {
+        if let Some(task) = self.stderr_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        }
+        self.check_stderr()
+    }
+
+    pub(crate) async fn spawn_plan(plan: &ShellCommandPlan) -> Result<Self, BridgeError> {
         #[cfg(unix)]
         {
-            return Self::spawn_supervised(&plan).await;
+            return Self::spawn_supervised(plan).await;
         }
         #[cfg(windows)]
         {
-            return Self::spawn_supervised(&plan).await;
+            return Self::spawn_supervised(plan).await;
         }
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = &plan;
+            let _ = plan;
             Err(BridgeError::ProcessSpawn(
                 "Transport supervision is unavailable on this platform".into(),
             ))
@@ -1118,7 +1210,7 @@ impl BridgeConnection {
         });
 
         Ok(Self {
-            writer: Some(BufWriter::new(stdin)),
+            writer: Some(BufWriter::new(BridgeWriterStream::Child(stdin))),
             reader: Some(BufReader::new(BridgeReaderStream::Child(stdout))),
             child_guard: Some(guard()),
             #[cfg(unix)]
@@ -1551,8 +1643,13 @@ impl BridgeConnection {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
-            let stdin_fd = match self.writer.as_ref() {
-                Some(w) => dup_fd(w.get_ref().as_raw_fd())?,
+            let stdin_fd = match self.writer.as_ref().map(|w| w.get_ref()) {
+                Some(BridgeWriterStream::Child(stdin)) => dup_fd(stdin.as_raw_fd())?,
+                Some(BridgeWriterStream::Mux(_)) => {
+                    return Err(BridgeError::NotTransferable(
+                        "A shared-connection channel has no descriptors to transfer".into(),
+                    ))
+                }
                 None => return Err(BridgeError::NotTransferable("Writer missing".into())),
             };
 
@@ -1746,7 +1843,7 @@ impl BridgeConnection {
             let child_guard = BridgeChildGuard::imported(state.child_pid);
 
             Ok(Self {
-                writer: Some(BufWriter::new(tokio_stdin)),
+                writer: Some(BufWriter::new(BridgeWriterStream::Child(tokio_stdin))),
                 reader: Some(BufReader::new(stream)),
                 child_guard: Some(child_guard),
                 stderr_fd: Some(stored_stderr_fd),
@@ -1905,8 +2002,11 @@ impl SshBridgeClient {
         location: &HelperLocation,
         target: Option<&TargetRef>,
     ) -> Result<Self, BridgeError> {
-        // Ensure remote helper daemon is started (idempotent, no silent build/trust modifications)
-        helper_setup::ensure_started(host, env, location).await?;
+        // Ensure remote helper daemon is started (idempotent, no silent build/trust modifications).
+        // A live host mux already reaches that daemon, so the extra round trip is skipped.
+        if !(super::mux_client::enabled() && super::mux_client::is_live(host, location)) {
+            helper_setup::ensure_started(host, env, location).await?;
+        }
 
         // Open control connection and execute initial handshake
         let mut control = BridgeConnection::spawn(host, env, location).await?;

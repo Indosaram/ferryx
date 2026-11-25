@@ -16,6 +16,7 @@ import {
 } from "../../lib/browserSettings";
 import { clearAllBrowserHistory } from "../../lib/browserLibrary";
 import {
+  describeInstalledCookieImportBlock,
   extractBrowserErrorCode,
   focusBrowser,
   formatBrowserCookieImportError,
@@ -185,11 +186,16 @@ export function BrowserSection() {
         ...prev,
         [profileId]: `Importing from ${source === "chrome" ? "Chrome" : "Edge"}…`,
       }));
-      const { importedCount, skippedCount } = await importInstalledBrowserCookies(profileId, source);
+      const { importedCount, skippedCount, blocked } = await importInstalledBrowserCookies(profileId, source);
       const skippedText = skippedCount > 0 ? ` (${skippedCount} skipped)` : "";
+      // A refusal the browser reported while the rest imported is part of the outcome, not a
+      // detail to hide: it comes back typed, and says why those rows were skipped.
+      const blockedText = describeInstalledCookieImportBlock(blocked);
       setImportStatus((prev) => ({
         ...prev,
-        [profileId]: `Imported ${importedCount} cookies${skippedText}`,
+        [profileId]: blockedText
+          ? `Imported ${importedCount} cookies${skippedText} - ${blockedText}`
+          : `Imported ${importedCount} cookies${skippedText}`,
       }));
     } catch (error) {
       setImportStatus((prev) => ({

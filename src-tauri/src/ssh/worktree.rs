@@ -284,8 +284,8 @@ pub fn worktree_create_script(
                 None => String::new(),
             };
             format!(
-                "out=$(git -C {quoted_root} worktree add -b {quoted_branch} {quoted_path}{quoted_base} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
-            ) + "\n" + &posix_exclude_script(&quoted_root)
+                "out=$(git -C {quoted_root} worktree add -b {quoted_branch} {quoted_path}{quoted_base} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '{WORKTREE_ERR_MARKER}\\n%s\\n' \"$out\"; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
+            ) + "\n" + &posix_exclude_script(&quoted_root) + &format!("\nprintf '{WORKTREE_DONE_MARKER}\\n'")
         }
         RemotePlatform::Windows => {
             let p = powershell_data(repo_root);
@@ -299,10 +299,50 @@ pub fn worktree_create_script(
                 "{POWERSHELL_GIT}\n$p={p}; $wt={wt}; $br={br}; \
                  $args=@('-C',$p,'worktree','add','-b',$br,$wt);{base_code} \
                  $g=Invoke-FerryxGit $args; \
-                 if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree add failed' }}; throw $err }}"
-            ) + "\n" + &windows_exclude_script()
+                 if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree add failed' }}; [Console]::Out.WriteLine('{WORKTREE_ERR_MARKER}'); [Console]::Out.WriteLine($err); throw $err }}"
+            ) + "\n" + &windows_exclude_script() + &format!("\n[Console]::Out.WriteLine('{WORKTREE_DONE_MARKER}')")
         }
     }
+}
+
+/// Printed last by the create and remove scripts once git has succeeded. Some SSH servers
+/// (Tailscale SSH among them) report every remote command as exit 0, so a failed `git worktree`
+/// would otherwise look like a success.
+pub const WORKTREE_DONE_MARKER: &str = "FERRYX_WT_DONE";
+
+/// Printed on stdout immediately before the git error body when a create or remove command fails,
+/// so an exit-0 SSH server still surfaces the real git diagnostic (including dirty-worktree text).
+const WORKTREE_ERR_MARKER: &str = "FERRYX_WT_ERR";
+
+fn is_dirty_worktree_message(msg: &str) -> bool {
+    msg.contains("modified or untracked files") || msg.contains("--force")
+}
+
+fn require_done(output: &[u8], stage: &'static str) -> Result<(), IpcError> {
+    let text = String::from_utf8_lossy(output);
+    if text.lines().any(|line| line.trim() == WORKTREE_DONE_MARKER) {
+        return Ok(());
+    }
+    let diagnostic = text
+        .split_once(WORKTREE_ERR_MARKER)
+        .map(|(_, rest)| rest.trim())
+        .filter(|s| !s.is_empty());
+    let code = if stage == "worktree-remove" && diagnostic.is_some_and(is_dirty_worktree_message) {
+        IpcErrorCode::DirtyWorktree
+    } else {
+        IpcErrorCode::GitError
+    };
+    let message = match diagnostic {
+        Some(detail) => format!("SSH git {stage} failed: {detail}"),
+        None => "The remote git worktree command did not confirm success".to_string(),
+    };
+    Err(tag_error(
+        IpcError::new(code, message).with_details(serde_json::json!({
+            "stage": "execution",
+            "stderr": diagnostic,
+        })),
+        stage,
+    ))
 }
 
 /// Printed on stdout by the create script when the best-effort `info/exclude` update fails.
@@ -351,7 +391,7 @@ pub fn worktree_remove_script(
             let quoted_root = direct::quote_posix(repo_root);
             let quoted_path = direct::quote_posix(path);
             format!(
-                "out=$(git -C {quoted_root} worktree remove{force_arg} {quoted_path} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
+                "out=$(git -C {quoted_root} worktree remove{force_arg} {quoted_path} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '{WORKTREE_ERR_MARKER}\\n%s\\n' \"$out\"; printf '%s\\n' \"$out\" >&2; exit $rc; }}; printf '{WORKTREE_DONE_MARKER}\\n'"
             )
         }
         RemotePlatform::Windows => {
@@ -362,7 +402,8 @@ pub fn worktree_remove_script(
                 "{POWERSHELL_GIT}\n$p={p}; $wt={wt}; \
                  $args = @('-C',$p,'worktree','remove');{force_code} $args += $wt; \
                  $g=Invoke-FerryxGit $args; \
-                 if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree remove failed' }}; throw $err }}"
+                 if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree remove failed' }}; [Console]::Out.WriteLine('{WORKTREE_ERR_MARKER}'); [Console]::Out.WriteLine($err); throw $err }}; \
+                 [Console]::Out.WriteLine('{WORKTREE_DONE_MARKER}')"
             )
         }
     }
@@ -438,6 +479,7 @@ pub async fn create_remote(
     let output = direct::bounded_output(&plan, Duration::from_secs(30))
         .await
         .map_err(|err| tag_error(err, "worktree-create"))?;
+    require_done(&output, "worktree-create")?;
     if String::from_utf8_lossy(&output)
         .lines()
         .any(|line| line.trim() == EXCLUDE_FAILED_MARKER)
@@ -465,14 +507,14 @@ pub async fn remove_remote(
     let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
     let result = direct::bounded_output(&plan, Duration::from_secs(30)).await;
     match result {
-        Ok(_) => Ok(()),
+        Ok(output) => require_done(&output, "worktree-remove"),
         Err(mut err) => {
             let is_dirty = err
                 .details
                 .as_ref()
                 .and_then(|d| d.get("stderr"))
                 .and_then(|s| s.as_str())
-                .map(|msg| msg.contains("modified or untracked files") || msg.contains("--force"))
+                .map(is_dirty_worktree_message)
                 .unwrap_or(false);
             if is_dirty {
                 err.code = IpcErrorCode::DirtyWorktree;
@@ -602,6 +644,38 @@ mod tests {
         // Windows remote strictly rejects Windows reserved device names
         assert!(WorktreeManager::format_branch_name_platform(ws_segment, "CON", true).is_err());
         assert!(WorktreeManager::format_branch_name_platform(ws_segment, "aux.txt", true).is_err());
+    }
+
+    #[test]
+    fn worktree_commands_need_their_done_marker_not_just_exit_zero() {
+        // A server that reports every command as exit 0 returns a failed git as empty output.
+        assert!(require_done(b"", "worktree-remove").is_err());
+        assert!(require_done(b"fatal: not a working tree\n", "worktree-create").is_err());
+        let dirty = require_done(
+            b"FERRYX_WT_ERR\nfatal: '/r/wt' contains modified or untracked files, use --force to delete it\n",
+            "worktree-remove",
+        )
+        .expect_err("dirty worktree error must surface even on exit-0 servers");
+        assert_eq!(dirty.code, IpcErrorCode::DirtyWorktree);
+        assert!(dirty.message.contains("modified or untracked files"));
+        assert!(require_done(b"FERRYX_WT_EXCLUDE_FAILED\nFERRYX_WT_DONE\n", "worktree-create").is_ok());
+        for script in [
+            worktree_create_script(RemotePlatform::Posix, "/r", "ferryx/a/b", "/r/.ferryx-worktrees/a/b", None),
+            worktree_create_script(RemotePlatform::Windows, r"C:\r", "ferryx/a/b", r"C:\r\.ferryx-worktrees\a\b", None),
+            worktree_remove_script(RemotePlatform::Posix, "/r", "/r/.ferryx-worktrees/a/b", false),
+            worktree_remove_script(RemotePlatform::Windows, r"C:\r", r"C:\r\.ferryx-worktrees\a\b", true),
+        ] {
+            assert!(script.contains(WORKTREE_DONE_MARKER), "{script}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_posix_remove_never_prints_the_done_marker() {
+        let script = worktree_remove_script(RemotePlatform::Posix, "/nonexistent-ferryx-repo", "/nonexistent-ferryx-repo/wt", false);
+        let output = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
+        assert!(!output.status.success());
+        assert!(require_done(&output.stdout, "worktree-remove").is_err());
     }
 
     #[test]

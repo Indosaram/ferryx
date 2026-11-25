@@ -25,9 +25,18 @@ import {
   UPDATER_KEEPER_MEMBER,
   verifyShippedKeeperDigest,
   verifyMacosFfmpegBundle,
+  assertMacosArm64,
 } from "./lib/release-platforms.mjs";
 import { parseReceipt } from "./lib/release-contract.mjs";
 import { writeRdClientArtifact } from "./fixtures/rd-client-artifact.mjs";
+
+test("macOS architecture gate accepts only a thin arm64 Mach-O", () => {
+  const inspect = (text) => () => text;
+  assert.doesNotThrow(() => assertMacosArm64("app", inspect("Mach-O 64-bit executable arm64")));
+  for (const description of ["Mach-O 64-bit executable x86_64", "Mach-O universal binary with 2 architectures arm64 x86_64", "ASCII text"]) {
+    assert.throws(() => assertMacosArm64("app", inspect(description)), /must contain only arm64/);
+  }
+});
 
 test("release-platforms: exports required APIs", () => {
   assert.equal(typeof probeMacbook, "function");
@@ -284,7 +293,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       appVersion: "2026.908.1",
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
@@ -311,11 +320,11 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       observedHost = hostName;
       const dummyApp = join(artifactsOutDir, "Ferryx.app.tar.gz");
       const dummySig = join(artifactsOutDir, "Ferryx.app.tar.gz.sig");
-      const dummyDmg = join(artifactsOutDir, "Ferryx_universal.dmg");
+      const dummyDmg = join(artifactsOutDir, "Ferryx_aarch64.dmg");
       writeFileSync(dummyApp, "MOCK_APP_CONTENT");
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
-      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64"), "MOCK_CLI_CONTENT");
       writeRdClientArtifact(artifactsOutDir, "darwin");
       return {
         exitCode: 0,
@@ -386,7 +395,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       appVersion: "2026.908.1",
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
@@ -413,11 +422,11 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       observedHost = hostName;
       const dummyApp = join(artifactsOutDir, "Ferryx.app.tar.gz");
       const dummySig = join(artifactsOutDir, "Ferryx.app.tar.gz.sig");
-      const dummyDmg = join(artifactsOutDir, "Ferryx_universal.dmg");
+      const dummyDmg = join(artifactsOutDir, "Ferryx_aarch64.dmg");
       writeFileSync(dummyApp, "MOCK_APP_CONTENT");
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
-      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64"), "MOCK_CLI_CONTENT");
       writeRdClientArtifact(artifactsOutDir, "darwin");
       return {
         exitCode: 0,
@@ -462,7 +471,7 @@ test("createBuildReceipt: creates valid receipt conforming to release contract",
     appVersion: "2026.908.1",
     msixVersion: "2026.908.1.0",
     channels: { store: true, nsisMigration: false },
-    requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+    requiredTargets: ["darwin-aarch64", "linux-x86_64"],
     toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
     sourceDateEpoch: 1788868800,
     createdAt: "2026-09-08T12:00:00.000Z",
@@ -486,8 +495,8 @@ test("createBuildReceipt: creates valid receipt conforming to release contract",
       },
       {
         kind: "dmg",
-        name: "Ferryx_2026.908.1_universal.dmg",
-        relPath: "darwin/Ferryx_2026.908.1_universal.dmg",
+        name: "Ferryx_2026.908.1_aarch64.dmg",
+        relPath: "darwin/Ferryx_2026.908.1_aarch64.dmg",
         bytes: 23456,
         sha256: "b".repeat(64),
         signatureRelPath: null,
@@ -564,7 +573,7 @@ test("buildHost: fails closed when a custom runner returns no result", async () 
       commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b", tag: "v2026.09.08.1",
       appVersion: "2026.908.1", msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800, createdAt: "2026-09-08T12:00:00.000Z",
     }));
@@ -620,7 +629,7 @@ test("buildHost: fails closed if workspace already exists on host", async () => 
       appVersion: "2026.908.1",
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
@@ -679,7 +688,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
       appVersion: "2026.908.1",
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
-      requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+      requiredTargets: ["darwin-aarch64", "linux-x86_64"],
       toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
@@ -708,11 +717,11 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
       // Simulate build artifact output
       const dummyApp = join(artifactsOutDir, "Ferryx.app.tar.gz");
       const dummySig = join(artifactsOutDir, "Ferryx.app.tar.gz.sig");
-      const dummyDmg = join(artifactsOutDir, "Ferryx_universal.dmg");
+      const dummyDmg = join(artifactsOutDir, "Ferryx_aarch64.dmg");
       writeFileSync(dummyApp, "MOCK_APP_CONTENT");
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
-      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64"), "MOCK_CLI_CONTENT");
       writeRdClientArtifact(artifactsOutDir, "darwin");
 
       return {
@@ -736,7 +745,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
 
     assert.equal(receipt.host, "macbook");
     assert.equal(receipt.exitCode, 0);
-    assert.deepEqual(receipt.artifacts.map(({ kind }) => kind).sort(), ["cli-darwin-universal", "dmg", "macos-updater", "rd-client-darwin-universal"]);
+    assert.deepEqual(receipt.artifacts.map(({ kind }) => kind).sort(), ["cli-darwin-arm64", "dmg", "macos-updater", "rd-client-darwin-arm64"]);
 
     const receiptPath = join(runDir, "receipts", "build-receipt-macbook.json");
     assert.ok(existsSync(receiptPath));
@@ -958,7 +967,7 @@ function createMacFinalizeFixture(tmp, { notaryStatus = "Accepted" } = {}) {
 
   const dmgDir = join(tmp, "bundle", "dmg");
   mkdirSync(dmgDir, { recursive: true });
-  const dmgPath = join(dmgDir, "Ferryx_2026.920.3_universal.dmg");
+  const dmgPath = join(dmgDir, "Ferryx_2026.920.3_aarch64.dmg");
   // Simulates the Tauri bundler's DMG: a snapshot of the app taken before the
   // coordinator's re-sign pass, so its helpers are unsigned.
   writeFileSync(dmgPath, JSON.stringify(snapshotTree(appPath)));
@@ -1616,6 +1625,8 @@ test("finalizeMacosBundle: bundled mhc binaries get the Developer ID signature, 
       dmgPath: null,
       workspaceDir: fixture.workspaceDir,
       signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
       exec: fixture.exec,
     });
 
@@ -1642,11 +1653,11 @@ test("finalizeMacosBundle: bundled mhc binaries get the Developer ID signature, 
 
 test("machoEntitlements: only Contents/Resources/mhc/<triple>/bun/bun gets the bun entitlements", () => {
   const app = "/b/Ferryx.app";
-  assert.equal(machoEntitlements(app, `${app}/Contents/Resources/mhc/x86_64-apple-darwin/bun/bun`), BUN_ENTITLEMENTS);
+  assert.equal(machoEntitlements(app, `${app}/Contents/Resources/mhc/aarch64-apple-darwin/bun/bun`), BUN_ENTITLEMENTS);
   for (const other of [
     "/Contents/MacOS/ferryx",
-    "/Contents/Resources/mhc/x86_64-apple-darwin/mhc/mhc",
-    "/Contents/Resources/mhc/x86_64-apple-darwin/mhc/bun",
+    "/Contents/Resources/mhc/aarch64-apple-darwin/mhc/mhc",
+    "/Contents/Resources/mhc/aarch64-apple-darwin/mhc/bun",
     "/Contents/Resources/helpers/aarch64-apple-darwin/ferryx-remote-helper",
     "/Contents/Helpers/Ferryx Daemon.app/Contents/MacOS/ferryx",
   ]) {
@@ -1698,6 +1709,19 @@ test("remote builders: every release builds, stages and checks the LGPL FFmpeg p
   assert.doesNotMatch(windows, /^.*bun tauri build[^\n]*--features/m);
   assert.match(windows, /--features cli --bin ferryx-rd-client/);
   assert.ok(windows.indexOf("--check") < windows.indexOf("tauri build"), "payload check precedes the build");
+  // The Windows client cannot start without its FFmpeg DLLs beside it (0xC0000135 on a host with
+  // no system FFmpeg), so the published artifact is a zip that must contain both.
+  assert.match(windows, /\$rdStageDir = Join-Path \$workspace 'rd-client-zip'/);
+  assert.match(windows, /Copy-Item -LiteralPath \$rdClient\[0\]\.FullName -Destination \(Join-Path \$rdStageDir 'ferryx-rd-client\.exe'\)/);
+  assert.match(windows, /\$rdRuntimeDir = Join-Path \$ffmpegPayload 'runtime'/);
+  assert.match(windows, /Get-ChildItem -Path \$rdRuntimeDir -Filter \$pattern -File/);
+  assert.match(windows, /Compress-Archive -Path \(Join-Path \$rdStageDir '\*'\) -DestinationPath \$rdZip/);
+  assert.match(windows, /ferryx-rd-client-windows-amd64\.zip/);
+  // The archive is verified by reading it back, not by trusting the packer.
+  assert.match(windows, /\[System\.IO\.Compression\.ZipFile\]::OpenRead\(\$rdZip\)/);
+  assert.ok(windows.indexOf("Compress-Archive") < windows.indexOf("ZipFile]::OpenRead"), "the zip is read back after packing");
+  // The DLLs live in the staged payload's runtime/ dir; a root-level glob shipped none of them.
+  assert.doesNotMatch(windows, /Get-ChildItem -Path \$ffmpegPayload -Filter \$pattern/);
 });
 
 test("verifyMacosFfmpegBundle: fails closed on missing dylib, absolute install name or missing rpath", () => {
@@ -1717,6 +1741,7 @@ test("verifyMacosFfmpegBundle: fails closed on missing dylib, absolute install n
     writeFileSync(join(appPath, "Contents", "Resources", "ffmpeg-legal", "SOURCE.txt"), "src");
     const otool = ({ id = "@rpath/libavutil.61.dylib", rpath = "@executable_path/../Frameworks", dep = "@rpath/libavutil.61.dylib" } = {}) =>
       (command, args) => {
+        if (command === "file") return { stdout: "Mach-O 64-bit dynamically linked shared library arm64" };
         assert.equal(command, "otool");
         if (args[0] === "-D") return { stdout: `${args[1]}:\n${id}\n` };
         if (args[0] === "-l") return { stdout: `cmd LC_RPATH\n path ${rpath} (offset 12)\n` };
@@ -1765,7 +1790,7 @@ function installKeeperPayload(appPath, payload = "macho:keeper-unsigned") {
         protocolMinor: 0,
         sha256: createHash("sha256").update(payload).digest("hex"),
         bytes: Buffer.byteLength(payload),
-        architectures: ["aarch64", "x86_64"],
+        architectures: ["aarch64"],
       },
       null,
       2,
@@ -1962,10 +1987,47 @@ test("finalizeMacosBundle: a bundle with no keeper at all still seals when a kee
       dmgPath: null,
       workspaceDir: fixture.workspaceDir,
       signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
-      approveNotarization: false,
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
       exec: fixture.exec,
     });
     assert.equal(outcome.keeper, null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: refuses a signed release that skips notarization", () => {
+  // A Developer ID build without a notarization ticket is rejected by Gatekeeper on end-user
+  // machines, so shipping one is a green build whose artifacts nobody can open. Ad-hoc bundles
+  // (identity '-') are never distributed and must keep sealing without a submission.
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-notarize-required-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: null,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          approveNotarization: false,
+          exec: fixture.exec,
+        }),
+      /Refusing to produce an unnotarized macOS release/,
+    );
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: null,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          approveNotarization: true,
+          exec: fixture.exec,
+        }),
+      /no notaryProfile is configured/,
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

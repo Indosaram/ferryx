@@ -15,6 +15,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
+import { toast } from "sonner";
 
 import type { ActivitySummary } from "../lib/activity";
 import { projectRootWorktree } from "../lib/projectIdentity";
@@ -63,7 +64,7 @@ import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow } from "./sidebar/SidebarWorktreeRow";
 import type { SectionId } from "./settings/types";
 import { openProjectMenu } from "./sidebarProjectMenu";
-import { agentsByWorktreePath, SortableWorktreeRow, WorktreeRow, worktreeListRowProps, worktreeSortableId } from "./WorktreeList";
+import { agentsByWorktreePath, SortableWorktreeRow, WorktreeRow, worktreeListRowProps, worktreeSortableId, worktreeUnavailableReason } from "./WorktreeList";
 import { useSupervisor } from "../lib/supervisor";
 
 export {
@@ -125,6 +126,8 @@ type SidebarProps = {
    * whenever this is set (App always sets it); a host without a focus target has no panel.
    */
   onFocusSupervisorSession?: (sessionRef: string) => void;
+  /** Sidebar-embedded slot below the tree, used for persistent setup progress. */
+  footerSlot?: React.ReactNode;
 };
 
 /**
@@ -165,6 +168,7 @@ export function Sidebar({
   onToggle,
   onHide,
   onFocusSupervisorSession,
+  footerSlot,
 }: SidebarProps) {
   // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
   // advanced features. The project tree is the other view; there is no Inbox view.
@@ -638,7 +642,16 @@ export function Sidebar({
             toggleGroup: toggleProject,
             selectProject: (node) => {
               const project = projectById.get(node.primaryWorkspaceId);
-              if (project) onSelectProject(project);
+              if (!project) return;
+              // A project whose every listed row is unavailable (paired machine offline, stale list)
+              // must refuse the header click exactly as its rows refuse theirs, not switch into it.
+              const rows = worktreesByProject.get(project.workspaceId) ?? [];
+              const blocked = rows.length > 0 ? rows.map(worktreeUnavailableReason) : [];
+              if (blocked.length > 0 && blocked.every((reason) => reason !== null)) {
+                toast.info(blocked[0]!);
+                return;
+              }
+              onSelectProject(project);
             },
             addProject: onAddProject,
             hideSidebar: hide ?? noop,
@@ -661,6 +674,8 @@ export function Sidebar({
           reorder={reorder}
         />
 
+        {footerSlot}
+
         <div
           role="separator"
           aria-label="Resize sidebar"
@@ -677,9 +692,17 @@ export function Sidebar({
           <span className="pointer-events-none absolute inset-y-0 right-0 w-px bg-worktree-sidebar-border transition-colors group-hover:bg-ring/45" />
         </div>
         {resizing ? (
-          // A dialog-role surface makes native terminal/browser surfaces yield (see
-          // nativeTerminalVisibility) so a native pane cannot swallow the resize pointerup.
-          <div role="dialog" aria-hidden="true" data-testid="sidebar-resize-mask" className="fixed inset-0 z-50 cursor-col-resize" />
+          // The mask swallows the pointerup so a native pane under the cursor cannot eat it and
+          // leave the drag (and the full-screen mask) stuck forever. It is aria-hidden because it
+          // is not a real dialog, so it opts in explicitly: hidden surfaces no longer suppress
+          // pane input, but this one must keep making native surfaces yield.
+          <div
+            role="dialog"
+            aria-hidden="true"
+            data-native-terminal-force-yield="true"
+            data-testid="sidebar-resize-mask"
+            className="fixed inset-0 z-50 cursor-col-resize"
+          />
         ) : null}
       </aside>
 

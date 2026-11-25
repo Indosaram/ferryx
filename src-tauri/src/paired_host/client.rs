@@ -1135,6 +1135,7 @@ fn relay_session_kind(ticket_target: &str) -> crate::remote::relay_server::Sessi
 /// UDP datagram, with headroom.
 pub const REMOTE_DESKTOP_MAX_FRAME_BYTES: usize = 256 * 1024;
 const REMOTE_DESKTOP_PAIR_MAX_BYTES: usize = 64 * 1024;
+const REMOTE_DESKTOP_DIRECT_BUDGET: Duration = Duration::from_secs(3);
 
 impl MachineClient {
     /// `POST /api/v1/remote-desktop/pair` on a Machine-scope paired host and returns the
@@ -1164,6 +1165,13 @@ impl MachineClient {
             conflict_is_answer: false,
             saw_conflict: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
+        super::direct_client::ensure_direct(
+            &self.http,
+            &host,
+            &lease,
+            REMOTE_DESKTOP_DIRECT_BUDGET,
+        )
+        .await;
         let (bytes, _rotated) = self.http_rotating(&host, &lease, &route).await?;
         Ok(bytes)
     }
@@ -1182,6 +1190,13 @@ impl MachineClient {
         if host.grant_scope != GrantScope::Machine {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
         }
+        super::direct_client::ensure_direct(
+            &self.http,
+            &host,
+            &lease,
+            REMOTE_DESKTOP_DIRECT_BUDGET,
+        )
+        .await;
         let segments = ["api", "v1", "remote-desktop", "stream"].map(str::to_owned);
         let base = super::direct_client::request_base(&host)?;
         let direct = match base.direct_epoch {

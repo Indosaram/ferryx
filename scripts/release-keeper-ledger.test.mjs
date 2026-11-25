@@ -264,7 +264,7 @@ function assembledRun(tmp, { ledger = EMPTY_LEDGER, failEdit = false, draftState
     appVersion: APP_VERSION,
     msixVersion: `${APP_VERSION}.0`,
     channels: { store: true, nsisMigration: false },
-    requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+    requiredTargets: ["darwin-aarch64", "linux-x86_64"],
     toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
     sourceDateEpoch: 1788868800,
     createdAt: "2026-09-08T12:00:00.000Z",

@@ -720,6 +720,70 @@ fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
     assert!(remote_cmd.contains("bridge --stdio --root"));
 }
 
+#[test]
+fn ssh_mux_plan_keeps_bridge_options_and_runs_bridge_mux() {
+    let posix = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Posix,
+        executor: crate::ssh::runtime::RemoteExecutor::Sh,
+        version: "Linux 6.1".into(),
+        home: "/home/user".into(),
+        temp: "/tmp".into(),
+        git: true,
+    };
+    let windows = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Windows,
+        executor: crate::ssh::runtime::RemoteExecutor::Pwsh,
+        version: "7.4".into(),
+        home: "C:\\Users\\user".into(),
+        temp: "C:\\Temp".into(),
+        git: true,
+    };
+    let posix_location = crate::ssh::helper_setup::HelperLocation {
+        executable: "/home/user/.ferryx/bin/ferryx-remote-helper".into(),
+        root: "/home/user/.ferryx/helper/host-one".into(),
+    };
+    let windows_location = crate::ssh::helper_setup::HelperLocation {
+        executable: "C:\\Users\\user\\.ferryx\\bin\\ferryx-remote-helper.exe".into(),
+        root: "C:\\Users\\user\\.ferryx\\helper\\host-one".into(),
+    };
+    for (env, location) in [(&posix, &posix_location), (&windows, &windows_location)] {
+        let stdio = bridge_plan(&host(), env, location).expect("bridge_plan");
+        let mux = mux_plan(&host(), env, location).expect("mux_plan");
+        assert_eq!(mux.program, stdio.program);
+        let (mux_command, stdio_command) = (mux.args.last().unwrap(), stdio.args.last().unwrap());
+        assert_eq!(
+            mux.args[..mux.args.len() - 1],
+            stdio.args[..stdio.args.len() - 1],
+            "the shared transport uses the same ssh options as a bridge"
+        );
+        let (mux_text, stdio_text) = (decoded_remote(mux_command), decoded_remote(stdio_command));
+        assert!(mux_text.contains("bridge --mux --root"), "{mux_text}");
+        assert!(!mux_text.contains("--stdio"), "{mux_text}");
+        assert_eq!(mux_text.replace("--mux", "--stdio"), stdio_text);
+    }
+}
+
+/// The remote command as the remote shell sees it: PowerShell commands travel UTF-16LE base64.
+fn decoded_remote(command: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    if !command.contains("-EncodedCommand ") {
+        return command.to_string();
+    }
+    let bytes = STANDARD.decode(command.rsplit_once(' ').unwrap().1).unwrap();
+    let utf16: Vec<u16> =
+        bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let mut script = String::from_utf16(&utf16).unwrap();
+    // Paths and arguments inside the script are themselves base64 literals.
+    let marker = "FromBase64String('";
+    while let Some(start) = script.find(marker) {
+        let body = start + marker.len();
+        let end = body + script[body..].find('\'').unwrap();
+        let decoded = String::from_utf8(STANDARD.decode(&script[body..end]).unwrap()).unwrap();
+        script.replace_range(start..end + 1, &decoded);
+    }
+    script
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn p10_windows_bridge_preserves_native_argv() {

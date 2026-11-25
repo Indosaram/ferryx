@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, UPDATE_CHANNEL_STORAGE_KEY } from "./storageKeys";
 
 const rustRegistry = readFileSync(resolve(__dirname, "../../../src-tauri/src/lib.rs"), "utf8");
 const registeredUpdaterCommands = new Set(
@@ -129,6 +131,22 @@ function controlledDownload() {
 async function freshModule() {
   vi.resetModules();
   return await import("./updater");
+}
+
+type Updater = Awaited<ReturnType<typeof freshModule>>;
+
+/** Resolves once the updater publishes a matching status; subscribe BEFORE triggering the action. */
+function statusWhere(
+  updater: Updater,
+  predicate: (status: ReturnType<Updater["getUpdateStatus"]>) => boolean,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const unsubscribe = updater.subscribeUpdateStatus((next) => {
+      if (!predicate(next)) return;
+      unsubscribe();
+      resolve();
+    });
+  });
 }
 
 function updateHandle(events: DownloadEvent[], options: { failWith?: Error } = {}) {
@@ -538,6 +556,236 @@ describe("updater status machine", () => {
 
     expect(check).toHaveBeenCalledTimes(1);
     expect(updater.getUpdateStatus()).toEqual({ state: "idle" });
+  });
+});
+
+describe("background update staging", () => {
+  beforeEach(() => {
+    check.mockReset();
+    relaunch.mockReset();
+    getVersion.mockReset();
+    invoke.mockReset();
+    invoke.mockResolvedValue(false);
+    isTauri.mockReturnValue(true);
+    resetBackend();
+    window.localStorage.removeItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY);
+    window.localStorage.removeItem(UPDATE_CHANNEL_STORAGE_KEY);
+  });
+
+  afterEach(() => {
+    window.localStorage.removeItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY);
+    window.localStorage.removeItem(UPDATE_CHANNEL_STORAGE_KEY);
+  });
+
+  it("reads the background download preference as off by default", async () => {
+    const updater = await freshModule();
+
+    expect(updater.getBackgroundUpdateDownload()).toBe(false);
+
+    updater.setBackgroundUpdateDownload(true);
+    expect(updater.getBackgroundUpdateDownload()).toBe(true);
+    expect(window.localStorage.getItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY)).toBe("true");
+
+    updater.setBackgroundUpdateDownload(false);
+    expect(updater.getBackgroundUpdateDownload()).toBe(false);
+    expect(window.localStorage.getItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY)).toBe("false");
+  });
+
+  it("leaves the offer undownloaded when the preference is off", async () => {
+    check.mockResolvedValue(updateHandle([]));
+    const updater = await freshModule();
+
+    await updater.checkForUpdate();
+
+    expect(updater.getUpdateStatus()).toMatchObject({ state: "available", version: "2026.08.26.1" });
+    expect(downloadCommand).not.toHaveBeenCalled();
+    expect(backendLog).toEqual([]);
+  });
+
+  it("stages the update without installing it when the preference is on", async () => {
+    window.localStorage.setItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, "true");
+    check.mockResolvedValue(
+      updateHandle([
+        { event: "started", data: { contentLength: 100 } },
+        { event: "progress", data: { chunkLength: 100 } },
+        { event: "finished" },
+      ]),
+    );
+    const updater = await freshModule();
+    const staged = statusWhere(updater, (next) => next.state === "staged");
+
+    await updater.checkForUpdate();
+    await staged;
+
+    expect(updater.getUpdateStatus()).toEqual({
+      state: "staged",
+      version: "2026.08.26.1",
+      releaseNotes: "Adds in-app updates",
+      downloadProgress: 1,
+    });
+    expect(backendLog).toEqual(["cmd_updater_download"]);
+    expect(installCommand).not.toHaveBeenCalled();
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("stages an offer that is already waiting when the preference is turned on", async () => {
+    check.mockResolvedValue(
+      updateHandle([
+        { event: "started", data: { contentLength: 10 } },
+        { event: "finished" },
+      ]),
+    );
+    const updater = await freshModule();
+    await updater.checkForUpdate();
+    expect(updater.getUpdateStatus().state).toBe("available");
+
+    const staged = statusWhere(updater, (next) => next.state === "staged");
+    updater.setBackgroundUpdateDownload(true);
+    await staged;
+
+    expect(downloadCommand).toHaveBeenCalledTimes(1);
+    expect(installCommand).not.toHaveBeenCalled();
+  });
+
+  it("installs a staged update once and relaunches without downloading again", async () => {
+    check.mockResolvedValue(
+      updateHandle([
+        { event: "started", data: { contentLength: 10 } },
+        { event: "finished" },
+      ]),
+    );
+    window.localStorage.setItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, "true");
+    const updater = await freshModule();
+    const staged = statusWhere(updater, (next) => next.state === "staged");
+    await updater.checkForUpdate();
+    await staged;
+    backendLog.length = 0;
+
+    await updater.applyStagedUpdate();
+
+    expect(backendLog).toEqual(["cmd_updater_install"]);
+    expect(downloadCommand).toHaveBeenCalledTimes(1);
+    expect(installCommand).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+    expect(updater.getUpdateStatus()).toEqual({
+      state: "downloaded",
+      version: "2026.08.26.1",
+      releaseNotes: "Adds in-app updates",
+      downloadProgress: 1,
+    });
+  });
+
+  it("does nothing when a restart is requested without a staged update", async () => {
+    const updater = await freshModule();
+
+    await updater.applyStagedUpdate();
+
+    expect(backendLog).toEqual([]);
+    expect(relaunch).not.toHaveBeenCalled();
+    expect(updater.getUpdateStatus()).toEqual({ state: "idle" });
+  });
+
+  it("skips the periodic check while a download is staged", async () => {
+    check.mockResolvedValue(
+      updateHandle([
+        { event: "started", data: { contentLength: 10 } },
+        { event: "finished" },
+      ]),
+    );
+    window.localStorage.setItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, "true");
+    const updater = await freshModule();
+    const staged = statusWhere(updater, (next) => next.state === "staged");
+    await updater.checkForUpdate();
+    await staged;
+
+    await updater.checkForUpdate();
+
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(updater.getUpdateStatus().state).toBe("staged");
+  });
+
+  it("discards the staged bytes and re-checks the new channel when the channel changes", async () => {
+    check.mockResolvedValue(
+      updateHandle([
+        { event: "started", data: { contentLength: 10 } },
+        { event: "finished" },
+      ]),
+    );
+    window.localStorage.setItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, "true");
+    const updater = await freshModule();
+    const staged = statusWhere(updater, (next) => next.state === "staged");
+    await updater.checkForUpdate();
+    await staged;
+    // The new channel offers a different build, downloaded again under the same supervision.
+    downloadEvents = [
+      { event: "started", data: { contentLength: 10 } },
+      { event: "finished" },
+    ];
+    check.mockResolvedValue({ version: "2026.09.18.1", currentVersion: "2026.08.26.1" });
+    backendLog.length = 0;
+    const rechecked = statusWhere(
+      updater,
+      (next) => next.state === "staged" && next.version === "2026.09.18.1",
+    );
+
+    await updater.setUpdateChannel("beta");
+    await rechecked;
+
+    expect(backendLog).toEqual(["cmd_updater_cancel", "cmd_updater_download"]);
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(window.localStorage.getItem(UPDATE_CHANNEL_STORAGE_KEY)).toBe("beta");
+    expect(updater.getUpdateStatus()).toMatchObject({ state: "staged", version: "2026.09.18.1" });
+  });
+
+  it("returns to a retryable offer when the backend has no pending install", async () => {
+    check.mockResolvedValue(
+      updateHandle([
+        { event: "started", data: { contentLength: 10 } },
+        { event: "finished" },
+      ]),
+    );
+    window.localStorage.setItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, "true");
+    installCommand.mockRejectedValueOnce({
+      code: "UPDATER_NO_PENDING_INSTALL",
+      message: "no downloaded update is waiting to be installed",
+      details: null,
+    });
+    const updater = await freshModule();
+    const staged = statusWhere(updater, (next) => next.state === "staged");
+    await updater.checkForUpdate();
+    await staged;
+
+    await updater.applyStagedUpdate();
+
+    expect(updater.getUpdateStatus()).toEqual({
+      state: "available",
+      version: "2026.08.26.1",
+      releaseNotes: "Adds in-app updates",
+    });
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a retryable offer when background staging stalls", async () => {
+    window.localStorage.setItem(UPDATE_BACKGROUND_DOWNLOAD_STORAGE_KEY, "true");
+    check.mockResolvedValue(updateHandle([]));
+    const updater = await freshModule();
+    const download = controlledDownload();
+    const failed = statusWhere(updater, (next) => next.state === "available" && next.lastFailure !== undefined);
+
+    await updater.checkForUpdate();
+    await download.commandEntered;
+    download.startDownload(100);
+    download.stall();
+    await failed;
+
+    expect(updater.getUpdateStatus()).toEqual({
+      state: "available",
+      version: "2026.08.26.1",
+      releaseNotes: "Adds in-app updates",
+      lastFailure: "stalled",
+    });
+    expect(installCommand).not.toHaveBeenCalled();
+    expect(relaunch).not.toHaveBeenCalled();
   });
 });
 

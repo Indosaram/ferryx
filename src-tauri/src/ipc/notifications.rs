@@ -12,14 +12,14 @@ use crate::notification::{
     open_system_notification_settings, open_system_notification_settings_with_launcher,
     picked_audio_file, DispatchNotificationRequest, DispatchNotificationResult,
     NativeNotificationBackend, NotificationActivations, NotificationAudioPlayer,
-    NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
-    NotificationPlatform,
-    NotificationProbeResult, NotificationService, NotificationSound, NotificationTarget,
+    NotificationContent, NotificationOrderFence, NotificationPermissionRequestDto,
+    NotificationPermissionStatusDto, NotificationPlatform, NotificationProbeResult,
+    NotificationService, NotificationSound, NotificationTarget,
     OpenSystemSettingsResult, PickedAudioFile, PlaySoundResult, SetBadgeCountResult,
     SUPPORTED_AUDIO_EXTENSIONS,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Runtime, State};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tauri::Manager;
@@ -109,6 +109,28 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
                 .map_err(|error| error.to_string())
         }
     }
+
+    /// Remove the delivered notification for `target`, if the platform can.
+    ///
+    /// macOS addresses the delivered request by its stable pane identifier.
+    /// Windows/Linux route through the `notify-rust` waiter registry, where a
+    /// withdrawal closes the banner still waiting for that pane and routes no
+    /// activation, so a superseded notification cannot steal focus later.
+    fn withdraw(&self, target: &NotificationTarget) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::notification::permission::macos::withdraw_notification(target)
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            crate::notification::notify_rust_adapter::withdraw_routed_notification(target)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = target;
+            Ok(())
+        }
+    }
 }
 
 /// Whether a Windows/Linux notification is shown through `notify-rust` on the calling thread
@@ -129,13 +151,54 @@ fn service_for<R: Runtime>(app: &AppHandle<R>) -> NotificationService {
     )))
 }
 
+/// The one ordering fence every dispatch and withdrawal shares.
+///
+/// The sequence allocator and the per-pane watermarks have to be the same
+/// objects on both paths, or a recall can never be recognised as newer than the
+/// prompt it supersedes.
+static ORDER_FENCE: OnceLock<NotificationOrderFence> = OnceLock::new();
+
+fn notification_order_fence() -> &'static NotificationOrderFence {
+    ORDER_FENCE.get_or_init(NotificationOrderFence::default)
+}
+
 /// Raise one native notification for an application event.
 #[tauri::command]
 pub async fn cmd_notification_dispatch<R: Runtime>(
     app: AppHandle<R>,
     request: DispatchNotificationRequest,
 ) -> Result<DispatchNotificationResult, IpcError> {
-    run_blocking(move || Ok(service_for(&app).dispatch(&request))).await
+    // Stamped here, before the blocking hop: workers start and finish in any
+    // order, so a sequence taken inside `run_blocking` would order by thread
+    // scheduling instead of by the order the frontend asked.
+    let seq = notification_order_fence().next_seq();
+    run_blocking(move || {
+        Ok(service_for(&app).dispatch_sequenced(&request, notification_order_fence(), seq))
+    })
+    .await
+}
+
+/// Remove the delivered notification for `target`.
+///
+/// Called when the pane leaves the attention state the banner announced (the
+/// user is back on it) or when the frontend acknowledges the session. No
+/// permission preflight runs: the banner is already on screen, and revoking
+/// alerts later does not make it disappear. The sequence is stamped
+/// synchronously for the same reason dispatch stamps its own - the recall is
+/// ordered against the prompt it supersedes, not against whichever blocking
+/// worker happens to finish first.
+#[tauri::command]
+pub async fn cmd_notification_withdraw<R: Runtime>(
+    app: AppHandle<R>,
+    target: NotificationTarget,
+) -> Result<(), IpcError> {
+    let seq = notification_order_fence().next_seq();
+    run_blocking(move || {
+        service_for(&app)
+            .withdraw_sequenced(&target, notification_order_fence(), seq)
+            .map_err(IpcError::internal)
+    })
+    .await
 }
 
 /// Atomically drain every pending notification-click activation.
@@ -334,6 +397,7 @@ pub async fn cmd_notification_set_badge_count<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notification::service::test_support::{macos_status, service_with, FakeBackend};
     use crate::notification::NotificationTarget;
     use crate::notification::{
         is_supported_audio_extension, NotificationAuthorization, NotificationDispatchReason,
@@ -707,5 +771,126 @@ mod tests {
                 "count": 0
             })
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sequenced withdrawal over IPC
+    // -----------------------------------------------------------------------
+
+    /// One pane target no other test in this binary touches, so the process-wide
+    /// order fence cannot leak state between tests.
+    fn ipc_test_target(suffix: &str) -> NotificationTarget {
+        NotificationTarget {
+            workspace_id: format!("ws-ipc-withdraw-{suffix}"),
+            session_id: format!("fe-ipc-withdraw-{suffix}"),
+        }
+    }
+
+    fn ipc_test_request(target: &NotificationTarget) -> DispatchNotificationRequest {
+        DispatchNotificationRequest {
+            source: NotificationSource::AgentTaskComplete,
+            agent_label: Some("Claude".into()),
+            target: Some(target.clone()),
+            ..Default::default()
+        }
+    }
+
+    fn ipc_test_service(backend: &Arc<FakeBackend>) -> NotificationService {
+        service_with(
+            macos_status(NotificationAuthorization::Authorized),
+            Arc::clone(backend),
+        )
+    }
+
+    #[tokio::test]
+    async fn withdraw_allocates_monotonic_sequences_and_delegates_cleanly() {
+        // Given: the process-wide fence the commands share and a fake backend.
+        let backend = Arc::new(FakeBackend::default());
+        let fence = notification_order_fence();
+
+        // When: three withdrawals are stamped before their blocking hop, the way
+        // `cmd_notification_withdraw` stamps them.
+        let sequences = [fence.next_seq(), fence.next_seq(), fence.next_seq()];
+
+        // Then: every request owns a strictly newer sequence than the last.
+        assert!(sequences[0] < sequences[1]);
+        assert!(sequences[1] < sequences[2]);
+
+        // And each one still reaches the backend cleanly, one delegation each.
+        for (index, seq) in sequences.into_iter().enumerate() {
+            let target = ipc_test_target(&format!("monotonic-{index}"));
+            let service = ipc_test_service(&backend);
+            run_blocking(move || {
+                service
+                    .withdraw_sequenced(&target, fence, seq)
+                    .map_err(IpcError::internal)
+            })
+            .await
+            .expect("withdraw resolves");
+        }
+        assert_eq!(backend.withdrawn_count(), 3);
+        assert_eq!(backend.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn reverse_order_blocking_completion_preserves_the_newer_dispatch() {
+        // Given: one pane and the three intents a fast frontend produces -
+        // dispatch, withdrawal, newer dispatch - each stamped synchronously
+        // before its blocking task is queued, exactly as the commands do.
+        let backend = Arc::new(FakeBackend::default());
+        let target = ipc_test_target("reverse");
+        let fence = notification_order_fence();
+        let stale_dispatch_seq = fence.next_seq();
+        let stale_withdraw_seq = fence.next_seq();
+        let newest_dispatch_seq = fence.next_seq();
+
+        // When: the blocking workers finish in reverse order, so the newest
+        // prompt lands first, then the recall that superseded the first prompt,
+        // then the first prompt itself.
+        let newest = run_blocking({
+            let service = ipc_test_service(&backend);
+            let target = target.clone();
+            move || {
+                Ok(service.dispatch_sequenced(
+                    &ipc_test_request(&target),
+                    fence,
+                    newest_dispatch_seq,
+                ))
+            }
+        })
+        .await
+        .expect("newest dispatch resolves");
+
+        run_blocking({
+            let service = ipc_test_service(&backend);
+            let target = target.clone();
+            move || {
+                service
+                    .withdraw_sequenced(&target, fence, stale_withdraw_seq)
+                    .map_err(IpcError::internal)
+            }
+        })
+        .await
+        .expect("stale withdraw resolves");
+
+        let stale = run_blocking({
+            let service = ipc_test_service(&backend);
+            move || {
+                Ok(service.dispatch_sequenced(
+                    &ipc_test_request(&target),
+                    fence,
+                    stale_dispatch_seq,
+                ))
+            }
+        })
+        .await
+        .expect("stale dispatch resolves");
+
+        // Then: the newest banner is still on screen, the stale recall did not
+        // delete it, and the superseded dispatch never reached the backend.
+        assert!(newest.submitted);
+        assert_eq!(stale, DispatchNotificationResult::suppressed());
+        assert_eq!(backend.count(), 1);
+        assert_eq!(backend.withdrawn_count(), 0);
     }
 }

@@ -10,7 +10,7 @@ use crate::worktree::WorktreeManager;
 use parking_lot::{Mutex, RwLock};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -462,7 +462,7 @@ impl PtyManager {
     pub(crate) fn spawn_in_worktree_with_id(
         &self,
         session_id: String,
-        mut cmd: CommandBuilder,
+        cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         worktree_manager: &WorktreeManager,
@@ -477,6 +477,28 @@ impl PtyManager {
             .flatten()
             .and_then(|w| w.orca_info())
             .map(|info| info.ws_id);
+        self.spawn_in_worktree_resolved(
+            session_id,
+            cmd,
+            cols,
+            rows,
+            canonical_worktree,
+            workspace_id,
+        )
+    }
+
+    /// Spawn into a worktree whose canonical path and managed workspace id the caller has already
+    /// resolved. Resolving them again here costs an extra `git worktree list` plus two `git
+    /// rev-parse`/`symbolic-ref` subprocesses per spawn (measured 110-160 ms on a warm cache).
+    pub(crate) fn spawn_in_worktree_resolved(
+        &self,
+        session_id: String,
+        mut cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        canonical_worktree: PathBuf,
+        workspace_id: Option<String>,
+    ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
         apply_session_env(
             &mut cmd,
             &session_id,

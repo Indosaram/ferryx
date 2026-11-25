@@ -515,7 +515,7 @@ pass that produced the site edits.
   https://github.com/denesbeck/tmux-worktree (MIT) **(new)** — licenses and descriptions read from
   the GitHub API and each README for the tmux/worktree comparison page.
 - https://api.github.com/repos/Indosaram/ferryx/releases/latest **(new)** — v2026.09.18.1 assets:
-  `Ferryx_universal.dmg`, `Ferryx_x64-setup.exe`, `Ferryx_amd64.AppImage`, `Ferryx_amd64.deb`,
+  `Ferryx_aarch64.dmg`, `Ferryx_x64-setup.exe`, `Ferryx_amd64.AppImage`, `Ferryx_amd64.deb`,
   `SHA256SUMS.txt`.
 - https://runpane.com/alternatives/conductor — competitor comparison-table format.
 - https://paseo.sh/alternatives/conductor — Apache-2.0, daemon + mobile clients.

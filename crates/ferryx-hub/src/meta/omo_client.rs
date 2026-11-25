@@ -109,8 +109,6 @@ pub fn classify_attempt(result: &Result<TurnOutcome>) -> AttemptOutcome {
 }
 /// Dedup tag for an ACK-timeout notice.
 pub const ACK_TIMEOUT_DEDUP_TAG: &str = "ack_timeout";
-/// Notice text for an ACK timeout; the underlying cause is not known.
-pub const ACK_TIMEOUT_NOTICE_TEXT: &str = "acknowledgement not received; underlying cause unknown";
 
 /// Parses `FERRYX_HUB_ACK_WINDOW_MS`: absent, empty, unparseable, zero or negative values give
 /// the default; values above 180000 ms are capped there.
@@ -1569,13 +1567,16 @@ async fn run_owned(
         // Events before the prompt is accepted belong to a run the engine started by itself;
         // the prompt is admitted once that run settles, so the ack wait restarts then.
         if !acked {
-            match f["type"].as_str() {
-                Some("agent_start") => engine_busy = true,
-                Some("agent_settled") => {
-                    engine_busy = false;
-                    ack_until = tokio::time::Instant::now() + config.ack_window;
-                }
-                _ => {}
+            // Any frame before the prompt is accepted is evidence of a run the engine started
+            // by itself (a resumed session's notification turn reports through message and
+            // tool frames, not through agent_start). The prompt is admitted once that run
+            // settles, so the ack wait starts over then; until it does, the run's own output
+            // is the only deadline that applies.
+            if f["type"] == "agent_settled" {
+                engine_busy = false;
+                ack_until = tokio::time::Instant::now() + config.ack_window;
+            } else {
+                engine_busy = true;
             }
             continue;
         }
@@ -1755,7 +1756,7 @@ mod rpc_tests {
             std::fs::create_dir_all(&dir).unwrap();
             let binary = dir.join("mhc");
             std::fs::write(&binary,r#"#!/usr/bin/env python3
-import json, os, sys, pathlib, threading
+import json, os, sys, pathlib, threading, time
 root = pathlib.Path(__file__).parent
 with (root / 'pids').open('a') as out: out.write(str(os.getpid())+'\n')
 session = root / 'session.jsonl'
@@ -1817,6 +1818,16 @@ for line in sys.stdin:
             event('agent_start')
             message('own run','m-own')
             event('agent_end',messages=[],willRetry=False)
+            event('agent_settled')
+        if scenario=='selfrun':
+            # The same resumed run, but it never announces itself with agent_start: it only
+            # reports through messages and tools, for far longer than the ack window.
+            for step in range(40):
+                event('message_start',message=dict(role='assistant',id='own-1'))
+                message('own %d'%step,'own-1')
+                event('tool_execution_start',toolCallId='own-tool',toolName='read',args={})
+                event('tool_execution_end',toolCallId='own-tool',toolName='read',result={},isError=False)
+                time.sleep(0.05)
             event('agent_settled')
         answer(c)
         lifecycle('running',True)
@@ -2236,6 +2247,15 @@ for line in sys.stdin:
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+    #[tokio::test]
+    async fn a_self_started_run_without_agent_start_does_not_time_out_the_prompt() {
+        let mut script = Script::new();
+        // Shorter than the self-started run: only tracking that run keeps the prompt waiting.
+        script.config.ack_window = Duration::from_millis(200);
+        let outcome = script.run("selfrun", None, None).await.unwrap();
+        assert_eq!(outcome.text, "final");
+        assert_eq!(prompts(&script), vec!["selfrun"]);
     }
     #[tokio::test]
     async fn an_engine_aborted_run_waits_for_its_own_continuation() {

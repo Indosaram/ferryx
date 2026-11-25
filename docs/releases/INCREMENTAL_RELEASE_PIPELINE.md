@@ -10,7 +10,7 @@
 ### Why past release builds took so long (~45–60 minutes total)
 1. **Fresh clones & wiped directories**:
    - **omaki (Linux)** wiped `$REL` and ran `git clone --depth 1` from scratch on every release (`rel-0906.sh`), starting with an empty `target/` and no `node_modules`.
-   - **MacBook (macOS)** created fresh `/tmp/ferryx-rel-XXXX` worktrees with an empty `src-tauri/target`. Building Universal binaries (`universal-apple-darwin`) compiled ~600 Rust crates and vendored Ghostty **twice** (once for `aarch64`, once for `x86_64`) from 0% cache.
+   - **MacBook (macOS)** created fresh `/tmp/ferryx-rel-XXXX` worktrees with an empty `src-tauri/target`. The old dual-architecture builds compiled ~600 Rust crates and vendored Ghostty twice from 0% cache. Current macOS releases compile only arm64.
    - **maho-win (Windows)** previously wiped `target/` due to historical C: drive space limits (~22GB).
 2. **Missing compiler cache**:
    - Cargo's `[profile.release]` has `incremental = false` by default, and `sccache` was neither configured in `~/.cargo/config.toml` nor set in `RUSTC_WRAPPER`.
@@ -91,7 +91,7 @@ mkdir -p "$CARGO_TARGET_DIR"
 # From your clean release worktree or directory:
 bun scripts/sync-version.mjs --tag <TAG>
 bun run --cwd ui build
-bun tauri build --target universal-apple-darwin
+bun tauri build --target aarch64-apple-darwin
 ```
 - `sccache` will automatically serve compiled objects for both `aarch64` and `x86_64` targets.
 - Subsequent runs will find existing compiled `.rlib` dependencies in `$CARGO_TARGET_DIR`.

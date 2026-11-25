@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  KIND_DEFINITIONS,
+  listZipEntries,
+  missingZipEntries,
   parsePlan,
   parseReceipt,
   requiredKinds,
 } from "./lib/release-contract.mjs";
+import { buildZip } from "./fixtures/rd-client-artifact.mjs";
 
 function makeValidPlan(overrides = {}) {
   return {
@@ -22,7 +26,6 @@ function makeValidPlan(overrides = {}) {
     },
     requiredTargets: [
       "darwin-aarch64",
-      "darwin-x86_64",
       "linux-x86_64",
     ],
     toolchains: {
@@ -118,7 +121,6 @@ test("parsePlan accepts valid standard plan without NSIS migration", () => {
   assert.equal(parsed.msixVersion, "2026.908.1.0");
   assert.deepEqual(parsed.requiredTargets, [
     "darwin-aarch64",
-    "darwin-x86_64",
     "linux-x86_64",
   ]);
 });
@@ -128,7 +130,6 @@ test("parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
     channels: { store: true, nsisMigration: true },
     requiredTargets: [
       "darwin-aarch64",
-      "darwin-x86_64",
       "linux-x86_64",
       "windows-x86_64",
     ],
@@ -197,7 +198,6 @@ test("parsePlan rejects target/channel inconsistency", () => {
           channels: { store: true, nsisMigration: false },
           requiredTargets: [
             "darwin-aarch64",
-            "darwin-x86_64",
             "linux-x86_64",
             "windows-x86_64",
           ],
@@ -227,7 +227,6 @@ test("parsePlan rejects duplicate targets in requiredTargets", () => {
           requiredTargets: [
             "darwin-aarch64",
             "darwin-aarch64",
-            "darwin-x86_64",
             "linux-x86_64",
           ],
         }),
@@ -285,7 +284,7 @@ test("parsePlan validates sourceDateEpoch and createdAt", () => {
 test("requiredKinds returns the standard ten kinds without NSIS migration", () => {
   const plan = makeValidPlan();
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "rd-client-linux-amd64", "rd-client-darwin-universal", "rd-client-windows-amd64"]);
+  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-arm64", "rd-client-linux-amd64", "rd-client-darwin-arm64", "rd-client-windows-amd64"]);
 });
 
 test("requiredKinds returns eleven kinds when nsisMigration is true", () => {
@@ -293,13 +292,12 @@ test("requiredKinds returns eleven kinds when nsisMigration is true", () => {
     channels: { store: true, nsisMigration: true },
     requiredTargets: [
       "darwin-aarch64",
-      "darwin-x86_64",
       "linux-x86_64",
       "windows-x86_64",
     ],
   });
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "rd-client-linux-amd64", "rd-client-darwin-universal", "rd-client-windows-amd64", "nsis"]);
+  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-arm64", "rd-client-linux-amd64", "rd-client-darwin-arm64", "rd-client-windows-amd64", "nsis"]);
 });
 
 // ------------------- parseReceipt tests -------------------
@@ -337,9 +335,9 @@ test("parseReceipt accepts host receipts containing standalone ferryx-cli artifa
 
   const macReceiptWithCli = makeValidReceipt("macbook", plan);
   macReceiptWithCli.artifacts.push({
-    kind: "cli-darwin-universal",
-    name: "ferryx-cli-darwin-universal",
-    relPath: "darwin/ferryx-cli-darwin-universal",
+    kind: "cli-darwin-arm64",
+    name: "ferryx-cli-darwin-arm64",
+    relPath: "darwin/ferryx-cli-darwin-arm64",
     signatureRelPath: null,
     sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     bytes: 1048576,
@@ -669,7 +667,6 @@ test("parseReceipt rejects legacy compressed wrappers (.AppImage.tar.gz, .nsis.z
     channels: { store: true, nsisMigration: true },
     requiredTargets: [
       "darwin-aarch64",
-      "darwin-x86_64",
       "linux-x86_64",
       "windows-x86_64",
     ],
@@ -756,13 +753,13 @@ test("parseReceipt accepts receipts containing cli-linux-amd64 from host omaki",
   assert.equal(parsedAlt.artifacts[0].name, "ferryx-cli");
 });
 
-test("parseReceipt accepts receipts containing cli-darwin-universal from host macbook", () => {
+test("parseReceipt accepts receipts containing cli-darwin-arm64 from host macbook", () => {
   const plan = makeValidPlan();
   const macReceipt = makeValidReceipt("macbook", plan);
   macReceipt.artifacts.push({
-    kind: "cli-darwin-universal",
-    name: "ferryx-cli-darwin-universal",
-    relPath: "darwin/ferryx-cli-darwin-universal",
+    kind: "cli-darwin-arm64",
+    name: "ferryx-cli-darwin-arm64",
+    relPath: "darwin/ferryx-cli-darwin-arm64",
     bytes: 23456789,
     sha256: "5523456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     signatureRelPath: null,
@@ -771,17 +768,17 @@ test("parseReceipt accepts receipts containing cli-darwin-universal from host ma
 
   const parsed = parseReceipt(macReceipt, plan);
   assert.equal(parsed.host, "macbook");
-  const cliArtifact = parsed.artifacts.find((a) => a.kind === "cli-darwin-universal");
+  const cliArtifact = parsed.artifacts.find((a) => a.kind === "cli-darwin-arm64");
   assert.ok(cliArtifact);
-  assert.equal(cliArtifact.name, "ferryx-cli-darwin-universal");
-  assert.equal(cliArtifact.relPath, "darwin/ferryx-cli-darwin-universal");
+  assert.equal(cliArtifact.name, "ferryx-cli-darwin-arm64");
+  assert.equal(cliArtifact.relPath, "darwin/ferryx-cli-darwin-arm64");
   assert.deepEqual(cliArtifact.targets, []);
 
   // Also accept alternate extension name "ferryx-cli"
   const altReceipt = makeValidReceipt("macbook", plan, {
     artifacts: [
       {
-        kind: "cli-darwin-universal",
+        kind: "cli-darwin-arm64",
         name: "ferryx-cli",
         relPath: "darwin/ferryx-cli",
         bytes: 23456789,
@@ -817,13 +814,13 @@ test("parseReceipt enforces permitted hosts and targets for cli artifacts", () =
     /kind 'cli-linux-amd64' not permitted for host 'macbook'/i,
   );
 
-  // omaki trying to claim cli-darwin-universal
+  // omaki trying to claim cli-darwin-arm64
   const invalidOmakiReceipt = makeValidReceipt("omaki", plan, {
     artifacts: [
       {
-        kind: "cli-darwin-universal",
-        name: "ferryx-cli-darwin-universal",
-        relPath: "linux/ferryx-cli-darwin-universal",
+        kind: "cli-darwin-arm64",
+        name: "ferryx-cli-darwin-arm64",
+        relPath: "linux/ferryx-cli-darwin-arm64",
         bytes: 1234,
         sha256: "5523456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         signatureRelPath: null,
@@ -833,7 +830,7 @@ test("parseReceipt enforces permitted hosts and targets for cli artifacts", () =
   });
   assert.throws(
     () => parseReceipt(invalidOmakiReceipt, plan),
-    /kind 'cli-darwin-universal' not permitted for host 'omaki'/i,
+    /kind 'cli-darwin-arm64' not permitted for host 'omaki'/i,
   );
 
   // non-empty targets rejected for cli artifacts (not updater)
@@ -857,3 +854,95 @@ test("parseReceipt enforces permitted hosts and targets for cli artifacts", () =
 });
 
 
+
+// ------------------- Windows RD client zip contract -------------------
+//
+// The Windows client links FFmpeg dynamically: beside it on disk it needs avcodec/avutil/
+// swscale/swresample, or Windows refuses to start it with 0xC0000135 (STATUS_DLL_NOT_FOUND),
+// measured 2026-11-10. One release asset cannot carry several files, so the artifact is a zip
+// whose members the contract pins.
+
+test("the Windows RD client artifact is a zip that must carry the client and its FFmpeg DLLs", () => {
+  const def = KIND_DEFINITIONS["rd-client-windows-amd64"];
+  assert.equal(def.stableAlias, "ferryx-rd-client-windows-amd64.zip");
+  assert.deepEqual(def.allowedExtensions, ["-windows-amd64.zip"]);
+  assert.deepEqual(def.zipEntries, [
+    "ferryx-rd-client.exe",
+    "avcodec-*.dll",
+    "avutil-*.dll",
+    "swscale-*.dll",
+    "swresample-*.dll",
+  ]);
+  // Every other kind is a single file, so nothing else gains a zip requirement by accident.
+  for (const [kind, other] of Object.entries(KIND_DEFINITIONS)) {
+    if (kind === "rd-client-windows-amd64") continue;
+    assert.equal(other.zipEntries, undefined, `${kind} must not require zip members`);
+  }
+});
+
+test("a Windows RD client receipt naming a bare .exe is refused", () => {
+  const plan = makeValidPlan();
+  const receipt = makeValidReceipt("maho-win", plan);
+  receipt.artifacts.push({
+    kind: "rd-client-windows-amd64",
+    name: "ferryx-rd-client-windows-amd64.exe",
+    relPath: "windows/ferryx-rd-client-windows-amd64.exe",
+    bytes: 11558912,
+    sha256: "9123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    signatureRelPath: null,
+    targets: [],
+  });
+  assert.throws(
+    () => parseReceipt(receipt, plan),
+    /does not match allowed extensions/i,
+  );
+});
+
+test("a Windows RD client receipt naming the zip is accepted", () => {
+  const plan = makeValidPlan();
+  const receipt = makeValidReceipt("maho-win", plan);
+  receipt.artifacts.push({
+    kind: "rd-client-windows-amd64",
+    name: "ferryx-rd-client-windows-amd64.zip",
+    relPath: "windows/ferryx-rd-client-windows-amd64.zip",
+    bytes: 4558912,
+    sha256: "9123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    signatureRelPath: null,
+    targets: [],
+  });
+  const parsed = parseReceipt(receipt, plan);
+  assert.equal(parsed.artifacts.at(-1).kind, "rd-client-windows-amd64");
+});
+
+test("missingZipEntries names exactly the members an incomplete client zip lacks", () => {
+  const complete = ["ferryx-rd-client.exe", "avcodec-63.dll", "avutil-61.dll", "swscale-10.dll", "swresample-7.dll"];
+  assert.deepEqual(missingZipEntries("rd-client-windows-amd64", complete), []);
+  assert.deepEqual(
+    missingZipEntries("rd-client-windows-amd64", ["ferryx-rd-client.exe"]),
+    ["avcodec-*.dll", "avutil-*.dll", "swscale-*.dll", "swresample-*.dll"],
+  );
+  assert.deepEqual(
+    missingZipEntries("rd-client-windows-amd64", ["avcodec-63.dll", "avutil-61.dll", "swscale-10.dll", "swresample-7.dll"]),
+    ["ferryx-rd-client.exe"],
+  );
+  // A DLL parked in a subdirectory does not satisfy a top-level requirement: Windows resolves
+  // sidecars next to the executable, not in a nested folder.
+  assert.deepEqual(
+    missingZipEntries("rd-client-windows-amd64", ["ferryx-rd-client.exe", "dlls/avcodec-63.dll"]),
+    ["avcodec-*.dll", "avutil-*.dll", "swscale-*.dll", "swresample-*.dll"],
+  );
+  // Kinds without a zip contract never report missing members.
+  assert.deepEqual(missingZipEntries("cli-linux-amd64", []), []);
+});
+
+test("listZipEntries reads real archive member names and refuses non-zips", () => {
+  const archive = buildZip([
+    { name: "ferryx-rd-client.exe", body: "exe" },
+    { name: "avcodec-63.dll", body: "avcodec" },
+  ]);
+  assert.deepEqual(listZipEntries(archive), ["ferryx-rd-client.exe", "avcodec-63.dll"]);
+  assert.equal(listZipEntries(Buffer.from("not a zip at all")), null);
+  assert.equal(listZipEntries(Buffer.alloc(0)), null);
+  // A truncated archive has no readable central directory.
+  assert.equal(listZipEntries(archive.subarray(0, 20)), null);
+});

@@ -7,6 +7,7 @@ pub mod crash_report;
 pub mod file_cp;
 pub mod billing;
 pub mod direct_trust;
+pub mod join_link;
 pub mod supervisor_engine;
 pub mod supervisor_goal;
 pub mod supervisor_dispatch;
@@ -2509,11 +2510,43 @@ fn read_enrollment_code_file(path: &str) -> Result<String, String> {
     Ok(code)
 }
 
-fn account_cli_origin(origin: Option<String>) -> Result<String, AccountCliError> {    match origin {
+/// Drops a leading `CODE: ` prefix so a coded message is not prefixed twice.
+fn strip_code_prefix(message: &str) -> String {
+    match message.split_once(": ") {
+        Some((code, rest))
+            if !code.is_empty()
+                && code
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_') =>
+        {
+            rest.to_string()
+        }
+        _ => message.to_string(),
+    }
+}
+
+/// The origin this machine enrolled to, when the enrollment record has one.
+fn enrolled_origin() -> Option<String> {
+    crate::account::enroll_client::load_enrollment_record()
+        .map(|record| record.account_origin.trim().to_string())
+        .filter(|origin| !origin.is_empty())
+}
+
+fn account_cli_origin(origin: Option<String>) -> Result<String, AccountCliError> {
+    match origin {
         Some(value) => crate::account::origin::normalize_account_origin(&value)
             .map_err(|error| AccountCliError::usage(error.to_string())),
-        None => crate::account::origin::account_origin()
-            .map_err(|error| AccountCliError::usage(error.to_string())),
+        // A machine that already enrolled knows the origin it enrolled to. Falling back to the
+        // enrollment record keeps every later command (`up`, `account plan`) working without
+        // re-exporting FERRYX_ACCOUNT_ORIGIN on each invocation.
+        None => match crate::account::origin::account_origin() {
+            Ok(origin) => Ok(origin),
+            Err(error) => match enrolled_origin() {
+                Some(origin) => crate::account::origin::normalize_account_origin(&origin)
+                    .map_err(|error| AccountCliError::usage(error.to_string())),
+                None => Err(AccountCliError::usage(error.to_string())),
+            },
+        },
     }
 }
 
@@ -3263,8 +3296,30 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
     // The process is still single-threaded at this point.
     std::env::remove_var(INSTALL_KEY_ENV);
 
-    let origin = account_cli_origin(command.origin.clone())
-        .map_err(|error| UpCliError::usage("ACCOUNT_ORIGIN_INVALID", error.message))?;
+    enroll_and_start_service(key, command.origin, command.email, command.name, command.no_service)
+}
+
+/// `ferryx join` already holds the key, so it never reads stdin or the environment for one:
+/// the link is the credential and the key must stay in memory only.
+pub fn run_up_cli_with_key(
+    key: &str,
+    origin: Option<String>,
+    name: Option<String>,
+) -> Result<UpSummary, UpCliError> {
+    enroll_and_start_service(Some(key.to_string()), origin, None, name, false)
+}
+
+fn enroll_and_start_service(
+    key: Option<String>,
+    origin: Option<String>,
+    email: Option<String>,
+    name: Option<String>,
+    no_service: bool,
+) -> Result<UpSummary, UpCliError> {
+    // `account_cli_origin` already returns a coded message (`CODE: detail`). Re-prefixing it
+    // produced `ACCOUNT_ORIGIN_INVALID: ACCOUNT_ORIGIN_UNSET: ...`; keep only the detail.
+    let origin = account_cli_origin(origin)
+        .map_err(|error| UpCliError::usage("ACCOUNT_ORIGIN_INVALID", strip_code_prefix(&error.message)))?;
 
     // 1. Identity first, so the approval request and the enrollment present the same machine.
     let identity_dir = crate::remote::auth::canonical_remote_dir().ok_or_else(|| {
@@ -3291,8 +3346,8 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
                 None => {
                     wait_for_machine_approval(
                         &origin,
-                        command.email.as_deref(),
-                        command.name.as_deref(),
+                        email.as_deref(),
+                        name.as_deref(),
                     )
                     .await?
                 }
@@ -3300,7 +3355,7 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
             let record = crate::account::enroll_client::enroll_machine_named(
                 &origin,
                 &enrollment_code,
-                command.name.as_deref(),
+                name.as_deref(),
             )
             .await
             .map_err(|error| up_error_from_enroll(&origin, &error))?;
@@ -3317,7 +3372,7 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
     };
 
     // 5. Keep the daemon running.
-    let service = if command.no_service {
+    let service = if no_service {
         let mut status = service_status(&runtime);
         if status.reason.is_none() {
             status.reason = Some("service install skipped (--no-service)".to_string());
@@ -3329,7 +3384,7 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
 
     // 6. Turn the relay on so the machine is reachable without a desktop. An unsupervised or
     // skipped service gets one endpoint attempt; Relay is then saved for the daemon's boot.
-    let daemon_wait = if service.installed && !command.no_service {
+    let daemon_wait = if service.installed && !no_service {
         RELAY_DAEMON_WAIT
     } else {
         std::time::Duration::ZERO
@@ -5041,6 +5096,18 @@ mod tests {
         assert!(poll_error_is_transient(&error("ACCOUNT_HTTP_502", 502)));
         assert!(!poll_error_is_transient(&error("DEVICE_CODE_EXPIRED", 400)));
         assert!(!poll_error_is_transient(&error("MACHINE_REQUEST_INVALID", 400)));
+    }
+
+    #[test]
+    fn strip_code_prefix_keeps_the_detail() {
+        assert_eq!(
+            strip_code_prefix("ACCOUNT_ORIGIN_UNSET: set FERRYX_ACCOUNT_ORIGIN"),
+            "set FERRYX_ACCOUNT_ORIGIN"
+        );
+        assert_eq!(strip_code_prefix("MAIL_FAILED: boom"), "boom");
+        // A message without a leading code is returned untouched.
+        assert_eq!(strip_code_prefix("boom: detail"), "boom: detail");
+        assert_eq!(strip_code_prefix("plain message"), "plain message");
     }
 
     #[test]

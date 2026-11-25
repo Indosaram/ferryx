@@ -596,7 +596,7 @@ export const NATIVE_TERMINAL_SCROLLBAR_HIDE_DELAY_MS = 800;
 const NATIVE_TERMINAL_SCROLLBAR_MIN_THUMB_PX = 20;
 const UNPRESENTED_FRAME_RETRIES = 5;
 const UNPRESENTED_MAX_RETRIES = 10;
-const COMPOSITION_TAIL_WINDOW_MS = 100;
+const COMPOSITION_TAIL_WINDOW_MS = 30;
 
 export function nativeScrollbarThumb(metrics: ScrollbarMetrics | null): {
   visible: boolean;
@@ -3686,6 +3686,12 @@ export function NativeTerminalPane({
       cancelRetry();
       // An explicit click is a fresh request for admission, even after a final refusal.
       refreshBlocked = false;
+      // A quarantined binding also blocked every retry from inside the effect, so a click
+      // could not recover a pane whose attach was refused for a stale tuple. The user asked
+      // for admission again, so drop the quarantine for this session and try once more.
+      if (quarantinedBindingRef.current?.sessionId === targetSessionId) {
+        quarantinedBindingRef.current = null;
+      }
       lastGeometry = null;
       void attemptAttach(0, true);
     };
@@ -4176,7 +4182,10 @@ export function NativeTerminalPane({
                   ? event.nativeEvent.isComposing
                   : (event as unknown as globalThis.KeyboardEvent).isComposing;
               if (!isComposingNow) {
-                if (event.key === compositionTailCharRef.current) {
+                // Only a single, non-repeating character key can be the re-delivery: a held key
+                // repeating, a shortcut chord, or a named key is always the user's own input and
+                // used to be dropped for the whole tail window when it matched the last character.
+                if (event.repeat === false && event.key.length === 1 && event.key === compositionTailCharRef.current) {
                   // This keydown is WebKit's re-delivery of the key that already terminated
                   // the composition (isComposing=false); its character was already sent
                   // inside the committed text. Swallow it exactly once. Keydowns of jamos
@@ -4266,6 +4275,9 @@ export function NativeTerminalPane({
             const text = event.currentTarget.value;
             event.currentTarget.value = "";
             if (text) {
+              // Any text that reaches the input directly means the pending tail key was already
+              // delivered by another path; keeping it armed would swallow the next real keystroke.
+              compositionTailCharRef.current = null;
               sendInput({ text });
             }
           }}

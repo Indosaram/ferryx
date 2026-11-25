@@ -6,7 +6,10 @@ import type { AccountWorktreeOption } from "../useAccountWorktrees";
 export function fixtureLane(overrides: Partial<SupervisorLane> & Pick<SupervisorLane, "key">): SupervisorLane {
   return {
     title: "Ship the remote inbox",
-    status: "running",
+    // The hub's own vocabulary: `insert_lane` starts at `queued` and `LaneStatus` has no
+    // `running`. A fixture default outside that set would let the model pass here while the
+    // real phone showed "Status unknown" for every freshly queued lane.
+    status: "working",
     sessionId: `session-${overrides.key}`,
     cwd: "/Users/me/code/ferryx",
     goal: "Land the inbox and keep CI green",

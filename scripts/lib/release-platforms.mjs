@@ -343,7 +343,7 @@ $rustV = ((rustc --version 2>$null) -replace '^rustc\\s+', '' -replace '\\s+.*$'
 $cargoV = ((cargo --version 2>$null) -replace '^cargo\\s+', '' -replace '\\s+.*$', '')
 
 # vswhere & link.exe
-$vswhere = Join-Path \${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+$vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) "Microsoft Visual Studio/Installer/vswhere.exe"
 $hasVswhere = Test-Path $vswhere
 $linker = $null
 if ($hasVswhere) {
@@ -744,8 +744,8 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signi
     ? `$env:PATH = ${quotePowerShell(`${hostConfig.path};`)} + $env:PATH\n`
     : "";
   const targetDirCode = hostConfig.root
-    ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget`
-    : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
+    ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget\n# ffmpeg-sys-next's build script compiles and runs check.exe to probe the FFmpeg API.\n# With the MSVC toolchain it dies with 0xc00000fd (STATUS_STACK_OVERFLOW) before printing\n# anything, which fails the whole build. Raise the stack for the process cargo spawns\n# and tell the MSVC linker to reserve more for the probe binary.\n# PowerShell 5.1 has no inline if-expression, so the flag is appended conditionally.\n$env:RUST_MIN_STACK = '33554432'\nif ($env:RUSTFLAGS) { $env:RUSTFLAGS = $env:RUSTFLAGS + ' -C link-arg=/STACK:33554432' } else { $env:RUSTFLAGS = '-C link-arg=/STACK:33554432' }`
+    : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget\n$env:RUST_MIN_STACK = '33554432'\nif ($env:RUSTFLAGS) { $env:RUSTFLAGS = $env:RUSTFLAGS + ' -C link-arg=/STACK:33554432' } else { $env:RUSTFLAGS = '-C link-arg=/STACK:33554432' }`;
   // FFmpeg: build it from the pinned source tarball with scripts/build-ffmpeg-lgpl.sh
   // (MSYS2 bash + MSVC toolchain, no OpenH264; cached per script hash), stage it, link against
   // its import libs (FFMPEG_DIR), and pass the payload to NSIS (overlay merged into one -c file)
@@ -761,16 +761,44 @@ New-Item -ItemType Directory -Path $ffmpegCache -Force | Out-Null
 $ffmpegScript = Join-Path $sourceDir 'scripts/build-ffmpeg-lgpl.sh'
 $ffmpegKey = (Get-FileHash -LiteralPath $ffmpegScript -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 16)
 $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
+# The MSVC x64 developer environment is imported for the whole script, not only when FFmpeg
+# has to be rebuilt: bindgen needs the Windows SDK headers and link.exe. The FFmpeg cache lives
+# at the host root and survives a workspace cleanup, so on a second run this block is skipped --
+# with vcvars inside it, cargo would run without VCINSTALLDIR/WindowsSdkDir and ffmpeg-sys-next
+# would die with STATUS_STACK_OVERFLOW. MSYS2 also inherits cl.exe/link.exe from here.
+$vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio/Installer/vswhere.exe'
+$vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vsInstall) { throw 'Visual Studio C++ build tools not found (vswhere)' }
+$vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
+# Import the MSVC x64 developer environment into this process so MSYS2 inherits cl.exe/link.exe.
+#
+# COMSPEC is pwsh.exe on this host. vcvars64.bat re-enters a subshell through COMSPEC, and
+# PowerShell cannot run .bat syntax, so the call returned exit code 0 having set nothing:
+# VCINSTALLDIR, WindowsSdkDir and the MSVC PATH entries all stayed empty. ffmpeg-sys-next
+# died with STATUS_STACK_OVERFLOW, and openssl-src ran 'nmake depend' against a PATH with no
+# nmake, failing with exit code 2.
+#
+# Setting $env:COMSPEC from PowerShell is not enough: the child cmd.exe comes up with the
+# machine COMSPEC again, so vcvars still misbehaves. COMSPEC has to be assigned inside the
+# generated .bat before the call. Measured on maho-win, this form yields
+# VCINSTALLDIR=...\BuildTools\VC\, WindowsSdkDir=...\Windows Kits\10\, and nmake on PATH.
+# vswhere is reached through [Environment] instead of the env:ProgramFiles(x86) variable:
+# the parenthesised name is not a valid variable literal and expands to nothing on this host.
+$realCmd = Join-Path $env:SystemRoot 'System32\\cmd.exe'
+$vcImportBat = Join-Path $env:TEMP 'ferryx-vcvars-import.bat'
+Set-Content -LiteralPath $vcImportBat -Encoding ASCII -Value @(
+  '@echo off',
+  ('set "COMSPEC=' + $realCmd + '"'),
+  ('call "' + $vcvars + '" >nul 2>&1'),
+  'set'
+)
+foreach ($line in (& $realCmd /d /c $vcImportBat)) {
+  if ($line -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
+}
+Remove-Item -LiteralPath $vcImportBat -Force -ErrorAction SilentlyContinue
+
 if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt'))) {
   Remove-Item -LiteralPath $ffmpegPrefix, "$ffmpegPrefix.build" -Recurse -Force -ErrorAction SilentlyContinue
-  $vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-  $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-  if (-not $vsInstall) { throw 'Visual Studio C++ build tools not found (vswhere)' }
-  $vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
-  # Import the MSVC x64 developer environment into this process so MSYS2 inherits cl.exe/link.exe.
-  foreach ($line in (cmd.exe /d /c "\`"$vcvars\`" >nul && set")) {
-    if ($line -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
-  }
   $env:MSYSTEM = 'MINGW64'
   $env:MSYS2_PATH_TYPE = 'inherit'
   $env:CHERE_INVOKING = '1'
@@ -837,15 +865,49 @@ $executables = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 
 if ($executables.Count -ne 1) { throw "Expected exactly one Ferryx executable, found $($executables.Count)" }
 # The remote-desktop client is its own workspace (crates/ferryx-rd) and needs the "cli" feature.
 # It links FFmpeg dynamically, so the client ships next to the same DLLs the daemon stages.
-cargo build --manifest-path (Join-Path $sourceDir 'crates/ferryx-rd/Cargo.toml') --release -p ferryx-rd-app --features cli --bin ferryx-rd-client; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-$rdClient = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 'ferryx-rd-client.exe' -File)
+# crates/ferryx-rd resolves openssl-src to a different build-script hash than src-tauri does, so
+# sharing CARGO_TARGET_DIR makes the two workspaces fight over the same openssl-sys output and
+# nmake depend fails with exit code 2. Give it the workspace's own target dir, as the Linux script
+# already does.
+$rdTargetDir = Join-Path $sourceDir 'crates/ferryx-rd/target'
+$savedTargetDir = $env:CARGO_TARGET_DIR
+$env:CARGO_TARGET_DIR = $rdTargetDir
+cargo build --manifest-path (Join-Path $sourceDir 'crates/ferryx-rd/Cargo.toml') --release -p ferryx-rd-app --features cli --bin ferryx-rd-client; $rdExit = $LASTEXITCODE
+$env:CARGO_TARGET_DIR = $savedTargetDir
+if ($rdExit -ne 0) { exit $rdExit }
+$rdClient = @(Get-ChildItem -Path (Join-Path $rdTargetDir 'release') -Filter 'ferryx-rd-client.exe' -File)
 if ($rdClient.Count -ne 1) { throw "Expected exactly one ferryx-rd-client.exe, found $($rdClient.Count)" }
-Copy-Item -LiteralPath $rdClient[0].FullName -Destination (Join-Path $outDir 'ferryx-rd-client-windows-amd64.exe')
+# The client links FFmpeg dynamically, so it only starts with its DLL sidecars beside it: a bare
+# .exe exits 0xC0000135 (STATUS_DLL_NOT_FOUND) in about 0 ms on any machine without a system
+# FFmpeg (measured on maho-win, 2026-11-10). A release asset cannot carry two files, so the
+# published artifact is one zip holding the exe and exactly the DLLs it needs. Those DLLs live in
+# the staged payload's runtime/ directory, not at its root (scripts/stage-ffmpeg.mjs), which is why
+# the previous root-level glob shipped no DLLs at all.
+$rdStageDir = Join-Path $workspace 'rd-client-zip'
+if (Test-Path $rdStageDir) { throw 'Remote output collision' }
+New-Item -ItemType Directory -Path $rdStageDir | Out-Null
+Copy-Item -LiteralPath $rdClient[0].FullName -Destination (Join-Path $rdStageDir 'ferryx-rd-client.exe')
+$rdRuntimeDir = Join-Path $ffmpegPayload 'runtime'
+if (-not (Test-Path $rdRuntimeDir)) { throw "FFmpeg payload runtime directory is missing: $rdRuntimeDir" }
 foreach ($pattern in @('avcodec-*.dll', 'avutil-*.dll', 'swscale-*.dll', 'swresample-*.dll')) {
-  foreach ($dll in @(Get-ChildItem -Path $ffmpegPayload -Filter $pattern -File -ErrorAction SilentlyContinue)) {
-    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $outDir $dll.Name) -Force
-  }
+  $dlls = @(Get-ChildItem -Path $rdRuntimeDir -Filter $pattern -File -ErrorAction SilentlyContinue)
+  if ($dlls.Count -ne 1) { throw "Expected exactly one $pattern in the FFmpeg payload runtime directory, found $($dlls.Count)" }
+  Copy-Item -LiteralPath $dlls[0].FullName -Destination (Join-Path $rdStageDir $dlls[0].Name)
 }
+$rdZip = Join-Path $outDir 'ferryx-rd-client-windows-amd64.zip'
+if (Test-Path $rdZip) { Remove-Item -LiteralPath $rdZip -Force }
+Compress-Archive -Path (Join-Path $rdStageDir '*') -DestinationPath $rdZip -CompressionLevel Optimal
+# Verify the archive instead of trusting the packer: every staged file must be an entry, and the
+# client itself must be there under the name its DLL lookup needs.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$rdArchive = [System.IO.Compression.ZipFile]::OpenRead($rdZip)
+try { $rdEntries = @($rdArchive.Entries | ForEach-Object { $_.FullName }) } finally { $rdArchive.Dispose() }
+$rdStaged = @(Get-ChildItem -Path $rdStageDir -File | ForEach-Object { $_.Name })
+if ($rdStaged -notcontains 'ferryx-rd-client.exe') { throw 'The RD client zip has no ferryx-rd-client.exe' }
+$rdMissing = @($rdStaged | Where-Object { $rdEntries -notcontains $_ })
+if ($rdMissing.Count -gt 0) { throw "The RD client zip is missing: $($rdMissing -join ', ')" }
+if ($rdEntries.Count -ne $rdStaged.Count) { throw "The RD client zip carries $($rdEntries.Count) entries, expected $($rdStaged.Count)" }
+if ((Get-Item -LiteralPath $rdZip).Length -le 0) { throw 'The RD client zip is empty' }
 & (Join-Path $sourceDir 'scripts/build-msix.ps1') -ExePath $executables[0].FullName -Version ${quotePowerShell(plan.msixVersion)} -OutputDir $outDir -SkipSigning -FfmpegPayloadDir $ffmpegPayload
 if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ${nsisBuild}Pop-Location
@@ -856,7 +918,7 @@ $versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun -
 Write-Output '---BUILD_RESULT---'
 Write-Output ($versions | ConvertTo-Json -Compress)
 } finally {
-  Remove-Item -LiteralPath $signingSecretFile -Force -ErrorAction SilentlyContinue
+  if ($signingSecretFile) { Remove-Item -LiteralPath $signingSecretFile -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
   Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
 }
@@ -1210,6 +1272,24 @@ export function finalizeMacosBundle({
   // `requireKeeper` turns "a keeper is optional here" into "this bundle must carry one", so the two
   // macOS release paths cannot seal a keeper-less app even if the install step is skipped.
   if (sidecars.keeper !== null || requireKeeper) assertKeeperInApp({ appPath });
+  // A signed-but-unnotarized macOS build is rejected by Gatekeeper on end-user machines
+  // ("Unnotarized Developer ID"), and the updater tar/DMG then ship without a ticket: a green
+  // build whose artifacts are unusable. Ad-hoc identities ('-' and nothing else) mark bundles
+  // that are never distributed -- the daemon-lifetime QA harness and the test fixtures -- so they
+  // keep sealing without a submission; a real Developer ID may not.
+  const isDistributable = Boolean(signingIdentity) && signingIdentity !== "-";
+  if (approveNotarization && !notaryProfile) {
+    throw new Error(
+      "approveNotarization is set but no notaryProfile is configured for this host; " +
+        "add notaryProfile to the host entry in the release hosts config",
+    );
+  }
+  if (isDistributable && !approveNotarization) {
+    throw new Error(
+      "Refusing to produce an unnotarized macOS release: pass --approve-notarization " +
+        "(or set approveNotarization) so the app, DMG and updater tar carry a notarization ticket",
+    );
+  }
   const notarizations = [];
   if (approveNotarization && notaryProfile) {
     const appZipPath = join(workspaceDir, "Ferryx-notary.zip");
@@ -1300,18 +1380,22 @@ function nestedHelperBundles(appPath) {
 }
 
 /**
- * macOS FFmpeg payload: builds (or reuses cached) arm64 and x86_64 LGPL FFmpeg prefixes, stages
- * them as universal dylibs with @rpath install names, and returns the cargo env plus the
- * `tauri build -c` overlay that copies them into Contents/Frameworks. One universal build links
- * both slices, so FFMPEG_DIR is a link SDK of the arm64 headers (arch-neutral) and the staged
- * universal dylibs.
+ * Rejects non-Mach-O, Intel and multi-architecture release binaries.
  */
+export function assertMacosArm64(binaryPath, exec = execFileSync) {
+  const description = exec("file", ["-b", binaryPath], { encoding: "utf8" }).trim();
+  if (!/^Mach-O\b/.test(description) || !/\barm64\b/.test(description) || /x86_64|universal binary/.test(description)) {
+    throw new Error(`macOS binary must contain only arm64: ${binaryPath} (${description})`);
+  }
+}
+
+/** Stages the arm64 LGPL FFmpeg prefix and exposes its headers and dylibs as FFMPEG_DIR. */
 export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }) {
   const script = join(sourceDir, "scripts", "build-ffmpeg-lgpl.sh");
   const key = createHash("sha256").update(readFileSync(script)).digest("hex").slice(0, 16);
   mkdirSync(cacheRoot, { recursive: true });
   const prefixes = {};
-  for (const [triple, arch] of [["aarch64-apple-darwin", "arm64"], ["x86_64-apple-darwin", "x86_64"]]) {
+  for (const [triple, arch] of [["aarch64-apple-darwin", "arm64"]]) {
     const prefix = join(cacheRoot, `lgpl-${key}-${arch}`);
     if (!existsSync(join(prefix, "build-receipt.txt"))) {
       rmSync(prefix, { recursive: true, force: true });
@@ -1327,14 +1411,13 @@ export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }
   const stage = join(sourceDir, "scripts", "stage-ffmpeg.mjs");
   exec("bun", [
     stage,
-    "--target", "universal-apple-darwin",
+    "--target", "aarch64-apple-darwin",
     "--prefix", `aarch64-apple-darwin=${prefixes["aarch64-apple-darwin"]}`,
-    "--prefix", `x86_64-apple-darwin=${prefixes["x86_64-apple-darwin"]}`,
     "--prune",
   ], { cwd: sourceDir, stdio: "pipe" });
-  exec("bun", [stage, "--target", "universal-apple-darwin", "--check"], { cwd: sourceDir, stdio: "pipe" });
+  exec("bun", [stage, "--target", "aarch64-apple-darwin", "--check"], { cwd: sourceDir, stdio: "pipe" });
   // One -c file: the staged overlay plus the empty beforeBuildCommand of the bundling pass.
-  const payloadDir = join(sourceDir, FFMPEG_PAYLOAD_REL, "universal-apple-darwin");
+  const payloadDir = join(sourceDir, FFMPEG_PAYLOAD_REL, "aarch64-apple-darwin");
   const sdkDir = join(payloadDir, "sdk");
   rmSync(sdkDir, { recursive: true, force: true });
   mkdirSync(join(sdkDir, "lib"), { recursive: true });
@@ -1363,6 +1446,7 @@ export function verifyMacosFfmpegBundle({ appPath, payloadDir, exec = macExec })
   for (const name of Object.keys(manifest.runtime)) {
     const path = join(frameworks, name);
     if (!existsSync(path)) throw new Error(`FFmpeg dylib missing from the app bundle: Contents/Frameworks/${name}`);
+    assertMacosArm64(path, (command, args) => exec(command, args).stdout);
     const id = exec("otool", ["-D", path]).stdout.trim().split("\n").pop().trim();
     if (id !== `@rpath/${name}`) throw new Error(`${name} install name is ${id}, expected @rpath/${name}`);
   }
@@ -1552,13 +1636,13 @@ export async function buildHost({
         stdio: "pipe",
       });
 
-      // Verified mhc + bun for both slices of the universal app (Contents/Resources/mhc/<triple>)
-      execFileSync("bun", ["scripts/fetch-mhc.mjs", "--target", "universal-apple-darwin", "--prune"], {
+      // Verified mhc + bun for the arm64 app (Contents/Resources/mhc/<triple>)
+      execFileSync("bun", ["scripts/fetch-mhc.mjs", "--target", "aarch64-apple-darwin", "--prune"], {
         cwd: isolatedSource,
         stdio: "pipe",
       });
 
-      // Build Darwin universal
+      // Build Darwin arm64
       const cargoTargetDir = hostConfig.root
         ? join(hostConfig.root, "cargo-target")
         : join(workspaceDir, "cargo-target");
@@ -1590,14 +1674,12 @@ export async function buildHost({
         delete buildEnv.APPLE_PASSWORD;
       }
 
-      // Build Darwin universal binaries first (skip bundle)
+      // Build Darwin arm64 binaries first (skip bundle)
       const aarch64Rel = join(cargoTargetDir, "aarch64-apple-darwin", "release");
-      const x86Rel = join(cargoTargetDir, "x86_64-apple-darwin", "release");
-      const universalRel = join(cargoTargetDir, "universal-apple-darwin", "release");
 
       execFileSync(
         "bun",
-        ["tauri", "build", "--target", "universal-apple-darwin", "--no-bundle"],
+        ["tauri", "build", "--target", "aarch64-apple-darwin", "--no-bundle"],
         {
           cwd: isolatedSource,
           env: buildEnv,
@@ -1606,9 +1688,9 @@ export async function buildHost({
         },
       );
 
-      // The headless binaries ship standalone (ferryx-cli-darwin-universal) and must not load the
+      // The headless binaries ship standalone (ferryx-cli-darwin-arm64) and must not load the
       // FFmpeg dylibs that only the app bundle carries, so rebuild them without default features.
-      for (const triple of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
+      for (const triple of ["aarch64-apple-darwin"]) {
         execFileSync(
           "cargo",
           [
@@ -1631,21 +1713,10 @@ export async function buildHost({
         );
       }
 
-      // Ensure all workspace binaries used by the app bundle are universal lipo'd.
-      mkdirSync(universalRel, { recursive: true });
-      for (const binName of ["ferryx-cli", "ferryx-account", "ferryx-relay", "ferryx-rd-client"]) {
-        const aarch64Bin = join(aarch64Rel, binName);
-        const x86Bin = join(x86Rel, binName);
-        const universalBin = join(universalRel, binName);
-        if (existsSync(aarch64Bin) && existsSync(x86Bin)) {
-          execFileSync("lipo", ["-create", aarch64Bin, x86Bin, "-output", universalBin], { stdio: "pipe" });
-        }
-      }
-
-      // Pre-sign universal binaries with hardened runtime so Tauri bundler packages valid signed components
+      // Pre-sign arm64 binaries with hardened runtime so Tauri bundler packages valid signed components
       if (hostConfig.signingIdentity) {
         for (const binName of ["ferryx", "ferryx-cli", "ferryx-account", "ferryx-relay"]) {
-          const targetBin = join(universalRel, binName);
+          const targetBin = join(aarch64Rel, binName);
           if (existsSync(targetBin)) {
             execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, targetBin], {
               stdio: "pipe",
@@ -1654,11 +1725,19 @@ export async function buildHost({
         }
       }
 
-      // Run Tauri bundling now that all universal binaries exist
+      // Run Tauri bundling now that all arm64 binaries exist.
+      //
+      // Only the .app is requested. finalizeMacosBundle rebuilds the DMG from the
+      // app after signing, notarizing and stapling it (recreateDmgFromApp), so the
+      // bundler's own DMG would be discarded anyway. Asking for it means running
+      // bundle_dmg.sh, which drives Finder over AppleScript to draw the disk-image
+      // window and fails outright over SSH with no GUI session:
+      //   Error failed to bundle project error running bundle_dmg.sh
+      // That killed the whole Darwin build after a 20-minute compile.
       execFileSync(
         "bun",
         [
-          "tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app,dmg",
+          "tauri", "build", "--target", "aarch64-apple-darwin", "--bundles", "app",
           "-c", ffmpeg.overlay,
         ],
         {
@@ -1672,7 +1751,7 @@ export async function buildHost({
       // Collect and verify macOS bundle artifacts
       const bundleDir = join(
         cargoTargetDir,
-        "universal-apple-darwin",
+        "aarch64-apple-darwin",
         "release",
         "bundle",
       );
@@ -1682,15 +1761,12 @@ export async function buildHost({
         throw new Error(`Expected macOS app bundle not found at ${appPath}`);
       }
 
-      // 1. Verify universal binary architectures with lipo
+      // 1. Verify the app is a single arm64 slice.
       const binaryPath = join(appPath, "Contents", "MacOS", "ferryx");
       if (!existsSync(binaryPath)) {
         throw new Error(`Executable binary not found at ${binaryPath}`);
       }
-      const lipoOut = execFileSync("lipo", ["-info", binaryPath], { encoding: "utf8" });
-      if (!lipoOut.includes("x86_64") || (!lipoOut.includes("arm64") && !lipoOut.includes("aarch64"))) {
-        throw new Error(`macOS binary is not a universal binary (lipo output: ${lipoOut.trim()})`);
-      }
+      assertMacosArm64(binaryPath);
 
       // 2. Verify Info.plist
       const plistPath = join(appPath, "Contents", "Info.plist");
@@ -1706,7 +1782,7 @@ export async function buildHost({
       }
       verifyMacosFfmpegBundle({
         appPath,
-        payloadDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "universal-apple-darwin"),
+        payloadDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "aarch64-apple-darwin"),
       });
 
       // 2a. Keeper payload. The plan ships supervised restart and the PTY keeper in ONE release and
@@ -1720,7 +1796,7 @@ export async function buildHost({
         sourceDir: isolatedSource,
         targetDir: cargoTargetDir,
         destDir: keeperDir,
-        triples: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+        triples: ["aarch64-apple-darwin"],
         appVersion: plan.appVersion,
         env: buildEnv,
         sourceDateEpoch: plan.sourceDateEpoch,
@@ -1756,21 +1832,20 @@ export async function buildHost({
       // instead of silently symbolicate nothing. Must precede finalizeMacosBundle, which seals the
       // exact bytes that are notarized.
       const dsymDir = join(runDir, "dsyms");
-      // One dSYM per shipped executable. The debug maps live in the per-architecture binaries rustc
-      // linked (rustc packs `<binary>.dSYM` beside each), not in the lipo'd universal file, so the
-      // bundle is built from the slices and covers both UUIDs in one archive entry.
+      // One dSYM per shipped executable, built from its single arm64 debug map.
       const shipped = [
-        { name: "ferryx", slices: [join(aarch64Rel, "ferryx"), join(x86Rel, "ferryx")], binary: join(appPath, "Contents", "MacOS", "ferryx") },
-        { name: "ferryx-cli", slices: [join(aarch64Rel, "ferryx-cli"), join(x86Rel, "ferryx-cli")], binary: join(universalRel, "ferryx-cli") },
-        { name: "ferryx-rd-client", slices: [join(aarch64Rel, "ferryx-rd-client"), join(x86Rel, "ferryx-rd-client")], binary: join(universalRel, "ferryx-rd-client") },
+        { name: "ferryx", slices: [join(aarch64Rel, "ferryx")], binary: join(appPath, "Contents", "MacOS", "ferryx") },
+        { name: "ferryx-cli", slices: [join(aarch64Rel, "ferryx-cli")], binary: join(aarch64Rel, "ferryx-cli") },
+        { name: "ferryx-rd-client", slices: [join(aarch64Rel, "ferryx-rd-client")], binary: join(aarch64Rel, "ferryx-rd-client") },
         // The keeper is a shipped executable too: a SIGSEGV in the process that owns every PTY
         // master is the other crash Phase 0 must be able to symbolicate.
-        { name: "ferryx-ptykeeper", slices: [join(cargoTargetDir, "aarch64-apple-darwin", "release", "ferryx-ptykeeper"), join(cargoTargetDir, "x86_64-apple-darwin", "release", "ferryx-ptykeeper")], binary: join(keeperResourceDir, "ferryx-ptykeeper") },
+        { name: "ferryx-ptykeeper", slices: [join(aarch64Rel, "ferryx-ptykeeper")], binary: join(keeperResourceDir, "ferryx-ptykeeper") },
       ].filter((entry) => isFile(entry.binary));
       const archived = shipped.map((entry) => {
         const slices = entry.slices.filter((slice) => isFile(slice));
         const outPath = join(dsymDir, `${entry.name}.dSYM`);
         const produced = produceDsymFromSlices({ slices: slices.length > 0 ? slices : [entry.binary], outPath });
+        if (produced.uuids.length !== 1) throw new Error(`${entry.name}: expected exactly one dSYM UUID`);
         return { ...entry, ...produced };
       });
       for (const entry of shipped) strippedForShipping(entry.binary);
@@ -1785,7 +1860,12 @@ export async function buildHost({
           });
         }
       }
-      const dsymGate = shipped.map((entry) => assertDsymGate({ binaryPath: entry.binary, dsymDir }));
+      const dsymGate = shipped.map((entry) => {
+        assertMacosArm64(entry.binary);
+        const gate = assertDsymGate({ binaryPath: entry.binary, dsymDir });
+        if (gate.binaryUuids.length !== 1) throw new Error(`${entry.name}: expected exactly one arm64 UUID`);
+        return gate;
+      });
       const relative = (path) => (path.startsWith(`${runDir}/`) ? path.slice(runDir.length + 1) : path);
 
       // 3-4. Re-sign all Mach-O binaries, notarize/staple the app, then rebuild
@@ -1796,7 +1876,10 @@ export async function buildHost({
       const outerEntitlements = join(workspaceDir, "outer-entitlements.plist");
       assembleDaemonHelper({ appPath, identity: macSigningIdentity, entitlements: outerEntitlements });
       const dmgDir = join(bundleDir, "dmg");
-      let dmgPath = null;
+      // The bundler no longer produces a DMG (see the --bundles app note above), so the
+      // destination is named here and filled in by recreateDmgFromApp inside
+      // finalizeMacosBundle, after the app is signed, notarized and stapled.
+      let dmgPath = join(dmgDir, "Ferryx_aarch64.dmg");
       if (existsSync(dmgDir)) {
         for (const file of readdirSync(dmgDir)) {
           if (file.endsWith(".dmg")) {
@@ -1805,6 +1888,7 @@ export async function buildHost({
           }
         }
       }
+      mkdirSync(dmgDir, { recursive: true });
 
       // Sealing re-signs the keeper, which rewrites its bytes; the digest `keeper.json` advertises is
       // therefore re-derived inside this call, from the signed bytes, and returned here as the only
@@ -1871,12 +1955,12 @@ export async function buildHost({
       // <data>/dsyms or ~/ferryx-releases/dsyms.
       execFileSync(
         "tar",
-        ["--no-xattrs", "-czf", join(runDir, "Ferryx-universal.dSYM.tar.gz"), "-C", dsymDir, "."],
+        ["--no-xattrs", "-czf", join(runDir, "Ferryx-arm64.dSYM.tar.gz"), "-C", dsymDir, "."],
         { env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: "pipe" },
       );
 
       // 5. Create updater tar from verified (and stapled) .app, excluding AppleDouble
-      const updaterTarPath = join(artifactsOutDir, "Ferryx.app.tar.gz");
+      const updaterTarPath = join(artifactsOutDir, "Ferryx_aarch64.app.tar.gz");
       execFileSync(
         "tar",
         ["--no-xattrs", "-czf", updaterTarPath, "-C", macosDir, "Ferryx.app"],
@@ -1892,15 +1976,15 @@ export async function buildHost({
         verifyShippedKeeperDigest({ archivePath: updaterTarPath, expectedSha256: shippedKeeper.sha256 });
       }
       if (dmgPath && existsSync(dmgPath)) {
-        execFileSync("cp", [dmgPath, join(artifactsOutDir, "Ferryx_universal.dmg")]);
+        execFileSync("cp", [dmgPath, join(artifactsOutDir, "Ferryx_aarch64.dmg")]);
       }
-      const universalCli = join(universalRel, "ferryx-cli");
-      if (existsSync(universalCli)) {
-        execFileSync("cp", [universalCli, join(artifactsOutDir, "ferryx-cli-darwin-universal")]);
+      const arm64Cli = join(aarch64Rel, "ferryx-cli");
+      if (existsSync(arm64Cli)) {
+        execFileSync("cp", [arm64Cli, join(artifactsOutDir, "ferryx-cli-darwin-arm64")]);
       }
-      const universalRdClient = join(universalRel, "ferryx-rd-client");
-      if (existsSync(universalRdClient)) {
-        execFileSync("cp", [universalRdClient, join(artifactsOutDir, "ferryx-rd-client-darwin-universal")]);
+      const arm64RdClient = join(aarch64Rel, "ferryx-rd-client");
+      if (existsSync(arm64RdClient)) {
+        execFileSync("cp", [arm64RdClient, join(artifactsOutDir, "ferryx-rd-client-darwin-arm64")]);
       }
     } else {
       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";
@@ -1955,7 +2039,7 @@ export async function buildHost({
           });
           const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
           toolchains = parseBuildResult(result.stdout);
-          const names = ["Ferryx_x64.msix", "ferryx-rd-client-windows-amd64.exe"];
+          const names = ["Ferryx_x64.msix", "ferryx-rd-client-windows-amd64.zip"];
           if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
           for (const name of names) {
             await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });

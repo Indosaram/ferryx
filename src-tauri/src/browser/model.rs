@@ -1038,9 +1038,28 @@ mod tests {
         let res = ImportInstalledBrowserCookiesResult {
             imported_count: 42,
             skipped_count: 5,
+            blocked: None,
         };
         let res_json = serde_json::to_string(&res).unwrap();
         assert_eq!(res_json, r#"{"importedCount":42,"skippedCount":5}"#);
+
+        // A named refusal rides along with the rows that did import, under stable wire names.
+        let blocked_res = ImportInstalledBrowserCookiesResult {
+            imported_count: 3,
+            skipped_count: 2,
+            blocked: Some(InstalledCookieImportBlock {
+                reason: "app-bound-key-refused".into(),
+                skipped_count: 2,
+                hresult: Some("0x8004A007".into()),
+            }),
+        };
+        let blocked_json = serde_json::to_string(&blocked_res).unwrap();
+        assert_eq!(
+            blocked_json,
+            r#"{"importedCount":3,"skippedCount":2,"blocked":{"reason":"app-bound-key-refused","skippedCount":2,"hresult":"0x8004A007"}}"#
+        );
+        let parsed: ImportInstalledBrowserCookiesResult = serde_json::from_str(&blocked_json).unwrap();
+        assert_eq!(parsed, blocked_res);
     }
 }
 
@@ -1058,5 +1077,23 @@ pub struct ImportInstalledBrowserCookiesRequest {
 pub struct ImportInstalledBrowserCookiesResult {
     pub imported_count: usize,
     pub skipped_count: usize,
+    /// Why some rows were left unapplied even though the import succeeded, when the importer
+    /// named a reason (today: the browser refusing its app-bound key, with the profile's `v10`
+    /// cookies still imported). Absent when nothing was blocked, so it is additive on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<InstalledCookieImportBlock>,
+}
+
+/// A class of rows one installed-profile import could not apply, by stable `reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledCookieImportBlock {
+    /// The same wire string the failure path uses (`app-bound-key-refused`).
+    pub reason: String,
+    /// How many rows this block left unapplied (the importer's "seen" count).
+    pub skipped_count: usize,
+    /// The measured COM status behind the block, `0x`-prefixed, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hresult: Option<String>,
 }
 

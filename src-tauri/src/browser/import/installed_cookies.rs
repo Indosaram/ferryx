@@ -19,6 +19,9 @@ pub enum InstalledCookieImportFailureReason {
     NoProfile,
     KeychainDenied,
     NoCookies,
+    /// The browser's elevation service refused its app-bound (`v20`) key: those cookies were
+    /// seen and reported but not applied. The same profile's `v10` cookies still are.
+    AppBoundKeyRefused,
     CookieImportFailed,
 }
 
@@ -28,6 +31,7 @@ impl InstalledCookieImportFailureReason {
             Self::NoProfile => "no-profile",
             Self::KeychainDenied => "keychain-denied",
             Self::NoCookies => "no-cookies",
+            Self::AppBoundKeyRefused => "app-bound-key-refused",
             Self::CookieImportFailed => "cookie-import-failed",
         }
     }
@@ -38,10 +42,32 @@ impl InstalledCookieImportFailureReason {
 pub struct InstalledCookieImportError {
     pub reason: InstalledCookieImportFailureReason,
     pub message: String,
+    /// The measured COM status behind an app-bound refusal (`0x8004A007` = the elevation
+    /// service's `kValidationDidNotPass` for any caller that is not the browser's own image).
+    /// `None` for every other failure; it is what makes the refusal diagnosable instead of
+    /// leaving "N cookies need sign-in again" as the only trace.
+    pub hresult: Option<u32>,
+    /// How many rows the importer named as left unapplied by this block (its "seen" count).
+    /// `None` when the failure is not a block of rows (a missing profile, a refused keychain).
+    pub rows: Option<usize>,
+}
+
+impl InstalledCookieImportError {
+    /// The `details` of this failure's structured `{code, message, details}` IPC error.
+    pub fn details(&self) -> serde_json::Value {
+        let mut details = serde_json::json!({ "reason": self.reason.as_str() });
+        if let Some(hresult) = self.hresult {
+            details["hresult"] = serde_json::json!(format!("0x{hresult:08X}"));
+        }
+        if let Some(rows) = self.rows {
+            details["rows"] = serde_json::json!(rows);
+        }
+        details
+    }
 }
 
 fn failure(reason: InstalledCookieImportFailureReason, message: impl Into<String>) -> InstalledCookieImportError {
-    InstalledCookieImportError { reason, message: message.into() }
+    InstalledCookieImportError { reason, message: message.into(), hresult: None, rows: None }
 }
 
 /// The cookies read from one installed profile.
@@ -52,6 +78,10 @@ pub struct InstalledCookies {
     pub skipped: usize,
     /// Google cookies, left out on purpose (Google signs the account out when they move).
     pub google_excluded: usize,
+    /// Why some rows could not be applied even though others were, when the importer named a
+    /// reason: today the browser refusing its app-bound key. Reported alongside the imported
+    /// `v10` cookies so the loss is never just a count.
+    pub blocked: Option<InstalledCookieImportError>,
 }
 
 /// Collects what the ported cookie worker reads.
@@ -108,12 +138,21 @@ impl ImportDestination for Collector {
 }
 
 fn read_failure(error: &ImportError) -> InstalledCookieImportError {
-    let reason = match error {
-        ImportError::FileNotFound(_) => InstalledCookieImportFailureReason::NoProfile,
-        ImportError::KeyUnavailable(_) => InstalledCookieImportFailureReason::KeychainDenied,
-        _ => InstalledCookieImportFailureReason::CookieImportFailed,
-    };
-    failure(reason, error.to_string())
+    match error {
+        ImportError::FileNotFound(_) => {
+            failure(InstalledCookieImportFailureReason::NoProfile, error.to_string())
+        }
+        ImportError::KeyUnavailable(_) => {
+            failure(InstalledCookieImportFailureReason::KeychainDenied, error.to_string())
+        }
+        ImportError::AppBoundKeyRefused { hresult } => InstalledCookieImportError {
+            reason: InstalledCookieImportFailureReason::AppBoundKeyRefused,
+            message: error.to_string(),
+            hresult: Some(*hresult),
+            rows: None,
+        },
+        _ => failure(InstalledCookieImportFailureReason::CookieImportFailed, error.to_string()),
+    }
 }
 
 /// Reads the cookies of `profile_name` (default `Default`) of the installed `kind` under
@@ -153,18 +192,39 @@ pub fn read_installed_browser_cookies(
     let outcome = orchestrator.run_type(ImportType::Cookies, &browser, &progress);
     drop(progress);
     outcome.map_err(|error| read_failure(&error))?;
-    let needs_sign_in: usize = events
-        .try_iter()
-        .map(|event| match event {
-            ImportProgress::Summary { count, .. } => count as usize,
-            _ => 0,
-        })
-        .sum();
+    let mut needs_sign_in = 0usize;
+    let mut blocked = None;
+    for event in events.try_iter() {
+        match event {
+            ImportProgress::Summary { count, .. } => needs_sign_in += count as usize,
+            // The worker names the reason its rows were dropped (`app-bound-key-refused` with the
+            // measured HRESULT) before the count; keep it so the shell sees why, not just how many.
+            ImportProgress::Blocked { code, message, hresult, rows, .. } => {
+                blocked = Some(InstalledCookieImportError {
+                    reason: match code.as_str() {
+                        "app-bound-key-refused" => {
+                            InstalledCookieImportFailureReason::AppBoundKeyRefused
+                        }
+                        _ => InstalledCookieImportFailureReason::CookieImportFailed,
+                    },
+                    message,
+                    hresult,
+                    rows: Some(rows as usize),
+                });
+            }
+            _ => {}
+        }
+    }
 
     let mut read = std::mem::take(&mut *collector.read.lock());
     read.skipped += needs_sign_in;
+    read.blocked = blocked;
     if read.cookies.is_empty() {
-        // Every encrypted cookie failing means the browser's key was not released.
+        // Every encrypted cookie failing means the browser's key was not released; when the
+        // importer named the refusal, that reason (and its HRESULT) is the answer.
+        if let Some(refusal) = read.blocked {
+            return Err(refusal);
+        }
         if needs_sign_in > 0 {
             return Err(failure(
                 Reason::KeychainDenied,
@@ -241,6 +301,133 @@ mod tests {
         assert_eq!(unreadable.reason, InstalledCookieImportFailureReason::CookieImportFailed);
         let locked_key = read_failure(&ImportError::KeyUnavailable("no keychain".into()));
         assert_eq!(locked_key.reason, InstalledCookieImportFailureReason::KeychainDenied);
+    }
+
+    /// An app-bound refusal keeps its own reason and carries the measured HRESULT into the
+    /// structured IPC details, so the shell can tell "the browser said no" apart from "no key
+    /// was found" and from a generic failure.
+    #[test]
+    fn an_app_bound_refusal_is_its_own_reason_and_carries_its_hresult() {
+        let refused = ImportError::AppBoundKeyRefused { hresult: 0x8004_A007 };
+        let mapped = read_failure(&refused);
+        assert_eq!(mapped.reason, InstalledCookieImportFailureReason::AppBoundKeyRefused);
+        assert_eq!(mapped.reason.as_str(), "app-bound-key-refused");
+        assert_eq!(mapped.hresult, Some(0x8004_A007));
+        let details = mapped.details();
+        assert_eq!(details["reason"], "app-bound-key-refused");
+        assert_eq!(details["hresult"], "0x8004A007");
+        assert!(mapped.to_string().starts_with("app-bound-key-refused: "), "{mapped}");
+        assert!(mapped.to_string().contains("0x8004A007"), "{mapped}");
+
+        // Every other failure keeps one reason string and no HRESULT.
+        let no_profile = read_failure(&ImportError::FileNotFound("Cookies".into()));
+        assert_eq!(no_profile.reason.as_str(), "no-profile");
+        assert_eq!(no_profile.hresult, None);
+        assert!(no_profile.details().get("hresult").is_none());
+    }
+
+    /// The live path: a profile whose app-bound key the browser refuses still imports its `v10`
+    /// cookies, and the refusal is reported with its reason and HRESULT instead of only a count.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_app_bound_key_reports_the_reason_and_still_imports_v10_cookies() {
+        use base64::Engine as _;
+        use ferryx_browser_import::decrypt::win_app_bound::{COM_DECRYPT_LOCK, COM_DECRYPT_OVERRIDE};
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+        fn dpapi_protect(plain: &[u8]) -> Vec<u8> {
+            let input = CRYPT_INTEGER_BLOB {
+                cbData: plain.len() as u32,
+                pbData: plain.as_ptr() as *mut u8,
+            };
+            let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+            unsafe {
+                CryptProtectData(&input, None, None, None, None, 0, &mut out).unwrap();
+                let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+                let _ = LocalFree(Some(HLOCAL(out.pbData as *mut std::ffi::c_void)));
+                bytes
+            }
+        }
+
+        fn v10_cookie(key: &[u8], host: &str, value: &str) -> Vec<u8> {
+            use aes_gcm::aead::{Aead, KeyInit};
+            use aes_gcm::{Aes256Gcm, Nonce};
+            use sha2::{Digest, Sha256};
+            let iv = [0x41u8; 12];
+            let mut plain = Sha256::digest(host.as_bytes()).to_vec();
+            plain.extend_from_slice(value.as_bytes());
+            let cipher = Aes256Gcm::new_from_slice(key).unwrap();
+            let mut blob = b"v10".to_vec();
+            blob.extend_from_slice(&iv);
+            blob.extend(cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).unwrap());
+            blob
+        }
+
+        let _guard = COM_DECRYPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = [0x6Du8; 32];
+        let home = tempfile::tempdir().unwrap();
+        let profile = chrome_profile(home.path());
+
+        // Local State sits one level above the profile, where the worker looks for it.
+        let mut dpapi = b"DPAPI".to_vec();
+        dpapi.extend_from_slice(&dpapi_protect(&key));
+        let mut app_bound = b"APPB".to_vec();
+        app_bound.extend_from_slice(b"sealed-app-bound");
+        let local_state = serde_json::json!({
+            "os_crypt": {
+                "encrypted_key": base64::engine::general_purpose::STANDARD.encode(&dpapi),
+                "app_bound_encrypted_key": base64::engine::general_purpose::STANDARD.encode(&app_bound),
+            }
+        });
+        std::fs::write(profile.parent().unwrap().join("Local State"), local_state.to_string()).unwrap();
+
+        let network = profile.join("Network");
+        std::fs::create_dir_all(&network).unwrap();
+        let conn = rusqlite::Connection::open(network.join("Cookies")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT NOT NULL UNIQUE, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('version', '24');
+             CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL DEFAULT '',
+                 encrypted_value BLOB DEFAULT x'', path TEXT NOT NULL DEFAULT '/', expires_utc INTEGER NOT NULL DEFAULT 0,
+                 is_secure INTEGER NOT NULL DEFAULT 0, is_httponly INTEGER NOT NULL DEFAULT 0,
+                 samesite INTEGER NOT NULL DEFAULT -1, source_scheme INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        let expires = (4_000_000_000i64 + 11_644_473_600) * 1_000_000;
+        for (host, name, encrypted) in [
+            (".v10.test", "v10", v10_cookie(&key, ".v10.test", "v10-value")),
+            (".v20.test", "v20", b"v20sealed-ciphertext".to_vec()),
+        ] {
+            conn.execute(
+                "INSERT INTO cookies (host_key, name, value, encrypted_value, expires_utc, is_secure, is_httponly, samesite)
+                 VALUES (?1, ?2, '', ?3, ?4, 1, 1, 1)",
+                rusqlite::params![host, name, encrypted, expires],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        *COM_DECRYPT_OVERRIDE.lock().unwrap() = Some(|_browser, _payload| {
+            Err(ferryx_browser_import::decrypt::win_app_bound::AppBoundKeyError::Refused {
+                hresult: 0x8004_A007,
+            })
+        });
+        let read = read_installed_browser_cookies(InstalledBrowserKind::Chrome, Some("Default"), Some(home.path()));
+        *COM_DECRYPT_OVERRIDE.lock().unwrap() = None;
+
+        let read = read.expect("the v10 cookie still imports despite the refusal");
+        assert_eq!(read.cookies.len(), 1, "{:?}", read.cookies.iter().map(|c| c.domain.clone()).collect::<Vec<_>>());
+        assert_eq!(read.cookies[0].domain.as_deref(), Some(".v10.test"));
+        assert_eq!(read.cookies[0].value, "v10-value");
+        assert_eq!(read.skipped, 1, "the refused v20 row is counted, not applied");
+
+        let blocked = read.blocked.expect("the refusal is reported alongside the imported rows");
+        assert_eq!(blocked.reason.as_str(), "app-bound-key-refused");
+        assert_eq!(blocked.hresult, Some(0x8004_A007));
+        assert_eq!(blocked.rows, Some(1), "the block names the row it cost");
+        assert_eq!(blocked.details()["hresult"], "0x8004A007");
+        assert_eq!(blocked.details()["rows"], 1);
     }
 
     // macOS fetches the browser's Keychain key before reading any row, which would prompt on a

@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 use super::service::{authenticate_user, parse_json, run_account_blocking, AccountState, ApiError};
 use super::store::{now_secs, store_sqlite};
 
+/// Each continuity field is accepted up to 4096 bytes, and a request carries four of them, so
+/// the router-wide 4 KiB body limit would refuse as `413` what this handler types as
+/// `400 INVALID_CONTINUITY`. The route therefore raises the limit enough for the field checks
+/// to be the thing that decides validity, while still bounding the read.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContinuityPointer {
@@ -40,7 +46,7 @@ impl PutContinuity {
         let cleared = fields.iter().all(|field| field.is_none());
         let selected = [&self.machine_id, &self.workspace_id, &self.session_id].iter().all(|field| {
             field.as_ref().is_some_and(|value| !value.trim().is_empty() && value.len() <= 4096)
-        }) && self.worktree_slug.as_ref().map_or(true, |value| {
+        }) && self.worktree_slug.as_ref().is_none_or(|value| {
             !value.trim().is_empty() && value.len() <= 4096
         });
         if self.expected_revision < 0 || (!cleared && !selected) {

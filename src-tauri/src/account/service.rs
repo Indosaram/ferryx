@@ -1880,7 +1880,12 @@ pub fn router(state: Arc<AccountState>) -> Router {
         .route("/api/account/v1/me", get(get_me))
         .route(
             "/api/account/v1/continuity",
-            get(super::continuity::get).put(super::continuity::put),
+            get(super::continuity::get)
+                .put(super::continuity::put)
+                // Continuity validates each field up to 4096 bytes, which four fields can exceed,
+                // so it raises the body limit above the router-wide one rather than answering
+                // `413` where the handler types `400 INVALID_CONTINUITY`.
+                .layer(DefaultBodyLimit::max(super::continuity::MAX_BODY_BYTES.max(limit))),
         )
         .route("/api/account/v1/login/consume", post(login_consume))
         .route("/api/account/v1/device/request", post(device_request))

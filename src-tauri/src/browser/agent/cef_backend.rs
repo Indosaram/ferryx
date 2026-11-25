@@ -217,6 +217,17 @@ mod tests {
         png
     }
 
+    /// The JSON the observe script was invoked with, so a test asserts the payload the page sees
+    /// rather than a substring of the rendered source.
+    fn observe_payload(expression: &str) -> Value {
+        let prefix = format!("({})(", observe::OBSERVE_SOURCE);
+        let payload = expression
+            .strip_prefix(prefix.as_str())
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("an observe script invocation");
+        serde_json::from_str(payload).expect("observe invocation JSON")
+    }
+
     #[tokio::test]
     async fn eval_translates_to_runtime_evaluate_in_the_page_world() {
         let cdp = FakeCdp::start("eval", |method, params| match (method, params["expression"].as_str()) {
@@ -433,9 +444,49 @@ mod tests {
         act_element(&cdp.tab, &action, "input\ntextbox\n").await.unwrap();
         let expressions = cdp.expressions();
         assert_eq!(expressions.len(), 2);
-        assert!(expressions[0].contains(r#""action":{"type":"credentialCheck"}"#));
-        assert!(expressions[1].contains(r#""action":{"type":"focusBind"}"#));
+        for (expression, action_type) in expressions.iter().zip(["credentialCheck", "focusBind"]) {
+            let payload = observe_payload(expression);
+            assert_eq!(payload["op"], "act");
+            assert_eq!(payload["action"], json!({ "type": action_type }));
+            assert_eq!(payload["ref"], "d1.2");
+            assert_eq!(payload["expect"], "input\ntextbox\n");
+            assert_eq!(payload["isolated"], true);
+        }
         assert_eq!(cdp.calls().last().unwrap(), &("Input.insertText".to_string(), json!({ "text": "hello" })));
+    }
+
+    #[tokio::test]
+    async fn redirected_focus_dispatches_no_trusted_input() {
+        // focusBind reports BROWSER_FOCUS_REDIRECTED when the page moves focus off the addressed
+        // element; insertText must never follow, or the typed text lands in whatever the page
+        // redirected focus to.
+        let cdp = FakeCdp::start("focus-redirected", |method, params| {
+            world(method, 6).unwrap_or_else(|| match method {
+                "Runtime.evaluate" => {
+                    let payload = observe_payload(params["expression"].as_str().unwrap());
+                    match payload["action"]["type"].as_str().unwrap() {
+                        "credentialCheck" => evaluated(json!({ "ok": true })),
+                        "focusBind" => evaluated(json!({
+                            "ok": false,
+                            "code": "BROWSER_FOCUS_REDIRECTED",
+                            "message": "the page moved focus away from the addressed element",
+                        })),
+                        other => panic!("unexpected type action: {other}"),
+                    }
+                }
+                _ => Reply::Ok(json!({})),
+            })
+        });
+        let action = BrowserAutomationAction::Type { reference: Some("d1.2".into()), text: "hello".into() };
+        assert_eq!(
+            act_element(&cdp.tab, &action, "input\ntextbox\n").await,
+            Err(BrowserError::AutomationFailed("the page moved focus away from the addressed element".into()))
+        );
+        let actions: Vec<Value> = cdp.expressions().iter()
+            .map(|expression| observe_payload(expression)["action"].clone())
+            .collect();
+        assert_eq!(actions, [json!({ "type": "credentialCheck" }), json!({ "type": "focusBind" })]);
+        assert!(!cdp.methods().iter().any(|method| method.starts_with("Input.")));
     }
 
     #[tokio::test]

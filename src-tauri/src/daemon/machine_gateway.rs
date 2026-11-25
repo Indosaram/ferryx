@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
+use axum::response::IntoResponse;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 #[cfg(test)]
 #[path = "machine_gateway_tests.rs"]
@@ -91,22 +92,48 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> axum::serve::Listener f
     }
 }
 
+/// Holds the guard `admit` returns for exactly as long as one HTTP request is being served; a
+/// refused admission answers 503 with the refusal code.
+fn guard_each_request<G, F>(router: axum::Router, admit: F) -> axum::Router
+where
+    G: Send + 'static,
+    F: Fn() -> Result<Option<G>, String> + Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let admit = admit.clone();
+            async move {
+                let _guard = match admit() {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+                    }
+                };
+                next.run(request).await
+            }
+        },
+    ))
+}
+
 pub(super) async fn serve<S>(stream: S, state: Arc<crate::remote::state::RemoteGatewayState>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let _retirement = match state
+    // The gateway connection is long-lived (a peer keeps it open for websocket streams and
+    // reuses it), so it must not hold a RetirementGuard: a handover commit waits for every
+    // guarded request to finish, and an open gateway would block it for good (HANDOVER_BUSY).
+    // Each HTTP request holds the guard only while it is being served, like the one-shot
+    // requests on the daemon socket.
+    let sessions = state
         .machine_services
         .as_ref()
-        .map(|services| services.sessions.retain_machine_request())
-        .transpose()
-    {
-        Ok(guard) => guard,
-        Err(error) => {
+        .map(|services| Arc::clone(&services.sessions));
+    if let Some(sessions) = &sessions {
+        if let Err(error) = sessions.retain_machine_request() {
             tracing::warn!(%error, "Retiring machine gateway rejected connection");
             return;
         }
-    };
+    }
     let (closed, mut receiver) = tokio::sync::watch::channel(false);
     let listener = Listener {
         connection: Some(Connection {
@@ -116,7 +143,13 @@ where
             write_deadline: None,
         }),
     };
-    let router = crate::remote::server::create_remote_router(state);
+    let router = guard_each_request(crate::remote::server::create_remote_router(state), move || {
+        sessions
+            .as_ref()
+            .map(|sessions| sessions.retain_machine_request())
+            .transpose()
+            .map(Option::flatten)
+    });
     if let Err(error) = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             drop(receiver.wait_for(|closed| *closed).await);

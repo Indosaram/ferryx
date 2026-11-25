@@ -37,6 +37,17 @@ use crate::storage::{now_rfc3339, WriteTx};
 
 use super::pull_request::{self, LanePullRequest};
 
+/// The timestamp columns one lifecycle op writes: the new `state` plus the evidence columns for
+/// that state. Exactly one carries a value; every other op clears the rest.
+type LifecycleStateColumns = (
+    &'static str,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Every state the table accepts, in the order the sidebar renders them.
 pub const STATES: [&str; 5] = ["pinned", "active", "snoozed", "settled", "archived"];
 
@@ -403,14 +414,14 @@ pub async fn apply(
     // Exactly one timestamp column carries the new state; the others are cleared, so a row
     // never claims two states at once. `settle_reason` is one of those state evidence columns:
     // only `Settle` sets it, every other op clears it.
-    let (state, pinned_at, settled_at, settle_reason, snoozed_until, archived_at): (
-        &str,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = match op {
+    let (
+        state,
+        pinned_at,
+        settled_at,
+        settle_reason,
+        snoozed_until,
+        archived_at,
+    ): LifecycleStateColumns = match op {
         LifecycleOp::Pin { pinned } => (
             if *pinned { "pinned" } else { "active" },
             pinned.then(|| now.to_owned()),
@@ -435,7 +446,9 @@ pub async fn apply(
             Some(match until {
                 Some(until) => until.clone(),
                 None => (parse_rfc3339(now).ok_or_else(|| {
-                    HubError::message("now must be an RFC 3339 timestamp to calculate the default snooze")
+                    HubError::message(
+                        "now must be an RFC 3339 timestamp to calculate the default snooze",
+                    )
                 })? + chrono::Duration::seconds(DEFAULT_SNOOZE_SECONDS))
                     .to_rfc3339(),
             }),

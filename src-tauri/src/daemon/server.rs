@@ -8630,6 +8630,7 @@ impl DaemonServer {
                             stale_tuple: result.stale_tuple,
                             blocked: result.blocked,
                             affirmative_exit: result.affirmative_exit,
+                            blocked_code: result.blocked_code,
                         },
                         Err(code) => daemon_error(code),
                     }
@@ -15849,7 +15850,7 @@ mod instance_lock_deadline_tests {
                                 assert_eq!((daemon_epoch.as_str(), incarnation.as_str()), ("7", "inc"));
                                 DaemonResponse::RetryPairedSessionResult {
                                     admitted: true, owner_unavailable: false, stale_tuple: false,
-                                    blocked: false, affirmative_exit: false,
+                                    blocked: false, affirmative_exit: false, blocked_code: None,
                                 }
                             }
                             other => panic!("unexpected request forwarded to the legacy peer: {other:?}"),

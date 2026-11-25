@@ -476,6 +476,7 @@ test("runHostScript: maho-win stages the script to a host temp file and runs it 
   const fixtureDir = mkdtempSync(join(tmpdir(), "ferryx-ssh-maho-"));
   const sshLogFile = join(fixtureDir, "ssh-calls.json");
   const fakeSshBin = join(fixtureDir, "ssh");
+  const fakeScpBin = join(fixtureDir, "scp");
 
   // Fixture records argv plus any stdin, and succeeds on both transport steps.
   const fakeSshScript = `#!/usr/bin/env node
@@ -489,7 +490,7 @@ process.stdin.on('end', () => {
   const calls = fs.existsSync(${JSON.stringify(sshLogFile)})
     ? JSON.parse(fs.readFileSync(${JSON.stringify(sshLogFile)}, 'utf8'))
     : [];
-  calls.push({ args, stdinPiped });
+  calls.push({ tool: 'ssh', args, stdinPiped });
   fs.writeFileSync(${JSON.stringify(sshLogFile)}, JSON.stringify(calls, null, 2));
   process.stdout.write('STAGE_OK\\n');
   process.exit(0);
@@ -498,12 +499,33 @@ process.stdin.on('end', () => {
   writeFileSync(fakeSshBin, fakeSshScript, "utf8");
   chmodSync(fakeSshBin, 0o755);
 
+  // scp records the local file it was asked to deliver, then succeeds.
+  const fakeScpScript = `#!/usr/bin/env node
+const fs = require('node:fs');
+
+const args = process.argv.slice(2);
+const source = args[args.length - 2];
+const calls = fs.existsSync(${JSON.stringify(sshLogFile)})
+  ? JSON.parse(fs.readFileSync(${JSON.stringify(sshLogFile)}, 'utf8'))
+  : [];
+calls.push({
+  tool: 'scp',
+  args,
+  stdinPiped: '',
+  stagedBytes: fs.readFileSync(source, 'utf8'),
+});
+fs.writeFileSync(${JSON.stringify(sshLogFile)}, JSON.stringify(calls, null, 2));
+process.exit(0);
+`;
+  writeFileSync(fakeScpBin, fakeScpScript, "utf8");
+  chmodSync(fakeScpBin, 0o755);
+
   try {
     const config = makeValidConfig();
     const result = await runHostScript(
       config.hosts["maho-win"],
       { powershell: "Write-Output 'Windows Build Step'" },
-      { sshCommand: fakeSshBin }
+      { sshCommand: fakeSshBin, scpCommand: fakeScpBin }
     );
 
     assert.equal(result.exitCode, 0);
@@ -511,18 +533,20 @@ process.stdin.on('end', () => {
     const calls = JSON.parse(readFileSync(sshLogFile, "utf8"));
     assert.equal(calls.length, 2, "expected a staging call and a run call");
 
-    // Step 1 stages the script over stdin.
+    // Step 1 delivers the script with scp. It must not be piped through
+    // `[Console]::In.ReadToEnd()`, which does not reliably observe EOF on a
+    // non-interactive Win32-OpenSSH session.
     const stage = calls[0];
-    assert.ok(stage.args.includes("maho-win"));
-    assert.ok(stage.args.includes("powershell"));
-    assert.ok(stage.args.includes("-NoProfile"));
-    assert.ok(stage.args.includes("-NonInteractive"));
-    assert.ok(stage.stdinPiped.includes("$ProgressPreference = 'SilentlyContinue'"));
-    assert.ok(stage.stdinPiped.includes("Write-Output 'Windows Build Step'"));
-    assert.ok(stage.stdinPiped.includes("$LASTEXITCODE"));
+    assert.equal(stage.tool, "scp");
+    assert.ok(stage.args.includes("maho-win:C:/Users/sook/ferryx-releases/ferryx-host-script-" + process.pid + ".ps1"));
+    assert.ok(stage.stagedBytes.includes("$ProgressPreference = 'SilentlyContinue'"));
+    assert.ok(stage.stagedBytes.includes("Write-Output 'Windows Build Step'"));
+    assert.ok(stage.stagedBytes.includes("$LASTEXITCODE"));
+    assert.equal(stage.stdinPiped, "", "staging must not pipe the script over stdin");
 
     // Step 2 runs the staged file; no script text on the command line at all.
     const run = calls[1];
+    assert.equal(run.tool, "ssh");
     assert.ok(run.args.includes("-o"));
     assert.ok(run.args.includes("BatchMode=yes"));
     assert.ok(run.args.includes("ConnectTimeout=10"));

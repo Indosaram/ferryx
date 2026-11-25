@@ -44,6 +44,25 @@ export function describeAccountError(err: unknown): string {
   return accountErrorMessage(err) ?? String(err);
 }
 
+/** `hostname` prints "(none)" on Linux hosts and containers that never set one. */
+const PLACEHOLDER_HOSTNAMES = new Set(["(none)", "localhost", "localhost.localdomain"]);
+
+function usableName(name: string | null | undefined): string | null {
+  const trimmed = name?.trim();
+  if (!trimmed || trimmed === DEFAULT_MACHINE_LABEL || PLACEHOLDER_HOSTNAMES.has(trimmed.toLowerCase())) return null;
+  return trimmed;
+}
+
+/**
+ * The label the user gave this machine locally wins over the hostname it enrolled with; a
+ * placeholder hostname falls back to a short machine id so two such rows stay distinguishable.
+ */
+export function machineRowName(localName: string | null | undefined, accountDisplayName: string | null | undefined, machineId: string | null | undefined): string {
+  return usableName(localName)
+    ?? usableName(accountDisplayName)
+    ?? (machineId ? `${DEFAULT_MACHINE_LABEL} ${machineId.slice(0, 8)}` : DEFAULT_MACHINE_LABEL);
+}
+
 /** Account-enrolled machines merged with the local paired inventory, account entries first. */
 export function mergePairedHosts(accountMachines: AccountMachineView[], state: RemoteHostState, accountOrigin: string): HostEndpoint[] {
   const accountHostEndpoints: HostEndpoint[] = accountMachines.map((m) => {
@@ -57,7 +76,7 @@ export function mergePairedHosts(accountMachines: AccountMachineView[], state: R
     const isPaired = effectiveScope === "machine" && (local ? local.authStatus === "paired" : true);
     return {
       hostId: local?.hostId ?? hostId,
-      name: m.displayName || local?.name || DEFAULT_MACHINE_LABEL,
+      name: machineRowName(local?.name, m.displayName, m.machineId),
       address: m.relayOrigin || accountOrigin,
       transport: "relay",
       authStatus: isPaired ? "paired" : (local?.authStatus ?? "needsMachineGrant"),

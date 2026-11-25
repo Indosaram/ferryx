@@ -52,14 +52,14 @@ test("receipt gate accepts LGPL-only configurations and rejects gpl, nonfree, x2
 test("runtime library names follow each platform's loader convention", () => {
   assert.ok(isRuntimeLibrary("x86_64-unknown-linux-gnu", "libavcodec.so.63"));
   assert.ok(!isRuntimeLibrary("x86_64-unknown-linux-gnu", "libavcodec.so"));
-  assert.ok(isRuntimeLibrary("universal-apple-darwin", "libavutil.61.dylib"));
-  assert.ok(!isRuntimeLibrary("universal-apple-darwin", "libavutil.dylib"));
+  assert.ok(isRuntimeLibrary("aarch64-apple-darwin", "libavutil.61.dylib"));
+  assert.ok(!isRuntimeLibrary("aarch64-apple-darwin", "libavutil.dylib"));
   assert.ok(isRuntimeLibrary("x86_64-pc-windows-msvc", "avformat-63.dll"));
   assert.ok(!isRuntimeLibrary("x86_64-pc-windows-msvc", "ffmpeg.exe"));
 });
 
 test("parseArgs keys prefixes by triple and rejects unknown targets", () => {
-  const options = parseArgs(["--target", "universal-apple-darwin", "--prefix", "aarch64-apple-darwin=/a", "--prefix", "/plain"]);
+  const options = parseArgs(["--target", "aarch64-apple-darwin", "--prefix", "aarch64-apple-darwin=/a", "--prefix", "/plain"]);
   assert.equal(options.prefixes["aarch64-apple-darwin"], "/a");
   assert.equal(options.prefixes["*"], "/plain");
   assert.throws(() => parseArgs(["--target", "riscv64-unknown-linux-gnu"]), /unsupported/);
@@ -75,7 +75,7 @@ test("overlay bundles libraries per platform without touching unrelated config",
   const win = overlayConfig({ triple: "x86_64-pc-windows-msvc", root, runtime: ["avutil-61.dll"], legal: [], baseConfig: base, tauriDir: "/repo/src-tauri" });
   assert.equal(win.bundle.resources["resources/ffmpeg/payload/x/runtime/avutil-61.dll"], "avutil-61.dll");
   assert.equal(win.bundle.linux, undefined);
-  const mac = overlayConfig({ triple: "universal-apple-darwin", root, runtime: ["libavutil.61.dylib"], legal: [], baseConfig: base, tauriDir: "/repo/src-tauri" });
+  const mac = overlayConfig({ triple: "aarch64-apple-darwin", root, runtime: ["libavutil.61.dylib"], legal: [], baseConfig: base, tauriDir: "/repo/src-tauri" });
   assert.deepEqual(mac.bundle.macOS.frameworks, [`${root}/runtime/libavutil.61.dylib`]);
 });
 
@@ -114,10 +114,10 @@ test("linux: refuses a non-LGPL prefix and leaves no payload behind", () =>
     assert.throws(() => checkStaged({ dest, triple: "x86_64-unknown-linux-gnu", pin: PIN }), /not staged/);
   }));
 
-test("darwin universal: lipo's both slices and rewrites install names to @rpath", () =>
+test("darwin arm64: copies its slice and rewrites install names to @rpath", () =>
   withTmp(async (dir) => {
     const prefixes = {};
-    for (const slice of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
+    for (const slice of ["aarch64-apple-darwin"]) {
       const prefix = join(dir, slice);
       mkdirSync(join(prefix, "lib"), { recursive: true });
       mkdirSync(join(prefix, "share", "ferryx-legal"), { recursive: true });
@@ -130,14 +130,13 @@ test("darwin universal: lipo's both slices and rewrites install names to @rpath"
     const calls = [];
     const exec = (command, args) => {
       calls.push([command, ...args]);
-      if (command === "lipo") writeFileSync(args[args.length - 1], "fat");
       if (command === "otool") return `${args[1]}:\n\t${prefixes["aarch64-apple-darwin"]}/lib/libavutil.60.dylib (compat)\n`;
       return "";
     };
     const dest = join(dir, "payload");
-    const manifest = await stageTarget({ dest, triple: "universal-apple-darwin", pin: PIN, prefixes, exec });
+    const manifest = await stageTarget({ dest, triple: "aarch64-apple-darwin", pin: PIN, prefixes, exec });
     assert.equal(Object.keys(manifest.runtime).length, LIBS.length);
-    assert.equal(calls.filter(([command]) => command === "lipo").length, LIBS.length);
+    assert.ok(calls.every(([command]) => ["otool", "install_name_tool"].includes(command)));
     const installs = calls.filter(([command]) => command === "install_name_tool");
     assert.equal(installs.length, LIBS.length);
     for (const call of installs) {
@@ -145,15 +144,16 @@ test("darwin universal: lipo's both slices and rewrites install names to @rpath"
       assert.match(call[2], /^@rpath\/lib\w+\.\d+\.dylib$/);
       assert.deepEqual(call.slice(3, 6), ["-change", `${prefixes["aarch64-apple-darwin"]}/lib/libavutil.60.dylib`, "@rpath/libavutil.60.dylib"]);
     }
-    assert.match(readFileSync(join(dest, "universal-apple-darwin", "legal", "build-receipt.txt"), "utf8"), /# slice x86_64-apple-darwin/);
-    const overlay = JSON.parse(readFileSync(join(dest, "universal-apple-darwin", "tauri.ffmpeg.conf.json"), "utf8"));
+    assert.equal(readFileSync(join(dest, "aarch64-apple-darwin", "legal", "build-receipt.txt"), "utf8"), RECEIPT);
+    assert.equal(readFileSync(join(dest, "aarch64-apple-darwin", "runtime", "libavutil.60.dylib"), "utf8"), "aarch64-apple-darwin avutil");
+    const overlay = JSON.parse(readFileSync(join(dest, "aarch64-apple-darwin", "tauri.ffmpeg.conf.json"), "utf8"));
     assert.equal(overlay.bundle.macOS.frameworks.length, LIBS.length);
   }));
 
-test("darwin universal: a missing slice prefix fails closed", () =>
+test("darwin arm64: a missing slice prefix fails closed", () =>
   withTmp(async (dir) => {
     await assert.rejects(
-      stageTarget({ dest: join(dir, "payload"), triple: "universal-apple-darwin", pin: PIN, prefixes: {}, exec: () => "" }),
+      stageTarget({ dest: join(dir, "payload"), triple: "aarch64-apple-darwin", pin: PIN, prefixes: {}, exec: () => "" }),
       /no FFmpeg prefix for aarch64-apple-darwin/,
     );
   }));

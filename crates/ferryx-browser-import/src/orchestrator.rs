@@ -89,6 +89,19 @@ pub enum ImportProgress {
         count: u32,
         message: String,
     },
+    /// A whole class of rows of one import type could not be applied for an
+    /// environmental reason that has a stable `code` (e.g. the browser's
+    /// elevation service refused its app-bound key). Sent before the type's
+    /// `Summary`; the rows are counted there as skipped, and this says why.
+    Blocked {
+        import_type: ImportType,
+        code: String,
+        message: String,
+        /// How many rows of that type this block left unapplied (the "seen" count).
+        rows: u32,
+        /// The measured COM status behind the block, when the block came from one.
+        hresult: Option<u32>,
+    },
     /// All imports are complete. Only the orchestrator sends this (INV-7).
     AllComplete,
     /// An error occurred. `import_type` is `Some` when a single import type
