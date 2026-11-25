@@ -110,6 +110,15 @@ export function agentsByWorktreePath(agents: readonly ActiveAgent[]): Map<string
   return new Map(agents.map((agent) => [agent.worktreePath, agent]));
 }
 
+/** Why a row cannot open right now (stale paired list, disabled row), or null when it can. */
+export function worktreeUnavailableReason(worktree: Worktree): string | null {
+  const isStale = Boolean(worktree.stale || worktree.freshness?.stale);
+  if (!worktree.disabled && !isStale) return null;
+  return isStale
+    ? `${worktree.hostSummary ?? "Stale"}: this is the last list the machine sent. The row turns back on when the machine reconnects.`
+    : "This worktree is unavailable right now.";
+}
+
 export function fileManagerActionLabel() {
   const platform = getHostPlatform();
   if (platform === "macos") return "Reveal in Finder";
@@ -261,11 +270,7 @@ export const WorktreeRow = memo(function WorktreeRow({
   const isDisabled = Boolean(worktree.disabled || isStale);
   // A stale row shows the last list a paired machine sent before it dropped off. It must not open
   // (that machine cannot serve it now), but it must say why instead of swallowing the click.
-  const unavailableReason = isDisabled
-    ? isStale
-      ? `${worktree.hostSummary ?? "Stale"}: this is the last list the machine sent. The row turns back on when the machine reconnects.`
-      : "This worktree is unavailable right now."
-    : null;
+  const unavailableReason = worktreeUnavailableReason(worktree);
 
   return (
     <SidebarWorktreeRow

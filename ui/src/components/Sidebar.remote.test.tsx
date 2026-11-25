@@ -5,6 +5,8 @@ import type { RegisteredProject } from "../lib/types";
 import { remoteHostStore } from "../state/remoteHostStore";
 
 const native = vi.hoisted(() => ({ openNativePopupMenu: vi.fn(), revealPath: vi.fn() }));
+const toastMocks = vi.hoisted(() => ({ info: vi.fn(), success: vi.fn(), error: vi.fn() }));
+vi.mock("sonner", () => ({ toast: toastMocks }));
 vi.mock("../lib/nativeMenu", () => ({ openNativePopupMenu: native.openNativePopupMenu }));
 vi.mock("../lib/tauri", () => ({ revealPath: native.revealPath }));
 vi.mock("../lib/sshHosts", () => ({
@@ -397,4 +399,45 @@ it("preserves stale/offline hostSummary for pairedDaemon project through groupin
 
   expect(screen.getAllByText(/Offline \(stale\)/).length).toBeGreaterThanOrEqual(1);
   expect(screen.queryByText(/Online \(relay\)/)).not.toBeInTheDocument();
+});
+
+it("refuses the project header click when every listed row is stale, as the rows do", () => {
+  const pairedProject: RegisteredProject = {
+    workspaceId: "paired:offline-group",
+    repoRoot: "/srv/offline-repo",
+    gitRoot: "/srv/offline-repo",
+    target: { kind: "pairedDaemon", hostId: "host-offline" },
+    remoteWorkspaceId: "daemon:offline-group",
+  };
+  const staleRow = {
+    path: "/srv/offline-repo", branch: "main", head: "abc",
+    bare: false, detached: false, locked: null, prunable: null, hostLabel: "Offline Machine",
+    hostSummary: "Offline (stale)", stale: true, offline: true, disabled: true,
+    freshness: { stale: true, offline: true },
+  };
+  const onSelectProject = vi.fn();
+  const onSelectWorktree = vi.fn();
+  const { container } = render(
+    <Sidebar
+      projects={[pairedProject]}
+      activeProjectId={undefined}
+      worktrees={[]}
+      inactiveProjectWorktrees={{ [pairedProject.workspaceId]: [staleRow as any] }}
+      agents={[]}
+      activePath=""
+      onSelectProject={onSelectProject}
+      onSelectWorktree={onSelectWorktree}
+      onCreateWorktree={vi.fn()}
+    />,
+  );
+
+  const header = container.querySelector("button[aria-expanded]")!.nextElementSibling as HTMLButtonElement;
+  fireEvent.click(header);
+  expect(onSelectProject).not.toHaveBeenCalled();
+  expect(toastMocks.info).toHaveBeenCalledTimes(1);
+  expect(toastMocks.info.mock.calls[0][0]).toContain("reconnects");
+
+  fireEvent.click(container.querySelector("button[data-shortcut-worktree-path]")!);
+  expect(onSelectWorktree).not.toHaveBeenCalled();
+  expect(toastMocks.info).toHaveBeenCalledTimes(2);
 });
