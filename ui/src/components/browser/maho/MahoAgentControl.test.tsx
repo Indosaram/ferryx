@@ -133,7 +133,9 @@ describe("useBrowserAgentActivity surfaces", () => {
     const view = await mountSurfaces(store, "docs");
 
     expect(view.getByTestId("badge-count")).toHaveTextContent("1");
-    expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("qa-agent");
+    await vi.waitFor(() =>
+      expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("qa-agent"),
+    );
     expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("1");
 
     const section = view.getByTestId("maho-agent-tasks");
@@ -142,7 +144,7 @@ describe("useBrowserAgentActivity surfaces", () => {
 
     expect(view.getByTestId("maho-tab-borrow-chip")).toHaveTextContent("qa-agent");
 
-    const banner = view.getByTestId("maho-agent-controlled-banner");
+    const banner = await view.findByTestId("maho-agent-controlled-banner");
     expect(banner).toHaveAttribute("data-browser-id", "docs");
     expect(banner).toHaveTextContent("qa-agent");
     expect(banner).toHaveTextContent("is controlling this tab");
@@ -171,12 +173,13 @@ describe("useBrowserAgentActivity surfaces", () => {
     });
 
     await vi.waitFor(() => expect(view.getByTestId("badge-count")).toHaveTextContent("1"));
-    expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("qa-agent");
+    await vi.waitFor(() =>
+      expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("qa-agent"),
+    );
     expect(view.getByTestId("maho-agent-controlled-banner")).toBeInTheDocument();
   });
 
-  it("focuses a controlled tab from the Agent Tasks section", async () => {
-    const store = makeStore();
+  it("focuses a controlled tab from the Agent Tasks section", async () => {    const store = makeStore();
     addTab(store, "docs", { title: "Docs", agentControlled: true });
     const onSelectTab = vi.fn();
     const view = await mountSurfaces(store, "docs", onSelectTab);
@@ -240,7 +243,7 @@ describe("handoff and take over", () => {
     addTab(store, "docs", { title: "Docs", agentControlled: true });
     const view = await mountSurfaces(store, "docs");
 
-    fireEvent.click(within(view.getByTestId("maho-agent-tasks")).getByRole("button", { name: "Revoke" }));
+    fireEvent.click(within(view.getByTestId("maho-agent-tasks")).getByRole("button", { name: "Revoke qa-agent on Docs" }));
 
     await vi.waitFor(() => expect(host.revoke).toHaveBeenCalledWith(controllerId));
   });
@@ -255,18 +258,22 @@ describe("pending approvals in the section", () => {
     ]);
     const view = await mountSurfaces(store, "docs");
 
-    const row = await view.findByTestId("maho-agent-task-approval");
-    expect(row).toHaveTextContent("https://docs.example.com");
-    fireEvent.click(within(row).getByRole("button", { name: "Approve" }));
+    const first = await view.findByTestId("maho-agent-task-approval");
+    expect(first).toHaveTextContent("https://docs.example.com");
+    fireEvent.click(within(first).getByRole("button", { name: "Approve" }));
     await vi.waitFor(() => expect(host.resolve).toHaveBeenCalledWith("a1", "approveOnce"));
+    // The resolved request leaves the list before the next event arrives.
+    await vi.waitFor(() => expect(view.queryByTestId("maho-agent-task-approval")).toBeNull());
 
     act(() =>
       host.approvalsHandler?.([
         { id: "a2", kind: "pairController", controller: controllerId, label: "qa-agent", expiresInMs: 60_000 },
       ]),
     );
-    const denyRow = await view.findByTestId("maho-agent-task-approval");
-    fireEvent.click(within(denyRow).getByRole("button", { name: "Deny" }));
+    const second = await view.findByText(/Allow "qa-agent" to control the browser/);
+    const row = second.closest("[data-testid='maho-agent-task-approval']");
+    expect(row).not.toBeNull();
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Deny" }));
     await vi.waitFor(() => expect(host.resolve).toHaveBeenCalledWith("a2", "deny"));
   });
 });
@@ -280,7 +287,7 @@ describe("structured IPC failures", () => {
 
     fireEvent.click(within(view.getByTestId("maho-agent-controlled-banner")).getByRole("button", { name: "Take over" }));
 
-    const alert = await view.findByTestId("maho-agent-error");
+    const alert = await view.findByTestId("maho-agent-banner-error");
     expect(alert).toHaveTextContent("AGENT_SESSION_GONE");
     expect(alert).not.toHaveTextContent("session 12345 vanished");
     // A refused reclaim leaves the agent in control; the surface stays up.
@@ -299,7 +306,7 @@ describe("structured IPC failures", () => {
 
     fireEvent.click(within(await view.findByTestId("maho-agent-task-approval")).getByRole("button", { name: "Approve" }));
 
-    expect(await view.findByTestId("maho-agent-error")).toHaveTextContent("BROWSER_APPROVAL_NOT_FOUND");
+    expect(await view.findByTestId("maho-agent-tasks-error")).toHaveTextContent("BROWSER_APPROVAL_NOT_FOUND");
   });
 
   it("surfaces { code } from a failed overview read", async () => {
@@ -308,7 +315,7 @@ describe("structured IPC failures", () => {
     host.getOverview.mockRejectedValue({ code: "BROWSER_AGENT_UNAVAILABLE", message: "host offline" });
     const view = await mountSurfaces(store, "docs");
 
-    expect(await view.findByTestId("maho-agent-error")).toHaveTextContent("BROWSER_AGENT_UNAVAILABLE");
+    expect(await view.findByTestId("maho-agent-tasks-error")).toHaveTextContent("BROWSER_AGENT_UNAVAILABLE");
   });
 });
 
@@ -324,6 +331,7 @@ describe("MahoAgentControlledBanner isolation", () => {
       busy: false,
       controllers: [],
       controllerLabelFor: () => null,
+      controllerIdFor: () => null,
       takeOver: async () => undefined,
       doneHandoff: async () => undefined,
       revokeController: async () => undefined,

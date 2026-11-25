@@ -40,6 +40,7 @@ import { Button } from "../../ui/button";
 export type BrowserAgentTask = {
   browserId: string;
   title: string;
+  controllerId: string | null;
   controllerLabel: string | null;
 };
 
@@ -58,6 +59,8 @@ export type BrowserAgentActivity = {
   controllers: BrowserAgentController[];
   /** Controller label for a tab, from the caller's map or the single active controller. */
   controllerLabelFor: (browserId: string) => string | null;
+  /** Controller id for a tab, so Revoke can address it; null when it cannot be attributed. */
+  controllerIdFor: (browserId: string) => string | null;
   takeOver: (browserId: string) => Promise<void>;
   doneHandoff: (browserId: string) => Promise<void>;
   revokeController: (controllerId: string) => Promise<void>;
@@ -68,6 +71,8 @@ export type BrowserAgentActivityOptions = {
   store?: BrowserStore;
   /** Per-tab controller names, for a caller that tracks which controller leases which tab. */
   controllerLabels?: Record<string, string>;
+  /** Per-tab controller ids, the companion of `controllerLabels`. */
+  controllerIds?: Record<string, string>;
 };
 
 function selectAgentControlledTabs(state: BrowserStoreState): BrowserStoreTab[] {
@@ -88,6 +93,7 @@ function tabTitle(tab: BrowserStoreTab): string {
 export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {}): BrowserAgentActivity {
   const store = options.store ?? browserStore;
   const labels = options.controllerLabels;
+  const ids = options.controllerIds;
   const [pending, setPending] = useState<BrowserAgentApproval[]>([]);
   const [controllers, setControllers] = useState<BrowserAgentController[]>([]);
   const [handoffs, setHandoffs] = useState<HandoffRequestPayload[]>([]);
@@ -97,13 +103,14 @@ export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {
 
   useEffect(() => {
     let cancelled = false;
-    // The events are authoritative; the overview read seeds the snapshot and keeps
-    // controller names current, mirroring the approval card's ordering.
+    // The change event carries the authoritative pending list; the overview read only seeds
+    // it until the first event and keeps controller names current (as the approval card does).
+    let heardEvent = false;
     const refresh = () =>
       getBrowserAgentOverview().then(
         (overview) => {
           if (cancelled || !overview) return;
-          setPending(overview.pending);
+          if (!heardEvent) setPending(overview.pending);
           setControllers(overview.controllers);
         },
         (failure: unknown) => {
@@ -113,7 +120,9 @@ export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {
     // Subscribe before the first read so a request arriving in between is not missed.
     const approvals = onBrowserAgentApprovals((next) => {
       if (cancelled) return;
+      heardEvent = true;
       setPending(next);
+      // A pairing just approved adds a controller name the surfaces need for later requests.
       void refresh();
     });
     const help = onBrowserAgentHelpRequest((request) => {
@@ -142,14 +151,27 @@ export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {
     [labels, activeControllers, controllers],
   );
 
+  const controllerIdFor = useCallback(
+    (browserId: string): string | null => {
+      const explicit = ids?.[browserId];
+      if (explicit) return explicit;
+      // The overview names controllers, not their leases; with one active controller
+      // every controlled tab belongs to it, otherwise the caller must attribute tabs.
+      if (activeControllers.length === 1) return activeControllers[0].id;
+      return null;
+    },
+    [ids, activeControllers],
+  );
+
   const activeTasks = useMemo<BrowserAgentTask[]>(
     () =>
       controlledTabs.map((tab) => ({
         browserId: tab.browserId,
         title: tabTitle(tab),
+        controllerId: controllerIdFor(tab.browserId),
         controllerLabel: controllerLabelFor(tab.browserId),
       })),
-    [controlledTabs, controllerLabelFor],
+    [controlledTabs, controllerLabelFor, controllerIdFor],
   );
 
   const controlledBrowserIds = useMemo(() => controlledTabs.map((tab) => tab.browserId), [controlledTabs]);
@@ -222,6 +244,7 @@ export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {
     busy,
     controllers,
     controllerLabelFor,
+    controllerIdFor,
     takeOver,
     doneHandoff,
     revokeController,
@@ -235,10 +258,10 @@ function agentLabel(label: string | null): string {
   return label ?? AGENT_LABEL_FALLBACK;
 }
 
-function MahoAgentError({ activity }: { activity: BrowserAgentActivity }) {
+function MahoAgentError({ activity, testId }: { activity: BrowserAgentActivity; testId: string }) {
   if (!activity.errorCode) return null;
   return (
-    <p role="alert" data-testid="maho-agent-error" className="mt-1 text-[11px] text-destructive">
+    <p role="alert" data-testid={testId} className="mt-1 text-[11px] text-destructive">
       {activity.errorCode}
     </p>
   );
@@ -333,16 +356,34 @@ export function MahoAgentTasksSection({
                 <span className="truncate">{task.title}</span>
               </button>
               <MahoTabBorrowChip browserId={task.browserId} controllerLabel={task.controllerLabel} />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-5 px-1.5 text-[10px]"
-                disabled={activity.busy}
-                onClick={() => void activity.takeOver(task.browserId)}
-              >
-                Revoke
-              </Button>
+              {task.controllerId ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-5 px-1.5 text-[10px]"
+                  disabled={activity.busy}
+                  aria-label={`Revoke ${task.controllerLabel ?? task.controllerId} on ${task.title}`}
+                  onClick={() => {
+                    const controllerId = task.controllerId;
+                    if (controllerId) void activity.revokeController(controllerId);
+                  }}
+                >
+                  Revoke
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-5 px-1.5 text-[10px]"
+                  disabled={activity.busy}
+                  aria-label={`Take over ${task.title}`}
+                  onClick={() => void activity.takeOver(task.browserId)}
+                >
+                  Take over
+                </Button>
+              )}
             </div>
           ))}
           {activity.handoffRequests.map((request) => (
@@ -414,7 +455,7 @@ export function MahoAgentTasksSection({
           {taskCount === 0 && activity.handoffRequests.length === 0 && activity.pendingApprovals.length === 0 ? (
             <p className="px-1 text-[11px] text-muted-foreground">No agent activity</p>
           ) : null}
-          <MahoAgentError activity={activity} />
+          <MahoAgentError activity={activity} testId="maho-agent-tasks-error" />
         </div>
       ) : null}
     </section>
@@ -506,7 +547,7 @@ export function MahoAgentControlledBanner({
           </Button>
         </div>
       ) : null}
-      <MahoAgentError activity={activity} />
+      <MahoAgentError activity={activity} testId="maho-agent-banner-error" />
     </div>
   );
 }
