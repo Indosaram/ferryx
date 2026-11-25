@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RegisteredProject } from "../../lib/tauri";
-import type { SshHost } from "../../lib/types";
+import type { SshHost } from "../../lib/sshHosts";
 import type { RemoteHostState } from "../../state/remoteHostStore";
 import { deduplicateSidebarProjects, normalizeMachineToken, resolveSshHostToPairedHost } from "./sidebarDedup";
 import { buildSidebarModel } from "./sidebarModel";
