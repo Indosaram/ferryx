@@ -86,6 +86,23 @@ function connectCalls(): unknown[][] {
   return invoke.mock.calls.filter(([command]) => command === "cmd_rd_connect");
 }
 
+/**
+ * `remoteHostStore` is a generation-guarded singleton: it drops a host whose re-published
+ * generation is not newer than the one it remembers, and a forgotten host for good. Tests
+ * therefore publish strictly increasing generations instead of resetting the inventory.
+ */
+let generation = 0;
+
+function seedHosts(hosts: HostEndpoint[]): void {
+  generation += 1;
+  remoteHostStore.setState((state) => ({
+    ...state,
+    hosts: Object.fromEntries(hosts.map((entry) => [entry.hostId, { ...entry, generation: String(generation) }])),
+    nativeStatus: "ready",
+    machineFeaturesEnabled: true,
+  }));
+}
+
 beforeEach(() => {
   channels.length = 0;
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -96,21 +113,15 @@ beforeEach(() => {
     }
     return undefined;
   });
-  remoteHostStore.setState((state) => ({
-    ...state,
-    hosts: {
-      "host-1": host({ hostId: "host-1", name: "Studio" }),
-      "host-2": host({ hostId: "host-2", name: "Laptop" }),
-    },
-    nativeStatus: "ready",
-    machineFeaturesEnabled: true,
-  }));
+  seedHosts([
+    host({ hostId: "host-1", name: "Studio" }),
+    host({ hostId: "host-2", name: "Laptop" }),
+  ]);
 });
 
 afterEach(() => {
   cleanup();
   remoteDesktopStore.reset();
-  remoteHostStore.reset();
   invoke.mockReset();
   channels.length = 0;
   __resetRdSupportedForTests();
@@ -180,14 +191,11 @@ describe("Remote Desktop Activity mode", () => {
   });
 
   it("disables Connect for an offline or ungranted machine and says why", async () => {
-    remoteHostStore.setState((state) => ({
-      ...state,
-      hosts: {
-        "host-1": host({ hostId: "host-1", name: "Studio" }),
-        "host-2": host({ hostId: "host-2", name: "Laptop", online: false }),
-        "host-3": host({ hostId: "host-3", name: "Old box", authStatus: "revoked" }),
-      },
-    }));
+    seedHosts([
+      host({ hostId: "host-1", name: "Studio" }),
+      host({ hostId: "host-2", name: "Laptop", online: false }),
+      host({ hostId: "host-3", name: "Old box", authStatus: "revoked" }),
+    ]);
     render(<Harness />);
 
     const offline = await screen.findByTestId("rd-connect-host-2");
