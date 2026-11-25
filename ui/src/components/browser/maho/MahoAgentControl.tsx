@@ -76,10 +76,15 @@ export type BrowserAgentActivityOptions = {
   controllerIds?: Record<string, string>;
 };
 
-/** A subscription that may be unavailable: no event bridge means no events, not a crash. */
+/**
+ * A subscription that may be unavailable. `listen` rejects when the host exposes no event
+ * bridge (a web or remote build), and it does so asynchronously, so the rejection has to be
+ * swallowed here: this hook is mounted by the shell in every mode, and a missing bridge has to
+ * mean "no live events", not an unhandled rejection on every mount.
+ */
 function subscribeOrNothing(subscribe: () => Promise<UnlistenFn>): Promise<UnlistenFn> {
   try {
-    return subscribe();
+    return subscribe().catch(() => () => undefined);
   } catch {
     return Promise.resolve(() => undefined);
   }

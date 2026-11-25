@@ -559,7 +559,7 @@ export function applyAgentOverviewToStore(store: BrowserStore, overview: Browser
  */
 function subscribeOrNothing(subscribe: () => Promise<UnlistenFn>): Promise<UnlistenFn> {
   try {
-    return subscribe();
+    return subscribe().catch(() => () => undefined);
   } catch {
     return Promise.resolve(() => undefined);
   }

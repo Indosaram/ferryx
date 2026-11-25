@@ -430,9 +430,10 @@ describe("Activity Bar shell integration", () => {
     act(() => {
       screen.getByTestId("activity-settings").click();
     });
-    // The dialog is lazy-loaded: its content arrives one dynamic import after the shell's
-    // placeholder, so the handoff button is awaited rather than assumed.
-    const handoff = await screen.findByRole("button", { name: "Open remote desktop" });
+    // The dialog is lazy-loaded, and the shell renders a placeholder while the chunk loads; the
+    // handoff button only exists once the real (mocked) module resolved, so it is awaited with a
+    // budget that covers a cold dynamic import on a loaded runner.
+    const handoff = await screen.findByRole("button", { name: "Open remote desktop" }, { timeout: 15_000 });
     act(() => { handoff.click(); });
 
     await waitFor(() => expect(connect).toHaveBeenCalledWith("host-1", "Studio"));
