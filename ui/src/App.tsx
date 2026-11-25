@@ -2658,14 +2658,11 @@ function WorkspaceApp({
     saveActivityMode(mode);
     // A mode with a drawer is useless with the drawer collapsed, so selecting it reveals the
     // drawer; `Cmd+B` still collapses it afterwards without touching the rail.
-    if (mode === "supervisor" || mode === "worktrees") {
-      setIsSidebarOpen((current) => {
-        if (current) return current;
-        persistSidebarOpen(true);
-        return true;
-      });
+    if ((mode === "supervisor" || mode === "worktrees") && !isSidebarOpen) {
+      setIsSidebarOpen(true);
+      persistSidebarOpen(true);
     }
-  }, []);
+  }, [isSidebarOpen]);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
@@ -5198,7 +5195,8 @@ function WorkspaceApp({
     };
   }, [activeRemoteHost, isNativeRuntime, isPrimary, projects.length, resolvedAgents]);
 
-  const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;  const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
+  const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
+  const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
     ? `${registrationError.code}: ${registrationError.message}`
     : undefined;
   const permissionsSummary = useMemo(() => {
@@ -5266,7 +5264,7 @@ function WorkspaceApp({
           widthMode={worktreeDrawerMode}
           view={worktreeDrawerMode}
           hideViewTabs
-          // The rail owns the macOS traffic-light clearance now.
+          // The rail owns the traffic-light clearance.
           isMac={false}
           projects={projects}
           activeProjectId={activeProject.workspaceId}
@@ -5482,7 +5480,7 @@ function WorkspaceApp({
       </main>
 
       {activityMode === "browser" ? (
-        <main
+        <section
           data-testid="activity-canvas-browser"
           className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
         >
@@ -5492,10 +5490,10 @@ function WorkspaceApp({
           <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
             Browser canvas arrives with the Maho browser sidebar and page canvas.
           </div>
-        </main>
+        </section>
       ) : null}
       {activityMode === "remoteDesktop" ? (
-        <main
+        <section
           data-testid="activity-canvas-remote-desktop"
           className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
         >
@@ -5505,7 +5503,7 @@ function WorkspaceApp({
           <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
             Connected machine canvases arrive with the Remote Desktop mode.
           </div>
-        </main>
+        </section>
       ) : null}
 
       {isCommandPaletteOpen && !activeRemoteHost ? (

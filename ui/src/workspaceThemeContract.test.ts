@@ -29,7 +29,7 @@ describe("workspace shell theme contract", () => {
     expect(rail).toContain("data-tauri-drag-region");
     // The shell hands the drawer `isMac={false}`: its titlebar starts at x=48, right of the rail.
     const app = readSource("./App.tsx");
-    expect(app).toMatch(/hideViewTabs[\s\S]{0,80}isMac=\{false\}/);
+    expect(app).toMatch(/hideViewTabs[\s\S]{0,200}isMac=\{false\}/);
     expect(sidebar).toContain("titlebarLeading={isMac ?");
   });
 

@@ -69,7 +69,7 @@ function hasDot(badge: ActivityBadge): boolean {
 }
 
 /** What a badge means, announced through `aria-describedby` so the mode name stays exact. */
-function badgeDescription(mode: ActivityMode, badge: ActivityBadge): string | null {
+function badgeDescription(badge: ActivityBadge): string | null {
   const count = badgeText(badge);
   if (count) return `${count} waiting`;
   return hasDot(badge) ? "Attention needed" : null;
@@ -175,7 +175,7 @@ export function DesktopActivityBar({
           const { label, icon: Icon } = ACTIVITY_MODE_META[entry];
           const selected = entry === mode;
           const badge = badges[entry];
-          const description = badgeDescription(entry, badge);
+          const description = badgeDescription(badge);
           return (
             <button
               key={entry}
