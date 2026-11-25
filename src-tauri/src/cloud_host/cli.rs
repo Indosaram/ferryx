@@ -87,8 +87,10 @@ use super::bootstrap::{self, Pins, Role};
 use super::catalog::{Catalog, CatalogRow, CatalogStore};
 use super::enroll::{self, AttachProver, EnrollmentCodeIssuer, ProvePolicy};
 use super::lifecycle::{self, LifecycleError, ProviderRegistry};
+use super::pool::PoolRegistry;
 use super::reaper::{HostReaper, ReaperScheduler};
 use super::secrets;
+use super::sync;
 use super::provider::{
     blaxel::BlaxelProvider, codespaces::CodespacesProvider, daytona::DaytonaProvider,
     e2b::E2bProvider, freestyle::FreestyleProvider, instabox::InstaboxProvider,
@@ -195,6 +197,10 @@ pub fn model_egress(provider: &str) -> ModelEgress {
 }
 
 pub const CLOUD_USAGE: &str = "usage: ferryx-cli cloud <verb>\n  \
+acquire [--provider <p|auto>] [--ttl 30m] [--owner-pid <pid>] [--task-id <id>] [--json]\n  \
+release <name> [--lease <id>] [--delete] [--force]\n  \
+sync-in <name> --local-cwd <dir> --task-id <id> [--json]\n  \
+sync-out <name> --task-id <id> --patch-out <file> [--cleanup] [--json]\n  \
 run [--provider <p|auto>] [--name <n>] [--ttl 30m] [--cwd <dir>] [--model <m>] [--keep] [--json] --prompt <text>\n  \
 providers [--json]\n  \
 create --provider <p> --name <n> [--ttl 30m] [--json]\n  \
@@ -209,6 +215,32 @@ reconcile                (the reaper entry calls this every 5 minutes)";
 pub enum CloudCliCommand {
     Help,
     Providers { json: bool },
+    Acquire {
+        provider: Option<String>,
+        ttl: Option<u64>,
+        owner_pid: Option<u32>,
+        task_id: Option<String>,
+        json: bool,
+    },
+    Release {
+        name: String,
+        lease_id: Option<String>,
+        delete: bool,
+        force: bool,
+    },
+    SyncIn {
+        name: String,
+        local_cwd: String,
+        task_id: String,
+        json: bool,
+    },
+    SyncOut {
+        name: String,
+        task_id: String,
+        patch_out: String,
+        cleanup: bool,
+        json: bool,
+    },
     Run {
         provider: Option<String>,
         name: Option<String>,
@@ -251,6 +283,140 @@ where
     let rest: &[String] = args.get(3..).unwrap_or(&[]);
     match verb {
         "--help" | "-h" | "help" => Ok(CloudCliCommand::Help),
+        "acquire" => {
+            let mut provider: Option<String> = None;
+            let mut ttl: Option<u64> = None;
+            let mut owner_pid: Option<u32> = None;
+            let mut task_id: Option<String> = None;
+            let mut json = false;
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--provider" if provider.is_none() => {
+                        let val = value_after(rest, index, "--provider")?;
+                        if val != "auto" {
+                            provider = Some(val);
+                        }
+                        index += 2;
+                    }
+                    "--ttl" if ttl.is_none() => {
+                        ttl = Some(parse_ttl(&value_after(rest, index, "--ttl")?)?);
+                        index += 2;
+                    }
+                    "--owner-pid" if owner_pid.is_none() => {
+                        let raw = value_after(rest, index, "--owner-pid")?;
+                        let pid = raw
+                            .parse::<u32>()
+                            .map_err(|_| format!("invalid --owner-pid `{raw}`\n{CLOUD_USAGE}"))?;
+                        owner_pid = Some(pid);
+                        index += 2;
+                    }
+                    "--task-id" if task_id.is_none() => {
+                        task_id = Some(value_after(rest, index, "--task-id")?);
+                        index += 2;
+                    }
+                    "--json" => {
+                        json = true;
+                        index += 1;
+                    }
+                    other => return Err(format!("unknown cloud acquire option `{other}`\n{CLOUD_USAGE}")),
+                }
+            }
+            Ok(CloudCliCommand::Acquire { provider, ttl, owner_pid, task_id, json })
+        }
+        "release" => {
+            let Some(name) = rest.first().cloned() else {
+                return Err(format!("missing machine name\n{CLOUD_USAGE}"));
+            };
+            validate_name(&name)?;
+            let mut lease_id: Option<String> = None;
+            let mut delete = false;
+            let mut force = false;
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--lease" if lease_id.is_none() => {
+                        lease_id = Some(value_after(rest, index, "--lease")?);
+                        index += 2;
+                    }
+                    "--delete" => {
+                        delete = true;
+                        index += 1;
+                    }
+                    "--force" => {
+                        force = true;
+                        index += 1;
+                    }
+                    other => return Err(format!("unknown cloud release option `{other}`\n{CLOUD_USAGE}")),
+                }
+            }
+            Ok(CloudCliCommand::Release { name, lease_id, delete, force })
+        }
+        "sync-in" => {
+            let Some(name) = rest.first().cloned() else {
+                return Err(format!("missing machine name\n{CLOUD_USAGE}"));
+            };
+            validate_name(&name)?;
+            let mut local_cwd: Option<String> = None;
+            let mut task_id: Option<String> = None;
+            let mut json = false;
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--local-cwd" if local_cwd.is_none() => {
+                        local_cwd = Some(value_after_any(rest, index, "--local-cwd")?);
+                        index += 2;
+                    }
+                    "--task-id" if task_id.is_none() => {
+                        task_id = Some(value_after(rest, index, "--task-id")?);
+                        index += 2;
+                    }
+                    "--json" => {
+                        json = true;
+                        index += 1;
+                    }
+                    other => return Err(format!("unknown cloud sync-in option `{other}`\n{CLOUD_USAGE}")),
+                }
+            }
+            let local_cwd = local_cwd.ok_or_else(|| format!("missing --local-cwd\n{CLOUD_USAGE}"))?;
+            let task_id = task_id.ok_or_else(|| format!("missing --task-id\n{CLOUD_USAGE}"))?;
+            Ok(CloudCliCommand::SyncIn { name, local_cwd, task_id, json })
+        }
+        "sync-out" => {
+            let Some(name) = rest.first().cloned() else {
+                return Err(format!("missing machine name\n{CLOUD_USAGE}"));
+            };
+            validate_name(&name)?;
+            let mut task_id: Option<String> = None;
+            let mut patch_out: Option<String> = None;
+            let mut cleanup = false;
+            let mut json = false;
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--task-id" if task_id.is_none() => {
+                        task_id = Some(value_after(rest, index, "--task-id")?);
+                        index += 2;
+                    }
+                    "--patch-out" if patch_out.is_none() => {
+                        patch_out = Some(value_after_any(rest, index, "--patch-out")?);
+                        index += 2;
+                    }
+                    "--cleanup" => {
+                        cleanup = true;
+                        index += 1;
+                    }
+                    "--json" => {
+                        json = true;
+                        index += 1;
+                    }
+                    other => return Err(format!("unknown cloud sync-out option `{other}`\n{CLOUD_USAGE}")),
+                }
+            }
+            let task_id = task_id.ok_or_else(|| format!("missing --task-id\n{CLOUD_USAGE}"))?;
+            let patch_out = patch_out.ok_or_else(|| format!("missing --patch-out\n{CLOUD_USAGE}"))?;
+            Ok(CloudCliCommand::SyncOut { name, task_id, patch_out, cleanup, json })
+        }
         "providers" => {
             let mut json = false;
             for arg in rest {
@@ -499,6 +665,18 @@ async fn run(command: CloudCliCommand) -> i32 {
     let registry = registry_from_env();
     match command {
         CloudCliCommand::Help | CloudCliCommand::Providers { .. } => EXIT_OK,
+        CloudCliCommand::Acquire { provider, ttl, owner_pid, task_id, json } => {
+            acquire_box(&registry, provider.as_deref(), ttl, owner_pid, task_id.as_deref(), json).await
+        }
+        CloudCliCommand::Release { name, lease_id, delete, force } => {
+            release_box(&registry, &name, lease_id.as_deref(), delete, force).await
+        }
+        CloudCliCommand::SyncIn { name, local_cwd, task_id, json } => {
+            sync_in_workspace(&registry, &name, &local_cwd, &task_id, json).await
+        }
+        CloudCliCommand::SyncOut { name, task_id, patch_out, cleanup, json } => {
+            sync_out_workspace(&registry, &name, &task_id, &patch_out, cleanup, json).await
+        }
         CloudCliCommand::Run { provider, name, ttl, cwd, model, prompt, keep, json } => {
             run_task(&registry, provider.as_deref(), name.as_deref(), ttl, cwd.as_deref(), model.as_deref(), &prompt, keep, json).await
         }
@@ -820,6 +998,331 @@ fn list_providers(json: bool) -> i32 {
                 status.id, state, status.transport, status.free_quota
             );
         }
+    }
+    EXIT_OK
+}
+
+async fn ensure_socket_for_row(
+    provider: &std::sync::Arc<dyn SandboxProvider>,
+    row: &CatalogRow,
+) -> Result<(PathBuf, String), String> {
+    let access = open_access(provider, row).await?;
+    dispatch_ready(&access).await?;
+    let remote_home = access.home().await?;
+    let path = crate::paired_host::socket_forward::socket_path(&row.name)
+        .map_err(|_| "cannot resolve the dispatch socket path".to_string())?;
+    if crate::paired_host::socket_forward::probe(&path).await.is_err() {
+        spawn_holder(&row.name)?;
+        wait_for_socket(&path, Duration::from_secs(30)).await?;
+    }
+    Ok((path, remote_home))
+}
+
+async fn acquire_box(
+    registry: &ProviderRegistry,
+    explicit_provider: Option<&str>,
+    ttl: Option<u64>,
+    owner_pid: Option<u32>,
+    task_id: Option<&str>,
+    json: bool,
+) -> i32 {
+    if DISPATCH_MODE != 'A' {
+        return fail(EXIT_REFUSED, "MODE_B: use ferryx-cli cloud mhc");
+    }
+    let catalog = match catalog_store() {
+        Ok(catalog) => catalog,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let slots = match SlotRegistry::default_location() {
+        Ok(slots) => slots,
+        Err(error) => return fail(EXIT_FAILURE, &error.to_string()),
+    };
+    let scheduler = match HostReaper::from_env() {
+        Ok(scheduler) => scheduler,
+        Err(error) => return fail(EXIT_FAILURE, &error.to_string()),
+    };
+    let pool = match PoolRegistry::default_location() {
+        Ok(pool) => pool,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let pid = owner_pid.unwrap_or_else(std::process::id);
+
+    if let Ok(mut current) = catalog.load().await {
+        let ready_names: Vec<String> = current
+            .rows
+            .iter()
+            .filter(|r| !r.is_tombstone() && r.state == SandboxState::Ready)
+            .filter(|r| explicit_provider.is_none_or(|p| r.provider == p))
+            .map(|r| r.name.clone())
+            .collect();
+
+        if !ready_names.is_empty() {
+            if let Ok(Some(lease)) = pool.claim_first_free(&ready_names, pid, task_id) {
+                if let Some(mut row) = current.row(&lease.machine).cloned() {
+                    if let Some(provider) = registry.get(&row.provider) {
+                        let live_ready = matches!(
+                            provider.get(&row.sandbox_id).await,
+                            Ok(info) if info.state == SandboxState::Ready
+                        );
+                        if live_ready {
+                            match ensure_socket_for_row(&provider, &row).await {
+                                Ok((socket_path, remote_home)) => {
+                                    row.last_used_at = now_ms();
+                                    current.upsert(row.clone());
+                                    let _ = catalog.save(&current).await;
+                                    print_acquired(&row, &socket_path, &remote_home, &lease.lease_id, true, json);
+                                    return EXIT_OK;
+                                }
+                                Err(error) => {
+                                    eprintln!("[cloud] warm box `{}` unreachable ({error}); provisioning fresh box", row.name);
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = pool.release(&lease.machine, Some(&lease.lease_id), true);
+            }
+        }
+    }
+
+    let candidates: Vec<String> = match explicit_provider {
+        Some(p) => vec![p.to_string()],
+        None => secrets::configured_providers_in_order()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    };
+    if candidates.is_empty() {
+        return fail(
+            EXIT_USAGE,
+            "no cloud provider configured: add an API key in Settings -> Remote or ~/.config/compute-secrets.env",
+        );
+    }
+
+    let context = CreateContext { registry, catalog: &catalog, slots: &slots, scheduler: &scheduler };
+    let mut last_error: Option<(i32, String)> = None;
+    for (attempt, provider_name) in candidates.iter().enumerate() {
+        let machine_name = format!("fx-pool-{}-{attempt}", unix_seconds());
+        eprintln!("[cloud] provisioning pooled box `{machine_name}` on {provider_name}...");
+        match provision_machine(&context, provider_name, &machine_name, ttl).await {
+            Ok((row, _egress)) => {
+                let lease = match pool.claim_machine(&row.name, pid, task_id) {
+                    Ok(lease) => lease,
+                    Err(error) => return fail(EXIT_FAILURE, &error),
+                };
+                let Some(provider) = registry.get(&row.provider) else {
+                    let _ = pool.release(&row.name, Some(&lease.lease_id), true);
+                    return fail(EXIT_FAILURE, &format!("unknown provider: {}", row.provider));
+                };
+                match ensure_socket_for_row(&provider, &row).await {
+                    Ok((socket_path, remote_home)) => {
+                        print_acquired(&row, &socket_path, &remote_home, &lease.lease_id, false, json);
+                        return EXIT_OK;
+                    }
+                    Err(error) => {
+                        let _ = pool.release(&row.name, Some(&lease.lease_id), true);
+                        discard(&context, provider.as_ref(), &row.name).await;
+                        last_error = Some((EXIT_FAILURE, error));
+                    }
+                }
+            }
+            Err((code, detail)) => {
+                eprintln!("[cloud] {provider_name} failed: {detail}");
+                last_error = Some((code, detail));
+            }
+        }
+    }
+    let (code, detail) = last_error.unwrap_or((EXIT_FAILURE, "all cloud providers failed".into()));
+    fail(code, &detail)
+}
+
+fn print_acquired(
+    row: &CatalogRow,
+    socket_path: &Path,
+    remote_home: &str,
+    lease_id: &str,
+    reused: bool,
+    json: bool,
+) {
+    if json {
+        println!(
+            "{}",
+            json!({
+                "machine": row.name,
+                "provider": row.provider,
+                "transport": transport_token(row.transport),
+                "egress": model_egress(&row.provider).as_str(),
+                "socketPath": socket_path.to_string_lossy(),
+                "remoteHome": remote_home,
+                "leaseId": lease_id,
+                "reused": reused,
+            })
+        );
+    } else {
+        println!("{}", socket_path.display());
+    }
+}
+
+async fn release_box(
+    registry: &ProviderRegistry,
+    name: &str,
+    lease_id: Option<&str>,
+    delete_now: bool,
+    force: bool,
+) -> i32 {
+    let pool = match PoolRegistry::default_location() {
+        Ok(pool) => pool,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    if let Err(error) = pool.release(name, lease_id, force) {
+        return fail(EXIT_FAILURE, &error);
+    }
+    if delete_now {
+        return delete(registry, name).await;
+    }
+    if let Ok(catalog) = catalog_store() {
+        if let Ok(mut current) = catalog.load().await {
+            if let Some(mut row) = current.row(name).cloned() {
+                row.last_used_at = now_ms();
+                current.upsert(row);
+                let _ = catalog.save(&current).await;
+            }
+        }
+    }
+    println!("{name} released");
+    EXIT_OK
+}
+
+async fn sync_in_workspace(
+    registry: &ProviderRegistry,
+    name: &str,
+    local_cwd: &str,
+    raw_task_id: &str,
+    json: bool,
+) -> i32 {
+    let task_id = match sync::sanitize_task_id(raw_task_id) {
+        Ok(id) => id,
+        Err(error) => return fail(EXIT_USAGE, &error),
+    };
+    let (_catalog, _current, row, provider) = match load_row(registry, name).await {
+        Ok(found) => found,
+        Err(code) => return code,
+    };
+    let packed = match sync::pack_local_workspace(Path::new(local_cwd)) {
+        Ok(packed) => packed,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let access = match open_access(&provider, &row).await {
+        Ok(access) => access,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let remote_home = match access.home().await {
+        Ok(home) => home,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let archive_bytes_len = packed.archive_bytes.len();
+    let archive_rel = sync::remote_archive_rel(&task_id);
+    if let Err(error) = access.push(&remote_home, &archive_rel, packed.archive_bytes, 0o600).await {
+        return fail(EXIT_FAILURE, &format!("sync-in upload failed: {error}"));
+    }
+    let script = sync::build_remote_unpack_script(&remote_home, &task_id);
+    let result = match access.run(&script, EXEC_TIMEOUT_SECONDS).await {
+        Ok(result) => result,
+        Err(error) => return fail(EXIT_FAILURE, &format!("sync-in unpack failed: {error}")),
+    };
+    if result.exit_code != Some(0) {
+        return fail(
+            EXIT_FAILURE,
+            &format!("sync-in remote unpack exited {:?}: {}", result.exit_code, tail(&result.stderr, 300)),
+        );
+    }
+    let remote_cwd = result
+        .stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| sync::remote_workspace_dir(&remote_home, &task_id));
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "machine": row.name,
+                "taskId": task_id,
+                "remoteCwd": remote_cwd,
+                "fileCount": packed.file_count,
+                "skippedLarge": packed.skipped_large,
+                "archiveBytes": archive_bytes_len,
+            })
+        );
+    } else {
+        println!("{remote_cwd}");
+    }
+    EXIT_OK
+}
+
+async fn sync_out_workspace(
+    registry: &ProviderRegistry,
+    name: &str,
+    raw_task_id: &str,
+    patch_out: &str,
+    cleanup: bool,
+    json: bool,
+) -> i32 {
+    let task_id = match sync::sanitize_task_id(raw_task_id) {
+        Ok(id) => id,
+        Err(error) => return fail(EXIT_USAGE, &error),
+    };
+    let (_catalog, _current, row, provider) = match load_row(registry, name).await {
+        Ok(found) => found,
+        Err(code) => return code,
+    };
+    let access = match open_access(&provider, &row).await {
+        Ok(access) => access,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let remote_home = match access.home().await {
+        Ok(home) => home,
+        Err(error) => return fail(EXIT_FAILURE, &error),
+    };
+    let script = sync::build_remote_diff_script(&remote_home, &task_id, cleanup);
+    let result = match access.run(&script, EXEC_TIMEOUT_SECONDS).await {
+        Ok(result) => result,
+        Err(error) => return fail(EXIT_FAILURE, &format!("sync-out diff failed: {error}")),
+    };
+    if result.exit_code != Some(0) {
+        return fail(
+            EXIT_FAILURE,
+            &format!("sync-out remote diff exited {:?}: {}", result.exit_code, tail(&result.stderr, 300)),
+        );
+    }
+    let (changed_files, patch_text) = sync::parse_remote_diff_output(&result.stdout);
+    let has_changes = !patch_text.trim().is_empty() || !changed_files.is_empty();
+    let patch_bytes = patch_text.len();
+    let written_path = if has_changes && !patch_text.is_empty() {
+        match sync::write_patch_file(Path::new(patch_out), &patch_text) {
+            Ok(path) => Some(path.to_string_lossy().to_string()),
+            Err(error) => return fail(EXIT_FAILURE, &error),
+        }
+    } else {
+        None
+    };
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "machine": row.name,
+                "taskId": task_id,
+                "hasChanges": has_changes,
+                "changedFiles": changed_files,
+                "patchPath": written_path,
+                "patchBytes": patch_bytes,
+            })
+        );
+    } else if let Some(path) = written_path {
+        println!("{path}");
     }
     EXIT_OK
 }
@@ -4273,6 +4776,45 @@ mod housekeeping_tests {
             })
         );
         assert!(parse(&["ferryx-cli", "cloud", "run"]).is_err());
+
+        assert_eq!(
+            parse(&["ferryx-cli", "cloud", "acquire", "--provider", "auto", "--owner-pid", "42", "--task-id", "st_1", "--json"]),
+            Ok(CloudCliCommand::Acquire {
+                provider: None,
+                ttl: None,
+                owner_pid: Some(42),
+                task_id: Some("st_1".into()),
+                json: true,
+            })
+        );
+        assert_eq!(
+            parse(&["ferryx-cli", "cloud", "release", "fx-pool-1", "--lease", "l-1", "--delete"]),
+            Ok(CloudCliCommand::Release {
+                name: "fx-pool-1".into(),
+                lease_id: Some("l-1".into()),
+                delete: true,
+                force: false,
+            })
+        );
+        assert_eq!(
+            parse(&["ferryx-cli", "cloud", "sync-in", "fx-pool-1", "--local-cwd", "/tmp/repo", "--task-id", "st_1", "--json"]),
+            Ok(CloudCliCommand::SyncIn {
+                name: "fx-pool-1".into(),
+                local_cwd: "/tmp/repo".into(),
+                task_id: "st_1".into(),
+                json: true,
+            })
+        );
+        assert_eq!(
+            parse(&["ferryx-cli", "cloud", "sync-out", "fx-pool-1", "--task-id", "st_1", "--patch-out", "/tmp/p.diff", "--cleanup", "--json"]),
+            Ok(CloudCliCommand::SyncOut {
+                name: "fx-pool-1".into(),
+                task_id: "st_1".into(),
+                patch_out: "/tmp/p.diff".into(),
+                cleanup: true,
+                json: true,
+            })
+        );
     }
 
     #[test]

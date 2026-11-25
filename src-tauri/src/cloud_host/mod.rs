@@ -26,10 +26,12 @@ pub mod catalog;
 pub mod cli;
 pub mod enroll;
 pub mod lifecycle;
+pub mod pool;
 pub mod provider;
 pub mod reaper;
 pub mod secrets;
 pub mod slots;
+pub mod sync;
 
 /// The macOS launchd acceptance run for the reaper: an ignored test that drives the real
 /// `launchctl` through the public lifecycle API. Run it on request with

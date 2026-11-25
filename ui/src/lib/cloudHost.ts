@@ -74,24 +74,3 @@ export async function deleteCloudMachine(name: string): Promise<void> {
   if (!isTauri()) return;
   await invoke(CLOUD_HOST_DELETE_COMMAND, { name });
 }
-
-export function shellQuotePosix(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-export function buildCloudRunCommand(options: {
-  prompt: string;
-  provider?: string;
-  keep?: boolean;
-}): { command: string; args: string[]; fullCommand: string } {
-  const args = ["cloud", "run"];
-  if (options.provider && options.provider !== "auto") {
-    args.push("--provider", options.provider);
-  }
-  if (options.keep) {
-    args.push("--keep");
-  }
-  args.push("--prompt", options.prompt);
-  const fullCommand = ["ferryx-cli", ...args.map(shellQuotePosix)].join(" ");
-  return { command: "ferryx-cli", args, fullCommand };
-}
