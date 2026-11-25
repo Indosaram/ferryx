@@ -781,6 +781,9 @@ type TabGroupViewProps = {
     targetPane?: { tabId: string; leafId: string },
   ) => void;
   onClosePane: (tabId: string, leafId: string) => void;
+  onDetachBrowserPane?: (browserId: string) => void;
+  onOpenBrowserFullscreen?: (browserId: string) => void;
+  onCloseBrowserSession?: (browserId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   onEqualizePaneRun: (tabId: string, path: string) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
