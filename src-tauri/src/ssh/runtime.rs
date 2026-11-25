@@ -336,6 +336,26 @@ where
             }
         }
 
+        let frame_prefix = format!("{marker}\0");
+        // Some servers (Tailscale SSH among them) report every remote command as exit 0, so a
+        // shell that does not exist (`powershell.exe` on a Mac) looks like a success with no
+        // output. The probe's own frame is the only reliable signal that the executor ran:
+        // without it, treat this executor as absent and try the next one.
+        let outcome = match outcome {
+            Ok(output)
+                if !output
+                    .windows(frame_prefix.len())
+                    .any(|part| part == frame_prefix.as_bytes()) =>
+            {
+                Err(error(
+                    IpcErrorCode::ParseError,
+                    "response",
+                    "Missing SSH response frame",
+                ))
+            }
+            other => other,
+        };
+
         match outcome {
             Ok(output) => {
                 let fields = parse_fields(
@@ -573,6 +593,26 @@ mod tests {
         .unwrap();
         assert_eq!(environment.platform, RemotePlatform::Posix);
         assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn an_executor_reported_as_exit_zero_without_its_frame_falls_through() {
+        // A server that never forwards exit status: the missing shells "succeed" with no output.
+        let mut probed = Vec::new();
+        let environment = detect_with(&probe_host(), None, |executor, script, _| {
+            probed.push(executor);
+            std::future::ready(Ok(match executor {
+                RemoteExecutor::Powershell | RemoteExecutor::Pwsh => Vec::new(),
+                RemoteExecutor::Sh => {
+                    let marker = script.split("FERRYX_ENV_V1_").nth(1).unwrap().split('\\').next().unwrap();
+                    format!("FERRYX_ENV_V1_{marker}\0posix\0Darwin\0/Users/u\0/tmp\01\0").into_bytes()
+                }
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(environment.platform, RemotePlatform::Posix);
+        assert_eq!(probed, [RemoteExecutor::Powershell, RemoteExecutor::Pwsh, RemoteExecutor::Sh]);
     }
 
     #[tokio::test]

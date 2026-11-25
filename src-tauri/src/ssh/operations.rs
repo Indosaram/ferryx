@@ -293,7 +293,7 @@ pub fn posix_install_script(dir: &str) -> String {
     posix_install_at(
         &format!(
             "b=\"$HOME/\"{dir}; \
-             if [ ! -d \"$b\" ]; then cat > /dev/null; exit 0; fi; \
+             if [ ! -d \"$b\" ]; then cat > /dev/null; printf '{INTEGRATION_DONE_MARKER}\\n'; exit 0; fi; \
              d=\"$b/agent/extensions\"; mkdir -p \"$d\";",
             dir = direct::quote_posix(dir)
         ),
@@ -308,7 +308,8 @@ fn posix_install_at(locate: &str, file: &str) -> String {
         "set -e; {locate} \
          stage=$(mktemp \"$d/.ferryx-agent-state.XXXXXX\"); \
          trap '[ -z \"$stage\" ] || rm -f \"$stage\"' EXIT; \
-         cat > \"$stage\"; mv -f \"$stage\" \"$d/{file}\"; stage="
+         cat > \"$stage\"; mv -f \"$stage\" \"$d/{file}\"; stage=; \
+         printf '{INTEGRATION_DONE_MARKER}\\n'"
     )
 }
 
@@ -332,10 +333,10 @@ fn posix_senpi_install_script() -> String {
     posix_install_at(
         &format!(
             "{agent_dir} d=\"$a/extensions\"; \
-             if [ ! -d \"$d\" ]; then cat > /dev/null; exit 0; fi; \
+             if [ ! -d \"$d\" ]; then cat > /dev/null; printf '{INTEGRATION_DONE_MARKER}\\n'; exit 0; fi; \
              r=$(cd \"$d\" && pwd -P); \
              for o in {listed}; do \
-                 if [ \"$(cd \"$HOME/$o/agent/extensions\" 2>/dev/null && pwd -P)\" = \"$r\" ]; then cat > /dev/null; exit 0; fi; \
+                 if [ \"$(cd \"$HOME/$o/agent/extensions\" 2>/dev/null && pwd -P)\" = \"$r\" ]; then cat > /dev/null; printf '{INTEGRATION_DONE_MARKER}\\n'; exit 0; fi; \
              done;",
             agent_dir = posix_senpi_agent_dir()
         ),
@@ -350,7 +351,7 @@ fn posix_plugin_install_script(dir: &str, plugins: &str) -> String {
     posix_install_at(
         &format!(
             "cfg=\"${{XDG_CONFIG_HOME:-$HOME/.config}}\"; b=\"$cfg/\"{dir}; \
-             if [ ! -d \"$b\" ]; then cat > /dev/null; exit 0; fi; \
+             if [ ! -d \"$b\" ]; then cat > /dev/null; printf '{INTEGRATION_DONE_MARKER}\\n'; exit 0; fi; \
              d=\"$b/\"{plugins}; mkdir -p \"$d\";",
             dir = direct::quote_posix(dir),
             plugins = direct::quote_posix(plugins)
@@ -382,7 +383,7 @@ fn windows_install_at(locate: &str, file: &str) -> String {
              try {{ [IO.File]::WriteAllBytes($tmp,$bytes); \
                  if ([IO.File]::Exists($p)) {{ [IO.File]::Replace($tmp,$p,[NullString]::Value) }} else {{ [IO.File]::Move($tmp,$p) }} \
              }} finally {{ if ([IO.File]::Exists($tmp)) {{ [IO.File]::Delete($tmp) }} }} \
-         }}"
+         }}; [Console]::Out.WriteLine('{INTEGRATION_DONE_MARKER}')"
     )
 }
 
@@ -754,6 +755,9 @@ pub(super) async fn run_integration_script(
         })
 }
 
+/// Printed last by every integration install script, including when the target is absent.
+pub(crate) const INTEGRATION_DONE_MARKER: &str = "FERRYX_INTEGRATION_DONE";
+
 /// Installs each target's own payload wherever that target's directory already exists on the host:
 /// the [`EXTENSION_AGENTS`] directories, senpi's directory and each plugin agent's config directory.
 pub async fn prepare_integration(
@@ -762,8 +766,21 @@ pub async fn prepare_integration(
 ) -> Result<(), IpcError> {
     for target in remote_targets() {
         let script = target.install_script(environment.platform);
-        run_integration_script(host, environment, &script, target.payload()?, "integration")
-            .await?;
+        let output =
+            run_integration_script(host, environment, &script, target.payload()?, "integration")
+                .await?;
+        // Some SSH servers report every command as exit 0, so only the script's own last word
+        // proves the install ran to the end.
+        if !String::from_utf8_lossy(&output)
+            .lines()
+            .any(|line| line.trim() == INTEGRATION_DONE_MARKER)
+        {
+            return Err(error(
+                IpcErrorCode::IoError,
+                "integration",
+                "The remote agent integration install did not confirm success",
+            ));
+        }
     }
     super::remote_hooks::install(host, environment).await
 }
@@ -986,7 +1003,7 @@ mod forwarding_tests {
 mod installer_tests {
     use super::{
         posix_install_script, posix_removal_script, remote_targets, removal_candidates,
-        RemotePlatform, RemoteTarget, SENPI_TARGET,
+        RemotePlatform, RemoteTarget, INTEGRATION_DONE_MARKER, SENPI_TARGET,
     };
     use crate::daemon::agent_extension::{
         extension_source_for, EXTENSION_AGENTS, EXTENSION_FILE_NAME, PLUGIN_FILE_NAME,
@@ -1217,6 +1234,39 @@ mod installer_tests {
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"original");
         assert_eq!(std::fs::read_dir(&extensions).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn every_install_path_ends_with_the_done_marker_and_a_failure_does_not() {
+        let fixture = tempfile::tempdir().unwrap();
+        let done = |output: &Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.trim() == INTEGRATION_DONE_MARKER)
+        };
+        // Absent agent directory: nothing to do, still a confirmed success.
+        for target in remote_targets() {
+            let script = target.install_script(RemotePlatform::Posix);
+            let output = run(&script, fixture.path(), None, &target.payload().unwrap());
+            assert!(output.status.success() && done(&output), "{}", target.label());
+        }
+        // Installed: confirmed.
+        std::fs::create_dir(fixture.path().join(".omo")).unwrap();
+        assert!(done(&run(&posix_install_script(".omo"), fixture.path(), None, b"x")));
+        // A failed copy must not print the marker, so an exit-0 server cannot fake success.
+        let bin = fixture.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let mv = bin.join("mv");
+        std::fs::write(&mv, "#!/bin/sh\nexit 17\n").unwrap();
+        std::fs::set_permissions(&mv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let failed = run(
+            &posix_install_script(".omo"),
+            fixture.path(),
+            Some(format!("{}:/usr/bin:/bin", bin.display())),
+            b"y",
+        );
+        assert!(!failed.status.success());
+        assert!(!done(&failed));
     }
 
     #[test]

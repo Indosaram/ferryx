@@ -193,6 +193,18 @@ impl ManualSshTarget {
 
 /// Minimal platform probe over the manual plan (mirrors `runtime::detect`'s scripts).
 pub async fn detect(target: &ManualSshTarget) -> Result<RemoteEnvironment, IpcError> {
+    detect_with(|executor, script| {
+        let plan = target.plan(executor.command(&script));
+        async move { super::direct::bounded_output(&plan, Duration::from_secs(8)).await }
+    })
+    .await
+}
+
+async fn detect_with<F, Fut>(mut run: F) -> Result<RemoteEnvironment, IpcError>
+where
+    F: FnMut(RemoteExecutor, String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
     let marker = format!("FERRYX_ENV_V1_{}", uuid::Uuid::new_v4().simple());
     let mut last = None;
     for executor in [RemoteExecutor::Powershell, RemoteExecutor::Sh] {
@@ -206,8 +218,18 @@ pub async fn detect(target: &ManualSshTarget) -> Result<RemoteEnvironment, IpcEr
                  [Console]::Write(('{marker}','windows',$PSVersionTable.PSVersion.ToString(),$HOME,[IO.Path]::GetTempPath(),'' -join [char]0))"
             ),
         };
-        match super::direct::bounded_output(&target.plan(executor.command(&script)), Duration::from_secs(8)).await {
-            Ok(output) => return environment_from(executor, &output, &marker),
+        let frame_prefix = format!("{marker}\0");
+        match run(executor, script).await {
+            Ok(output)
+                if output
+                    .windows(frame_prefix.len())
+                    .any(|part| part == frame_prefix.as_bytes()) =>
+            {
+                return environment_from(executor, &output, &marker)
+            }
+            // A server that reports every command as exit 0 hides a missing shell: without the
+            // probe's own frame, this executor did not run, so try the next one.
+            Ok(output) => last = Some(environment_from(executor, &output, &marker).unwrap_err()),
             // 255 is a transport failure: every executor would fail the same way.
             Err(err) if err.details.as_ref().and_then(|d| d.get("exitCode")).and_then(|v| v.as_i64()) == Some(255) => return Err(err),
             Err(err) => last = Some(err),
@@ -249,6 +271,25 @@ mod tests {
             out.push(0);
         }
         out
+    }
+
+    #[tokio::test]
+    async fn a_shell_reported_as_exit_zero_without_its_frame_falls_through() {
+        let mut probed = Vec::new();
+        let env = detect_with(|executor, script| {
+            probed.push(executor);
+            std::future::ready(Ok(match executor {
+                RemoteExecutor::Sh => {
+                    let m = script.split("FERRYX_ENV_V1_").nth(1).unwrap().split('\\').next().unwrap();
+                    probe(&format!("FERRYX_ENV_V1_{m}"), ["posix", "Darwin", "/Users/u", "/tmp"])
+                }
+                _ => Vec::new(),
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(env.platform, RemotePlatform::Posix);
+        assert_eq!(probed, [RemoteExecutor::Powershell, RemoteExecutor::Sh]);
     }
 
     #[test]
