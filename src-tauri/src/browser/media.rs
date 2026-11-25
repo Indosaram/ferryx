@@ -356,6 +356,10 @@ pub fn install_engine_media_poller<R: tauri::Runtime>(
                 continue;
             }
             for browser_id in tabs {
+                // A tab the manager already dropped needs no snapshot.
+                if manager.get_state(&browser_id).is_err() {
+                    continue;
+                }
                 let snapshot = match engine_media_snapshot(&browser_id).await {
                     Ok(snapshot) => snapshot,
                     Err(error) => {

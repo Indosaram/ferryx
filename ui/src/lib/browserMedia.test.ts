@@ -153,20 +153,17 @@ describe("useBrowserMediaStates", () => {
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
-  it("does not apply a report that arrives after unmount", async () => {
+  it("stops a listener that resolves after unmount instead of leaving it registered", async () => {
     let settle: ((stop: () => void) => void) | undefined;
     tauri.listen.mockImplementationOnce(
       () => new Promise<() => void>((resolve) => { settle = resolve; }),
     );
     const { unmount } = renderHook(() => useBrowserMediaStates());
-    const handler = tauri.captured.handler;
     unmount();
     const stop = vi.fn();
     settle?.(stop);
     await act(async () => {});
-    // A late listener is stopped instead of left registered.
     expect(stop).toHaveBeenCalledTimes(1);
-    expect(handler).not.toBeNull();
   });
 });
 

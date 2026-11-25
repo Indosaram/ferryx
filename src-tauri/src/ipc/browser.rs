@@ -1973,7 +1973,11 @@ pub(crate) fn trusted_bridge_sink<R: tauri::Runtime>(
         if attestation == crate::browser::bridge::Attestation::IsolatedWorld
             && crate::browser::media::is_media_envelope(raw)
         {
-            crate::browser::media::handle_media_envelope(&app, browser_id, raw);
+            // Only a tab the manager still knows can report: a late report from a closed tab is
+            // dropped instead of resurrecting a card for it.
+            if manager.get_state(browser_id).is_ok() {
+                crate::browser::media::handle_media_envelope(&app, browser_id, raw);
+            }
             return;
         }
         let action = match crate::browser::bridge::parse_envelope(raw) {
