@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 
 import { saveBrowserSettings } from "../lib/browserSettings";
 import type { BrowserAgentOverview } from "../lib/browserAgent";
+import { BROWSER_STORE_STORAGE_KEY } from "../lib/storageKeys";
 import type { BrowserState } from "../lib/types";
 import {
   applyAgentOverviewToStore,
@@ -94,6 +95,21 @@ function testStore(): BrowserStore {
   return createBrowserStore({ storage: null });
 }
 
+/** jsdom's `localStorage` is not writable everywhere, so persistence tests get their own Storage. */
+function memoryStorage(): Storage {
+  const entries = new Map<string, string>();
+  return {
+    get length() {
+      return entries.size;
+    },
+    clear: () => entries.clear(),
+    getItem: (key: string) => entries.get(key) ?? null,
+    key: (index: number) => [...entries.keys()][index] ?? null,
+    removeItem: (key: string) => void entries.delete(key),
+    setItem: (key: string, value: string) => void entries.set(key, String(value)),
+  };
+}
+
 /** Three Spaces, three tabs each; the first tab of every Space is that Space's active tab. */
 function nineTabsAcrossThreeSpaces(store: BrowserStore) {
   const spaces = ["space-default"];
@@ -142,12 +158,15 @@ describe("global browser session hydration", () => {
     const { active, background } = nineTabsAcrossThreeSpaces(store);
 
     const targets = collectGlobalBrowserRestoreTargets(store.getState());
-    expect(targets.map((target) => target.browserId).sort()).toEqual([...active].sort());
+    // Restore order is Space order (Personal, Work, Research), not sorted: a restart recreates the
+    // active tabs in the order the sidebar lists their Spaces.
+    expect(targets.map((target) => target.browserId)).toEqual(active);
 
     const result = await hydrateGlobalBrowserStore(store);
 
     expect(tauriMocks.ensureBrowser).toHaveBeenCalledTimes(3);
-    expect(result.hydrated.sort()).toEqual([...active].sort());
+    // Completion order of the three concurrent sessions is not part of the contract.
+    expect([...result.hydrated].sort()).toEqual([...active].sort());
     for (const browserId of background) {
       expect(tauriMocks.ensureBrowser).not.toHaveBeenCalledWith(expect.objectContaining({ browserId }));
     }
@@ -213,6 +232,45 @@ describe("global browser session hydration", () => {
     expect(result.hydrated).toEqual(["alive"]);
     expect(store.getState().tabs.gone.hydrationError).toBe("BROWSER_NOT_FOUND");
     expect(store.getState().tabs.alive.hydrationError).toBeUndefined();
+  });
+
+  it("writes no live session fields for a tab archived while loading and broken", async () => {
+    const storage = memoryStorage();
+    const store = createBrowserStore({ storage });
+    store.upsertTab({ browserId: "boom", url: "https://boom.test/" });
+    store.touch("boom");
+
+    // Live state from the host, then a failed hydration: both are runtime-only.
+    applyBrowserStateChangedToStore(store, {
+      browserId: "boom",
+      url: "https://boom.test/",
+      loading: true,
+      canGoBack: true,
+      canGoForward: true,
+    });
+    tauriMocks.ensureBrowser.mockImplementation(async () => {
+      throw { code: "BOOM", message: "session died" };
+    });
+    await hydrateGlobalBrowserStore(store);
+    expect(store.getState().tabs.boom.loading).toBe(true);
+    expect(store.getState().tabs.boom.hydrationError).toBe("BOOM");
+
+    store.closeTab("boom");
+
+    const raw = storage.getItem(BROWSER_STORE_STORAGE_KEY) ?? "";
+    expect(raw).not.toContain("hydrationError");
+    expect(raw).not.toContain("BOOM");
+    expect(raw).not.toContain("\"loading\"");
+    expect(raw).not.toContain("canGoBack");
+    expect(raw).not.toContain("canGoForward");
+
+    const reloaded = createBrowserStore({ storage }).getState();
+    const archived = reloaded.archive.find((entry) => entry.tab.browserId === "boom")?.tab;
+    expect(archived).toBeDefined();
+    expect(archived?.loading).toBeUndefined();
+    expect(archived?.canGoBack).toBeUndefined();
+    expect(archived?.canGoForward).toBeUndefined();
+    expect(archived?.hydrationError).toBeUndefined();
   });
 
   it("updates a background tab from browser_state_changed through the sync hook", async () => {

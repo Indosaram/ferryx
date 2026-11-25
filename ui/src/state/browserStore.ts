@@ -319,7 +319,9 @@ function serializeBrowserState(state: BrowserStoreState): string {
     spaces: sortSpaces(state.spaces),
     folders: sortFolders(state.folders),
     tabs,
-    archive: state.archive.filter((entry) => !entry.tab.private),
+    archive: state.archive
+      .filter((entry) => !entry.tab.private)
+      .map((entry) => ({ ...entry, tab: withoutLiveState(entry.tab) })),
     mru: state.mru.filter((browserId) => persistedIds.has(browserId)).slice(0, MAX_MRU_ENTRIES),
     activeSpaceId: state.spaces[state.activeSpaceId] ? state.activeSpaceId : sortSpaces(state.spaces)[0]?.id ?? DEFAULT_SPACE_ID,
     activeBrowserIdBySpace,
@@ -706,7 +708,11 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
       const archived = !tab.private;
       commit({
         ...next,
-        archive: archived ? [{ tab, archivedAt: now(), reason: "closed" }, ...next.archive] : next.archive,
+        // An archived tab is not a live session: its runtime fields describe a webview that no
+        // longer exists, so restoring it must not resurrect a stale loading or error state.
+        archive: archived
+          ? [{ tab: withoutLiveState(tab), archivedAt: now(), reason: "closed" }, ...next.archive]
+          : next.archive,
       });
       return success({ tab, archived });
     },
@@ -843,7 +849,7 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
         mru: prev.mru.filter((browserId) => !removedIds.has(browserId)),
         miniBrowserId: prev.miniBrowserId && removedIds.has(prev.miniBrowserId) ? null : prev.miniBrowserId,
         archive: [
-          ...doomed.map((tab) => ({ tab, archivedAt: stamp, reason: "cleared" as const })),
+          ...doomed.map((tab) => ({ tab: withoutLiveState(tab), archivedAt: stamp, reason: "cleared" as const })),
           ...prev.archive,
         ],
       });
