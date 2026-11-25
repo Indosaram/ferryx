@@ -10,8 +10,8 @@
 // sidebar's scale, so the port keeps the raw numbers instead of rescaling.
 //
 // This module is the single source of truth for Maho geometry. `maho.css` repeats
-// the same numbers as CSS custom-property fallbacks; `mahoTokens.test.ts` pins the
-// two against each other so they cannot drift.
+// the same numbers as CSS custom-property fallbacks; `mahoSpacePalette.test.ts`
+// pins the two against each other so they cannot drift.
 //
 // Scope note: nothing here overrides a Ferryx global theme token. These are
 // browser-mode-local measurements, not colors.
@@ -211,8 +211,9 @@ const px = (value: number) => `${value}px`;
 
 /**
  * Flat `--maho-*` layout custom properties, derived from `MAHO_LAYOUT_TOKENS`.
- * `maho.css` declares the same names with the same fallback values; the test
- * pins both sides so the token object and the stylesheet cannot drift.
+ * `maho.css` declares the same names with the same fallback values;
+ * `mahoSpacePalette.test.ts` pins both sides so the token object and the
+ * stylesheet cannot drift.
  */
 export function mahoLayoutCssVars(): Record<string, string> {
   const { rail, topBar, controlIndicator, searchPill, library, favorites, rows, footer, spaceDot } =
