@@ -1137,22 +1137,21 @@ describe("App project workspace flow", () => {
     expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 
-  it.each(["working", "waiting"] as const)("confirms closing a single-pane tab with a %s agent as a tab close", async (state) => {
+  it.each(["working", "waiting"] as const)("closes a single-pane tab with a %s agent without confirmation when confirmCloseTab is disabled", async (state) => {
     workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
     await act(async () => { render(<App />); });
-    fireEvent.click(screen.getByRole("button", { name: "Close fixture pane" }));
-    const dialog = screen.getByRole("dialog");
-    expect(workspace.closePane).not.toHaveBeenCalled();
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Close fixture pane" }));
+    });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(workspace.closePane).not.toHaveBeenCalled();
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    act(() => { native.closeMenuHandler?.(); });
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close tab/i }));
     expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
     expect(workspace.closeTab).not.toHaveBeenCalled();
+
+    workspace.closePane.mockClear();
+    await act(async () => { native.closeMenuHandler?.(); });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 
   it.each(["working", "waiting"] as const)("closes a single pane in a split view with a %s agent without confirmation", async (state) => {
@@ -1175,18 +1174,12 @@ describe("App project workspace flow", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it.each(["working", "waiting"] as const)("confirms tab close for a %s agent even with confirmCloseTab disabled", async (state) => {
+  it.each(["working", "waiting"] as const)("closes a single-pane tab via tab close without confirmation even for a %s agent when confirmCloseTab is disabled", async (state) => {
     localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false }));
     workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
     await act(async () => { render(<App />); });
     fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
-    const dialog = screen.getByRole("dialog");
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close tab/i }));
     expect(workspace.closeTab).toHaveBeenCalledExactlyOnceWith("tab-1");
     expect(workspace.closePane).not.toHaveBeenCalled();
   });

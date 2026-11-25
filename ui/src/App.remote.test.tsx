@@ -5,7 +5,7 @@ import type { RegisteredRemoteProject } from "./lib/remoteProject";
 
 const native = vi.hoisted(() => ({
   registerProject: vi.fn(), registerRemoteProject: vi.fn(), listWorktrees: vi.fn(),
-  spawnTerminalDetailed: vi.fn(), spawnTerminal: vi.fn(), watchDagProject: vi.fn(),
+  spawnTerminalDetailed: vi.fn(), spawnTerminal: vi.fn(), closeTerminal: vi.fn(), watchDagProject: vi.fn(),
   loadSession: vi.fn(), saveSession: vi.fn(), isTauriRuntime: vi.fn(),
   getTerminalRemoteStatus: vi.fn<typeof import("./lib/tauri").getTerminalRemoteStatus>(),
   retryTerminalRemoteSession: vi.fn(),
@@ -91,8 +91,9 @@ vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: ({ initialSectio
   <div data-testid="settings-section">{initialSection}</div>
   <button onClick={() => onOpenMachineProject?.({ kind: "pairedDaemon", hostId: "h", generation: "1" }, { page: "machines", filter: "all" })}>Open paired project</button>
 </div> }));
-vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTab, onSplitPane, layout, onReconnectSshSession, onRefreshSessionIdentity }: {
+vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTab, onCloseTab, onSplitPane, layout, onReconnectSshSession, onRefreshSessionIdentity }: {
   onAddTab: () => void;
+  onCloseTab: (tabId: string) => void;
   onSplitPane: (tabId: string, leafId: string, direction: "horizontal") => void;
   layout: import("./lib/types").LayoutState;
   onReconnectSshSession: (sessionId: string) => Promise<void>;
@@ -100,6 +101,7 @@ vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTa
 }) => { native.reconnect = onReconnectSshSession; native.refresh = onRefreshSessionIdentity; return <div>
   <output data-testid="active-tab">{layout.activeTabId}</output>
   <button onClick={() => onAddTab()}>New remote tab</button>
+  <button onClick={() => { if (layout.activeTabId) onCloseTab(layout.activeTabId); }}>Close remote tab</button>
   <button onClick={() => {
     const tab = layout.tabs[0];
     const leaf = layout.layoutsByTabId![tab.id].activeLeafId!;
@@ -147,6 +149,7 @@ beforeEach(() => {
   native.registerRemoteProject.mockResolvedValue(registered);
   native.listWorktrees.mockResolvedValue([]);
   native.loadSession.mockResolvedValue(null); native.saveSession.mockResolvedValue(undefined);
+  native.closeTerminal.mockResolvedValue(undefined);
   native.watchDagProject.mockImplementation(async (projectPath: string) => ({ projectPath, runs: [] }));
   native.spawnTerminal.mockResolvedValue("backend-new");
   native.spawnTerminalDetailed.mockImplementation(async (request: { cwd?: string }) => {
@@ -892,5 +895,90 @@ describe("App SSH project lifecycle", () => {
     expect(latest.workspaces[remote.workspaceId].terminalSessions["saved-session"]).toMatchObject({
       localSessionId: "saved-session", backendSessionId: "old-backend", cwd: remote.repoRoot,
     });
+  });
+
+  it("closing the last SSH tab removes it immediately without confirmation, does not auto-reconnect SSH on closing disconnect, and persists the empty layout", async () => {
+    vi.useFakeTimers();
+    try {
+      native.isTauriRuntime.mockReturnValue(true);
+      seed([remote]);
+      const connectedStatus = {
+        type: "remoteSessionDetailsOk" as const,
+        legacyDirectSsh: false,
+        details: {
+          state: "connected" as const, generation: 2, failure: null, replayGap: null,
+          attempts: 0, pid: 1234,
+          descriptor: {
+            backendSessionId: "old-backend",
+            target: { hostId: "build", ownerId: "owner", backendSessionId: "remote-process", epoch: "1" },
+            config: {}, clientRequestId: "original-request", remoteCursor: "0", cols: 80, rows: 24,
+          },
+        },
+      };
+      native.getTerminalRemoteStatus.mockResolvedValue(connectedStatus);
+      native.loadSession.mockResolvedValue({
+        version: 3, timestamp: 1, activeWorkspaceId: remote.workspaceId,
+        workspaces: { [remote.workspaceId]: {
+          ...remote,
+          worktrees: [{ path: remote.repoRoot, branch: "", head: "", isMain: true, isLocked: false }],
+          activeWorktreePath: remote.repoRoot,
+          layout: {
+            tabs: [{ id: "saved-tab", label: "shell", sessionId: "saved-session" }],
+            activeTabId: "saved-tab", splitMode: "none", primaryTabId: "saved-tab", secondaryTabId: null,
+          },
+          terminalSessions: {
+            "saved-session": {
+              sessionId: "old-backend", localSessionId: "saved-session", backendSessionId: "old-backend",
+              cwd: remote.repoRoot, worktreePath: remote.repoRoot, createdAt: 1,
+            },
+          },
+        } },
+      });
+
+      await mount();
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.getByTestId("active-tab")).toHaveTextContent("saved-tab");
+
+      const closePending = deferred<void>();
+      native.closeTerminal.mockReturnValue(closePending.promise);
+      native.saveSession.mockClear();
+      native.retryTerminalRemoteSession.mockClear();
+
+      // Close the last remaining single-pane SSH tab: no confirmation dialog, tab closes immediately
+      // even before closeTerminal resolves.
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Close remote tab" }));
+      });
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByTestId("empty-workspace-view")).toBeInTheDocument();
+      expect(native.closeTerminal).toHaveBeenCalledWith("old-backend");
+
+      // While backend close is in flight, the daemon emits Disconnected (generation + 1).
+      // SSH recovery must already be fenced so no automatic retry/reconnect is issued.
+      await act(async () => {
+        native.remoteStatusHandler?.({
+          sessionId: "old-backend",
+          state: "disconnected",
+          generation: 3,
+          failure: null,
+          replayGap: null,
+        });
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(native.retryTerminalRemoteSession).not.toHaveBeenCalled();
+      expect(native.spawnTerminal).not.toHaveBeenCalled();
+      expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
+
+      await act(async () => { closePending.resolve(); await closePending.promise; });
+
+      // Debounced session persistence must save the now-empty workspace so the closed SSH tab
+      // does not come back on restart.
+      expect(native.saveSession).toHaveBeenCalled();
+      const persisted = native.saveSession.mock.calls.at(-1)![0];
+      expect(persisted.workspaces[remote.workspaceId].layout.tabs).toEqual([]);
+      expect(persisted.workspaces[remote.workspaceId].terminalSessions).toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

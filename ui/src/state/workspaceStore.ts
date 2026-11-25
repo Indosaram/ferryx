@@ -1686,6 +1686,7 @@ export function useWorkspaceStore({
   }, [dispatch, workspaceId]);
 
   const sshRearmsRef = useRef(new Map<string, number>());
+  const sshRecoveryRef = useRef<ReturnType<typeof startSshRecovery> | null>(null);
   const sshRecoveryKey = useMemo(
     () => Object.values(renderedState.sessions)
       .filter(session => isRemoteWorkspaceId(session.workspaceId) && session.lifecycle !== "exited")
@@ -1699,7 +1700,10 @@ export function useWorkspaceStore({
     [renderedState.sessions],
   );
   useEffect(() => {
-    if (!tauriIpc.isTauriRuntime() || !sshRecoveryKey) return;
+    if (!tauriIpc.isTauriRuntime() || !sshRecoveryKey) {
+      sshRecoveryRef.current = null;
+      return;
+    }
     const recovery = startSshRecovery({
       sessions: Object.values(stateRef.current.sessions).filter(
         session => isRemoteWorkspaceId(session.workspaceId) && session.lifecycle !== "exited",
@@ -1708,8 +1712,12 @@ export function useWorkspaceStore({
       onError: error => console.error("SSH session reconciliation failed:", error),
       rearms: sshRearmsRef.current,
     });
+    sshRecoveryRef.current = recovery;
     void recovery.ready.catch(error => console.error("SSH status subscription failed:", error));
-    return recovery.stop;
+    return () => {
+      if (sshRecoveryRef.current === recovery) sshRecoveryRef.current = null;
+      recovery.stop();
+    };
   }, [sshRecoveryKey, dispatch]);
 
   const splitController = useCallback(
@@ -2366,11 +2374,18 @@ export function useWorkspaceStore({
       }
 
       const disposableSessions = getDisposableSessionsForTab(snapshot, tabId);
-      if (snapshot.layout.tabs.length === 1 && !disposableSessions.some((session) => localSplitIntent(session))) {
+      // Fence SSH recovery synchronously before issuing any backend close so the daemon's
+      // closing Disconnected status event cannot trigger an automatic SSH reconnect.
+      for (const session of disposableSessions) {
+        if (session.backendSessionId) sshRecoveryRef.current?.closeSession(session.backendSessionId);
+      }
+      const healthy = snapshot.layout.tabs.length === 1 && !disposableSessions.some((session) => localSplitIntent(session))
+        ? disposableSessions.filter(isHealthyLocalPty)
+        : [];
+      if (healthy.length > 0) {
         // Only a healthy local PTY holds a writer the next tab must wait for. A connecting,
-        // reconnecting, lost or exited session has none, and its close may reject or never
-        // settle, so it must not hold the tab open; even the healthy wait is bounded.
-        const healthy = disposableSessions.filter(isHealthyLocalPty);
+        // reconnecting, lost, exited, or remote session has none, and its close may reject or
+        // never settle, so it must not hold the tab open; even the healthy wait is bounded.
         const results = await Promise.allSettled(healthy.map((session) => withTimeout(
           closeBackendSessionAndWait(session, services),
           LAST_TAB_EXIT_TIMEOUT_MS,
@@ -2385,7 +2400,10 @@ export function useWorkspaceStore({
         );
       } else {
         dispatch({ type: "CLOSE_TAB", tabId });
-        await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services)));
+        warnRejectedCloses(
+          await Promise.allSettled(disposableSessions.map((session) => closeBackendSession(session, services))),
+          disposableSessions,
+        );
       }
 
       // Only after CLOSE_TAB removes the layout references, tear down any collected
@@ -2422,6 +2440,7 @@ export function useWorkspaceStore({
       dispatch({ type: "CLOSE_PANE", tabId, leafId });
       releaseOrphanPreviews(stateRef.current);
       if (closingSessionId && !isSessionReferenced(stateRef.current, closingSessionId)) {
+        if (closingSession?.backendSessionId) sshRecoveryRef.current?.closeSession(closingSession.backendSessionId);
         await closeBackendSession(closingSession, services);
       }
       // Browser pane leaves carry no session; their native child webview must be torn
@@ -5900,6 +5919,7 @@ async function closeOrphanBackend(backendSessionId: string, services: WorkspaceS
 
 function isHealthyLocalPty(session: TerminalSession): boolean {
   if (!session.backendSessionId) return false;
+  if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) return false;
   if (session.lifecycle !== "working" && session.lifecycle !== "waiting" && session.lifecycle !== "running") return false;
   if (session.remoteConnectionState != null && session.remoteConnectionState !== "connected") return false;
   return session.reconnectLifecycle == null || session.reconnectLifecycle === "idle";

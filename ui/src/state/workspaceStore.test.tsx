@@ -1299,6 +1299,42 @@ describe("session title activity", () => {
       vi.useRealTimers();
     }
   });
+
+  it("removes a connected SSH sole tab immediately before closeTerminal settles", async () => {
+    const { services } = createServices();
+    let resolveClose!: () => void;
+    services.closeTerminal = vi.fn(() => new Promise<void>((resolve) => { resolveClose = resolve; }));
+    const { result } = renderHook(() => useWorkspaceStore({
+      workspaceId: "ssh:build",
+      initialWorktrees: [worktree],
+      services,
+    }));
+    act(() => result.current.restoreWorkspace({
+      ...soleTabState({
+        ...restoredSession("session-ssh-sole", "backend-ssh-sole"),
+        workspaceId: "ssh:build",
+        remoteConnectionState: "connected",
+        reconnectLifecycle: "idle",
+      }),
+      workspaceId: "ssh:build",
+    }));
+
+    let closing!: Promise<void>;
+    act(() => {
+      closing = result.current.closeTab("tab-sole");
+    });
+
+    // Connected SSH sessions are not local PTYs: CLOSE_TAB must dispatch synchronously without
+    // holding the tab open on waitForTerminalExit/closeTerminal while the daemon emits Disconnected.
+    expect(result.current.state.layout.tabs).toHaveLength(0);
+    expect(services.waitForTerminalExit).not.toHaveBeenCalled();
+    expect(services.closeTerminal).toHaveBeenCalledWith("backend-ssh-sole");
+
+    await act(async () => {
+      resolveClose();
+      await closing;
+    });
+  });
 });
 
 describe("worktree tab and session isolation", () => {

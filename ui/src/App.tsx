@@ -2554,16 +2554,24 @@ function WorkspaceApp({
   // does not schedule a save only reaches disk if some unrelated change saves later.
   const persistedSessionsKey = useMemo(() => sessionPersistenceKey(state.sessions), [state.sessions]);
 
+  // Tracks workspaces that had at least one open tab in this window so closing the last tab
+  // still persists the empty layout (preventing closed SSH/local tabs from resurrecting on
+  // restart) while un-restored initial empty renders remain blocked from clobbering disk.
+  const hadTabsByWorkspaceRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     const hasTabs =
       state.layout.tabs.length > 0 ||
       Object.values(state.worktreeLayouts ?? {}).some((l) => l.tabs.length > 0);
-    if (state.worktrees.length === 0 || !hasTabs) return;
+    const owner = state.workspaceId ?? activeProject.workspaceId;
+    if (hasTabs) {
+      hadTabsByWorkspaceRef.current.add(owner);
+    }
+    if (state.worktrees.length === 0 || (!hasTabs && !hadTabsByWorkspaceRef.current.has(owner))) return;
     // On the render that switches projects, `state` still holds the outgoing
     // project's data. Saving it under the incoming id would overwrite that
     // project's persisted session, so save it under its own owner instead of
     // discarding the newest state of the project being left.
-    const owner = state.workspaceId ?? activeProject.workspaceId;
     if (owner !== activeProject.workspaceId) {
       const outgoing = projectsRef.current.find((project) => project.workspaceId === owner);
       if (outgoing) void persistSession(owner, outgoing.repoRoot, state);

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { remoteHostStore } from "./state/remoteHostStore";
 import type { WorkspaceState } from "./state/workspaceStore";
@@ -340,16 +340,8 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       native.closeMenuHandler?.();
     });
 
-    // Local close goes through the close guard, which now prompts because the tab holds a live
-    // backend session (the point of this test is remote suppression, not the guard decision).
-    const closeDialog = await screen.findByRole("dialog", { name: "Close tab" });
-    expect(workspace.closePane).not.toHaveBeenCalled();
-    // Fire the click in a synchronous act and assert through waitFor: the store command is
-    // dispatched before any await, and an async act here waits on the whole App's pending
-    // work loop (live PTY subscriptions included), which never drains under jsdom.
-    act(() => {
-      fireEvent.click(within(closeDialog).getByRole("button", { name: "Close tab" }));
-    });
+    // A single remaining pane closes directly without confirmation when confirmCloseTab is off.
+    expect(screen.queryByRole("dialog", { name: "Close tab" })).toBeNull();
     await waitFor(() => {
       expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
     });

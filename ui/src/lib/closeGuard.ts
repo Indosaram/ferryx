@@ -126,6 +126,19 @@ function targetExists(state: WorkspaceState, target: CloseTarget): boolean {
 }
 
 /**
+ * Whether closing `target` removes at most a single pane (closing one leaf of a split, or
+ * closing a tab that only has a single pane left). Whole multi-pane tabs and multi-tab batches
+ * destroy several panes at once and keep the live-session / running-agent guard.
+ */
+function isSinglePaneClose(state: WorkspaceState, target: CloseTarget): boolean {
+  if (target.kind === "pane") return true;
+  if (target.kind === "tab") {
+    return getTabLayoutById(state, target.tabId)?.root.type !== "split";
+  }
+  return false;
+}
+
+/**
  * Decides whether closing `target` needs the user's confirmation, and why.
  *
  * The batch case deliberately assesses the union of every tab in the batch: sessions shared
@@ -155,6 +168,9 @@ export function assessClose(context: AssessmentContext, target: CloseTarget): Cl
     getTabById(state, target.tabId)?.pinned &&
     getTabLayoutById(state, target.tabId)?.root.type === "leaf"
   ) {
+    return { decision: "close", target };
+  }
+  if (!confirmAlways && isSinglePaneClose(state, target)) {
     return { decision: "close", target };
   }
   const liveSessions = dedupeByBackend(sessionsForTarget(state, target, runningSessionIds));
