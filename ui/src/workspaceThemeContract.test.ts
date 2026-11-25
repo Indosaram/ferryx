@@ -7,12 +7,30 @@ function readSource(relativeUrl: string) {
 }
 
 describe("workspace shell theme contract", () => {
-  it("removes the workspace header row and retains a closed-sidebar control", () => {
+  it("keeps the Activity Bar as the always-visible left rail and drops the collapsed-sidebar chrome", () => {
     const source = readSource("./App.tsx");
 
     expect(source).not.toContain("WorkspaceHeader");
-    expect(source).toContain("titlebar-left-floating");
-    expect(source).toContain('label="Show sidebar"');
+    // The rail is the shell's left edge: it mounts before the drawer and never hides.
+    expect(source).toContain("<DesktopActivityBar");
+    expect(source.indexOf("<DesktopActivityBar")).toBeLessThan(source.indexOf("<Sidebar\n"));
+    // The collapsed-drawer workaround is gone: no floating titlebar controls, no tab leading spacer.
+    expect(source).not.toContain("titlebar-left-floating");
+    expect(source).not.toMatch(/leadingSpacer=\{isSidebarOpen[^}]*108/);
+    expect(source).toMatch(/leadingSpacer=\{0\}/);
+  });
+
+  it("draws the macOS traffic-light clearance inside the rail, not in the drawer", () => {
+    const rail = readSource("./components/activity/DesktopActivityBar.tsx");
+    const sidebar = readSource("./components/Sidebar.tsx");
+
+    expect(rail).toContain('data-testid="titlebar-traffic-light-pad"');
+    expect(rail).toContain("MAC_TRAFFIC_LIGHT_CLEARANCE = 72");
+    expect(rail).toContain("data-tauri-drag-region");
+    // The shell hands the drawer `isMac={false}`: its titlebar starts at x=48, right of the rail.
+    const app = readSource("./App.tsx");
+    expect(app).toMatch(/hideViewTabs[\s\S]{0,80}isMac=\{false\}/);
+    expect(sidebar).toContain("titlebarLeading={isMac ?");
   });
 
   it("uses semantic workspace surfaces instead of a one-off background hex", () => {

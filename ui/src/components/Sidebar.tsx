@@ -29,14 +29,18 @@ import {
   clampSidebarWidth,
   loadCollapsedProjects,
   loadSidebarWidth,
+  loadSidebarWidthForMode,
   loadWorktreeOrder,
   DEFAULT_SIDEBAR_RANGE,
+  SIDEBAR_RANGE_BY_MODE,
   SUPERVISOR_SIDEBAR_RANGE,
   persistCollapsedProjects,
   persistSidebarWidth,
   persistWorktreeOrder,
   persistLaneOrder,
+  saveSidebarWidthForMode,
   localWorktreeOrderImported,
+  type ActivityMode,
   type SidebarLaneLifecycle,
   type WorktreeOrder,
 } from "../lib/sidebarPersistence";
@@ -128,6 +132,19 @@ type SidebarProps = {
   onFocusSupervisorSession?: (sessionRef: string) => void;
   /** Sidebar-embedded slot below the tree, used for persistent setup progress. */
   footerSlot?: React.ReactNode;
+  /**
+   * The Activity Bar mode whose drawer this is. Set by the desktop shell only: it selects that
+   * mode's width range and its `ferryx.sidebar.width.<mode>` key. Absent (a standalone sidebar,
+   * the remote client) keeps the historical single width and ranges.
+   */
+  widthMode?: ActivityMode;
+  /**
+   * The view the shell shows. Set together with `hideViewTabs` by the desktop Activity Bar, which
+   * is the view switch there; when absent the tabs pick the view themselves.
+   */
+  view?: SidebarViewId;
+  /** Hides the Supervisor/Worktrees tabs; the desktop rail replaces them. Never owned by the view. */
+  hideViewTabs?: boolean;
 };
 
 /**
@@ -169,18 +186,41 @@ export function Sidebar({
   onHide,
   onFocusSupervisorSession,
   footerSlot,
+  widthMode,
+  view,
+  hideViewTabs = false,
 }: SidebarProps) {
   // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
   // advanced features. The project tree is the other view; there is no Inbox view.
   const panelMode = onFocusSupervisorSession !== undefined;
-  const widthRange = panelMode ? SUPERVISOR_SIDEBAR_RANGE : DEFAULT_SIDEBAR_RANGE;
+  const widthRange = widthMode
+    ? SIDEBAR_RANGE_BY_MODE[widthMode]
+    : panelMode ? SUPERVISOR_SIDEBAR_RANGE : DEFAULT_SIDEBAR_RANGE;
   const [chosenView, setChosenView] = useState<SidebarViewId>(panelMode ? "supervisor" : "worktrees");
-  const sidebarView: SidebarViewId = panelMode ? chosenView : "worktrees";
+  const sidebarView: SidebarViewId = panelMode ? view ?? chosenView : "worktrees";
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
-  const [width, setWidth] = useState(() => loadSidebarWidth(widthRange));
+  const loadWidth = useCallback(
+    () => (widthMode ? loadSidebarWidthForMode(widthMode) : loadSidebarWidth(widthRange)),
+    [widthMode, widthRange],
+  );
+  const saveWidth = useCallback(
+    (next: number) => (widthMode ? saveSidebarWidthForMode(widthMode, next) : persistSidebarWidth(next, widthRange)),
+    [widthMode, widthRange],
+  );
+  const [width, setWidth] = useState(loadWidth);
   const widthRef = useRef(width);
   widthRef.current = width;
+  // Each mode remembers its own width, so switching the Activity Bar restores that drawer's width
+  // without the component remounting (remounting would drop filter, scroll and drag state).
+  const loadedWidthMode = useRef(widthMode);
+  useEffect(() => {
+    if (loadedWidthMode.current === widthMode) return;
+    loadedWidthMode.current = widthMode;
+    const next = loadWidth();
+    widthRef.current = next;
+    setWidth(next);
+  }, [loadWidth, widthMode]);
   const [worktreeOrder, setWorktreeOrder] = useState<WorktreeOrder>(loadWorktreeOrder);
   const worktreeOrderRef = useRef(worktreeOrder);
   worktreeOrderRef.current = worktreeOrder;
@@ -466,10 +506,10 @@ export function Sidebar({
   const endResize = useCallback(() => {
     if (!dragRef.current) return;
     dragRef.current = null;
-    persistSidebarWidth(widthRef.current, widthRange);
+    saveWidth(widthRef.current);
     document.body.style.cursor = "";
     setResizing(false);
-  }, [widthRange]);
+  }, [saveWidth]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -511,7 +551,7 @@ export function Sidebar({
     const nextWidth = clampSidebarWidth(widthRef.current + delta, widthRange);
     widthRef.current = nextWidth;
     setWidth(nextWidth);
-    persistSidebarWidth(nextWidth, widthRange);
+    saveWidth(nextWidth);
   };
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -658,7 +698,8 @@ export function Sidebar({
             hideSidebar: hide ?? noop,
             openSettings: () => onOpenSettings?.(),
             openResources: onOpenResources ?? noop,
-            onViewChange: panelMode ? setChosenView : undefined,
+            // The desktop rail is the view switch there; standalone keeps the in-sidebar tabs.
+            onViewChange: panelMode && !hideViewTabs ? setChosenView : undefined,
           }}
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}

@@ -126,7 +126,7 @@ function seed(projects: RegisteredProject[], active = projects[0]?.workspaceId) 
   if (active) localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, active);
 }
 async function mount() { await act(async () => { render(<App />); }); }
-// The sidebar opens on the Supervisor panel; the project tree is one tab away.
+// The Activity Bar selects the sidebar's view; the project tree is one rail button away.
 async function showWorktrees() { await act(async () => { fireEvent.click(screen.getByRole("tab", { name: "Worktrees" })); }); }
 // 7e8fdfb7 uses detailed spawn for new tabs so their durable identity is available immediately.
 beforeEach(() => {
