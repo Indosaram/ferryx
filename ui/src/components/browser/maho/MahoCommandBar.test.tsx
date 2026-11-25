@@ -96,9 +96,13 @@ describe("buildMahoCommandBarResults", () => {
       ],
     }));
 
-    expect(results.map((row) => row.browserId)).toEqual(["tab-favorite", "tab-plain"]);
+    // Two tab rows, then the search fallback for anything else.
+    expect(results.map((row) => row.source)).toEqual(["tab", "tab", "action"]);
+    expect(results.filter((row) => row.source === "tab").map((row) => row.browserId))
+      .toEqual(["tab-favorite", "tab-plain"]);
     expect(results[0].favorite).toBe(true);
     expect(results[1].favorite).toBe(false);
+    expect(results[results.length - 1]).toMatchObject({ source: "action", isSearch: true });
   });
 
   it("treats a domain as an address to navigate to", () => {
