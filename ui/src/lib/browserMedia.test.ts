@@ -9,8 +9,8 @@ const tauri = vi.hoisted(() => {
   return {
     captured,
     invoke: vi.fn(),
-    listen: vi.fn(async (event: string, handler: (payload: { payload: unknown }) => void) => {
-      captured.event = event;
+    listen: vi.fn(async (_event: string, handler: (payload: { payload: unknown }) => void): Promise<() => void> => {
+      captured.event = _event;
       captured.handler = handler;
       return () => undefined;
     }),
