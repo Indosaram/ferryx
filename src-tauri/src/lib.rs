@@ -1771,6 +1771,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle(),
                 Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
             );
+            // Chromium engine tabs have no page-world push channel, so their Now Playing state
+            // is polled through the same page-script path.
+            crate::browser::media::install_engine_media_poller(
+                app.handle().clone(),
+                Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
+            );
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
             if let Some(profile) = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow_mut().take()) {
                 let window_config = app
@@ -2230,6 +2236,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_get_state,
         cmd_browser_find,
         cmd_browser_clear_find,
+        cmd_browser_media_control,
         cmd_browser_download,
         cmd_browser_download_with_cookies,
         cmd_browser_download_list,

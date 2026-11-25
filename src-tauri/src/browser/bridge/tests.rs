@@ -333,6 +333,9 @@ fn broker_script_is_world_local_and_gates_on_trusted_events() {
     for kind in ["'download'", "'link'", "'popupOpen'", "'popupSelfClose'"] {
         assert!(TRUSTED_BROKER_SCRIPT.contains(kind), "{kind}");
     }
+    // The Now Playing report rides the same channel and is forwarded as its own kind.
+    assert!(TRUSTED_BROKER_SCRIPT.contains("intent.op === 'media'"));
+    assert!(TRUSTED_BROKER_SCRIPT.contains("post({ v: 1, kind: 'media', report })"));
 }
 
 #[test]

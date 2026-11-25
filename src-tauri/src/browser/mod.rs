@@ -19,6 +19,7 @@ pub mod library;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod linux;
 pub mod manager;
+pub mod media;
 pub mod model;
 pub mod picker;
 pub mod popup;
@@ -56,6 +57,10 @@ pub use guest::{
     BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
 pub use manager::BrowserManager;
+pub use media::{
+    browser_media_control_script, handle_media_envelope, is_media_envelope, BrowserMediaControlResult,
+    BrowserMediaState, MediaControlAction, BROWSER_MEDIA_STATE_EVENT,
+};
 pub use model::*;
 pub use remote_bridge_protocol::*;
 pub use remote_driver::*;
