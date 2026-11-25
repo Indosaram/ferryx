@@ -255,7 +255,7 @@ type TerminalSplitViewProps = {
   onSplitPane?: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane?: (tabId: string, leafId: string) => void;
   /** Split browser `×` default: drop the split reference, keep the live tab in the store. */
-  onDetachBrowserPane?: (browserId: string) => void;
+  onDetachBrowserPane?: (browserId: string, tabId: string, leafId: string) => void;
   /** Context menu: reveal the same live session fullscreen in Browser mode. */
   onOpenBrowserFullscreen?: (browserId: string) => void;
   /** Context menu: the explicit destructive close (store tab + backend session). */
@@ -781,7 +781,7 @@ type TabGroupViewProps = {
     targetPane?: { tabId: string; leafId: string },
   ) => void;
   onClosePane: (tabId: string, leafId: string) => void;
-  onDetachBrowserPane?: (browserId: string) => void;
+  onDetachBrowserPane?: (browserId: string, tabId: string, leafId: string) => void;
   onOpenBrowserFullscreen?: (browserId: string) => void;
   onCloseBrowserSession?: (browserId: string) => void;
   onSetRatio: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
@@ -1100,7 +1100,7 @@ type PaneRendererProps = {
   onEqualizePaneRun: (tabId: string, path: string) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-  onDetachBrowserPane?: (browserId: string) => void;
+  onDetachBrowserPane?: (browserId: string, tabId: string, leafId: string) => void;
   onOpenBrowserFullscreen?: (browserId: string) => void;
   onCloseBrowserSession?: (browserId: string) => void;
 } & PaneChatProps;
@@ -1215,7 +1215,7 @@ type PaneLeafViewProps = {
   onClosePane: (tabId: string, leafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
   /** Detach-by-default: drop this browser leaf's split reference, keeping the tab in the store. */
-  onDetachBrowserPane?: (browserId: string) => void;
+  onDetachBrowserPane?: (browserId: string, tabId: string, leafId: string) => void;
   /** Context menu: show this browser's live tab fullscreen in Browser mode. */
   onOpenBrowserFullscreen?: (browserId: string) => void;
   /** Context menu: the explicit destructive close (store tab + backend session). */
@@ -1289,12 +1289,29 @@ const PaneLeafView = React.memo(function PaneLeafView({
   });
 
   const paneBrowserId = content.kind === "browser" ? (content.browser?.browserId ?? content.browserId ?? "") : "";
+  /**
+   * A browser split's `x` detaches: the callback drops the split reference *and* removes this leaf
+   * from the layout, keeping the live tab in the global store. The pane must disappear, so this
+   * never returns without a layout change - callers without the callback fall back to closePane.
+   */
   const closePaneOrDetachBrowser = () => {
     if (paneBrowserId && onDetachBrowserPane) {
-      onDetachBrowserPane(paneBrowserId);
+      onDetachBrowserPane(paneBrowserId, tab.id, leafId);
       return;
     }
     onClosePane(tab.id, leafId);
+  };
+
+  /** Menu coordinates are pane-relative: the popover is positioned inside this leaf. */
+  const openBrowserMenu = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = leafRef.current?.getBoundingClientRect();
+    setBrowserMenu({
+      browserId: paneBrowserId,
+      x: rect ? event.clientX - rect.left : 0,
+      y: rect ? event.clientY - rect.top : 0,
+    });
   };
 
   React.useEffect(() => {
@@ -1624,9 +1641,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
               }}
               onContextMenu={(event) => {
                 if (!paneBrowserId) return;
-                event.preventDefault();
-                event.stopPropagation();
-                setBrowserMenu({ browserId: paneBrowserId, x: event.clientX, y: event.clientY });
+                openBrowserMenu(event);
               }}
             >
               <X className="size-3" />
@@ -1640,7 +1655,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
           data-testid="pane-browser-menu"
           role="menu"
           className="absolute z-40 min-w-[200px] rounded-md border border-border bg-popover py-1 text-[11px] text-popover-foreground shadow-md"
-          style={{ left: Math.min(browserMenu.x, 40), top: 24 }}
+          style={{ left: browserMenu.x, top: Math.max(browserMenu.y, 24) }}
           onPointerDown={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
@@ -1661,7 +1676,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
             className="flex w-full items-center px-2 py-1 text-left hover:bg-accent/60"
             onClick={() => {
               setBrowserMenu(null);
-              onDetachBrowserPane?.(browserMenu.browserId);
+              onDetachBrowserPane?.(browserMenu.browserId, tab.id, leafId);
             }}
           >
             Detach from split

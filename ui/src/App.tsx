@@ -58,7 +58,9 @@ import {
   adoptCliBrowserSession,
   closeBrowserSessionFromSplit,
   detachBrowserFromWorktreeSplit,
+  focusAdoptedBrowser,
   handleWorktreeDeletedForBrowsers,
+  openBrowserInWorktreeSplit,
   resolveBrowserTabSwitch,
 } from "./lib/worktreeBrowserBridge";
 import { browserStore } from "./state/browserStore";
@@ -4378,11 +4380,8 @@ function WorkspaceApp({
         return;
       }
     }
-    // Detach now: a deleted worktree must never take the user's browser tabs with it. The tabs
-    // stay in the global store and in Browser mode.
-    const identity = worktreeIdentity(worktree);
-    const workspaceId = identity?.wsId ?? worktree.workspaceId;
-    if (workspaceId) handleWorktreeDeletedForBrowsers(workspaceId, browserStore);
+    // Opening the confirmation must not detach anything: cancelling has to leave every split
+    // exactly as it was. The detach runs in the dialog's onDeleted, after deletion is confirmed.
     setDeleteTarget(worktree);
   }, []);
   const handleAddBrowserTab = useCallback(
@@ -4391,19 +4390,60 @@ function WorkspaceApp({
       const task = profileId
         ? createBrowserTab(targetUrl, undefined, { profileId })
         : createBrowserTab(targetUrl);
-      void task.catch(reportRuntimeError);
+      void task.then((tabId) => {
+        if (!tabId) return;
+        // Register the new worktree browser tab in the global store with its `worktreeTag`, so
+        // Maho/Browser mode can show it and deleting the worktree only detaches it.
+        const currentState = stateRef.current;
+        const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
+        if (!tab || tab.kind !== "browser") return;
+        const worktreePath = tab.worktreePath ?? currentState.activeWorktreePath;
+        const worktree = worktreePath
+          ? currentState.worktrees.find((candidate) => candidate.path === worktreePath)
+          : undefined;
+        const workspaceId = worktreeIdentity(worktree ?? {})?.wsId ?? worktree?.workspaceId;
+        if (!worktreePath || !workspaceId) return;
+        // A standalone browser tab has no pane leaves: the attachment names the tab itself so
+        // `resolveBrowserTabSwitch` and `detachAllForWorkspace` can still find it.
+        openBrowserInWorktreeSplit({
+          browserId: tab.browserId,
+          url: tab.url,
+          title: tab.title ?? null,
+          workspaceId,
+          worktreePath,
+          ...(worktree?.label ?? tab.worktreeLabel ? { worktreeLabel: worktree?.label ?? tab.worktreeLabel } : {}),
+          tabId,
+          leafId: "root",
+        }, browserStore);
+      }).catch(reportRuntimeError);
     },
     [createBrowserTab, reportRuntimeError],
   );
 
   /**
-   * Split browser `×`: Detach by default. Only the split reference goes; the live tab stays in
-   * the global store so Browser mode shows the same page, unloaded.
+   * Split browser `×`: Detach by default. Two steps, and no backend close:
+   *  1. drop the split reference (the live tab stays in the global store), then
+   *  2. remove the leaf from the layout so the pane actually disappears.
+   * Step 2 dispatches the reducer action directly instead of calling `closePane`, because
+   * `closePane` tears the native webview down once the last layout reference is gone - exactly
+   * what detaching must not do.
    */
-  const handleDetachBrowserPane = useCallback((browserId: string) => {
-    detachBrowserFromWorktreeSplit(browserId, browserStore);
-    toast.success("Browser tab detached", { description: "It stays open in Browser mode." });
-  }, []);
+  const handleDetachBrowserPane = useCallback(
+    (browserId: string, tabId: string, leafId: string) => {
+      detachBrowserFromWorktreeSplit(browserId, browserStore);
+      const ownerTab = stateRef.current.layout.tabs.find((tab) => tab.id === tabId);
+      if (ownerTab && isTerminalTab(ownerTab)) {
+        // The browser pane lives inside a terminal-kind tab: drop just that leaf.
+        dispatchWorkspaceAction({ type: "CLOSE_PANE", tabId, leafId });
+      } else {
+        // A standalone browser tab cannot lose one leaf (the reducer refuses), so the tab itself
+        // goes; the session survives in browserStore for Browser mode.
+        dispatchWorkspaceAction({ type: "CLOSE_TAB", tabId });
+      }
+      toast.success("Browser tab detached", { description: "It stays open in Browser mode." });
+    },
+    [dispatchWorkspaceAction],
+  );
 
   /** Context menu "Open in Browser fullscreen": the same browserId, no reload. */
   const handleOpenBrowserFullscreen = useCallback(
@@ -4720,6 +4760,9 @@ function WorkspaceApp({
       // Also adopt into the global store: Browser mode shows the same session in every Activity
       // mode, with no layout tab and no reload. Store-only work, so the CLI ack stays inside 3s.
       adoptCliBrowserSession(payload.browser, payload.workspaceId ?? undefined, null, browserStore);
+      // Make the adopted session the active tab of its Space, so switching to Browser mode lands
+      // on the page the CLI/agent just opened.
+      focusAdoptedBrowser(payload.browser.browserId, browserStore);
       void reportBrowserAdoption(payload.browser.browserId, true).catch(reportRuntimeError);
     }).then((cleanup) => {
       if (disposed) cleanup();
@@ -5765,6 +5808,10 @@ function WorkspaceApp({
           worktree={deleteTarget}
           onClose={handleCloseDeleteTarget}
           onDeleted={() => {
+            // The deletion is confirmed and done: only now drop this worktree's split references.
+            // The browser tabs themselves stay in the global store, so Browser mode keeps them.
+            const deletedWorkspaceId = deleteTarget ? worktreeIdentity(deleteTarget)?.wsId ?? deleteTarget.workspaceId : undefined;
+            if (deletedWorkspaceId) handleWorktreeDeletedForBrowsers(deletedWorkspaceId, browserStore);
             setWorktreeStatuses((current) => {
               const next = { ...current };
               delete next[deleteTarget.path];

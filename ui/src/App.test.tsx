@@ -1700,6 +1700,53 @@ describe("App project workspace flow", () => {
     expect(deleteDialog).toHaveAttribute("data-worktree-path", worktreeProj2.path);
   });
 
+  it("detaches worktree browser splits only after deletion is confirmed, never when the dialog is cancelled", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    const project = { workspaceId: "project-del", repoRoot: "/repos/project-del" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([project]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, project.workspaceId);
+    native.registerProject.mockResolvedValue(project);
+
+    const worktree: Worktree = {
+      path: "/repos/project-del/.orca-worktrees/project-del/feature-del",
+      head: "abc123",
+      branch: "refs/heads/orca/project-del/feature-del",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    workspace.storeState = { ...workspace.storeState, worktrees: [worktree] };
+
+    const { browserStore } = await import("./state/browserStore");
+    const detachSpy = vi.spyOn(browserStore, "detachAllForWorkspace");
+
+    try {
+      render(<App />);
+      expect(await screen.findByText("Active project project-del")).toBeInTheDocument();
+
+      // Opening the dialog must not detach anything: cancelling has to leave splits intact.
+      fireEvent.click(screen.getByRole("button", { name: `Delete worktree ${worktree.path}` }));
+      expect(await screen.findByTestId("worktree-delete-dialog")).toBeInTheDocument();
+      expect(detachSpy).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Cancel delete" }));
+      await waitFor(() => expect(screen.queryByTestId("worktree-delete-dialog")).toBeNull());
+      expect(detachSpy).not.toHaveBeenCalled();
+
+      // Confirming is the only path that drops this worktree's split references.
+      fireEvent.click(screen.getByRole("button", { name: `Delete worktree ${worktree.path}` }));
+      expect(await screen.findByTestId("worktree-delete-dialog")).toBeInTheDocument();
+      expect(detachSpy).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+      await waitFor(() => expect(detachSpy).toHaveBeenCalled());
+      expect(detachSpy).toHaveBeenCalledWith("project-del");
+    } finally {
+      detachSpy.mockRestore();
+    }
+  });
+
   it("migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10)", async () => {
     const project = { workspaceId: "migrated-proj", repoRoot: "/repos/migrated" };
     localStorage.setItem("rorca.projects", JSON.stringify([project]));
