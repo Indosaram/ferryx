@@ -285,54 +285,46 @@ pub struct BrowserMediaControlResult {
 /// The page script that drives the dominant media element. The action is a literal from a closed
 /// set, so no page- or caller-provided string is ever spliced into the script body.
 pub fn browser_media_control_script(action: MediaControlAction) -> String {
-    // The dominant element is chosen exactly like the reporter chooses it: the largest playing
-    // one, else the first in document order that has media.
-    let body = r#"(() => {
+    // Only this action's branch is emitted: the script never carries the other controls.
+    let branch = match action {
+        MediaControlAction::Play => "{\n        const started = target.play();\n        if (started && typeof started.catch === 'function') started.catch(() => {});\n        break;\n      }",
+        MediaControlAction::Pause => "target.pause(); break;",
+        MediaControlAction::Toggle => {
+            "{\n        if (playing(target)) target.pause();\n        else {\n          const started = target.play();\n          if (started && typeof started.catch === 'function') started.catch(() => {});\n        }\n        break;\n      }"
+        }
+        MediaControlAction::Mute => "target.muted = true; break;",
+        MediaControlAction::Unmute => "target.muted = false; break;",
+    };
+    format!(
+        r#"(() => {{
+  const action = '{action}';
+  // The dominant element is chosen exactly like the reporter chooses it: the largest playing
+  // one, else the largest one in document order.
   const elements = Array.from(document.querySelectorAll('audio,video'))
     .filter((node) => node.tagName === 'AUDIO' || node.tagName === 'VIDEO');
-  if (elements.length === 0) return JSON.stringify({ action: ACTION, applied: false, reason: 'no-media' });
-  const area = (element) => {
+  if (elements.length === 0) {{
+    return JSON.stringify({{ action, applied: false, playing: false, muted: false, hasMedia: false, reason: 'no-media' }});
+  }}
+  const area = (element) => {{
     const rect = typeof element.getBoundingClientRect === 'function' ? element.getBoundingClientRect() : null;
     if (!rect) return 0;
     return Math.max(0, rect.width) * Math.max(0, rect.height);
-  };
+  }};
   const playing = (element) => !element.paused && !element.ended && element.readyState > 0;
   const active = elements.filter(playing);
   const target = active.length > 0
     ? active.reduce((best, element) => (area(element) > area(best) ? element : best))
     : elements.reduce((best, element) => (area(element) > area(best) ? element : best));
-  try {
-    switch (ACTION) {
-      case 'play': {
-        const started = target.play();
-        if (started && typeof started.catch === 'function') started.catch(() => {});
-        break;
-      }
-      case 'pause': target.pause(); break;
-      case 'toggle': {
-        if (playing(target)) target.pause();
-        else {
-          const started = target.play();
-          if (started && typeof started.catch === 'function') started.catch(() => {});
-        }
-        break;
-      }
-      case 'mute': target.muted = true; break;
-      case 'unmute': target.muted = false; break;
-      default: break;
-    }
-  } catch (error) {
-    return JSON.stringify({ action: ACTION, applied: false, reason: String(error) });
-  }
-  return JSON.stringify({
-    action: ACTION,
-    applied: true,
-    playing: playing(target),
-    muted: target.muted === true,
-    hasMedia: true,
-  });
-})()"#;
-    body.replace("ACTION", &format!("'{}'", action.as_str()))
+  try {{
+    {branch}
+  }} catch (error) {{
+    return JSON.stringify({{ action, applied: false, playing: playing(target), muted: target.muted === true, hasMedia: true, reason: String(error) }});
+  }}
+  return JSON.stringify({{ action, applied: true, playing: playing(target), muted: target.muted === true, hasMedia: true }});
+}})()"#,
+        action = action.as_str(),
+        branch = branch
+    )
 }
 
 /// The pull form of the shared reporter: one JSON snapshot, used for Chromium engine tabs.
@@ -574,13 +566,20 @@ mod tests {
     #[test]
     fn control_script_embeds_only_the_action_token() {
         let play = browser_media_control_script(MediaControlAction::Play);
-        assert!(play.contains("case 'play':"));
+        assert!(play.contains("const action = 'play';"));
         assert!(play.contains("querySelectorAll('audio,video')"));
         assert!(!play.contains("ACTION"));
         // The mute action never carries another action's body.
         let mute = browser_media_control_script(MediaControlAction::Mute);
         assert!(mute.contains("target.muted = true"));
-        assert!(!mute.contains("case 'pause'"));
+        assert!(!mute.contains("target.pause()"));
+        assert!(!mute.contains("const action = 'toggle';"));
+        // Every script reports the same outcome shape, so the command always parses it.
+        for action in MediaControlAction::ALL {
+            let script = browser_media_control_script(action);
+            assert!(script.contains("applied: true"));
+            assert!(script.contains("hasMedia: true"));
+        }
     }
 
     #[test]
