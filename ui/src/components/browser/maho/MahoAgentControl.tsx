@@ -34,6 +34,7 @@ import {
   type BrowserStoreState,
   type BrowserStoreTab,
 } from "../../../state/browserStore";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { Button } from "../../ui/button";
 
 /** A tab an agent currently controls, named by its store title and controller. */
@@ -74,6 +75,15 @@ export type BrowserAgentActivityOptions = {
   /** Per-tab controller ids, the companion of `controllerLabels`. */
   controllerIds?: Record<string, string>;
 };
+
+/** A subscription that may be unavailable: no event bridge means no events, not a crash. */
+function subscribeOrNothing(subscribe: () => Promise<UnlistenFn>): Promise<UnlistenFn> {
+  try {
+    return subscribe();
+  } catch {
+    return Promise.resolve(() => undefined);
+  }
+}
 
 function selectAgentControlledTabs(state: BrowserStoreState): BrowserStoreTab[] {
   return Object.values(state.tabs)
@@ -118,17 +128,20 @@ export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {
         },
       );
     // Subscribe before the first read so a request arriving in between is not missed.
-    const approvals = onBrowserAgentApprovals((next) => {
+    // `listen` throws synchronously when the host exposes no event bridge (a web or remote
+    // build), and this hook is mounted by the shell in every mode: a missing bridge must
+    // leave the badge off, not tear down the mount.
+    const approvals = subscribeOrNothing(() => onBrowserAgentApprovals((next) => {
       if (cancelled) return;
       heardEvent = true;
       setPending(next);
       // A pairing just approved adds a controller name the surfaces need for later requests.
       void refresh();
-    });
-    const help = onBrowserAgentHelpRequest((request) => {
+    }));
+    const help = subscribeOrNothing(() => onBrowserAgentHelpRequest((request) => {
       if (cancelled) return;
       setHandoffs((list) => [...list.filter((item) => item.browserId !== request.browserId), request]);
-    });
+    }));
     void refresh();
     return () => {
       cancelled = true;

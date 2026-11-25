@@ -430,11 +430,13 @@ describe("Activity Bar shell integration", () => {
     act(() => {
       screen.getByTestId("activity-settings").click();
     });
-    const dialog = await screen.findByTestId("settings-dialog");
-    act(() => { within(dialog).getByRole("button", { name: "Open remote desktop" }).click(); });
+    // The dialog is lazy-loaded: its content arrives one dynamic import after the shell's
+    // placeholder, so the handoff button is awaited rather than assumed.
+    const handoff = await screen.findByRole("button", { name: "Open remote desktop" });
+    act(() => { handoff.click(); });
 
     await waitFor(() => expect(connect).toHaveBeenCalledWith("host-1", "Studio"));
-    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open remote desktop" })).toBeNull();
     // The mode switched to Remote Desktop: its drawer is the mode's own surface.
     expect(await screen.findByTestId("activity-drawer-remote-desktop")).toBeInTheDocument();
     expect(localStorage.getItem(ACTIVITY_MODE_STORAGE_KEY)).toBe("remoteDesktop");

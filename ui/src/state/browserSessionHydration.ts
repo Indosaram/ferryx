@@ -19,6 +19,7 @@ import {
 } from "../lib/browserTauri";
 import { isPrivateBrowserProfileId, readScrollPosition } from "../lib/sessionPersistence";
 import type { BrowserPaneState, BrowserState, BrowserTab, LayoutState } from "../lib/types";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   browserStore,
   runBrowserStoreMigrationOnce,
@@ -552,6 +553,19 @@ export function applyAgentOverviewToStore(store: BrowserStore, overview: Browser
 }
 
 /**
+ * A subscription that may be unavailable. `listen` throws synchronously when the host exposes
+ * no event bridge (a web or remote build), and this hook is mounted by the shell in every mode:
+ * a missing bridge has to mean "no live events", not an unhandled rejection on mount.
+ */
+function subscribeOrNothing(subscribe: () => Promise<UnlistenFn>): Promise<UnlistenFn> {
+  try {
+    return subscribe();
+  } catch {
+    return Promise.resolve(() => undefined);
+  }
+}
+
+/**
  * Keeps the global store live while the app runs: hydrates the eager startup sessions once, then
  * subscribes to host state changes (background tabs included) and to agent approval changes so
  * `agentControlled` stays accurate. Everything is unsubscribed on unmount or when disabled.
@@ -577,16 +591,16 @@ export function useGlobalBrowserStoreSync(store: BrowserStore = browserStore, en
         });
     };
 
-    void onBrowserStateChanged((payload) => {
+    void subscribeOrNothing(() => onBrowserStateChanged((payload) => {
       applyBrowserStateChangedToStore(store, payload);
-    }).then((cleanup) => {
+    })).then((cleanup) => {
       if (disposed) cleanup();
       else unlistenState = cleanup;
     }).catch((error: unknown) => {
       if (!disposed) console.warn("Browser live state subscription failed:", error);
     });
 
-    void onBrowserAgentApprovals(() => refreshAgentFlags()).then((cleanup) => {
+    void subscribeOrNothing(() => onBrowserAgentApprovals(() => refreshAgentFlags())).then((cleanup) => {
       if (disposed) cleanup();
       else unlistenAgent = cleanup;
     }).catch(() => {
