@@ -16,6 +16,8 @@ export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabl
 export const BROWSER_SCROLL_STORAGE_KEY = "ferryx.browser.scroll-positions";
 /** Per-tab back/forward stacks (browser id -> entries), restored with the tab; never private tabs. */
 export const BROWSER_TAB_NAVIGATION_STORAGE_KEY = "ferryx.browser.tab-navigation";
+/** Today auto-archive idle window in hours (default 12); invalid values fall back to the default. */
+export const BROWSER_AUTO_ARCHIVE_HOURS_STORAGE_KEY = "ferryx.browser.autoArchiveHours";
 /** Global browser store: Spaces, folders, favorites/pinned/today tabs, archive, MRU, split refs. */
 export const BROWSER_STORE_STORAGE_KEY = "ferryx.browser.store:v1";
 /** One-shot guard: legacy worktree browser tabs have been copied into the global store. */
