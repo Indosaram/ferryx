@@ -198,7 +198,11 @@ export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {
       run(async () => {
         // Reclaims the lease: the agent stops writing, the page is not closed or reloaded.
         await reclaimBrowserAgent(browserId, true);
-        store.upsertTab({ browserId, agentControlled: false });
+        // A tab the store no longer holds must not be resurrected as a phantom `about:blank`
+        // row by the reclaim: the lease is the only thing left to clear.
+        if (store.getState().tabs[browserId]) {
+          store.upsertTab({ browserId, agentControlled: false });
+        }
         setHandoffs((list) => list.filter((item) => item.browserId !== browserId));
       }),
     [run, store],
@@ -217,12 +221,22 @@ export function useBrowserAgentActivity(options: BrowserAgentActivityOptions = {
   const revokeController = useCallback(
     (controllerId: string) =>
       run(async () => {
+        // The tabs this controller held, read before the revoke changes the overview: their
+        // chips have to clear with the lease instead of waiting for each tab to close.
+        const attributed = controlledTabs
+          .filter((tab) => controllerIdFor(tab.browserId) === controllerId)
+          .map((tab) => tab.browserId);
         await revokeBrowserAgent(controllerId);
+        for (const browserId of attributed) {
+          if (store.getState().tabs[browserId]) {
+            store.upsertTab({ browserId, agentControlled: false });
+          }
+        }
         const overview = await getBrowserAgentOverview();
         setPending(overview.pending);
         setControllers(overview.controllers);
       }),
-    [run],
+    [controlledTabs, controllerIdFor, run, store],
   );
 
   const resolveApproval = useCallback(

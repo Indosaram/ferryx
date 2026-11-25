@@ -229,21 +229,24 @@ export function buildMahoCommandBarResults(input: MahoCommandBarInput): MahoComm
     }
   }
 
-  const ranked = [...byUrl.values()]
-    .sort((left, right) => right.score - left.score
-      || right.recency - left.recency
-      || left.title.localeCompare(right.title))
-    .slice(0, MAX_RESULTS);
+  const ranked = [...byUrl.values()].sort((left, right) => right.score - left.score
+    || right.recency - left.recency
+    || left.title.localeCompare(right.title));
 
   const action = actionRow(query, input.settings);
-  if (!action) return ranked;
+  if (!action) return ranked.slice(0, MAX_RESULTS);
   // The same page is already offered by a tab/bookmark/history row, which can open it in a
   // new tab on its own: a second identical row would only split the choice.
   const actionKey = normalizeSuggestionUrl(action.url);
-  if (ranked.some((row) => normalizeSuggestionUrl(row.url) === actionKey)) return ranked;
+  if (ranked.some((row) => normalizeSuggestionUrl(row.url) === actionKey)) {
+    return ranked.slice(0, MAX_RESULTS);
+  }
+  // The action row is part of the list, not a bonus entry: the whole palette still fits in
+  // `MAX_RESULTS`, so the list never grows past what the panel can show.
+  const room = MAX_RESULTS - 1;
   // A typed address is what the user most likely means, so it leads; a web search is
   // the fallback and stays below anything that already exists.
-  return action.isSearch ? [...ranked, action] : [action, ...ranked];
+  return action.isSearch ? [...ranked.slice(0, room), action] : [action, ...ranked.slice(0, room)];
 }
 
 function rowIcon(row: MahoCommandBarResult): LucideIcon {
@@ -334,11 +337,23 @@ export function MahoCommandBar({
 
   const boundedIndex = results.length === 0 ? 0 : Math.min(selectedIndex, results.length - 1);
 
+  // `Cmd+T` opened this palette to land somewhere new. An existing tab/bookmark/history row
+  // for the typed address is the same page as the typed address, so it must not silently
+  // replace the page the user is looking at either.
+  const typedAddressKey = useMemo(() => {
+    if (mode !== "new-tab") return null;
+    if (!query.trim()) return null;
+    const url = normalizeBrowserAddress(query, settings);
+    if (!url || url === "about:blank") return null;
+    return normalizeSuggestionUrl(url);
+  }, [mode, query, settings]);
+
   const commit = useCallback((row: MahoCommandBarResult | undefined, target: MahoCommandBarTarget) => {
     if (!row) return;
-    // `Cmd+T` opened this palette to land somewhere new: a typed address must not
-    // replace the page the user is looking at.
-    const resolved = target === "current" && row.source === "action" && mode === "new-tab"
+    const matchesTypedAddress = typedAddressKey !== null
+      && normalizeSuggestionUrl(row.url) === typedAddressKey;
+    const resolved = target === "current"
+      && (matchesTypedAddress || (row.source === "action" && mode === "new-tab"))
       ? "new-tab"
       : target;
     if (row.source === "tab" && row.browserId && resolved === "current") {
@@ -348,7 +363,7 @@ export function MahoCommandBar({
     }
     onNavigate(row.url, resolved);
     onClose();
-  }, [mode, onClose, onNavigate, onSelectOpenTab]);
+  }, [mode, onClose, onNavigate, onSelectOpenTab, typedAddressKey]);
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown") {

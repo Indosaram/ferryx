@@ -93,10 +93,24 @@ struct MediaEnvelope {
     report: MediaReport,
 }
 
-/// Strips control characters, collapses runs of whitespace, trims and clamps to `limit` chars.
+/// Whether `ch` is an invisible direction/zero-width formatting character a page can use to
+/// make a title read one way in the Now Playing card and another way in the tab strip.
+fn is_invisible_format(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2060}'
+    )
+}
+
+/// Strips control and invisible formatting characters, collapses runs of whitespace, trims and
+/// clamps to `limit` chars.
 pub fn clamp_text(raw: &str, limit: usize) -> String {
     let cleaned: String = raw
         .chars()
+        .filter(|ch| !is_invisible_format(*ch))
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -528,6 +542,16 @@ mod tests {
     fn text_clamping_collapses_whitespace() {
         assert_eq!(clamp_text("  a\n\t b  ", 100), "a b");
         assert_eq!(clamp_text("abc", 2), "ab");
+    }
+
+    #[test]
+    fn text_clamping_strips_bidi_and_zero_width_characters() {
+        // A page can flip the visual order of a title with RTL overrides, or hide a suffix in
+        // zero-width characters; neither survives into the card.
+        assert_eq!(clamp_text("\u{202e}evil\u{202c} text", 100), "evil text");
+        assert_eq!(clamp_text("a\u{200b}b\u{200e}c\u{2060}d", 100), "abcd");
+        assert_eq!(clamp_text("\u{2066}\u{2069}kept", 100), "kept");
+        assert_eq!(clamp_text("\u{200f}", 100), "");
     }
 
     #[test]

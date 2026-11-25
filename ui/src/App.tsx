@@ -35,9 +35,7 @@ import { Toaster, toast } from "./components/ui/sonner";
 import { cn } from "./lib/cn";
 import {
   loadActivityMode,
-  loadSidebarWidthForMode,
   saveActivityMode,
-  SIDEBAR_RANGE_BY_MODE,
   type ActivityMode,
 } from "./lib/sidebarPersistence";
 import { copyTextToClipboard } from "./lib/clipboard";
@@ -64,6 +62,14 @@ import {
   resolveBrowserTabSwitch,
 } from "./lib/worktreeBrowserBridge";
 import { browserStore } from "./state/browserStore";
+import {
+  BROWSER_MODE_SHORTCUT_EVENT,
+  MahoBrowserMiniPane,
+  useMahoBrowserRuntime,
+  useMahoBrowserShell,
+  type BrowserModeShortcutDetail,
+} from "./components/browser/maho/MahoBrowserShell";
+import { useBrowserAgentActivity } from "./components/browser/maho/MahoAgentControl";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
@@ -1349,6 +1355,9 @@ function WorkspaceApp({
   // Without this the host's history recorder never learns history is on: it starts disabled, so
   // no visit is ever written and the library stays empty (audit run 42341850075).
   useBrowserLibrarySync(isNativeRuntime, reportRuntimeError);
+  // The global browser store's startup migration + live sync, the auto-archive policy and the
+  // mini link opener are app-lifetime: they belong to the store, not to the mode on screen.
+  useMahoBrowserRuntime(isNativeRuntime);
 
   useEffect(() => {
     setSshTabOperation(null);
@@ -2664,7 +2673,7 @@ function WorkspaceApp({
   const [activityMode, setActivityMode] = useState<ActivityMode>(loadActivityMode);
   // Each mode's drawer remembers its own width. The Browser and Remote Desktop drawers own their
   // resize handles; these read the same keys so their width survives that work.
-  const [browserDrawerWidth] = useState(() => loadSidebarWidthForMode("browser"));
+
   // The Remote Desktop canvas shows one host at a time; the drawer and its tabs both select it.
   const [remoteDesktopHostId, setRemoteDesktopHostId] = useState<string | null>(null);
   const remoteDesktopSessionCount = useSyncExternalStore(
@@ -2677,7 +2686,7 @@ function WorkspaceApp({
     saveActivityMode(mode);
     // A mode with a drawer is useless with the drawer collapsed, so selecting it reveals the
     // drawer; `Cmd+B` still collapses it afterwards without touching the rail.
-    if ((mode === "supervisor" || mode === "worktrees" || mode === "remoteDesktop") && !isSidebarOpen) {
+    if (!isSidebarOpen) {
       setIsSidebarOpen(true);
       persistSidebarOpen(true);
     }
@@ -5023,8 +5032,6 @@ function WorkspaceApp({
   };
   const routeSplitEventToBrowserRef = useRef(routeSplitEventToBrowser);
   routeSplitEventToBrowserRef.current = routeSplitEventToBrowser;
-  const dispatchBrowserShortcutRef = useRef(dispatchBrowserShortcut);
-  dispatchBrowserShortcutRef.current = dispatchBrowserShortcut;
 
   // Child browser webviews own OS focus, so the main window never sees these
   // The embedded browser webview owns native keyboard focus while active, which
@@ -5142,6 +5149,11 @@ function WorkspaceApp({
    * (capture phase, earlier listener) so it wins the keystroke, and it prevents the default so the
    * app dispatcher skips the same chord. Worktrees mode is untouched: the router returns null and
    * Ctrl+Tab stays `tab.next`, Cmd+Shift+I stays Supervisor.
+   *
+   * The router only decides *which* chord fired; the surfaces that act on it (the Maho drawer's
+   * Command Bar, the Ctrl+Tab card switcher, closing the Space's active tab) live in
+   * `MahoBrowserShell`, so the action travels as the shell's DOM event rather than being
+   * re-implemented here. One handler means the key path and any other emitter cannot drift.
    */
   useEffect(() => {
     if (activeRemoteHost) return;
@@ -5152,44 +5164,15 @@ function WorkspaceApp({
       if (!action) return;
       if (event.target instanceof Element && event.target.closest("[data-shortcut-recorder]")) return;
       event.preventDefault();
-      if (action === "new-tab") {
-        void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError);
-        return;
-      }
-      if (action === "close-tab") {
-        // Browser mode closes the Maho tab the canvas is showing; the worktree surface is hidden
-        // in this mode, so falling back to it would close a tab the user cannot see.
-        const storeState = browserStore.getState();
-        const activeId = storeState.activeBrowserIdBySpace[storeState.activeSpaceId] ?? null;
-        if (activeId) {
-          closeBrowserSessionFromSplit(activeId, (id) => {
-            browserTabNavigation.forget(id);
-            void closeBrowser(id).catch(reportRuntimeError);
-          }, browserStore);
-          return;
-        }
-        handleCloseActiveSurface();
-        return;
-      }
-      if (action === "command-bar") {
-        if (shortcutBrowserId) dispatchBrowserShortcutRef.current("focus-address");
-        return;
-      }      if (action === "switcher-next") {
-        handleCycleTab(1);
-        return;
-      }
-      handleCycleTab(-1);
+      window.dispatchEvent(new CustomEvent<BrowserModeShortcutDetail>(BROWSER_MODE_SHORTCUT_EVENT, {
+        detail: { action },
+      }));
     };
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [
     activeRemoteHost,
     activityMode,
-    createBrowserTab,
-    handleCloseActiveSurface,
-    handleCycleTab,
-    reportRuntimeError,
-    shortcutBrowserId,
   ]);
   const shortcutHandlers = useMemo(
     () => {
@@ -5387,6 +5370,16 @@ function WorkspaceApp({
   // avoid. Browser and Remote Desktop only hide it and draw their own canvas beside it.
   const worktreeDrawerMode = activityMode === "supervisor" || activityMode === "worktrees" ? activityMode : null;
   const workspaceSurfaceVisible = worktreeDrawerMode !== null;
+  // Browser mode's whole surface lives in one hook: the Maho drawer, the canvas, the Command Bar
+  // and the Ctrl+Tab switcher. Splitting it this way keeps the always-mounted worktree surface
+  // exactly where it was while still giving every Browser surface one owner of its state.
+  const browserActivity = useBrowserAgentActivity();
+  const mahoBrowser = useMahoBrowserShell({
+    active: activityMode === "browser",
+    drawerOpen: isSidebarOpen,
+    activity: browserActivity,
+    onRevealBrowser: handleOpenBrowserFullscreen,
+  });
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
@@ -5420,6 +5413,7 @@ function WorkspaceApp({
         supervisorBadge={supervisorDecisionCount > 0 ? supervisorDecisionCount : null}
         worktreesBadge={worktreeAgentAttention > 0 ? worktreeAgentAttention : null}
         remoteDesktopBadge={remoteDesktopSessionCount > 0 ? remoteDesktopSessionCount : null}
+        browserBadge={browserActivity.badgeCount > 0 ? browserActivity.badgeCount : null}
         sidebarOpen={isSidebarOpen}
         onToggleSidebar={toggleSidebar}
         onOpenResources={() => setIsResourcesOpen(true)}
@@ -5478,22 +5472,7 @@ function WorkspaceApp({
           onToggle={toggleSidebar}
         />
       ) : null}
-      {isSidebarOpen && activityMode === "browser" ? (
-        <aside
-          data-testid="activity-drawer-browser"
-          className="flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-worktree-sidebar text-worktree-sidebar-foreground"
-          style={{
-            width: `${browserDrawerWidth}px`,
-            minWidth: `${SIDEBAR_RANGE_BY_MODE.browser.min}px`,
-            maxWidth: `${SIDEBAR_RANGE_BY_MODE.browser.max}px`,
-          }}
-        >
-          <div data-tauri-drag-region className="h-titlebar shrink-0" />
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 text-[11px] text-muted-foreground">
-            <p className="py-2">Browser tabs open here next to the worktree workspace.</p>
-          </div>
-        </aside>
-      ) : null}
+      {mahoBrowser.drawer}
       {isSidebarOpen && activityMode === "remoteDesktop" ? (
         <RemoteDesktopActivitySidebar activeHostId={remoteDesktopHostId} onSelectHost={setRemoteDesktopHostId} />
       ) : null}
@@ -5636,20 +5615,13 @@ function WorkspaceApp({
           </div>
         )}
       </main>
+      {/* The Transient Mini Pane's slot outside Browser mode: Shift+click on a terminal link peeks
+          beside the terminal, in the same right split a worktree browser pane uses. Browser mode
+          renders the mini inside its own canvas overlay instead, so one `browserId` is only ever
+          on one surface. */}
+      <MahoBrowserMiniPane visible={workspaceSurfaceVisible} />
 
-      {activityMode === "browser" ? (
-        <section
-          data-testid="activity-canvas-browser"
-          className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
-        >
-          <div className="flex h-titlebar shrink-0 items-center border-b border-border px-3 text-[11px] text-muted-foreground">
-            Browser
-          </div>
-          <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
-            Browser canvas arrives with the Maho browser sidebar and page canvas.
-          </div>
-        </section>
-      ) : null}
+      {mahoBrowser.canvas}
       {/* Mounted in every mode: switching to a worktree or the browser only hides the canvas, so a
           live remote desktop session never disconnects (GAP-7). */}
       <GlobalRemoteDesktopCanvas
@@ -5916,6 +5888,9 @@ function WorkspaceApp({
           }}
         />
       ) : null}
+      {/* Browser mode's overlay surfaces (Command Bar, Ctrl+Tab switcher). They render nothing
+          while closed, and their `role="dialog"` is what occludes the native page underneath. */}
+      {mahoBrowser.overlays}
     </div>
   );
 }

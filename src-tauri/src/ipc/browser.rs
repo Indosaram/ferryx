@@ -3252,7 +3252,8 @@ pub async fn cmd_browser_media_control<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub async fn cmd_browser_download(url: String, file_path: String) -> Result<(), IpcError> {    download_url_to_path(&url, std::path::Path::new(&file_path)).await?;
+pub async fn cmd_browser_download(url: String, file_path: String) -> Result<(), IpcError> {
+    download_url_to_path(&url, std::path::Path::new(&file_path)).await?;
     Ok(())
 }
 
@@ -4026,6 +4027,9 @@ pub async fn close_browser_session<R: tauri::Runtime>(
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
     crate::browser::site_permissions::forget_browser(browser_id);
     crate::browser::media::forget_browser(browser_id);
+    // The Now Playing card outlives the tab that produced it, so a closed tab has to publish
+    // its empty state; the forgetting above already dropped the throttle that would suppress it.
+    crate::browser::media::publish(app, crate::browser::media::BrowserMediaState::empty(browser_id));
     crate::browser::sign_in_handoff::untrack(browser_id);
     crate::ipc::browser_library::forget_tab(browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
