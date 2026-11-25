@@ -20,6 +20,8 @@ export const BROWSER_TAB_NAVIGATION_STORAGE_KEY = "ferryx.browser.tab-navigation
 export const BROWSER_STORE_STORAGE_KEY = "ferryx.browser.store:v1";
 /** One-shot guard: legacy worktree browser tabs have been copied into the global store. */
 export const BROWSER_STORE_MIGRATION_KEY = "ferryx.browser.store.migrated:v1";
+/** Browser mode's 2-way split ratio (0.25-0.75), persisted so the divider keeps its place. */
+export const BROWSER_SPLIT_RATIO_STORAGE_KEY = "ferryx.browser.splitRatio";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
 export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";
