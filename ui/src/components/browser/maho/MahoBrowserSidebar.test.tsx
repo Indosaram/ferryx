@@ -190,9 +190,10 @@ describe("Favorites grid", () => {
     withDnd(<MahoFavoritesGrid store={store} />);
     expect(store.getState().tabs.thirteenth.section).toBe("today");
 
-    const dropped = act(() =>
-      applyMahoDrop(store, { kind: "tab", tabId: "thirteenth" }, { kind: "section", section: "favorite" }),
-    );
+    let dropped = true;
+    act(() => {
+      dropped = applyMahoDrop(store, { kind: "tab", tabId: "thirteenth" }, { kind: "section", section: "favorite" });
+    });
     expect(dropped).toBe(false);
     expect(store.getState().tabs.thirteenth.section).toBe("today");
     expect(toastMocks.error).toHaveBeenCalledWith(FAVORITE_LIMIT_MESSAGE);
