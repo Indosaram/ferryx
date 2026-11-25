@@ -1,11 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { toIpcError } from "../lib/tauri";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent } from "react";
 import {
   mapClientPointToFrame,
-  rdConnect,
-  rdDisconnect,
   rdErrorMessage,
-  RdInputSender,
   rdMouseButton,
   wheelDeltaPixels,
   type RdConnectionState,
@@ -13,20 +9,17 @@ import {
   type RdInputEvent,
   type RdVideoFrame,
 } from "../lib/remoteDesktop";
+import { remoteDesktopStore, type RemoteDesktopSession } from "../state/remoteDesktopStore";
 import { Button } from "./ui/button";
 
 export type RemoteDesktopPaneProps = {
   hostId: string;
   label: string;
-  /** False while the owning tab is hidden. */
+  /** False while the owning tab is hidden; the session is kept alive but nothing is drawn or sent. */
   visible: boolean;
   /** True while pane drop feedback covers this pane; input is suspended so the drop wins. */
   occluded?: boolean;
 };
-
-type PaneStatus =
-  | { phase: RdConnectionState; reason: string | null }
-  | { phase: "error"; message: string };
 
 const STATUS_LABEL: Record<RdConnectionState, string> = {
   connecting: "Connecting…",
@@ -35,21 +28,31 @@ const STATUS_LABEL: Record<RdConnectionState, string> = {
   ended: "Session ended",
 };
 
+function useSession(hostId: string): RemoteDesktopSession | null {
+  return useSyncExternalStore(
+    remoteDesktopStore.subscribe,
+    () => remoteDesktopStore.getSession(hostId),
+    () => null,
+  );
+}
+
 /**
- * Viewer of one paired host's desktop: JPEG frames from the `cmd_rd_connect` channel are drawn on
- * a canvas scaled aspect-fit, and pointer/keyboard input is mapped to normalized frame coordinates.
- * The viewer session lives only as long as this component; unmount disconnects it.
+ * Canvas view of one paired host's desktop. The session itself belongs to `remoteDesktopStore`, so
+ * mounting, hiding or unmounting this pane only attaches or detaches the canvas: the connection
+ * survives worktree and tab switches. Only the explicit Disconnect button tears it down.
  */
 export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: RemoteDesktopPaneProps) {
+  const session = useSession(hostId);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const senderRef = useRef<RdInputSender | null>(null);
   const frameSizeRef = useRef<{ width: number; height: number } | null>(null);
   const pendingFrameRef = useRef<RdVideoFrame | null>(null);
   const decodingRef = useRef(false);
   const pressedKeysRef = useRef(new Set<string>());
-  const [status, setStatus] = useState<PaneStatus>({ phase: "connecting", reason: null });
+  const capturedPointersRef = useRef(new Set<number>());
+  const visibleRef = useRef(visible);
   const [hasFrame, setHasFrame] = useState(false);
-  const [attempt, setAttempt] = useState(0);
+
+  visibleRef.current = visible;
 
   const drawLatestFrame = useCallback(() => {
     if (decodingRef.current) return;
@@ -61,7 +64,8 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     void createImageBitmap(new Blob([frame.jpeg.slice()], { type: "image/jpeg" }))
       .then((bitmap) => {
         const canvas = canvasRef.current;
-        if (canvas) {
+        // A hidden pane keeps the session but must not paint: the stale frame is dropped.
+        if (canvas && visibleRef.current) {
           if (canvas.width !== frame.width) canvas.width = frame.width;
           if (canvas.height !== frame.height) canvas.height = frame.height;
           canvas.getContext("2d")?.drawImage(bitmap, 0, 0, frame.width, frame.height);
@@ -79,55 +83,60 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
       });
   }, []);
 
+  // Attach to the host's session. Reusing an existing connected session is what keeps the
+  // connection alive across mounts; nothing here may disconnect.
   useEffect(() => {
-    let cancelled = false;
-    let rdSessionId: string | null = null;
-    setStatus({ phase: "connecting", reason: null });
-    const onFrame = (message: RdFrameMessage) => {
-      if (cancelled) return;
-      if (message.kind === "status") {
-        setStatus({ phase: message.state, reason: message.reason });
-        return;
-      }
-      // Only the newest frame is kept while one decodes; older ones are dropped.
-      pendingFrameRef.current = message;
-      drawLatestFrame();
-    };
-    rdConnect(hostId, onFrame, (error) => console.warn("Remote desktop frame rejected", error)).then(
-      (result) => {
-        if (cancelled) {
-          void rdDisconnect(result.rdSessionId).catch(() => undefined);
-          return;
-        }
-        rdSessionId = result.rdSessionId;
-        senderRef.current = new RdInputSender(result.rdSessionId, undefined, (error) => {
-          console.warn("Remote desktop input failed", error);
-        });
-      },
-      (error: unknown) => {
-        if (cancelled) return;
-        setStatus({ phase: "error", message: rdErrorMessage(toIpcError(error)) });
-      },
-    );
-    return () => {
-      cancelled = true;
-      senderRef.current?.close();
-      senderRef.current = null;
-      pendingFrameRef.current = null;
-      pressedKeysRef.current.clear();
-      if (rdSessionId) {
-        void rdDisconnect(rdSessionId).catch((error: unknown) => {
-          console.warn("Remote desktop disconnect failed", error);
-        });
-      }
-    };
-  }, [hostId, attempt, drawLatestFrame]);
+    void remoteDesktopStore.connect(hostId, label);
+  }, [hostId, label]);
 
-  const inputEnabled = status.phase === "connected" && !occluded;
+  useEffect(() => remoteDesktopStore.subscribeFrames(hostId, (message: RdFrameMessage) => {
+    if (message.kind === "status") return;
+    if (!visibleRef.current) return;
+    // Only the newest frame is kept while one decodes; older ones are dropped.
+    pendingFrameRef.current = message;
+    drawLatestFrame();
+  }), [hostId, drawLatestFrame]);
+
+  const status = session?.status ?? "connecting";
+  const wireState = session?.wireState ?? (status === "connected" ? "connected" : null);
+  const inputEnabled = status === "connected" && session?.rdSessionId != null && visible && !occluded;
 
   const send = useCallback((event: RdInputEvent) => {
-    senderRef.current?.push(event);
+    remoteDesktopStore.sendInput(hostId, event);
+  }, [hostId]);
+
+  const releasePressedKeys = useCallback(() => {
+    for (const code of pressedKeysRef.current) send({ kind: "key", code, down: false });
+    pressedKeysRef.current.clear();
+  }, [send]);
+
+  const releasePointerCapture = useCallback(() => {
+    const canvas = canvasRef.current;
+    for (const pointerId of capturedPointersRef.current) {
+      try {
+        canvas?.releasePointerCapture?.(pointerId);
+      } catch {
+        // The pointer is already gone; nothing to release.
+      }
+    }
+    capturedPointersRef.current.clear();
   }, []);
+
+  // Hiding is not disconnecting: stop drawing, hand back the pointer, and let the far side know
+  // about keys it still believes are held.
+  useEffect(() => {
+    if (visible) return;
+    pendingFrameRef.current = null;
+    releasePointerCapture();
+    releasePressedKeys();
+  }, [visible, releasePointerCapture, releasePressedKeys]);
+
+  useEffect(() => {
+    if (!inputEnabled) {
+      releasePointerCapture();
+      releasePressedKeys();
+    }
+  }, [inputEnabled, releasePointerCapture, releasePressedKeys]);
 
   const sendPointerPosition = useCallback((clientX: number, clientY: number): boolean => {
     const canvas = canvasRef.current;
@@ -156,15 +165,6 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     return () => canvas.removeEventListener("wheel", onWheel);
   }, [inputEnabled, send]);
 
-  const releasePressedKeys = useCallback(() => {
-    for (const code of pressedKeysRef.current) send({ kind: "key", code, down: false });
-    pressedKeysRef.current.clear();
-  }, [send]);
-
-  useEffect(() => {
-    if (!inputEnabled || !visible) releasePressedKeys();
-  }, [inputEnabled, visible, releasePressedKeys]);
-
   const handlePointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.focus({ preventScroll: true });
     if (!inputEnabled) return;
@@ -173,6 +173,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     if (!sendPointerPosition(event.clientX, event.clientY)) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    capturedPointersRef.current.add(event.pointerId);
     send({ kind: "mouseButton", button, down: true });
   };
 
@@ -182,6 +183,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     if (button === null) return;
     sendPointerPosition(event.clientX, event.clientY);
     event.currentTarget.releasePointerCapture?.(event.pointerId);
+    capturedPointersRef.current.delete(event.pointerId);
     send({ kind: "mouseButton", button, down: false });
   };
 
@@ -207,19 +209,23 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     send({ kind: "key", code, down });
   };
 
-  const statusText = status.phase === "error"
-    ? status.message
-    : status.reason && status.phase !== "connected"
-      ? `${STATUS_LABEL[status.phase]} ${status.reason}`
-      : STATUS_LABEL[status.phase];
-  const canRetry = status.phase === "error" || status.phase === "ended";
-  const showOverlay = status.phase !== "connected" || !hasFrame;
+  const statusText = status === "error"
+    ? rdErrorMessage(session?.error ?? { code: "UNKNOWN", message: "Remote desktop failed." })
+    : status === "idle" && !wireState
+      ? "Disconnected"
+      : wireState && wireState !== "connected" && session?.reason
+        ? `${STATUS_LABEL[wireState]} ${session.reason}`
+        : wireState
+          ? STATUS_LABEL[wireState]
+          : "Connecting…";
+  const canRetry = status === "error" || status === "idle" || wireState === "ended";
+  const showOverlay = status !== "connected" || !hasFrame;
 
   return (
     <div
       className="relative flex h-full w-full min-h-0 min-w-0 items-center justify-center overflow-hidden bg-black"
       data-testid="remote-desktop-pane"
-      data-rd-state={status.phase}
+      data-rd-state={status}
     >
       <canvas
         ref={canvasRef}
@@ -228,7 +234,10 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
         aria-label={`Remote desktop of ${label}`}
         data-testid="remote-desktop-canvas"
         className="h-full w-full object-contain outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
-        style={{ pointerEvents: occluded ? "none" : undefined, visibility: hasFrame ? "visible" : "hidden" }}
+        style={{
+          pointerEvents: occluded || !visible ? "none" : undefined,
+          visibility: hasFrame && visible ? "visible" : "hidden",
+        }}
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         onPointerMove={handlePointerMove}
@@ -240,9 +249,9 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
       {showOverlay ? (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center">
           <p
-            role={status.phase === "error" ? "alert" : "status"}
+            role={status === "error" ? "alert" : "status"}
             data-testid="remote-desktop-status"
-            className={`text-[12px] ${status.phase === "error" ? "text-destructive" : "text-muted-foreground"}`}
+            className={`text-[12px] ${status === "error" ? "text-destructive" : "text-muted-foreground"}`}
           >
             {statusText}
           </p>
@@ -252,13 +261,34 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
               size="sm"
               variant="outline"
               className="pointer-events-auto"
-              onClick={() => setAttempt((value) => value + 1)}
+              onClick={() => void remoteDesktopStore.connect(hostId, label)}
             >
               Reconnect
             </Button>
           ) : null}
+          {status === "connected" || status === "connecting" ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="pointer-events-auto"
+              onClick={() => void remoteDesktopStore.disconnect(hostId)}
+            >
+              Disconnect
+            </Button>
+          ) : null}
         </div>
-      ) : null}
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="absolute right-2 top-2"
+          onClick={() => void remoteDesktopStore.disconnect(hostId)}
+        >
+          Disconnect
+        </Button>
+      )}
     </div>
   );
 }
