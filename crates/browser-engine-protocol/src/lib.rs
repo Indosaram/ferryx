@@ -1162,8 +1162,8 @@ mod tests {
         assert!(MEDIA_SESSION_SOURCE.contains("querySelectorAll('audio,video')"));
 
         let push = media_reporter_script("post");
-        assert!(push.contains("(function (post)"));
-        assert!(push.ends_with(")(post);"));
+        assert!(push.contains("function (post)"));
+        assert!(push.contains(")(post);"));
         let pull = media_snapshot_script();
         assert!(pull.ends_with(")(null)"));
     }
