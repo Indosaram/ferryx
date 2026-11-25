@@ -124,6 +124,21 @@ impl FairQueue {
         true
     }
 
+    fn push_channel_frame(&self, channel: u32, frame: Vec<u8>) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.dead {
+            return false;
+        }
+        let existed = state.channels.contains_key(&channel);
+        state.channels.entry(channel).or_default().push_back(frame);
+        if !existed {
+            state.order.push_back(channel);
+        }
+        drop(state);
+        self.notify.notify_one();
+        true
+    }
+
     fn push_data(&self, channel: u32, payload: &[u8]) -> bool {
         if payload.is_empty() {
             return true;
@@ -220,6 +235,14 @@ async fn run_writer<W: AsyncWrite + Unpin>(
     }
 }
 
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub async fn serve_mux<S, G, F, Fut>(
     secure: SecureStream<S>,
     connect_gateway: F,
@@ -239,6 +262,7 @@ where
         Arc::clone(&transport),
         Arc::clone(&queue),
     ));
+    let _writer_abort = AbortOnDrop(writer_task.abort_handle());
 
     let channels: Arc<Mutex<HashMap<u32, mpsc::Sender<Vec<u8>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -290,7 +314,7 @@ where
                     }
                 };
                 if !admitted {
-                    queue.push_control(encode_mux_frame(channel, MuxKind::Close, &[]));
+                    queue.push_channel_frame(channel, encode_mux_frame(channel, MuxKind::Close, &[]));
                     continue;
                 }
                 let connect = Arc::clone(&connect_gateway);
@@ -302,7 +326,7 @@ where
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
                             .remove(&channel);
-                        queue.push_control(encode_mux_frame(channel, MuxKind::Close, &[]));
+                        queue.push_channel_frame(channel, encode_mux_frame(channel, MuxKind::Close, &[]));
                         return;
                     };
                     let (mut gw_rx, mut gw_tx) = tokio::io::split(gateway);
@@ -330,7 +354,7 @@ where
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .remove(&channel);
-                    queue.push_control(encode_mux_frame(channel, MuxKind::Close, &[]));
+                    queue.push_channel_frame(channel, encode_mux_frame(channel, MuxKind::Close, &[]));
                 });
             }
             MuxKind::Data => {
@@ -469,7 +493,7 @@ impl RelayMuxClient {
         }
         if !self
             .queue
-            .push_control(encode_mux_frame(channel, MuxKind::Open, &[]))
+            .push_channel_frame(channel, encode_mux_frame(channel, MuxKind::Open, &[]))
         {
             self.channels
                 .lock()
@@ -494,7 +518,7 @@ impl RelayMuxClient {
 
     fn close_write(&self, channel: u32) {
         self.queue
-            .push_control(encode_mux_frame(channel, MuxKind::Close, &[]));
+            .push_channel_frame(channel, encode_mux_frame(channel, MuxKind::Close, &[]));
     }
 
     fn detach_channel(&self, channel: u32) {
