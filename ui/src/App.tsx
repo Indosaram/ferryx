@@ -1,4 +1,3 @@
-import { Bot, PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
@@ -7,6 +6,7 @@ import { useDesktopContinuity } from "./lib/useDesktopContinuity";
 import { deriveContinuitySelection } from "./lib/continuitySelection";
 
 import { CommandPalette } from "./components/CommandPalette";
+import { DesktopActivityBar } from "./components/activity/DesktopActivityBar";
 import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
@@ -32,7 +32,14 @@ import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
-import { IconButton } from "./components/ui/IconButton";
+import { cn } from "./lib/cn";
+import {
+  loadActivityMode,
+  loadSidebarWidthForMode,
+  saveActivityMode,
+  SIDEBAR_RANGE_BY_MODE,
+  type ActivityMode,
+} from "./lib/sidebarPersistence";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { cycleAppearanceTheme, openAppearanceSurface } from "./lib/appearanceCommands";
 import { useAppearanceSettings, useApplyAppearanceSettings } from "./lib/appearanceSettings";
@@ -1074,7 +1081,7 @@ function WorkspaceApp({
     recoveredFromHmr,
     agents,
     tabActivity,
-    worktreeActivity,
+    worktreeActivity = {},
     attentionBySessionId = NO_ATTENTION,
     unreadBadgeCount: unreadBadgeCountFromStore,
     activityNotificationTargets,
@@ -2639,6 +2646,23 @@ function WorkspaceApp({
     resumeStartup: SpawnTerminalRequest["startup"] | null;
   } | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
+  // The Activity Bar's mode: the rail is always visible, so this (not the drawer width) decides what
+  // the main area shows. Persisted per window under `ferryx.activity.mode`.
+  const [activityMode, setActivityMode] = useState<ActivityMode>(loadActivityMode);
+  // Each mode's drawer remembers its own width. Browser and Remote Desktop have no drawer component
+  // yet (todos 8-17 fill them in); these read the same keys so their width survives that work.
+  const [browserDrawerWidth] = useState(() => loadSidebarWidthForMode("browser"));
+  const [remoteDesktopDrawerWidth] = useState(() => loadSidebarWidthForMode("remoteDesktop"));
+  const selectActivityMode = useCallback((mode: ActivityMode) => {
+    setActivityMode(mode);
+    saveActivityMode(mode);
+    // A mode with a drawer is useless with the drawer collapsed, so selecting it reveals the
+    // drawer; `Cmd+B` still collapses it afterwards without touching the rail.
+    if ((mode === "supervisor" || mode === "worktrees") && !isSidebarOpen) {
+      setIsSidebarOpen(true);
+      persistSidebarOpen(true);
+    }
+  }, [isSidebarOpen]);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
@@ -2646,6 +2670,14 @@ function WorkspaceApp({
   const [historyProject, setHistoryProject] = useState<RegisteredProject | null>(null);
   // The collapsed sidebar's badge counts the Supervisor panel's decisions for the owner.
   const supervisorDecisionCount = usePanelDecisionCount();
+  // The Worktrees rail mode's badge: agents that finished or are waiting for input in any lane.
+  const worktreeAgentAttention = useMemo(
+    () => Object.values(worktreeActivity).reduce(
+      (sum, summary) => sum + (summary ? summary.waitingCount + summary.doneCount : 0),
+      0,
+    ),
+    [worktreeActivity],
+  );
   useDesktopSidebarPublisher({
     // One desktop sidebar model per app (consumed by remote clients): the primary publishes it.
     enabled: isNativeRuntime && isPrimary,
@@ -4323,8 +4355,8 @@ function WorkspaceApp({
   }, []);
   // The Supervisor panel is the attention surface now; the old Inbox shortcut reveals the sidebar.
   const handleRevealSupervisor = useCallback(() => {
-    if (!isSidebarOpen) toggleSidebar();
-  }, [isSidebarOpen, toggleSidebar]);
+    selectActivityMode("supervisor");
+  }, [selectActivityMode]);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
   const handleDeleteWorktree = useCallback((worktree: Worktree) => {
@@ -5183,6 +5215,11 @@ function WorkspaceApp({
     (state.workspaceId !== activeProject.workspaceId || state.layout.tabs.length === 0) &&
     (sshInitializing || activeRegistrationError);
 
+  // The worktree/terminal workspace stays mounted in every mode: unmounting it would tear down
+  // PTY attachments and native surfaces, which is exactly the reload this Activity Bar exists to
+  // avoid. Browser and Remote Desktop only hide it and draw their own canvas beside it.
+  const worktreeDrawerMode = activityMode === "supervisor" || activityMode === "worktrees" ? activityMode : null;
+  const workspaceSurfaceVisible = worktreeDrawerMode !== null;
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
@@ -5209,9 +5246,26 @@ function WorkspaceApp({
       />
       <TerminalLinkActions />
       <TerminalFileLinkActions />
-      {isSidebarOpen ? (
+      <DesktopActivityBar
+        mode={activityMode}
+        onModeChange={selectActivityMode}
+        supervisorBadgeTestId="collapsed-attention-badge"
+        supervisorBadge={supervisorDecisionCount > 0 ? supervisorDecisionCount : null}
+        worktreesBadge={worktreeAgentAttention > 0 ? worktreeAgentAttention : null}
+        sidebarOpen={isSidebarOpen}
+        onToggleSidebar={toggleSidebar}
+        onOpenResources={() => setIsResourcesOpen(true)}
+        onOpenSettings={handleOpenSettings}
+        isMac={isMacShortcutPlatform()}
+      />
+      {isSidebarOpen && worktreeDrawerMode ? (
         <Sidebar
           open={true}
+          widthMode={worktreeDrawerMode}
+          view={worktreeDrawerMode}
+          hideViewTabs
+          // The rail owns the traffic-light clearance.
+          isMac={false}
           projects={projects}
           activeProjectId={activeProject.workspaceId}
           registeredProjectId={registeredProjectId}
@@ -5255,37 +5309,48 @@ function WorkspaceApp({
           }
           onToggle={toggleSidebar}
         />
-      ) : (
-        <div className="relative w-0 shrink-0 overflow-visible">
-          <div className="titlebar-left-floating absolute top-0 left-0 z-20 flex h-titlebar shrink-0 items-center border-b border-r border-border bg-card px-2">
-            {isMacShortcutPlatform() ? (
-              <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" />
-            ) : null}
-            <IconButton data-shortcut="sidebar.left.toggle" label="Show sidebar" className="no-drag" size="sm" onClick={toggleSidebar}>
-              <PanelLeft className="size-3.5" />
-            </IconButton>
-            <IconButton
-              data-shortcut="notifications.toggle"
-              label={supervisorDecisionCount > 0 ? `Open supervisor (${supervisorDecisionCount})` : "Open supervisor"}
-              className="no-drag relative"
-              size="sm"
-              onClick={handleRevealSupervisor}
-            >
-              <Bot className="size-3.5" />
-              {supervisorDecisionCount > 0 ? (
-                <span
-                  data-testid="collapsed-attention-badge"
-                  className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
-                >
-                  {supervisorDecisionCount > 9 ? "9+" : supervisorDecisionCount}
-                </span>
-              ) : null}
-            </IconButton>
+      ) : null}
+      {isSidebarOpen && activityMode === "browser" ? (
+        <aside
+          data-testid="activity-drawer-browser"
+          className="flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-worktree-sidebar text-worktree-sidebar-foreground"
+          style={{
+            width: `${browserDrawerWidth}px`,
+            minWidth: `${SIDEBAR_RANGE_BY_MODE.browser.min}px`,
+            maxWidth: `${SIDEBAR_RANGE_BY_MODE.browser.max}px`,
+          }}
+        >
+          <div data-tauri-drag-region className="h-titlebar shrink-0" />
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 text-[11px] text-muted-foreground">
+            <p className="py-2">Browser tabs open here next to the worktree workspace.</p>
           </div>
-        </div>
-      )}
+        </aside>
+      ) : null}
+      {isSidebarOpen && activityMode === "remoteDesktop" ? (
+        <aside
+          data-testid="activity-drawer-remote-desktop"
+          className="flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-worktree-sidebar text-worktree-sidebar-foreground"
+          style={{
+            width: `${remoteDesktopDrawerWidth}px`,
+            minWidth: `${SIDEBAR_RANGE_BY_MODE.remoteDesktop.min}px`,
+            maxWidth: `${SIDEBAR_RANGE_BY_MODE.remoteDesktop.max}px`,
+          }}
+        >
+          <div data-tauri-drag-region className="h-titlebar shrink-0" />
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 text-[11px] text-muted-foreground">
+            <p className="py-2">Paired machines and their connections open here.</p>
+          </div>
+        </aside>
+      ) : null}
 
-      <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
+      <main
+        data-testid="workspace-surface"
+        hidden={!workspaceSurfaceVisible}
+        className={cn(
+          "h-full min-w-0 flex-1 flex-col overflow-hidden bg-background",
+          workspaceSurfaceVisible ? "flex" : "hidden",
+        )}
+      >
         <InsecureTransportBanner />
         <RemoteBrowserSharingIndicator
           isSharing={remoteBrowserSharingActive}
@@ -5405,7 +5470,7 @@ function WorkspaceApp({
             onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
               markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
             }}
-            leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
+            leadingSpacer={0}
           />
         ) : (
           <div className="flex h-full flex-1 items-center justify-center bg-background text-xs text-muted-foreground">
@@ -5413,6 +5478,33 @@ function WorkspaceApp({
           </div>
         )}
       </main>
+
+      {activityMode === "browser" ? (
+        <section
+          data-testid="activity-canvas-browser"
+          className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+        >
+          <div className="flex h-titlebar shrink-0 items-center border-b border-border px-3 text-[11px] text-muted-foreground">
+            Browser
+          </div>
+          <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+            Browser canvas arrives with the Maho browser sidebar and page canvas.
+          </div>
+        </section>
+      ) : null}
+      {activityMode === "remoteDesktop" ? (
+        <section
+          data-testid="activity-canvas-remote-desktop"
+          className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+        >
+          <div className="flex h-titlebar shrink-0 items-center border-b border-border px-3 text-[11px] text-muted-foreground">
+            Remote Desktop
+          </div>
+          <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+            Connected machine canvases arrive with the Remote Desktop mode.
+          </div>
+        </section>
+      ) : null}
 
       {isCommandPaletteOpen && !activeRemoteHost ? (
         <CommandPalette

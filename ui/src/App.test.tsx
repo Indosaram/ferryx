@@ -2668,13 +2668,14 @@ describe("App project workspace flow", () => {
     expect(screen.getByTestId("mock-sidebar")).toHaveAttribute("data-open", "true");
     expect(screen.getByRole("button", { name: "Hide sidebar" })).toBeInTheDocument();
 
-    // Toggle off via Cmd+B shortcut
+    // Toggle off via Cmd+B shortcut; the Activity Bar rail stays put.
     fireEvent.keyDown(window, { key: "b", metaKey: true });
     expect(screen.queryByTestId("mock-sidebar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("desktop-activity-bar")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
     expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
 
-    // Toggle on via Show sidebar button in header
+    // Toggle on from the rail's own drawer toggle
     fireEvent.click(screen.getByRole("button", { name: "Show sidebar" }));
     expect(screen.getByTestId("mock-sidebar")).toBeInTheDocument();
     expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("true");

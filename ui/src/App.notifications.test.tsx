@@ -1114,15 +1114,16 @@ describe("App notification coordinator wiring", () => {
       }));
     });
 
-    it("counts the panel's decisions on the collapsed sidebar and reopens the sidebar from it", async () => {
+    it("counts the panel's decisions on the Activity Bar and reopens the drawer from it", async () => {
       panel.load.mockResolvedValue(panelSnapshotFixture);
       const view = render(<App />);
       await act(async () => { await Promise.all(panel.load.mock.results.map((result) => result.value)); });
       collapse();
       expect(view.queryByTestId("mock-sidebar")).toBeNull();
+      // The rail stays visible when Cmd+B hides the drawer, and carries the decision count.
       expect(view.getByTestId("collapsed-attention-badge")).toHaveTextContent(String(panelSnapshotFixture.decisions.length));
 
-      fireEvent.click(view.getByRole("button", { name: `Open supervisor (${panelSnapshotFixture.decisions.length})` }));
+      fireEvent.click(view.getByRole("tab", { name: "Supervisor" }));
 
       expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
     });
@@ -1141,7 +1142,7 @@ describe("App notification coordinator wiring", () => {
       collapse();
       // A finished agent is a desktop notification, not a decision for the owner.
       expect(view.queryByTestId("collapsed-attention-badge")).toBeNull();
-      expect(view.getByRole("button", { name: "Open supervisor" })).toBeInTheDocument();
+      expect(view.getByRole("tab", { name: "Supervisor" })).toBeInTheDocument();
 
       const [decision] = panelSnapshotFixture.decisions;
       act(() => { panel.handlers.forEach((handler) => handler({ type: "panel.decision", sessionRef: decision.sessionRef, decision })); });
