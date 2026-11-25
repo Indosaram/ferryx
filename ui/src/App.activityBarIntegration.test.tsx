@@ -363,7 +363,6 @@ describe("Activity Bar shell integration", () => {
     const drawer = screen.getByTestId("activity-drawer-browser");
     expect(within(drawer).getByRole("complementary", { name: /Browser sidebar/ })).toBeInTheDocument();
     expect(screen.getByTestId("browser-mode-canvas")).toBeInTheDocument();
-
     // Cmd+B collapses the drawer; the Activity Bar is the shell's left edge and never hides.
     act(() => {
       fireEvent.keyDown(window, { key: "b", metaKey: true });
@@ -389,15 +388,16 @@ describe("Activity Bar shell integration", () => {
     act(() => { fireEvent.keyDown(window, { key: "Escape" }); });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Maho command bar" })).toBeNull());
 
-    // Library replaces the tab body (favorites, pinned, Today, Agent tasks) with the library rail.
+    // Library replaces the tab body (favorites, pinned, Today) with the library rail. Agent tasks
+    // stay: they are their own section below the body, not part of it.
     const drawer = screen.getByTestId("activity-drawer-browser");
     expect(within(drawer).getByTestId("maho-agent-tasks")).toBeInTheDocument();
-    const libraryToggle = within(drawer).getAllByRole("button").find((button) => /library/i.test(button.getAttribute("aria-label") ?? button.textContent ?? ""));
-    expect(libraryToggle).toBeDefined();
-    act(() => { libraryToggle?.click(); });
-    await waitFor(() => expect(within(drawer).queryByTestId("maho-agent-tasks")).toBeNull());
-    act(() => { libraryToggle?.click(); });
-    await waitFor(() => expect(within(drawer).getByTestId("maho-agent-tasks")).toBeInTheDocument());
+    expect(within(drawer).queryByRole("tablist", { name: "Browser library" })).toBeNull();
+    const libraryToggle = within(drawer).getByRole("button", { name: "Library" });
+    act(() => { libraryToggle.click(); });
+    expect(await within(drawer).findByRole("tablist", { name: "Browser library" })).toBeInTheDocument();
+    act(() => { libraryToggle.click(); });
+    await waitFor(() => expect(within(drawer).queryByRole("tablist", { name: "Browser library" })).toBeNull());
   });
 
   it("tidy groups the Space's Today tabs and shows the browser badge for an agent-controlled tab", async () => {
@@ -413,9 +413,8 @@ describe("Activity Bar shell integration", () => {
 
     act(() => { railTab("Browser").click(); });
     const drawer = screen.getByTestId("activity-drawer-browser");
-    const tidy = within(drawer).getAllByRole("button").find((button) => /tidy/i.test(button.getAttribute("aria-label") ?? button.textContent ?? ""));
-    expect(tidy).toBeDefined();
-    act(() => { tidy?.click(); });
+    const tidy = within(drawer).getByRole("button", { name: "Tidy Today" });
+    act(() => { tidy.click(); });
 
     // Two tabs on one host become one folder named for that host.
     await waitFor(() => expect(Object.values(browserStore.getState().folders).map((folder) => folder.name)).toContain("docs.example.com"));
@@ -429,7 +428,7 @@ describe("Activity Bar shell integration", () => {
 
     // The rail's Settings button opens the dialog; its machine row performs the handoff.
     act(() => {
-      screen.getByRole("button", { name: /Settings/i }).click();
+      screen.getByTestId("activity-settings").click();
     });
     const dialog = await screen.findByTestId("settings-dialog");
     act(() => { within(dialog).getByRole("button", { name: "Open remote desktop" }).click(); });

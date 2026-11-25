@@ -40,7 +40,6 @@ import {
   navigateBrowser,
   reloadBrowser,
   type BrowserReloadOptions,
-  type BrowserShortcutAction,
 } from "../../../lib/browserTauri";
 import { browserTabNavigation, goBackInBrowserTab, goForwardInBrowserTab } from "../../../lib/browserTabNavigation";
 import { registerMiniBrowserLinkOpener } from "../../../lib/linkRouting";
@@ -50,6 +49,7 @@ import {
   saveSidebarWidthForMode,
   SIDEBAR_RANGE_BY_MODE,
 } from "../../../lib/sidebarPersistence";
+import type { MahoBrowserShortcutAction } from "../../../lib/shortcuts";
 import type { BrowserState } from "../../../lib/types";
 import { safeRandomUUID } from "../../../lib/uuid";
 import { closeBrowserSessionFromSplit } from "../../../lib/worktreeBrowserBridge";
@@ -85,7 +85,7 @@ import { tidyTodayTabs } from "./mahoTabTidy";
  */
 export const BROWSER_MODE_SHORTCUT_EVENT = "ferryx:browser-mode-shortcut";
 
-export type BrowserModeShortcutDetail = { action: BrowserShortcutAction };
+export type BrowserModeShortcutDetail = { action: MahoBrowserShortcutAction };
 
 /** The drawer's resize step, matching the other drawers' keyboard affordance. */
 const KEYBOARD_STEP = 16;
@@ -431,7 +431,7 @@ export function useMahoBrowserShell({
     void copyTextToClipboard(url).catch(() => undefined);
   }, []);
 
-  const drawer = drawerOpen ? (
+  const drawer = active && drawerOpen ? (
     <aside
       data-testid="activity-drawer-browser"
       className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-worktree-sidebar text-worktree-sidebar-foreground"
