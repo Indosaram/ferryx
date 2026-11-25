@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -24,7 +25,10 @@ const READABLE_TEXT = 4.5;
 const VISIBLE_GLYPH = 3;
 
 function readCss(): string {
-  return readFileSync(new URL("./maho.css", import.meta.url), "utf8");
+  // Resolved from the ui/ working directory, not via `new URL(..., import.meta.url)`:
+  // Vite rewrites a static URL literal like that into an asset reference, which is
+  // not a `file:` path under the jsdom test environment.
+  return readFileSync(join(process.cwd(), "src", "components", "browser", "maho", "maho.css"), "utf8");
 }
 
 function rgb(hex: string) {
