@@ -19,6 +19,7 @@ pub enum HostRouteState {
     Relay,
     Attempting,
     Direct,
+    Ssh,
     Disconnected,
 }
 
@@ -28,6 +29,7 @@ impl From<&RouteState> for HostRouteState {
             RouteState::Relay => Self::Relay,
             RouteState::Attempting => Self::Attempting,
             RouteState::Direct { .. } => Self::Direct,
+            RouteState::Ssh => Self::Ssh,
             RouteState::Disconnected => Self::Disconnected,
         }
     }

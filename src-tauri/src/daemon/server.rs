@@ -2502,7 +2502,7 @@ fn clear_stale_agent_state_rendezvous(runtime_dir: &Path) {
 
 pub(crate) use super::session_service::normalize_process_cwd;
 
-fn daemon_ssh_store_path() -> PathBuf {
+pub(crate) fn daemon_ssh_store_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR") {
         return PathBuf::from(dir).join("ssh_hosts.json");
     }

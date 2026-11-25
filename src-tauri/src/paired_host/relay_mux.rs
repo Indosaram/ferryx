@@ -118,6 +118,12 @@ where
     open_channel_in(&GLOBAL_RELAY_MUXES, key, mux_enabled(), dial).await
 }
 
+enum OpenAction {
+    Done(OpenChannelOutcome),
+    Wait(watch::Receiver<Option<DialOutcome>>),
+    Dial(watch::Sender<Option<DialOutcome>>),
+}
+
 async fn open_channel_in<F, Fut>(
     registry: &Mutex<Registry>,
     key: MuxKey,
@@ -132,46 +138,51 @@ where
         return Ok(OpenChannelOutcome::UseLegacy);
     }
 
-    let waiter = {
+    let action = {
         let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-        reg.live
-            .retain(|k, entry| k.host_id != key.host_id || k.generation == key.generation && entry.client.is_live());
+        reg.live.retain(|k, entry| {
+            k.host_id != key.host_id || (k.generation == key.generation && entry.client.is_live())
+        });
         reg.legacy_no_mux
             .retain(|k| k.host_id != key.host_id || k.generation == key.generation);
 
         if reg.legacy_no_mux.contains(&key) {
-            return Ok(OpenChannelOutcome::UseLegacy);
-        }
-        if let Some(entry) = reg.live.get(&key) {
-            if let Ok(stream) = entry.client.open_stream() {
-                return Ok(OpenChannelOutcome::Stream {
-                    stream,
-                    path: entry.path,
-                    reused: true,
-                });
-            }
-            reg.live.remove(&key);
-        }
-        if let Some(rx) = reg.dialing.get(&key) {
-            Some(rx.clone())
+            OpenAction::Done(OpenChannelOutcome::UseLegacy)
+        } else if let Some(stream) = reg.live.get(&key).and_then(|entry| {
+            entry.client.open_stream().ok().map(|stream| OpenChannelOutcome::Stream {
+                stream,
+                path: entry.path,
+                reused: true,
+            })
+        }) {
+            OpenAction::Done(stream)
         } else {
-            let (tx, rx) = watch::channel(None);
-            reg.dialing.insert(key.clone(), rx);
-            drop(reg);
-            let outcome = run_dial(registry, &key, tx, dial).await;
-            return finish_dial_outcome(outcome);
+            reg.live.remove(&key);
+            if let Some(rx) = reg.dialing.get(&key) {
+                OpenAction::Wait(rx.clone())
+            } else {
+                let (tx, rx) = watch::channel(None);
+                reg.dialing.insert(key.clone(), rx);
+                OpenAction::Dial(tx)
+            }
         }
     };
 
-    if let Some(mut rx) = waiter {
-        let _ = rx.wait_for(|v| v.is_some()).await;
-        let outcome = rx
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| DialOutcome::Failed(ClientError::local("HOST_UNAVAILABLE")));
-        return finish_dial_outcome(outcome);
+    match action {
+        OpenAction::Done(outcome) => Ok(outcome),
+        OpenAction::Dial(tx) => {
+            let outcome = run_dial(registry, &key, tx, dial).await;
+            finish_dial_outcome(outcome)
+        }
+        OpenAction::Wait(mut rx) => {
+            let _ = rx.wait_for(|v| v.is_some()).await;
+            let outcome = rx
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| DialOutcome::Failed(ClientError::local("HOST_UNAVAILABLE")));
+            finish_dial_outcome(outcome)
+        }
     }
-    Err(ClientError::local("HOST_UNAVAILABLE"))
 }
 
 struct DialCleanup<'a> {

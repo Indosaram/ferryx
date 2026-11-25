@@ -21,6 +21,7 @@ fn host_route_wire_shape_is_camel_case_and_never_carries_the_origin() {
         (HostRouteState::Relay, "relay"),
         (HostRouteState::Attempting, "attempting"),
         (HostRouteState::Direct, "direct"),
+        (HostRouteState::Ssh, "ssh"),
         (HostRouteState::Disconnected, "disconnected"),
     ] {
         assert_eq!(serde_json::to_value(state).unwrap(), json!(text));

@@ -21,6 +21,7 @@ pub enum RouteState {
     Relay,
     Attempting,
     Direct { origin: String },
+    Ssh,
     Disconnected,
 }
 
@@ -214,6 +215,34 @@ impl DirectRoutes {
     pub fn mark_disconnected(&self, host_id: &str, epoch: u64, now: Instant) {
         if self.settle(host_id, epoch, now, RouteState::Disconnected, true) {
             self.emit(host_id, epoch, RouteState::Disconnected);
+        }
+    }
+
+    pub fn record_active_transport(
+        &self,
+        host_id: &str,
+        path: super::path_select::AttachPath,
+    ) {
+        use super::path_select::AttachPath;
+        let next = match path {
+            AttachPath::SshForward => RouteState::Ssh,
+            AttachPath::Relay => RouteState::Relay,
+            AttachPath::Lan | AttachPath::Direct | AttachPath::Tailscale => return,
+        };
+        let emitted = {
+            let mut map = self.entries.lock();
+            let entry = map.entry(host_id.to_owned()).or_default();
+            if matches!(entry.state, RouteState::Direct { .. } | RouteState::Attempting) {
+                None
+            } else if entry.state != next {
+                entry.state = next.clone();
+                Some(entry.epoch)
+            } else {
+                None
+            }
+        };
+        if let Some(epoch) = emitted {
+            self.emit(host_id, epoch, next);
         }
     }
 
