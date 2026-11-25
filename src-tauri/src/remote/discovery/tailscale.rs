@@ -15,7 +15,6 @@ pub const DEFAULT_FERRYX_PORT: u16 = 43821;
 #[derive(Debug, Deserialize)]
 struct TailscaleStatus {
     #[serde(rename = "Self", default)]
-    #[allow(dead_code)]
     myself: Option<TailscalePeer>,
     #[serde(rename = "Peer", default)]
     peer: HashMap<String, TailscalePeer>,
@@ -49,6 +48,17 @@ pub struct TailscaleSshPeer {
     pub os: Option<String>,
 }
 
+/// One discovery pass: the peers we may configure, plus this node's own tailnet address.
+///
+/// The self address is reported separately because it never appears in `Peer`; a saved row that
+/// names it describes the machine we are running on, not a remote host, so pruning must not treat
+/// it as a vanished peer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TailscaleSshStatus {
+    pub peers: Vec<TailscaleSshPeer>,
+    pub self_ipv4: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum TailscaleDiscoveryError {
     Timeout,
@@ -71,23 +81,25 @@ impl TailscaleDiscoveryProvider {
         Self
     }
 
-    pub fn parse_ssh_peers(json_str: &str) -> Result<Vec<TailscaleSshPeer>, String> {
+    pub fn parse_ssh_status(json_str: &str) -> Result<TailscaleSshStatus, String> {
         let status: TailscaleStatus = serde_json::from_str(json_str).map_err(|e| format!("invalid tailscale status json: {e}"))?;
         if status.backend_state.as_deref().is_some_and(|state| state != "Running") {
             return Err(format!("tailscale backend is not running: {}", status.backend_state.as_deref().unwrap_or("unknown")));
         }
-        Ok(status.peer.into_iter().filter_map(|(key, peer)| {
-            let ipv4 = peer.tailscale_ips.iter().find_map(|value| {
-                let ip = value.parse::<Ipv4Addr>().ok()?;
-                let [a,b,_,_] = ip.octets();
-                (a == 100 && (64..=127).contains(&b)).then(|| ip.to_string())
-            })?;
+        let self_ipv4 = status.myself.as_ref().and_then(|myself| tailnet_ipv4(&myself.tailscale_ips));
+        let peers = status.peer.into_iter().filter_map(|(key, peer)| {
+            let ipv4 = tailnet_ipv4(&peer.tailscale_ips)?;
             let node_id = peer.id.filter(|id| !id.is_empty()).unwrap_or(key);
             let hostname = peer.host_name.filter(|name| !name.is_empty()).unwrap_or_else(|| node_id.clone());
             let dns_name = peer.dns_name.map(|name| name.trim_end_matches('.').to_owned()).filter(|name| !name.is_empty());
             let online = peer.online;
             Some(TailscaleSshPeer { node_id, hostname, dns_name, ipv4, online, os: peer.os })
-        }).collect())
+        }).collect();
+        Ok(TailscaleSshStatus { peers, self_ipv4 })
+    }
+
+    pub fn parse_ssh_peers(json_str: &str) -> Result<Vec<TailscaleSshPeer>, String> {
+        Ok(Self::parse_ssh_status(json_str)?.peers)
     }
 
     pub fn discover_ssh_peers(&self) -> Result<Vec<TailscaleSshPeer>, String> {
@@ -101,7 +113,7 @@ impl TailscaleDiscoveryProvider {
         Self::parse_ssh_peers(&String::from_utf8_lossy(&output.stdout))
     }
 
-    pub async fn discover_ssh_peers_async(&self) -> Result<Vec<TailscaleSshPeer>, TailscaleDiscoveryError> {
+    pub async fn discover_ssh_status_async(&self) -> Result<TailscaleSshStatus, TailscaleDiscoveryError> {
         let executable = crate::ipc::run_blocking(|| Ok(tailscale_executable())).await
             .map_err(|error| TailscaleDiscoveryError::Command(error.to_string()))?;
         let result = tokio::time::timeout(std::time::Duration::from_secs(6), async move {
@@ -110,10 +122,22 @@ impl TailscaleDiscoveryProvider {
                 .kill_on_drop(true)
                 .output().await.map_err(|e| TailscaleDiscoveryError::Command(format!("failed to run tailscale status: {e}")))?;
             if !output.status.success() { return Err(TailscaleDiscoveryError::Command(format!("tailscale status exited with error: {}", String::from_utf8_lossy(&output.stderr)))); }
-            Self::parse_ssh_peers(&String::from_utf8_lossy(&output.stdout)).map_err(TailscaleDiscoveryError::Parse)
+            Self::parse_ssh_status(&String::from_utf8_lossy(&output.stdout)).map_err(TailscaleDiscoveryError::Parse)
         }).await;
         result.map_err(|_| TailscaleDiscoveryError::Timeout)?
     }
+
+    pub async fn discover_ssh_peers_async(&self) -> Result<Vec<TailscaleSshPeer>, TailscaleDiscoveryError> {
+        Ok(self.discover_ssh_status_async().await?.peers)
+    }
+}
+
+fn tailnet_ipv4(values: &[String]) -> Option<String> {
+    values.iter().find_map(|value| {
+        let ip = value.parse::<Ipv4Addr>().ok()?;
+        let [a, b, _, _] = ip.octets();
+        (a == 100 && (64..=127).contains(&b)).then(|| ip.to_string())
+    })
 }
 
 fn tailscale_executable() -> std::path::PathBuf {

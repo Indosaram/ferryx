@@ -200,3 +200,45 @@ Host server
     );
     assert_eq!(srv.jump_host.as_deref(), Some("bastion:srv.example.com"));
 }
+
+#[test]
+fn red_blank_or_padded_user_never_becomes_an_empty_login() {
+    // A padded login is still a login, and a blank one is not a user at all. Before this the
+    // parser kept the raw bytes, so "  I552267  " went to ssh verbatim and a blank line became
+    // Some(""), which renders as "@host" and fails authentication on an otherwise good host.
+    let text = "\
+Host padded
+  User   I552267  
+Host blank
+  User
+Host padded-blank
+  User    
+";
+    let parsed = parse_ssh_config(text);
+    assert_eq!(parsed[0].username.as_deref(), Some("I552267"));
+    assert_eq!(parsed[1].username, None);
+    assert_eq!(parsed[2].username, None);
+
+    let imported = import_aliases(&parsed, &[]);
+    assert_eq!(imported[0].target(), "I552267@padded");
+    assert_eq!(imported[1].target(), "blank");
+    assert_eq!(imported[2].target(), "padded-blank");
+}
+
+#[test]
+fn red_blank_hostname_falls_back_and_padded_hostname_is_trimmed() {
+    // HostName is what ssh actually connects to, so the same rule as User applies: padded bytes
+    // reach the command line verbatim and a blank line must not become an empty destination.
+    let text = "\
+Host padded-host
+  HostName   srv.example.com   
+Host blank-host
+  HostName
+Host padded-blank-host
+  HostName    
+";
+    let parsed = parse_ssh_config(text);
+    assert_eq!(parsed[0].hostname.as_deref(), Some("srv.example.com"));
+    assert_eq!(parsed[1].hostname, None);
+    assert_eq!(parsed[2].hostname, None);
+}

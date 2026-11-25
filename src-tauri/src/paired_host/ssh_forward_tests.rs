@@ -63,6 +63,22 @@ fn forward_args_include_stdio_target_and_hardening_options() {
 }
 
 #[test]
+fn forward_args_reuse_the_master_socket_instead_of_redialing() {
+    let host = sample_host("ssh-pro", "pro", "100.110.225.110", Some("indo"));
+    let socket = std::path::Path::new("/tmp/ferryx-ssh/0123456789abcdef.sock");
+    let args = forward_args_reusing(&host, 43821, Some(socket));
+    // Reuse options must lead: OpenSSH keeps the first -o it sees for a keyword, and the
+    // hardening block below carries ControlPath-free defaults.
+    assert_eq!(&args[..2], &["-o", "ControlMaster=no"]);
+    assert_eq!(&args[2..4], &["-o", "ControlPath=/tmp/ferryx-ssh/0123456789abcdef.sock"]);
+    assert!(args.iter().any(|arg| arg == "-W"));
+    assert_eq!(args.last().map(String::as_str), Some("indo@100.110.225.110"));
+    // The cold path must stay byte-identical to what the shipped code sends.
+    assert_eq!(forward_args_reusing(&host, 43821, None), forward_args(&host, 43821));
+    assert!(!forward_args(&host, 43821).iter().any(|arg| arg.starts_with("ControlPath=")));
+}
+
+#[test]
 fn normalize_machine_token_strips_local_and_tailscale_suffixes() {
     assert_eq!(
         normalize_machine_token("Indoui-MacBookPro-3.local"),
