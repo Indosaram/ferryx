@@ -15,6 +15,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
+import { toast } from "sonner";
 
 import type { ActivitySummary } from "../lib/activity";
 import { projectRootWorktree } from "../lib/projectIdentity";
@@ -63,7 +64,7 @@ import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow } from "./sidebar/SidebarWorktreeRow";
 import type { SectionId } from "./settings/types";
 import { openProjectMenu } from "./sidebarProjectMenu";
-import { agentsByWorktreePath, SortableWorktreeRow, WorktreeRow, worktreeListRowProps, worktreeSortableId } from "./WorktreeList";
+import { agentsByWorktreePath, SortableWorktreeRow, WorktreeRow, worktreeListRowProps, worktreeSortableId, worktreeUnavailableReason } from "./WorktreeList";
 import { useSupervisor } from "../lib/supervisor";
 
 export {
@@ -641,7 +642,16 @@ export function Sidebar({
             toggleGroup: toggleProject,
             selectProject: (node) => {
               const project = projectById.get(node.primaryWorkspaceId);
-              if (project) onSelectProject(project);
+              if (!project) return;
+              // A project whose every listed row is unavailable (paired machine offline, stale list)
+              // must refuse the header click exactly as its rows refuse theirs, not switch into it.
+              const rows = worktreesByProject.get(project.workspaceId) ?? [];
+              const blocked = rows.length > 0 ? rows.map(worktreeUnavailableReason) : [];
+              if (blocked.length > 0 && blocked.every((reason) => reason !== null)) {
+                toast.info(blocked[0]!);
+                return;
+              }
+              onSelectProject(project);
             },
             addProject: onAddProject,
             hideSidebar: hide ?? noop,
