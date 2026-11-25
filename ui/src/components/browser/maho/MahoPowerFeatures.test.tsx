@@ -25,8 +25,17 @@ const tauri = vi.hoisted(() => {
   };
 });
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
+// `importOriginal` keeps the real module's other exports (`isTauri`, `convertFileSrc`,
+// ...) in place: `nativeTerminalVisibility` reads `isTauri` when it reports overlay
+// ownership, so a bare `{ invoke }` mock would fail that call on every mutation.
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+  invoke: tauri.invoke,
+}));
+vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/event")>()),
+  listen: tauri.listen,
+}));
 // `mahoBrowserTabActions` pulls in the toast channel for its Undo affordances; the
 // power features only read its pure helpers, so the channel is a no-op here.
 vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), info: vi.fn() }) }));
