@@ -449,6 +449,22 @@ pub const VAULT_BINDING_NAME: &str = "__ferryxVault";
 /// trusted broker, and the Chromium engine injects it into [`VAULT_WORLD_NAME`].
 pub const VAULT_CAPTURE_SCRIPT: &str = include_str!("vault_capture.js");
 
+/// Media-session observation for the Now Playing card, shared by both engines. It is ONE
+/// function expression taking a `post` callback, so each engine can use it its own way.
+pub const MEDIA_SESSION_SOURCE: &str = include_str!("media_session.js");
+
+/// The push form of [`MEDIA_SESSION_SOURCE`]: a reporter bound to `post`, which the system
+/// webview's guest bridge calls with one JSON string per change.
+pub fn media_reporter_script(post: &str) -> String {
+    format!("({MEDIA_SESSION_SOURCE})({post});")
+}
+
+/// The pull form of [`MEDIA_SESSION_SOURCE`]: one snapshot as JSON text, for the Chromium engine,
+/// whose only page-world hook is the existing `Runtime.evaluate` path.
+pub fn media_snapshot_script() -> String {
+    format!("({MEDIA_SESSION_SOURCE})(null)")
+}
+
 /// `value` as a JSON string literal, for the CDP messages the engine writes by hand.
 pub fn json_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
@@ -1132,6 +1148,24 @@ mod tests {
         assert!(!form.to_line().contains('\n'));
         assert_eq!(Event::parse(&form.to_line()), Some(form));
         assert_eq!(Command::parse("fill"), None);
+    }
+
+    #[test]
+    fn media_session_source_is_one_function_and_carries_both_forms() {
+        assert!(MEDIA_SESSION_SOURCE.contains("function (post)"));
+        assert!(!MEDIA_SESSION_SOURCE.contains("(() => {"));
+        // Read-only towards the page: no eval, no page-global writes beyond the install flag.
+        assert!(!MEDIA_SESSION_SOURCE.contains("eval("));
+        assert!(!MEDIA_SESSION_SOURCE.contains("new Function"));
+        assert!(MEDIA_SESSION_SOURCE.contains("navigator.mediaSession.metadata"));
+        assert!(MEDIA_SESSION_SOURCE.contains("MAX_REPORTS_PER_SECOND = 2"));
+        assert!(MEDIA_SESSION_SOURCE.contains("querySelectorAll('audio,video')"));
+
+        let push = media_reporter_script("post");
+        assert!(push.contains("(function (post)"));
+        assert!(push.ends_with(")(post);"));
+        let pull = media_snapshot_script();
+        assert!(pull.ends_with(")(null)"));
     }
 
     #[test]
