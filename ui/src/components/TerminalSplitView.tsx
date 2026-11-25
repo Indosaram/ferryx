@@ -254,6 +254,12 @@ type TerminalSplitViewProps = {
   onReloadBrowserTab?: (tabId: string, browserId?: string, options?: BrowserReloadOptions) => void;
   onSplitPane?: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane?: (tabId: string, leafId: string) => void;
+  /** Split browser `×` default: drop the split reference, keep the live tab in the store. */
+  onDetachBrowserPane?: (browserId: string) => void;
+  /** Context menu: reveal the same live session fullscreen in Browser mode. */
+  onOpenBrowserFullscreen?: (browserId: string) => void;
+  /** Context menu: the explicit destructive close (store tab + backend session). */
+  onCloseBrowserSession?: (browserId: string) => void;
   onSetRatio?: (tabId: string, path: string, ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
   onSetGroupRatio?: (path: string, ratio: number) => void;
   onEqualizeGroupRun?: (path: string) => void;
@@ -322,6 +328,9 @@ export function TerminalSplitView({
   onReloadBrowserTab = () => undefined,
   onSplitPane = () => undefined,
   onClosePane = () => undefined,
+  onDetachBrowserPane,
+  onOpenBrowserFullscreen,
+  onCloseBrowserSession,
   onSetRatio = () => undefined,
   onSetGroupRatio = () => undefined,
   onEqualizeGroupRun = () => undefined,
@@ -573,6 +582,9 @@ export function TerminalSplitView({
     onSplitPane,
     onMoveTabToSplit,
     onClosePane,
+    onDetachBrowserPane,
+    onOpenBrowserFullscreen,
+    onCloseBrowserSession,
     onSetRatio,
     onEqualizePaneRun,
     onSwapPanes,
@@ -838,6 +850,9 @@ function TabGroupView({
   onEqualizePaneRun,
   onSwapPanes,
   onFocusPane,
+  onDetachBrowserPane,
+  onOpenBrowserFullscreen,
+  onCloseBrowserSession,
   unreadTabIds,
   activityByTabId,
   activityBySessionId,
@@ -1020,6 +1035,9 @@ function TabGroupView({
                     onEqualizePaneRun={onEqualizePaneRun}
                     onSwapPanes={onSwapPanes}
                     onFocusPane={onFocusPane}
+                    onDetachBrowserPane={onDetachBrowserPane}
+                    onOpenBrowserFullscreen={onOpenBrowserFullscreen}
+                    onCloseBrowserSession={onCloseBrowserSession}
                     chatViewAvailable={chatViewAvailable}
                     onSetPaneView={onSetPaneView}
                     renderChatPane={renderChatPane}
@@ -1079,6 +1097,9 @@ type PaneRendererProps = {
   onEqualizePaneRun: (tabId: string, path: string) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
+  onDetachBrowserPane?: (browserId: string) => void;
+  onOpenBrowserFullscreen?: (browserId: string) => void;
+  onCloseBrowserSession?: (browserId: string) => void;
 } & PaneChatProps;
 
 const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) {
@@ -1119,6 +1140,9 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         onSplitPane={props.onSplitPane}
         onClosePane={props.onClosePane}
         onFocusPane={props.onFocusPane}
+        onDetachBrowserPane={props.onDetachBrowserPane}
+        onOpenBrowserFullscreen={props.onOpenBrowserFullscreen}
+        onCloseBrowserSession={props.onCloseBrowserSession}
         chatViewAvailable={props.chatViewAvailable}
         onSetPaneView={props.onSetPaneView}
         renderChatPane={props.renderChatPane}
@@ -1187,10 +1211,18 @@ type PaneLeafViewProps = {
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
+  /** Detach-by-default: drop this browser leaf's split reference, keeping the tab in the store. */
+  onDetachBrowserPane?: (browserId: string) => void;
+  /** Context menu: show this browser's live tab fullscreen in Browser mode. */
+  onOpenBrowserFullscreen?: (browserId: string) => void;
+  /** Context menu: the explicit destructive close (store tab + backend session). */
+  onCloseBrowserSession?: (browserId: string) => void;
 } & PaneChatProps;
 
 // Height of the pane drag toolbar (Tailwind h-5).
 const PANE_TOOLBAR_PX = 20;
+
+type BrowserPaneMenuState = { browserId: string; x: number; y: number } | null;
 
 const PaneLeafView = React.memo(function PaneLeafView({
   leafId,
@@ -1219,11 +1251,15 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onSplitPane,
   onClosePane,
   onFocusPane,
+  onDetachBrowserPane,
+  onOpenBrowserFullscreen,
+  onCloseBrowserSession,
   chatViewAvailable = false,
   onSetPaneView,
   renderChatPane,
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
+  const [browserMenu, setBrowserMenu] = React.useState<BrowserPaneMenuState>(null);
   const [isFocusedWithin, setIsFocusedWithin] = React.useState(false);
   // A pointer press focuses the drag handle (browser panes have no terminal focus sink to take
   // it back); Enter/Space typed afterwards belongs to the page, not to a keyboard pane drag.
@@ -1248,6 +1284,29 @@ const PaneLeafView = React.memo(function PaneLeafView({
       sourceSessionId: content.kind === "terminal" ? session.id : "",
     },
   });
+
+  const paneBrowserId = content.kind === "browser" ? (content.browser?.browserId ?? content.browserId ?? "") : "";
+  const closePaneOrDetachBrowser = () => {
+    if (paneBrowserId && onDetachBrowserPane) {
+      onDetachBrowserPane(paneBrowserId);
+      return;
+    }
+    onClosePane(tab.id, leafId);
+  };
+
+  React.useEffect(() => {
+    if (!browserMenu) return;
+    const dismiss = () => setBrowserMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") dismiss();
+    };
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [browserMenu]);
 
   React.useEffect(() => {
     return () => {
@@ -1550,14 +1609,21 @@ const PaneLeafView = React.memo(function PaneLeafView({
           </IconButton>
           {!isOnlyLeaf ? (
             <IconButton
-              label="Close split view"
+              label={paneBrowserId ? "Detach browser pane" : "Close split view"}
+              data-testid={paneBrowserId ? "pane-browser-detach" : undefined}
               data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.unsplit tab.close" : "tab.close"}
               size="sm"
               className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation();
-                onClosePane(tab.id, leafId);
+                closePaneOrDetachBrowser();
+              }}
+              onContextMenu={(event) => {
+                if (!paneBrowserId) return;
+                event.preventDefault();
+                event.stopPropagation();
+                setBrowserMenu({ browserId: paneBrowserId, x: event.clientX, y: event.clientY });
               }}
             >
               <X className="size-3" />
@@ -1565,6 +1631,51 @@ const PaneLeafView = React.memo(function PaneLeafView({
           ) : null}
         </div>
       </div>
+
+      {browserMenu ? (
+        <div
+          data-testid="pane-browser-menu"
+          role="menu"
+          className="absolute z-40 min-w-[200px] rounded-md border border-border bg-popover py-1 text-[11px] text-popover-foreground shadow-md"
+          style={{ left: Math.min(browserMenu.x, 40), top: 24 }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-center px-2 py-1 text-left hover:bg-accent/60"
+            onClick={() => {
+              setBrowserMenu(null);
+              onOpenBrowserFullscreen?.(browserMenu.browserId);
+            }}
+          >
+            Open in Browser fullscreen
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-center px-2 py-1 text-left hover:bg-accent/60"
+            onClick={() => {
+              setBrowserMenu(null);
+              onDetachBrowserPane?.(browserMenu.browserId);
+            }}
+          >
+            Detach from split
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-center px-2 py-1 text-left text-destructive hover:bg-accent/60"
+            onClick={() => {
+              setBrowserMenu(null);
+              onCloseBrowserSession?.(browserMenu.browserId);
+            }}
+          >
+            Close browser session
+          </button>
+        </div>
+      ) : null}
 
       {restartError ? (
         <div

@@ -65,7 +65,11 @@ export type ShortcutActionId =
   | "notifications.toggle"
   | "zoom.in"
   | "zoom.out"
-  | "zoom.reset";
+  | "zoom.reset"
+  | "activity.mode1"
+  | "activity.mode2"
+  | "activity.mode3"
+  | "activity.mode4";
 
 export type ShortcutBinding = {
   key: string;
@@ -524,6 +528,38 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "0", mod: true },
     source: "original",
   },
+  // Activity Bar modes. The chords avoid every reserved neighbour on purpose: macOS Cmd+Shift+3/4/5
+  // is the system screenshot row, Cmd+1..9 is `workspace.select*` and Ctrl+1..9 is `tab.select*`,
+  // and the `terminal-first` preset parks workspaces on Alt+Shift+digit. That leaves Ctrl+Cmd+digit
+  // on macOS and Ctrl+Alt+Shift+digit elsewhere, neither of which any other action claims.
+  {
+    id: "activity.mode1",
+    title: "Switch to Supervisor mode",
+    group: "Global",
+    binding: { key: "1", mod: true, control: true, nonMac: { mod: false, alt: true, shift: true } },
+    source: "ferryx",
+  },
+  {
+    id: "activity.mode2",
+    title: "Switch to Worktrees mode",
+    group: "Global",
+    binding: { key: "2", mod: true, control: true, nonMac: { mod: false, alt: true, shift: true } },
+    source: "ferryx",
+  },
+  {
+    id: "activity.mode3",
+    title: "Switch to Browser mode",
+    group: "Global",
+    binding: { key: "3", mod: true, control: true, nonMac: { mod: false, alt: true, shift: true } },
+    source: "ferryx",
+  },
+  {
+    id: "activity.mode4",
+    title: "Switch to Remote Desktop mode",
+    group: "Global",
+    binding: { key: "4", mod: true, control: true, nonMac: { mod: false, alt: true, shift: true } },
+    source: "ferryx",
+  },
 ] as const;
 
 /** Sparse user remaps: a binding replaces the primary chord and drops aliases; `null` unbinds. */
@@ -768,6 +804,12 @@ export function useShortcuts(
         if (chord) switchDebug(`shortcut.hook.${stage}`, { registration, isMac, ...chord, ...details });
       };
       trace("receipt");
+      // A chord a higher-priority surface already claimed (Browser mode routes Cmd+T/W/L and
+      // Ctrl+Tab to Maho before this runs) must not also fire an app action.
+      if (event.defaultPrevented) {
+        trace("reject", { reason: "already-handled" });
+        return;
+      }
       // The Settings shortcut recorder captures raw chords; dispatching app actions while the
       // user records (e.g. Mod+, closing Settings, Mod+K opening the palette) would hijack it.
       if (event.target instanceof Element && event.target.closest("[data-shortcut-recorder]")) {
@@ -824,6 +866,58 @@ export function useShortcuts(
 
 export function isMacShortcutPlatform() {
   return detectMacPlatform();
+}
+
+/** Activity Bar modes, mirrored from `sidebarPersistence.ActivityMode` so this module stays React-free. */
+export type ShortcutActivityMode = "supervisor" | "worktrees" | "browser" | "remoteDesktop";
+
+/** The Maho browser actions a mode-scoped chord can address. */
+export type MahoBrowserShortcutAction =
+  | "new-tab"
+  | "close-tab"
+  | "command-bar"
+  | "switcher-next"
+  | "switcher-prev";
+
+/** The subset of a keydown the router reads, so tests can pass a plain object. */
+export type BrowserModeShortcutEvent = Pick<
+  KeyboardEvent,
+  "key" | "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"
+>;
+
+/**
+ * Browser mode owns the tab chords a browser user expects: Cmd/Ctrl+T opens a Maho tab,
+ * Cmd/Ctrl+W closes one, Cmd/Ctrl+L targets the command bar, and Ctrl+Tab walks the tab
+ * switcher. Every other mode keeps the registry above untouched - in Worktrees mode
+ * Ctrl+Tab stays `tab.next`/`tab.previous` and Cmd+Shift+I stays the Supervisor shortcut.
+ *
+ * Returns `null` when the mode does not own the chord, so the caller falls through to the
+ * normal shortcut dispatcher.
+ */
+export function routeBrowserModeShortcut(
+  event: BrowserModeShortcutEvent,
+  activityMode: ShortcutActivityMode,
+  isMac = detectMacPlatform(),
+): MahoBrowserShortcutAction | null {
+  if (activityMode !== "browser") return null;
+  if (event.altKey) return null;
+
+  const mod = isMac ? event.metaKey : event.ctrlKey;
+  // The switcher chords are Ctrl+Tab / Ctrl+Shift+Tab on every platform (a "bare Ctrl" chord);
+  // Cmd+Tab on macOS belongs to the OS window switcher, so `mod` must not reach them.
+  const isTab = event.key === "Tab" || event.code === "Tab";
+
+  if (isTab) {
+    if (!event.ctrlKey || event.metaKey) return null;
+    return event.shiftKey ? "switcher-prev" : "switcher-next";
+  }
+
+  if (!mod || event.shiftKey) return null;
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === "t") return "new-tab";
+  if (key === "w") return "close-tab";
+  if (key === "l") return "command-bar";
+  return null;
 }
 
 /** Whether this platform's webview exposes a native cache-bypassing reload: macOS WKWebView

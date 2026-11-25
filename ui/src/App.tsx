@@ -46,13 +46,22 @@ import { useAppearanceSettings, useApplyAppearanceSettings } from "./lib/appeara
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, closeBrowser, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { startInboundUrlDelivery } from "./lib/inboundUrls";
 import { printBrowser, stepBrowserZoom } from "./lib/browserSystem";
+import { browserTabNavigation } from "./lib/browserTabNavigation";
 import { useBrowserLibrarySync } from "./lib/browserLibrarySync";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
+import {
+  adoptCliBrowserSession,
+  closeBrowserSessionFromSplit,
+  detachBrowserFromWorktreeSplit,
+  handleWorktreeDeletedForBrowsers,
+  resolveBrowserTabSwitch,
+} from "./lib/worktreeBrowserBridge";
+import { browserStore } from "./state/browserStore";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
@@ -79,7 +88,7 @@ import { planOrphanAdoption } from "./state/orphanAdoption";
 import { movedEverySession, planTabMove } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
-import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
+import { isMacShortcutPlatform, resolvedShortcuts, routeBrowserModeShortcut, useShortcuts } from "./lib/shortcuts";
 import { useShortcutOverrides, useShortcutPreset } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
@@ -4369,6 +4378,11 @@ function WorkspaceApp({
         return;
       }
     }
+    // Detach now: a deleted worktree must never take the user's browser tabs with it. The tabs
+    // stay in the global store and in Browser mode.
+    const identity = worktreeIdentity(worktree);
+    const workspaceId = identity?.wsId ?? worktree.workspaceId;
+    if (workspaceId) handleWorktreeDeletedForBrowsers(workspaceId, browserStore);
     setDeleteTarget(worktree);
   }, []);
   const handleAddBrowserTab = useCallback(
@@ -4380,6 +4394,37 @@ function WorkspaceApp({
       void task.catch(reportRuntimeError);
     },
     [createBrowserTab, reportRuntimeError],
+  );
+
+  /**
+   * Split browser `×`: Detach by default. Only the split reference goes; the live tab stays in
+   * the global store so Browser mode shows the same page, unloaded.
+   */
+  const handleDetachBrowserPane = useCallback((browserId: string) => {
+    detachBrowserFromWorktreeSplit(browserId, browserStore);
+    toast.success("Browser tab detached", { description: "It stays open in Browser mode." });
+  }, []);
+
+  /** Context menu "Open in Browser fullscreen": the same browserId, no reload. */
+  const handleOpenBrowserFullscreen = useCallback(
+    (browserId: string) => {
+      const tab = browserStore.getState().tabs[browserId];
+      browserStore.touch(browserId);
+      if (tab) browserStore.setActiveSpace(tab.spaceId);
+      selectActivityMode("browser");
+    },
+    [selectActivityMode],
+  );
+
+  /** Context menu "Close browser session": the only split path that destroys the session. */
+  const handleCloseBrowserSession = useCallback(
+    (browserId: string) => {
+      closeBrowserSessionFromSplit(browserId, (id) => {
+        browserTabNavigation.forget(id);
+        void closeBrowser(id).catch(reportRuntimeError);
+      }, browserStore);
+    },
+    [reportRuntimeError],
   );
 
 
@@ -4664,12 +4709,17 @@ function WorkspaceApp({
         void reportBrowserAdoption(payload.browser.browserId, false, "remote-host-active").catch(reportRuntimeError);
         return;
       }
+      // The store already holds a live tab for this session (a split pane or a Maho tab), so the
+      // session is on screen even when no worktree layout tab needs to be created for it.
       const adoptedTabId = adoptBrowserSession(payload.browser, payload.workspaceId ?? undefined);
       if (!adoptedTabId) {
         toast.warning("Browser tab was not shown: session could not be adopted.");
         void reportBrowserAdoption(payload.browser.browserId, false, "adopt-failed").catch(reportRuntimeError);
         return;
       }
+      // Also adopt into the global store: Browser mode shows the same session in every Activity
+      // mode, with no layout tab and no reload. Store-only work, so the CLI ack stays inside 3s.
+      adoptCliBrowserSession(payload.browser, payload.workspaceId ?? undefined, null, browserStore);
       void reportBrowserAdoption(payload.browser.browserId, true).catch(reportRuntimeError);
     }).then((cleanup) => {
       if (disposed) cleanup();
@@ -4688,20 +4738,19 @@ function WorkspaceApp({
     let unlisten: (() => void) | undefined;
     void onBrowserTabSwitch((payload) => {
       const { browserId } = payload;
-      const owner = stateRef.current.layout.tabs.find((tab) =>
-        tab.kind === "browser"
-          ? tab.browserId === browserId
-          : Object.values(stateRef.current.layout.layoutsByTabId[tab.id]?.contentsByLeafId ?? {}).some(
-              (content) =>
-                content.kind === "browser" &&
-                (content.browser?.browserId ?? content.browserId) === browserId,
-            ),
-      );
-      if (!owner) {
-        toast.warning(`Browser tab for ${browserId} is not open in this window.`);
+      const resolved = resolveBrowserTabSwitch(browserId, browserStore, stateRef.current.layout);
+      if (resolved.target === "split") {
+        handleSelectTerminalTab(resolved.tabId);
+        if (resolved.leafId) handleContinuityFocusPane(resolved.tabId, resolved.leafId);
         return;
       }
-      handleSelectTerminalTab(owner.id);
+      if (resolved.target === "browser-mode") {
+        browserStore.touch(resolved.browserId);
+        browserStore.setActiveSpace(resolved.spaceId);
+        selectActivityMode("browser");
+        return;
+      }
+      toast.warning(`Browser tab for ${browserId} is not open in this window.`);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -4710,7 +4759,7 @@ function WorkspaceApp({
       disposed = true;
       unlisten?.();
     };
-  }, [handleSelectTerminalTab, reportRuntimeError]);
+  }, [handleContinuityFocusPane, handleSelectTerminalTab, reportRuntimeError, selectActivityMode]);
 
   // Terminal links and markdown editors route through routeHttpLink, which needs a live
   // opener to reach the built-in browser; without this registration every link silently
@@ -4917,6 +4966,8 @@ function WorkspaceApp({
   };
   const routeSplitEventToBrowserRef = useRef(routeSplitEventToBrowser);
   routeSplitEventToBrowserRef.current = routeSplitEventToBrowser;
+  const dispatchBrowserShortcutRef = useRef(dispatchBrowserShortcut);
+  dispatchBrowserShortcutRef.current = dispatchBrowserShortcut;
 
   // Child browser webviews own OS focus, so the main window never sees these
   // The embedded browser webview owns native keyboard focus while active, which
@@ -5029,6 +5080,60 @@ function WorkspaceApp({
     reportRuntimeError,
   ]);
 
+  /**
+   * Browser mode owns the tab chords a browser user expects. Registered before `useShortcuts`
+   * (capture phase, earlier listener) so it wins the keystroke, and it prevents the default so the
+   * app dispatcher skips the same chord. Worktrees mode is untouched: the router returns null and
+   * Ctrl+Tab stays `tab.next`, Cmd+Shift+I stays Supervisor.
+   */
+  useEffect(() => {
+    if (activeRemoteHost) return;
+    const isMac = isMacShortcutPlatform();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const action = routeBrowserModeShortcut(event, activityMode, isMac);
+      if (!action) return;
+      if (event.target instanceof Element && event.target.closest("[data-shortcut-recorder]")) return;
+      event.preventDefault();
+      if (action === "new-tab") {
+        void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError);
+        return;
+      }
+      if (action === "close-tab") {
+        // Browser mode closes the Maho tab the canvas is showing; the worktree surface is hidden
+        // in this mode, so falling back to it would close a tab the user cannot see.
+        const storeState = browserStore.getState();
+        const activeId = storeState.activeBrowserIdBySpace[storeState.activeSpaceId] ?? null;
+        if (activeId) {
+          closeBrowserSessionFromSplit(activeId, (id) => {
+            browserTabNavigation.forget(id);
+            void closeBrowser(id).catch(reportRuntimeError);
+          }, browserStore);
+          return;
+        }
+        handleCloseActiveSurface();
+        return;
+      }
+      if (action === "command-bar") {
+        if (shortcutBrowserId) dispatchBrowserShortcutRef.current("focus-address");
+        return;
+      }      if (action === "switcher-next") {
+        handleCycleTab(1);
+        return;
+      }
+      handleCycleTab(-1);
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [
+    activeRemoteHost,
+    activityMode,
+    createBrowserTab,
+    handleCloseActiveSurface,
+    handleCycleTab,
+    reportRuntimeError,
+    shortcutBrowserId,
+  ]);
   const shortcutHandlers = useMemo(
     () => {
       if (activeRemoteHost) {
@@ -5101,6 +5206,10 @@ function WorkspaceApp({
         "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
         "zoom.out": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : handleZoomOut,
         "zoom.reset": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "reset") : handleZoomReset,
+        "activity.mode1": () => selectActivityMode("supervisor"),
+        "activity.mode2": () => selectActivityMode("worktrees"),
+        "activity.mode3": () => selectActivityMode("browser"),
+        "activity.mode4": () => selectActivityMode("remoteDesktop"),
       };
     },
     [
@@ -5139,6 +5248,7 @@ function WorkspaceApp({
       handleBrowserZoom,
       reportRuntimeError,
       toggleSidebar,
+      selectActivityMode,
     ],
   );
   const { overrides: shortcutOverrides } = useShortcutOverrides();
@@ -5451,6 +5561,9 @@ function WorkspaceApp({
             onDuplicateBrowserTab={handleDuplicateBrowserTab}
             onSplitPane={handleSplitPane}
             onClosePane={handleClosePane}
+            onDetachBrowserPane={handleDetachBrowserPane}
+            onOpenBrowserFullscreen={handleOpenBrowserFullscreen}
+            onCloseBrowserSession={handleCloseBrowserSession}
             onSetRatio={setPaneRatio}
             onSetGroupRatio={setTabGroupRatio}
             onEqualizePaneRun={equalizePaneRun}
