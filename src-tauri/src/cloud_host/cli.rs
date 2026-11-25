@@ -1013,7 +1013,7 @@ async fn ensure_socket_for_row(
         .map_err(|_| "cannot resolve the dispatch socket path".to_string())?;
     if crate::paired_host::socket_forward::probe(&path).await.is_err() {
         spawn_holder(&row.name)?;
-        wait_for_socket(&path, Duration::from_secs(30)).await?;
+        wait_for_socket(&path, Duration::from_secs(45)).await?;
     }
     Ok((path, remote_home))
 }
@@ -2048,18 +2048,7 @@ async fn hold(registry: &ProviderRegistry, name: &str) -> i32 {
                         return EXIT_FAILURE;
                     }
                 };
-                let forward = match crate::ssh::socket_forward::start_with_files(files, &spec).await {
-                    Ok(forward) => forward,
-                    Err(error) => {
-                        eprintln!("cannot forward {name}'s socket: {error}");
-                        return EXIT_FAILURE;
-                    }
-                };
-                // A machine whose provider blocks the model endpoint serves that endpoint from this
-                // Mac over its own `ssh -T` channel. The bridge is proved reachable *before* the
-                // socket is published, because a published socket is a promise that a session can run
-                // and a session whose first model call fails breaks that promise.
-                if model_egress(&row.provider) == ModelEgress::Bridge {
+                let bridge_task = if model_egress(&row.provider) == ModelEgress::Bridge {
                     let program = match crate::ssh::exec::resolve_ssh_program() {
                         Ok(program) => program,
                         Err(error) => {
@@ -2072,8 +2061,6 @@ async fn hold(registry: &ProviderRegistry, name: &str) -> i32 {
                     let mut bridge = tokio::spawn(async move {
                         serve_model_bridge(&program, &files, &box_home).await
                     });
-                    // The probe is the readiness signal: it answers once the listener is reachable
-                    // from inside the box, so this waits for the state rather than for a delay.
                     let mut probe = Box::pin(prove_model_bridge(&access, &home));
                     let ready = tokio::select! {
                         result = &mut probe => Some(result),
@@ -2090,7 +2077,7 @@ async fn hold(registry: &ProviderRegistry, name: &str) -> i32 {
                     match ready {
                         Some(Ok(())) => {
                             eprintln!("bridging {name}'s model calls over the dispatch channel");
-                            hold_open((forward, bridge)).await;
+                            Some(bridge)
                         }
                         Some(Err(error)) => {
                             eprintln!("cannot bridge {name}'s model calls: {error}");
@@ -2100,8 +2087,19 @@ async fn hold(registry: &ProviderRegistry, name: &str) -> i32 {
                         None => return EXIT_FAILURE,
                     }
                 } else {
-                    hold_open(forward).await;
-                }
+                    None
+                };
+                let forward = match crate::ssh::socket_forward::start_with_files(files, &spec).await {
+                    Ok(forward) => forward,
+                    Err(error) => {
+                        if let Some(bridge) = bridge_task {
+                            bridge.abort();
+                        }
+                        eprintln!("cannot forward {name}'s socket: {error}");
+                        return EXIT_FAILURE;
+                    }
+                };
+                hold_open((forward, bridge_task)).await;
             }
         }
         Transport::Relay => {
