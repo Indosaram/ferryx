@@ -14,6 +14,10 @@ export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabl
 export const BROWSER_SCROLL_STORAGE_KEY = "ferryx.browser.scroll-positions";
 /** Per-tab back/forward stacks (browser id -> entries), restored with the tab; never private tabs. */
 export const BROWSER_TAB_NAVIGATION_STORAGE_KEY = "ferryx.browser.tab-navigation";
+/** Global browser store: Spaces, folders, favorites/pinned/today tabs, archive, MRU, split refs. */
+export const BROWSER_STORE_STORAGE_KEY = "ferryx.browser.store:v1";
+/** One-shot guard: legacy worktree browser tabs have been copied into the global store. */
+export const BROWSER_STORE_MIGRATION_KEY = "ferryx.browser.store.migrated:v1";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
 export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";
