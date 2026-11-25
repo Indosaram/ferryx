@@ -11,7 +11,7 @@ import { revealPath } from "./tauri";
 export const TERMINAL_LINK_ACTION_EVENT = "ferryx:terminal-link-actions";
 
 export type LinkRoutingSource = "app" | "terminal" | "browser-popup" | "markdown" | "editor";
-export type LinkDestination = "builtin" | "external";
+export type LinkDestination = "builtin" | "external" | "mini";
 
 export type TerminalToken =
   | { readonly type: "url"; readonly target: string }
@@ -46,6 +46,25 @@ export function registerBuiltInBrowserLinkOpener(opener: BuiltInBrowserOpener): 
   };
 }
 
+/**
+ * The Transient Mini Pane's opener: it is the in-app right split slot, so an unregistered opener
+ * means there is nowhere to put a mini and the link falls back to the built-in browser.
+ */
+type MiniBrowserLinkOpener = (url: string) => void | Promise<void>;
+let miniBrowserLinkOpener: MiniBrowserLinkOpener | null = null;
+
+export function registerMiniBrowserLinkOpener(opener: MiniBrowserLinkOpener): () => void {
+  miniBrowserLinkOpener = opener;
+  return () => {
+    if (miniBrowserLinkOpener === opener) miniBrowserLinkOpener = null;
+  };
+}
+
+/** True when a Transient Mini Pane can take a link right now. */
+export function hasMiniBrowserLinkOpener(): boolean {
+  return miniBrowserLinkOpener !== null;
+}
+
 export type WorktreePathOpener = (path: string) => boolean;
 let worktreePathOpener: WorktreePathOpener | null = null;
 
@@ -62,16 +81,41 @@ export async function routeHttpLink(url: string, options: LinkRoutingOptions = {
 
   const settings = loadBrowserSettings();
   const preferred = options.modifierKey ? settings.modifierClickTarget : settings.linkClickTarget;
+  // Shift on a terminal/app link is the "peek" gesture: the page opens beside the terminal in the
+  // Transient Mini Pane, unless the user made Shift mean the system browser. An explicit
+  // destination always wins over the gesture.
+  const shiftPrefersMini =
+    options.shiftKey === true &&
+    !settings.shiftOpensSystemBrowser &&
+    (options.source === "terminal" || options.source === "app") &&
+    miniBrowserLinkOpener !== null;
   const destination = options.destination
     ?? (options.shiftKey && settings.shiftOpensSystemBrowser
       ? "external"
-      : preferred === "builtin" && builtInBrowserOpener
-        ? "builtin"
-        : preferred === "external"
-          ? "external"
-          : settings.openLinksInBuiltInBrowser && builtInBrowserOpener
-            ? "builtin"
-            : "external");
+      : shiftPrefersMini
+        ? "mini"
+        : preferred === "builtin" && builtInBrowserOpener
+          ? "builtin"
+          : preferred === "external"
+            ? "external"
+            : settings.openLinksInBuiltInBrowser && builtInBrowserOpener
+              ? "builtin"
+              : "external");
+
+  if (destination === "mini") {
+    if (miniBrowserLinkOpener) {
+      await miniBrowserLinkOpener(normalized);
+      return "mini";
+    }
+    // No mini slot mounted (no host, or a surface that has none): a built-in browser is the
+    // closest thing to the peek, and an unavailable one still leaves the user a working link.
+    if (builtInBrowserOpener) {
+      await builtInBrowserOpener(normalized);
+      return "builtin";
+    }
+    await openExternalUrl(normalized);
+    return "external";
+  }
 
   if (destination === "builtin") {
     if (!builtInBrowserOpener) {
