@@ -27,6 +27,7 @@ pub mod protocol;
 pub mod push;
 pub mod reference_chat;
 pub mod relay_client;
+pub mod relay_mux;
 pub mod sealed_offer;
 pub mod security_settings;
 pub mod session_transport;

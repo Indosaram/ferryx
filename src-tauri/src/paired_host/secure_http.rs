@@ -8,12 +8,14 @@
 //! dialled over that loopback origin; the same encrypted handshake runs on either socket, and an
 //! unavailable direct route simply loses the race to the relay.
 use super::{
-    attach::{attach_relay_session_with_candidates, RelayAttachedStream},
+    attach::{attach_relay_session_with_candidates_and_path, RelayAttachedStream},
     client::ClientError,
     inventory::{HostAttach, PublishedOrigin},
     path_select::{AttachPath, CandidatePath},
+    relay_mux::{self, MuxKey, OpenChannelOutcome},
 };
 use crate::remote::attach_crypto::MAX_ATTACH_FRAME;
+use crate::remote::relay_mux::RelayMuxStream;
 use crate::remote::relay_server::SessionKind;
 use std::{
     collections::{HashMap, HashSet},
@@ -47,6 +49,7 @@ const MAX_ALLOCATION_BODY: usize = 64 * 1024;
 pub enum PairedStream {
     Net(TcpStream),
     Tunnel(DuplexStream),
+    Mux(RelayMuxStream),
 }
 /// Every paired-host WebSocket, whichever path carries it.
 pub type PairedSocket = WebSocketStream<MaybeTlsStream<PairedStream>>;
@@ -60,6 +63,7 @@ impl AsyncRead for PairedStream {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Tunnel(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Mux(stream) => Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -72,18 +76,21 @@ impl AsyncWrite for PairedStream {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Tunnel(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Mux(stream) => Pin::new(stream).poll_write(cx, buf),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_flush(cx),
             Self::Tunnel(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Mux(stream) => Pin::new(stream).poll_flush(cx),
         }
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tunnel(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Mux(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
@@ -459,6 +466,28 @@ async fn establish_stream(
     target: StreamTarget<'_>,
     published_origins: &[PublishedOrigin],
 ) -> Result<RelayAttachedStream, ClientError> {
+    establish_stream_with_path(
+        http,
+        host_id,
+        relay_origin,
+        allocation_bearer,
+        machine_id,
+        target,
+        published_origins,
+    )
+    .await
+    .map(|(stream, _)| stream)
+}
+
+async fn establish_stream_with_path(
+    http: &reqwest::Client,
+    host_id: Option<&str>,
+    relay_origin: &str,
+    allocation_bearer: &str,
+    machine_id: &str,
+    target: StreamTarget<'_>,
+    published_origins: &[PublishedOrigin],
+) -> Result<(RelayAttachedStream, AttachPath), ClientError> {
     let StreamTarget { attach, kind } = target;
     let relay_origin = crate::remote::relay_client::live_relay_url(relay_origin).into_owned();
     let dir = client_attach_dir()?;
@@ -477,7 +506,7 @@ async fn establish_stream(
         // seconds, far shorter than a cold relay handshake, and the session it allocates cannot be
         // re-dialled once the losing attempt is aborted.
         let attached = if candidates.iter().any(|c| c.path != AttachPath::Relay) {
-            attach_relay_session_with_candidates(
+            attach_relay_session_with_candidates_and_path(
                 &relay_origin,
                 &session_id,
                 machine_id,
@@ -497,6 +526,7 @@ async fn establish_stream(
                 &dir,
             )
             .await
+            .map(|stream| (stream, AttachPath::Relay))
         };
         // The origin record only matters while a session is being dialled.
         super::path_select::release_attach_origin(&session_id);
@@ -603,6 +633,64 @@ fn session_slot(host_id: &str, generation: u64) -> Slot {
     )
 }
 
+async fn open_mux_channel(
+    target: &SecureTarget<'_>,
+) -> Result<OpenChannelOutcome, ClientError> {
+    let key = MuxKey {
+        host_id: target.host_id.to_owned(),
+        generation: target.generation,
+    };
+    relay_mux::open_channel_with(key, || async {
+        let (secure, path) = establish_stream_with_path(
+            target.http,
+            Some(target.host_id),
+            target.relay_origin,
+            target.bearer,
+            target.machine_id,
+            StreamTarget {
+                attach: target.attach,
+                kind: SessionKind::Http,
+            },
+            target.published_origins,
+        )
+        .await
+        .map_err(Err)?;
+        let mux = relay_mux::handshake_stream(secure).await.map_err(Ok)?;
+        Ok((mux, path))
+    })
+    .await
+}
+
+async fn mux_http_request(
+    stream: &mut RelayMuxStream,
+    method: &str,
+    path_and_query: &str,
+    headers: &[(&str, String)],
+    body: Option<&[u8]>,
+    limit: usize,
+) -> Result<HttpResponse, (ClientError, bool)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let bytes =
+        encode_request(method, path_and_query, headers, body).map_err(|error| (error, false))?;
+    if stream.write_all(&bytes).await.is_err() {
+        return Err((ClientError::local("HOST_UNAVAILABLE"), false));
+    }
+    let _ = stream.shutdown().await;
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        if let Some((response, _consumed)) =
+            parse_response(&buf, limit).map_err(|error| (error, true))?
+        {
+            return Ok(response);
+        }
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return Err((ClientError::local("HOST_UNAVAILABLE"), true)),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
 /// Sends one request over the host's shared encrypted session, establishing it when
 /// absent. The session is taken out of its slot while in use, so a cancelled caller drops
 /// it instead of leaving half a response behind. A reused session that turns out broken is
@@ -616,6 +704,34 @@ pub async fn shared_request(
     limit: usize,
     idempotent: bool,
 ) -> Result<HttpResponse, ClientError> {
+    if let OpenChannelOutcome::Stream {
+        mut stream, reused, ..
+    } = open_mux_channel(target).await?
+    {
+        match mux_http_request(&mut stream, method, path_and_query, headers, body, limit).await {
+            Ok(response) => return Ok(response),
+            Err((error, reached))
+                if reused && error.code == "HOST_UNAVAILABLE" && (idempotent || !reached) =>
+            {
+                relay_mux::evict_generation(target.host_id, target.generation);
+                if let OpenChannelOutcome::Stream { mut stream, .. } =
+                    open_mux_channel(target).await?
+                {
+                    return mux_http_request(
+                        &mut stream,
+                        method,
+                        path_and_query,
+                        headers,
+                        body,
+                        limit,
+                    )
+                    .await
+                    .map_err(|(err, _)| err);
+                }
+            }
+            Err((error, _)) => return Err(error),
+        }
+    }
     let slot = session_slot(target.host_id, target.generation);
     let mut guard = slot.lock().await;
     let establish = || {
@@ -669,6 +785,74 @@ pub async fn open_secure_websocket(
     config: WebSocketConfig,
 ) -> Result<PairedSocket, ClientError> {
     let invalid = || ClientError::local("INVALID_REQUEST");
+    let build_request = || -> Result<tungstenite::handshake::client::Request, ClientError> {
+        let mut request = format!("ws://localhost{path_and_query}")
+            .into_client_request()
+            .map_err(|_| invalid())?;
+        let headers = request.headers_mut();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", target.bearer)
+                .parse()
+                .map_err(|_| invalid())?,
+        );
+        headers.insert(
+            CLIENT_BUILD_HEADER,
+            CLIENT_BUILD.parse().map_err(|_| invalid())?,
+        );
+        Ok(request)
+    };
+
+    if target.session_kind != SessionKind::RemoteDesktop {
+        if let OpenChannelOutcome::Stream { stream, reused, .. } = open_mux_channel(target).await? {
+            let request = build_request()?;
+            let first = tokio::time::timeout(
+                ESTABLISH_TIMEOUT,
+                tokio_tungstenite::client_async_with_config(
+                    request,
+                    MaybeTlsStream::Plain(PairedStream::Mux(stream)),
+                    Some(config),
+                ),
+            )
+            .await;
+            match first {
+                Ok(Ok((socket, _))) => return Ok(socket),
+                Ok(Err(tungstenite::Error::Http(response))) => {
+                    tracing::warn!(status = %response.status(), "paired host mux websocket upgrade rejected");
+                    return Err(ClientError::local("HOST_UNAVAILABLE"));
+                }
+                _ if reused => {
+                    relay_mux::evict_generation(target.host_id, target.generation);
+                    if let OpenChannelOutcome::Stream { stream, .. } =
+                        open_mux_channel(target).await?
+                    {
+                        let request = build_request()?;
+                        let (socket, _) = tokio::time::timeout(
+                            ESTABLISH_TIMEOUT,
+                            tokio_tungstenite::client_async_with_config(
+                                request,
+                                MaybeTlsStream::Plain(PairedStream::Mux(stream)),
+                                Some(config),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| ClientError::local("TIMEOUT"))?
+                        .map_err(|error| {
+                            tracing::warn!("paired host mux websocket upgrade failed: {error}");
+                            ClientError::local("HOST_UNAVAILABLE")
+                        })?;
+                        return Ok(socket);
+                    }
+                }
+                Err(_) => return Err(ClientError::local("TIMEOUT")),
+                Ok(Err(error)) => {
+                    tracing::warn!("paired host mux websocket upgrade failed: {error}");
+                    return Err(ClientError::local("HOST_UNAVAILABLE"));
+                }
+            }
+        }
+    }
+
     let secure = establish_stream(
         target.http,
         Some(target.host_id),
@@ -684,17 +868,7 @@ pub async fn open_secure_websocket(
         // Ends when either side closes; dropping the socket closes `local`.
         let _ = crate::remote::session_transport::proxy_secure_to_gateway(secure, gateway).await;
     });
-    let mut request = format!("ws://localhost{path_and_query}")
-        .into_client_request()
-        .map_err(|_| invalid())?;
-    let headers = request.headers_mut();
-    headers.insert(
-        "authorization",
-        format!("Bearer {}", target.bearer)
-            .parse()
-            .map_err(|_| invalid())?,
-    );
-    headers.insert(CLIENT_BUILD_HEADER, CLIENT_BUILD.parse().map_err(|_| invalid())?);
+    let request = build_request()?;
     let (socket, _) = tokio::time::timeout(
         ESTABLISH_TIMEOUT,
         tokio_tungstenite::client_async_with_config(

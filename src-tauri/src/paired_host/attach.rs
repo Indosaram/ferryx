@@ -157,6 +157,28 @@ pub async fn attach_paired_session_with_candidates(
     identity_dir: &Path,
     options: AttachCandidates<'_>,
 ) -> anyhow::Result<RelayAttachedStream> {
+    attach_paired_session_with_candidates_and_path(
+        relay_origin,
+        session_id,
+        machine_id,
+        machine_attach_public_key,
+        enrollment_epoch,
+        identity_dir,
+        options,
+    )
+    .await
+    .map(|(stream, _)| stream)
+}
+
+pub async fn attach_paired_session_with_candidates_and_path(
+    relay_origin: &str,
+    session_id: &str,
+    machine_id: &str,
+    machine_attach_public_key: &str,
+    enrollment_epoch: &str,
+    identity_dir: &Path,
+    options: AttachCandidates<'_>,
+) -> anyhow::Result<(RelayAttachedStream, AttachPath)> {
     let AttachCandidates { paths: candidates, http_client: _http_client } = options;
     // The RAW pool is kept here on purpose. Filtering up front would make the identity gate
     // unreachable: an all-mismatched pool would look like an empty one, fall through to the
@@ -214,7 +236,14 @@ pub async fn attach_paired_session_with_candidates(
             )
             .await;
             match pinned {
-                Ok(Ok(attached)) => return Ok(attached),
+                Ok(Ok(attached)) => {
+                    let pinned_path = candidates
+                        .iter()
+                        .find(|c| c.base_origin == existing)
+                        .map(|c| c.path)
+                        .unwrap_or(AttachPath::Relay);
+                    return Ok((attached, pinned_path));
+                }
                 Ok(Err(error)) => tracing::debug!(
                     session_id,
                     origin = %existing,
@@ -287,7 +316,7 @@ pub async fn attach_paired_session_with_candidates(
 
         if let Some(winner) = selected {
             confirm_attach_origin(session_id, &winner.base_origin);
-            return Ok(winner.channel);
+            return Ok((winner.channel, winner.path));
         }
         // Every candidate named a machine other than the one being attached to. That is an
         // identity event, not bad luck on the network, so it is reported as its own typed failure
@@ -332,7 +361,12 @@ pub async fn attach_paired_session_with_candidates(
 
     confirm_attach_origin(session_id, &chosen_origin);
 
-    Ok(attached)
+    let chosen_path = candidates
+        .iter()
+        .find(|c| c.base_origin == chosen_origin)
+        .map(|c| c.path)
+        .unwrap_or(AttachPath::Relay);
+    Ok((attached, chosen_path))
 }
 
 pub async fn attach_relay_session(
@@ -369,6 +403,27 @@ pub async fn attach_relay_session_with_candidates(
     paths: &[CandidatePath],
 ) -> anyhow::Result<RelayAttachedStream> {
     attach_paired_session_with_candidates(
+        relay_origin,
+        session_id,
+        machine_id,
+        machine_attach_public_key,
+        enrollment_epoch,
+        identity_dir,
+        AttachCandidates { paths, http_client: None },
+    )
+    .await
+}
+
+pub async fn attach_relay_session_with_candidates_and_path(
+    relay_origin: &str,
+    session_id: &str,
+    machine_id: &str,
+    machine_attach_public_key: &str,
+    enrollment_epoch: &str,
+    identity_dir: &Path,
+    paths: &[CandidatePath],
+) -> anyhow::Result<(RelayAttachedStream, AttachPath)> {
+    attach_paired_session_with_candidates_and_path(
         relay_origin,
         session_id,
         machine_id,

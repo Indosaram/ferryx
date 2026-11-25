@@ -16,6 +16,7 @@ pub mod account_reconcile;
 pub mod inventory;
 pub mod projects;
 pub mod reachability;
+pub mod relay_mux;
 pub mod route_view;
 pub mod secure_http;
 pub mod service;

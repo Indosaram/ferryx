@@ -1343,10 +1343,17 @@ impl RelayClient {
 
         match transport {
             crate::remote::session_transport::SessionTransport::Attached(secure) => {
-                let gateway = self.connect_gateway().await?;
-                crate::remote::session_transport::proxy_secure_to_gateway(secure, gateway)
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+                let gateway_addr = self.gateway_addr.clone();
+                crate::remote::session_transport::serve_secure_gateway(secure, move || {
+                    let gateway_addr = gateway_addr.clone();
+                    async move {
+                        let gateway = TcpStream::connect(&gateway_addr).await?;
+                        gateway.set_nodelay(true)?;
+                        Ok(gateway)
+                    }
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
             }
             crate::remote::session_transport::SessionTransport::Plain(stream) => {
                 proxy_ws_to_tcp(stream.into_inner(), self.connect_gateway().await?).await
