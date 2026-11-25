@@ -106,8 +106,8 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<Arc<HostMux>, DialError>>,
 {
-    if let Some(acquired) = existing(&key) {
-        return acquired;
+    if let Some(acquired) = try_existing(&key).await {
+        return Ok(acquired);
     }
     let gate = {
         let mut dialing = REGISTRY.dialing.lock().unwrap_or_else(|p| p.into_inner());
@@ -115,8 +115,8 @@ where
     };
     let queued_at = Instant::now();
     let mut last_failure = gate.lock().await;
-    if let Some(acquired) = existing(&key) {
-        return acquired;
+    if let Some(acquired) = try_existing(&key).await {
+        return Ok(acquired);
     }
     if let Some((failed_at, message)) = last_failure.as_ref() {
         if *failed_at >= queued_at {
@@ -139,8 +139,15 @@ where
                 .slots
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(key, Slot::Live(Arc::clone(&mux)));
-            mux.open().map(Acquired::Stream)
+                .insert(key.clone(), Slot::Live(Arc::clone(&mux)));
+            match mux.open().await {
+                Ok(stream) => Ok(Acquired::Stream(stream)),
+                Err(error) => {
+                    mux.mark_dead();
+                    evict_if_same(&key, &mux);
+                    Err(error)
+                }
+            }
         }
         Err(DialError::Unsupported) => {
             REGISTRY
@@ -154,20 +161,49 @@ where
     }
 }
 
-fn existing(key: &MuxKey) -> Option<Result<Acquired, BridgeError>> {
+enum ExistingSlot {
+    Live(Arc<HostMux>),
+    Legacy,
+}
+
+fn existing_slot(key: &MuxKey) -> Option<ExistingSlot> {
     let mut slots = REGISTRY.slots.lock().unwrap_or_else(|p| p.into_inner());
     match slots.get(key) {
-        Some(Slot::Live(mux)) if mux.is_alive() => Some(mux.open().map(Acquired::Stream)),
+        Some(Slot::Live(mux)) if mux.is_alive() => Some(ExistingSlot::Live(Arc::clone(mux))),
         Some(Slot::Live(_)) => {
             slots.remove(key);
             None
         }
-        Some(Slot::Legacy(since)) if since.elapsed() < LEGACY_RETRY => Some(Ok(Acquired::Legacy)),
+        Some(Slot::Legacy(since)) if since.elapsed() < LEGACY_RETRY => Some(ExistingSlot::Legacy),
         Some(Slot::Legacy(_)) => {
             slots.remove(key);
             None
         }
         None => None,
+    }
+}
+
+fn evict_if_same(key: &MuxKey, mux: &Arc<HostMux>) {
+    let mut slots = REGISTRY.slots.lock().unwrap_or_else(|p| p.into_inner());
+    if matches!(slots.get(key), Some(Slot::Live(current)) if Arc::ptr_eq(current, mux)) {
+        slots.remove(key);
+    }
+}
+
+/// Attempts to open a stream on an existing slot without holding the registry lock across
+/// backpressure or dead-mux transitions. If a cached live mux died in the race window between
+/// `is_alive()` and `open().await`, it is evicted so the caller falls through to dial a fresh mux.
+async fn try_existing(key: &MuxKey) -> Option<Acquired> {
+    match existing_slot(key)? {
+        ExistingSlot::Legacy => Some(Acquired::Legacy),
+        ExistingSlot::Live(mux) => match mux.open().await {
+            Ok(stream) => Some(Acquired::Stream(stream)),
+            Err(_) => {
+                mux.mark_dead();
+                evict_if_same(key, &mux);
+                None
+            }
+        },
     }
 }
 
@@ -179,6 +215,28 @@ pub fn is_live(host: &SshHost, location: &HelperLocation) -> bool {
         REGISTRY.slots.lock().unwrap_or_else(|p| p.into_inner()).get(&key),
         Some(Slot::Live(mux)) if mux.is_alive()
     )
+}
+
+/// Drops any cached live mux for `host`/`location` and ends its SSH transport.
+///
+/// Called when a live mux stops reaching a healthy helper daemon (for example after the remote
+/// helper daemon exited or restarted with a rotated auth token) so the next open dials a fresh
+/// `bridge --mux` against the restarted helper.
+pub fn invalidate(host: &SshHost, location: &HelperLocation) {
+    invalidate_key(&MuxKey::of(host, location));
+}
+
+fn invalidate_key(key: &MuxKey) {
+    let removed = {
+        let mut slots = REGISTRY.slots.lock().unwrap_or_else(|p| p.into_inner());
+        match slots.get(key) {
+            Some(Slot::Live(_)) => slots.remove(key),
+            _ => None,
+        }
+    };
+    if let Some(Slot::Live(mux)) = removed {
+        mux.mark_dead();
+    }
 }
 
 /// The remote environment last detected for a host whose mux is live. It cannot change while
@@ -265,7 +323,17 @@ impl HostMux {
         !self.channels.lock().unwrap_or_else(|p| p.into_inner()).dead
     }
 
-    fn open(self: &Arc<Self>) -> Result<MuxStream, BridgeError> {
+    async fn open(self: &Arc<Self>) -> Result<MuxStream, BridgeError> {
+        if !self.is_alive() {
+            return Err(BridgeError::ConnectionClosed);
+        }
+        // Reserve an outbound slot before registering the channel so backpressure waits cleanly
+        // instead of falsely reporting ConnectionClosed or leaking an entry in `channels.inbound`.
+        let permit = self
+            .outbound
+            .reserve()
+            .await
+            .map_err(|_| BridgeError::ConnectionClosed)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let id = {
             let mut channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
@@ -282,9 +350,7 @@ impl HostMux {
             channels.idle_since = None;
             id
         };
-        self.outbound
-            .try_send(MuxFrame { channel: id, kind: MuxKind::Open, payload: Vec::new() })
-            .map_err(|_| BridgeError::ConnectionClosed)?;
+        permit.send(MuxFrame { channel: id, kind: MuxKind::Open, payload: Vec::new() });
         Ok(MuxStream {
             mux: Arc::clone(self),
             channel: id,
@@ -305,10 +371,20 @@ impl HostMux {
                 channels.idle_since = Some(Instant::now());
             }
         }
+        let dead = channels.dead;
         drop(channels);
-        let _ = self
-            .outbound
-            .try_send(MuxFrame { channel, kind: MuxKind::Close, payload: Vec::new() });
+        if dead {
+            return;
+        }
+        let frame = MuxFrame { channel, kind: MuxKind::Close, payload: Vec::new() };
+        if let Err(mpsc::error::TrySendError::Full(frame)) = self.outbound.try_send(frame) {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let outbound = self.outbound.clone();
+                handle.spawn(async move {
+                    let _ = outbound.send(frame).await;
+                });
+            }
+        }
     }
 
     fn mark_dead(&self) {
@@ -389,8 +465,8 @@ impl HostMux {
         mux
     }
 
-    pub(crate) fn open_stream(self: &Arc<Self>) -> Result<MuxStream, BridgeError> {
-        self.open()
+    pub(crate) async fn open_stream(self: &Arc<Self>) -> Result<MuxStream, BridgeError> {
+        self.open().await
     }
 
     pub(crate) fn alive(&self) -> bool {

@@ -526,4 +526,31 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
     expect(workspace.openTab).not.toHaveBeenCalled();
     expect(workspace.activateTab).not.toHaveBeenCalled();
   });
+
+  it("falls back to the first worktree when activeWorktreePath is stale during New Terminal", async () => {
+    const previousPath = workspace.storeState.activeWorktreePath;
+    workspace.storeState.activeWorktreePath = "/stale-deleted-worktree";
+    try {
+      render(<App />);
+      await waitFor(() => {
+        expect(native.newTerminalMenuHandler).toBeTypeOf("function");
+      });
+      workspace.openTab.mockClear();
+
+      act(() => {
+        native.newTerminalMenuHandler?.();
+      });
+
+      await waitFor(() => {
+        expect(workspace.openTab).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/local" }),
+          undefined,
+          undefined,
+          undefined,
+        );
+      });
+    } finally {
+      workspace.storeState.activeWorktreePath = previousPath;
+    }
+  });
 }, 30_000);

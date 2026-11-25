@@ -394,6 +394,83 @@ pub fn validate_target_handshake(
     Ok(())
 }
 
+/// Errors that can be caused by a cached `HostMux` pointing at a remote helper daemon that
+/// exited, restarted with a rotated auth token, or dropped mid-handshake.
+fn is_stale_mux_recoverable(err: &BridgeError) -> bool {
+    matches!(
+        err,
+        BridgeError::ConnectionClosed
+            | BridgeError::Io(_)
+            | BridgeError::ProcessExited { .. }
+            | BridgeError::Timeout(_)
+            | BridgeError::Remote(_)
+            | BridgeError::Protocol(_)
+    )
+}
+
+async fn open_dual_handshaked(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    location: &HelperLocation,
+) -> Result<(BridgeConnection, HandshakeResult, BridgeConnection, HandshakeResult), BridgeError> {
+    let mut control = BridgeConnection::spawn(host, env, location).await?;
+    let handshake = match control.handshake().await {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            let _ = control.close().await;
+            return Err(error);
+        }
+    };
+    let mut reader = match BridgeConnection::spawn(host, env, location).await {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = control.close().await;
+            return Err(error);
+        }
+    };
+    let reader_handshake = match reader.handshake().await {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            let _ = control.close().await;
+            let _ = reader.close().await;
+            return Err(error);
+        }
+    };
+    if reader_handshake.host_id != handshake.host_id
+        || reader_handshake.owner_id != handshake.owner_id
+        || reader_handshake.epoch != handshake.epoch
+    {
+        let _ = control.close().await;
+        let _ = reader.close().await;
+        return Err(BridgeError::ConnectionClosed);
+    }
+    Ok((control, handshake, reader, reader_handshake))
+}
+
+async fn open_dual_with_stale_mux_recovery<T, F, Fut, E, EFut, Inv>(
+    skipped_ensure_started: bool,
+    mut open_pair: F,
+    mut ensure_started: E,
+    mut invalidate_mux: Inv,
+) -> Result<T, BridgeError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, BridgeError>>,
+    E: FnMut() -> EFut,
+    EFut: std::future::Future<Output = Result<(), BridgeError>>,
+    Inv: FnMut(),
+{
+    match open_pair().await {
+        Ok(pair) => Ok(pair),
+        Err(err) if skipped_ensure_started && is_stale_mux_recoverable(&err) => {
+            invalidate_mux();
+            ensure_started().await?;
+            open_pair().await
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub async fn write_frame_async<W: AsyncWrite + Unpin>(
     writer: &mut W,
     value: &Value,
@@ -2004,17 +2081,32 @@ impl SshBridgeClient {
     ) -> Result<Self, BridgeError> {
         // Ensure remote helper daemon is started (idempotent, no silent build/trust modifications).
         // A live host mux already reaches that daemon, so the extra round trip is skipped.
-        if !(super::mux_client::enabled() && super::mux_client::is_live(host, location)) {
+        // If that live mux turns out to be stale (the remote helper daemon crashed or restarted
+        // with a rotated token while `bridge --mux` stayed alive), invalidate the mux, run
+        // `ensure_started`, and retry once so new tabs recover on the first attempt.
+        let skipped_ensure_started =
+            super::mux_client::enabled() && super::mux_client::is_live(host, location);
+        if !skipped_ensure_started {
             helper_setup::ensure_started(host, env, location).await?;
         }
 
-        // Open control connection and execute initial handshake
-        let mut control = BridgeConnection::spawn(host, env, location).await?;
-        let handshake = control.handshake().await?;
+        let (mut control, handshake, mut reader, reader_handshake) =
+            open_dual_with_stale_mux_recovery(
+                skipped_ensure_started,
+                || open_dual_handshaked(host, env, location),
+                || async {
+                    helper_setup::ensure_started(host, env, location)
+                        .await
+                        .map_err(BridgeError::from)
+                },
+                || super::mux_client::invalidate(host, location),
+            )
+            .await?;
 
         // Protocol & capability verification
         if handshake.protocol != PROTOCOL_VERSION {
             let _ = control.close().await;
+            let _ = reader.close().await;
             return Err(BridgeError::Protocol(format!(
                 "Unsupported protocol version: expected {PROTOCOL_VERSION}, got {}",
                 handshake.protocol
@@ -2022,6 +2114,7 @@ impl SshBridgeClient {
         }
         if !handshake.capabilities.iter().any(|c| c == "sshHelperV1") {
             let _ = control.close().await;
+            let _ = reader.close().await;
             return Err(BridgeError::Protocol(
                 "Helper missing required capability 'sshHelperV1'".into(),
             ));
@@ -2030,12 +2123,9 @@ impl SshBridgeClient {
         // Handshake must independently match configured host and restored target
         if let Err(e) = validate_target_handshake(&handshake, &host.id, target) {
             let _ = control.close().await;
+            let _ = reader.close().await;
             return Err(e);
         }
-
-        // Open independent read connection and verify handshake parity
-        let mut reader = BridgeConnection::spawn(host, env, location).await?;
-        let reader_handshake = reader.handshake().await?;
 
         if reader_handshake.protocol != PROTOCOL_VERSION {
             let _ = control.close().await;
@@ -2055,15 +2145,6 @@ impl SshBridgeClient {
             return Err(BridgeError::Protocol(
                 "Reader helper missing required capability 'sshHelperV1'".into(),
             ));
-        }
-
-        if reader_handshake.host_id != handshake.host_id
-            || reader_handshake.owner_id != handshake.owner_id
-            || reader_handshake.epoch != handshake.epoch
-        {
-            let _ = control.close().await;
-            let _ = reader.close().await;
-            return Err(BridgeError::ConnectionClosed);
         }
 
         let client = Self {
@@ -3247,5 +3328,120 @@ mod transfer_tests {
             c_guard.terminate_and_wait();
             r_guard.terminate_and_wait();
         }
+    }
+
+    #[tokio::test]
+    async fn stale_mux_recovery_invalidates_ensures_started_and_retries_once() {
+        for err_kind in ["closed", "unauthorized"] {
+            let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ensures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+            let result = open_dual_with_stale_mux_recovery(
+                true,
+                || {
+                    let opens = Arc::clone(&opens);
+                    async move {
+                        let attempt = opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if attempt == 0 {
+                            if err_kind == "closed" {
+                                Err(BridgeError::ConnectionClosed)
+                            } else {
+                                Err(BridgeError::Remote("UNAUTHORIZED: bad token".into()))
+                            }
+                        } else {
+                            Ok("recovered")
+                        }
+                    }
+                },
+                || {
+                    let ensures = Arc::clone(&ensures);
+                    async move {
+                        ensures.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+                || {
+                    invalidations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                },
+            )
+            .await
+            .expect("stale mux error must recover after invalidating and calling ensure_started");
+
+            assert_eq!(result, "recovered");
+            assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(ensures.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(invalidations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_mux_recovery_skips_retry_when_ensure_started_already_ran() {
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ensures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let err = open_dual_with_stale_mux_recovery(
+            false,
+            || {
+                let opens = Arc::clone(&opens);
+                async move {
+                    opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<(), _>(BridgeError::ConnectionClosed)
+                }
+            },
+            || {
+                let ensures = Arc::clone(&ensures);
+                async move {
+                    ensures.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+            || {
+                invalidations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("must not retry when ensure_started already ran");
+
+        assert!(matches!(err, BridgeError::ConnectionClosed));
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(ensures.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(invalidations.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_mux_recovery_skips_non_recoverable_errors() {
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ensures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let err = open_dual_with_stale_mux_recovery(
+            true,
+            || {
+                let opens = Arc::clone(&opens);
+                async move {
+                    opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<(), _>(BridgeError::SshPlan("bad path".into()))
+                }
+            },
+            || {
+                let ensures = Arc::clone(&ensures);
+                async move {
+                    ensures.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+            || {
+                invalidations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("non-recoverable plan errors must not trigger mux invalidation");
+
+        assert!(matches!(err, BridgeError::SshPlan(_)));
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(ensures.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(invalidations.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

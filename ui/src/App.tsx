@@ -3283,31 +3283,32 @@ function WorkspaceApp({
     [isNativeRuntime, isPrimary, ownsNotificationTarget],
   );
 
+  const refuseTerminalOpen = useCallback((reason: string, message: string) => {
+    switchDebug("terminal.open.refused", { workspaceId: activeProjectRef.current.workspaceId, reason });
+    toast.warning(message);
+  }, []);
+
   const handleAddTerminalTab = useCallback((shell?: string) => {
     // Every refusal below used to return silently, so a click on "New Terminal" could do nothing
     // with no trace. Say why, and record it so a release log shows which guard fired.
-    const refuse = (reason: string, message: string) => {
-      switchDebug("terminal.open.refused", { workspaceId: activeProjectRef.current.workspaceId, reason });
-      toast.warning(message);
-    };
     if (activeRemoteHostRef.current) {
-      refuse("remote-host-active", "Terminal was not opened because a remote host is active.");
+      refuseTerminalOpen("remote-host-active", "Terminal was not opened because a remote host is active.");
       return;
     }
     if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
-      refuse("paired-features-disabled", "Terminal was not opened: paired machine features are not enabled.");
+      refuseTerminalOpen("paired-features-disabled", "Terminal was not opened: paired machine features are not enabled.");
       return;
     }
     if (
       (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
       registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
     ) {
-      refuse("project-not-registered", "Terminal was not opened: this project is still connecting.");
+      refuseTerminalOpen("project-not-registered", "Terminal was not opened: this project is still connecting.");
       return;
     }
-    const activeWt = activeWorktreeRef.current;
+    const activeWt = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
     if (!activeWt) {
-      refuse("no-active-worktree", "Terminal was not opened: no worktree is selected.");
+      refuseTerminalOpen("no-active-worktree", "Terminal was not opened: no worktree is selected.");
       return;
     }
     runTabOperation(async () => {
@@ -3316,7 +3317,7 @@ function WorkspaceApp({
       if (tabId === null) toast.warning("Terminal was not opened because the workspace changed while it was starting. Try again.");
       return tabId;
     });
-  }, [openTab, runTabOperation]);
+  }, [openTab, refuseTerminalOpen, runTabOperation]);
 
   // Starts an agent in a new tab of the given worktree of the active project, which need not be
   // the active worktree (a freshly created one is not selected yet).
@@ -3326,11 +3327,19 @@ function WorkspaceApp({
       agent: { name: string; command: string; args: string },
       options: { view?: PaneView } = {},
     ) => {
-      if (activeRemoteHostRef.current) return;
+      if (activeRemoteHostRef.current) {
+        refuseTerminalOpen("remote-host-active", "Terminal was not opened because a remote host is active.");
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+        refuseTerminalOpen("paired-features-disabled", "Terminal was not opened: paired machine features are not enabled.");
+        return;
+      }
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
         registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
       ) {
+        refuseTerminalOpen("project-not-registered", "Terminal was not opened: this project is still connecting.");
         return;
       }
       try {
@@ -3377,6 +3386,7 @@ function WorkspaceApp({
         // openTab does not own a pre-spawned backend, so a discarded tab would orphan the PTY.
         if (tabId === null) {
           await closeTerminal(backendSessionId);
+          toast.warning("Terminal was not opened because the workspace changed while it was starting. Try again.");
           return;
         }
         if (typeCommand) {
@@ -3389,16 +3399,19 @@ function WorkspaceApp({
         reportRuntimeError(error);
       }
     },
-    [openTab, reportRuntimeError],
+    [openTab, refuseTerminalOpen, reportRuntimeError],
   );
 
   const handleLaunchAgent = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
       const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
-      if (!targetWorktree) return;
+      if (!targetWorktree) {
+        refuseTerminalOpen("no-active-worktree", "Terminal was not opened: no worktree is selected.");
+        return;
+      }
       await launchAgentInWorktree(targetWorktree, agent);
     },
-    [launchAgentInWorktree],
+    [launchAgentInWorktree, refuseTerminalOpen],
   );
 
   // Chat view reads the agent's local native history, so it is offered only for local projects.
@@ -3413,16 +3426,25 @@ function WorkspaceApp({
 
   const handleNewChat = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
-      if (!chatViewAvailableRef.current) return;
+      if (!chatViewAvailableRef.current) {
+        refuseTerminalOpen("chat-unavailable", "Chat view is only available for local projects.");
+        return;
+      }
       const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
-      if (!targetWorktree) return;
+      if (!targetWorktree) {
+        refuseTerminalOpen("no-active-worktree", "Terminal was not opened: no worktree is selected.");
+        return;
+      }
       await launchAgentInWorktree(targetWorktree, agent, { view: "chat" });
     },
-    [launchAgentInWorktree],
+    [launchAgentInWorktree, refuseTerminalOpen],
   );
 
   const handleNewChatShortcut = useCallback(() => {
-    if (!chatViewAvailableRef.current) return;
+    if (!chatViewAvailableRef.current) {
+      refuseTerminalOpen("chat-unavailable", "Chat view is only available for local projects.");
+      return;
+    }
     const agent = pickChatAgent(
       chatSupportedAgents(getLaunchableAgents(resolvedAgentsRef.current)),
       loadLastChatAgentId(),
@@ -3433,7 +3455,7 @@ function WorkspaceApp({
       return;
     }
     void handleNewChat(agent);
-  }, [handleNewChat]);
+  }, [handleNewChat, refuseTerminalOpen]);
 
   // Resolves a dialog's agent choice against the agents launchable right now.
   const launchAgentByIdInWorktree = useCallback(
@@ -4343,19 +4365,26 @@ function WorkspaceApp({
 
   const handleSplitPane = useCallback(
     (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second"; startup?: SpawnTerminalRequest["startup"]; view?: PaneView; agentType?: string }) => {
-      if (activeRemoteHostRef.current) return;
-      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
+      if (activeRemoteHostRef.current) {
+        refuseTerminalOpen("remote-host-active", "Pane was not split because a remote host is active.");
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+        refuseTerminalOpen("paired-features-disabled", "Pane was not split: paired machine features are not enabled.");
+        return;
+      }
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
         registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
       ) {
+        refuseTerminalOpen("project-not-registered", "Pane was not split: this project is still connecting.");
         return;
       }
       const pending = splitPane(tabId, leafId, direction, options);
       if (options?.startup?.kind === "agentContinue") return pending;
       void pending.catch(reportRuntimeError);
     },
-    [reportRuntimeError, splitPane],
+    [refuseTerminalOpen, reportRuntimeError, splitPane],
   );
 
   const handleSplitChat = useCallback(

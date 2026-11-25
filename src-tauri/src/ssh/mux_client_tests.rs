@@ -41,7 +41,7 @@ async fn peer(host: &str) -> Peer {
 }
 
 async fn connection(peer: &Peer) -> BridgeConnection {
-    BridgeConnection::from_mux_stream(peer.mux.open_stream().unwrap())
+    BridgeConnection::from_mux_stream(peer.mux.open_stream().await.unwrap())
 }
 
 #[tokio::test]
@@ -91,8 +91,8 @@ async fn transport_loss_fails_every_open_connection() {
     let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(client_read.into()).unwrap();
     let writer = tokio::net::unix::pipe::Sender::from_owned_fd(client_write.into()).unwrap();
     let mux = HostMux::start(writer, tokio::io::BufReader::new(reader), None);
-    let mut first = BridgeConnection::from_mux_stream(mux.open_stream().unwrap());
-    let mut second = BridgeConnection::from_mux_stream(mux.open_stream().unwrap());
+    let mut first = BridgeConnection::from_mux_stream(mux.open_stream().await.unwrap());
+    let mut second = BridgeConnection::from_mux_stream(mux.open_stream().await.unwrap());
     drop(helper_write);
     drop(helper_read);
 
@@ -106,7 +106,7 @@ async fn transport_loss_fails_every_open_connection() {
     })
     .await
     .expect("mux marks itself dead after transport loss");
-    assert!(matches!(mux.open_stream(), Err(BridgeError::ConnectionClosed)));
+    assert!(matches!(mux.open_stream().await, Err(BridgeError::ConnectionClosed)));
 }
 
 #[tokio::test]
@@ -157,7 +157,7 @@ fn only_a_usage_error_without_mux_means_unsupported() {
 #[tokio::test]
 async fn idle_grace_keeps_a_mux_with_no_streams_alive() {
     let peer = peer("qa-mux-grace").await;
-    let first = peer.mux.open_stream().unwrap();
+    let first = peer.mux.open_stream().await.unwrap();
     drop(first);
     assert!(peer.mux.alive(), "closing the last stream must not end the transport");
     let mut again = connection(&peer).await;
@@ -168,7 +168,10 @@ async fn idle_grace_keeps_a_mux_with_no_streams_alive() {
 #[tokio::test]
 async fn channel_ids_are_not_reused_while_open() {
     let peer = peer("qa-mux-ids").await;
-    let streams: Vec<_> = (0..64).map(|_| peer.mux.open_stream().unwrap()).collect();
+    let mut streams = Vec::with_capacity(64);
+    for _ in 0..64 {
+        streams.push(peer.mux.open_stream().await.unwrap());
+    }
     let mut ids: Vec<u32> = streams.iter().map(MuxStream::channel).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -254,4 +257,131 @@ async fn callers_queued_behind_a_failed_dial_share_its_error() {
 
     let later = open_stream_with(key, || async { Err(DialError::Unsupported) }).await;
     assert!(matches!(later, Ok(Acquired::Legacy)), "a later caller dials again");
+}
+
+#[tokio::test]
+async fn open_stream_evicts_a_dead_cached_mux_and_redials() {
+    let key = test_key("dead-cached-mux");
+    // Construct a cached mux whose outbound channel is already closed while `dead` is still false:
+    // this reproduces the exact race where `is_alive()` returns true just before `open()` fails.
+    let (outbound, outbound_rx) = mpsc::channel(1);
+    drop(outbound_rx);
+    let broken_mux = Arc::new(HostMux {
+        outbound,
+        channels: std::sync::Mutex::new(Channels {
+            next_id: 1,
+            inbound: HashMap::new(),
+            open_streams: 0,
+            dead: false,
+            idle_since: None,
+            last_inbound: Instant::now(),
+        }),
+        _transport: std::sync::Mutex::new(None),
+    });
+    REGISTRY
+        .slots
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone(), Slot::Live(Arc::clone(&broken_mux)));
+
+    let fresh = peer("qa-mux-redial").await;
+    let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dials_for_cb = Arc::clone(&dials);
+    let fresh_mux = Arc::clone(&fresh.mux);
+
+    let acquired = open_stream_with(key.clone(), || async move {
+        dials_for_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(fresh_mux)
+    })
+    .await
+    .expect("must evict the dead cached mux and redial transparently");
+
+    assert_eq!(dials.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!broken_mux.alive(), "evicted broken mux must be marked dead");
+    let Acquired::Stream(stream) = acquired else {
+        panic!("expected a live mux stream after redial");
+    };
+    let mut conn = BridgeConnection::from_mux_stream(stream);
+    let reply = tokio::time::timeout(BOUND, conn.handshake()).await.unwrap().unwrap();
+    assert_eq!(reply.host_id, "qa-mux-redial");
+    invalidate_key(&key);
+}
+
+#[tokio::test]
+async fn open_waits_for_outbound_backpressure_and_release_delivers_close() {
+    let (outbound, mut outbound_rx) = mpsc::channel(1);
+    // Saturate the bounded outbound queue to simulate bursty traffic from other panes.
+    outbound
+        .send(MuxFrame { channel: 99, kind: MuxKind::Data, payload: vec![1, 2, 3] })
+        .await
+        .unwrap();
+
+    let mux = Arc::new(HostMux {
+        outbound: outbound.clone(),
+        channels: std::sync::Mutex::new(Channels {
+            next_id: 1,
+            inbound: HashMap::new(),
+            open_streams: 0,
+            dead: false,
+            idle_since: None,
+            last_inbound: Instant::now(),
+        }),
+        _transport: std::sync::Mutex::new(None),
+    });
+
+    let opener = {
+        let mux = Arc::clone(&mux);
+        tokio::spawn(async move { mux.open_stream().await })
+    };
+
+    // Drain the filler frame; the waiting open must now proceed and emit MuxKind::Open.
+    let filler = tokio::time::timeout(BOUND, outbound_rx.recv()).await.unwrap().unwrap();
+    assert_eq!((filler.channel, filler.kind), (99, MuxKind::Data));
+
+    let stream = tokio::time::timeout(BOUND, opener)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("open must wait for backpressure instead of failing with ConnectionClosed");
+    let open_frame = tokio::time::timeout(BOUND, outbound_rx.recv()).await.unwrap().unwrap();
+    let ch = stream.channel();
+    assert_eq!((open_frame.channel, open_frame.kind), (ch, MuxKind::Open));
+
+    // Saturate outbound again before dropping the stream; release must still deliver Close.
+    outbound
+        .send(MuxFrame { channel: 99, kind: MuxKind::Data, payload: vec![4, 5, 6] })
+        .await
+        .unwrap();
+    drop(stream);
+
+    let filler2 = tokio::time::timeout(BOUND, outbound_rx.recv()).await.unwrap().unwrap();
+    assert_eq!((filler2.channel, filler2.kind), (99, MuxKind::Data));
+    let close_frame = tokio::time::timeout(BOUND, outbound_rx.recv()).await.unwrap().unwrap();
+    assert_eq!((close_frame.channel, close_frame.kind), (ch, MuxKind::Close));
+}
+
+#[tokio::test]
+async fn invalidate_key_evicts_live_mux_and_preserves_legacy() {
+    let live_key = test_key("invalidate-live");
+    let peer = peer("qa-mux-invalidate").await;
+    REGISTRY
+        .slots
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(live_key.clone(), Slot::Live(Arc::clone(&peer.mux)));
+    assert!(peer.mux.alive());
+
+    invalidate_key(&live_key);
+    assert!(!peer.mux.alive(), "invalidated mux must be marked dead");
+    assert!(existing_slot(&live_key).is_none());
+
+    let legacy_key = test_key("invalidate-legacy");
+    REGISTRY
+        .slots
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(legacy_key.clone(), Slot::Legacy(Instant::now()));
+    invalidate_key(&legacy_key);
+    assert!(matches!(existing_slot(&legacy_key), Some(ExistingSlot::Legacy)));
+    REGISTRY.slots.lock().unwrap_or_else(|p| p.into_inner()).remove(&legacy_key);
 }
