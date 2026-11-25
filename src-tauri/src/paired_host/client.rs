@@ -139,6 +139,12 @@ pub enum Operation {
     SupervisorObserve {
         observation: serde_json::Value,
     },
+    /// A standby desktop's lane-lifecycle operation forwarded to the supervisor lease holder
+    /// (`POST supervisor/lane-lifecycle`).
+    LaneLifecycle {
+        operation: String,
+        body: serde_json::Value,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -451,6 +457,7 @@ impl Operation {
                 | Self::CloseSession { .. }
                 | Self::SupervisorRequest { .. }
                 | Self::SupervisorObserve { .. }
+                | Self::LaneLifecycle { .. }
         )
     }
 
@@ -496,6 +503,12 @@ impl Operation {
                 path = "supervisor/observe";
                 r.capability =
                     Some(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
+            }
+            Self::LaneLifecycle { .. } => {
+                path = "supervisor/lane-lifecycle";
+                r.capability = Some(
+                    crate::remote::server::supervisor_api::SUPERVISOR_LANE_LIFECYCLE_CAPABILITY,
+                );
             }
             Self::Directories {
                 path: p,
@@ -835,6 +848,16 @@ impl Operation {
                     serde_json::to_vec(body).map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
+            Self::LaneLifecycle { operation, body } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "operation": operation,
+                        "body": body,
+                    }))
+                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
             Self::AgentControl { op, fence } if op.is_input_mutation() => {
                 r.method = Method::POST;
                 // The request id stays off `route.request_id` so the workspace journal is not
@@ -869,6 +892,11 @@ impl Operation {
                     | Self::FileWrite { .. }
                     | Self::FileList { .. }
                     | Self::FileMkdir { .. }
+            )
+            || matches!(
+                self,
+                Self::LaneLifecycle { operation, .. }
+                    if matches!(operation.as_str(), "read" | "identities")
             );
         if r.segments
             .iter()
@@ -2445,7 +2473,9 @@ fn map_result(
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::SupervisorFence { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::Resources => OperationResult::Resources(decode(bytes)?),
-        Operation::SupervisorRequest { .. } | Operation::SupervisorObserve { .. } => {
+        Operation::SupervisorRequest { .. }
+        | Operation::SupervisorObserve { .. }
+        | Operation::LaneLifecycle { .. } => {
             OperationResult::Supervisor(decode(bytes)?)
         }
     })

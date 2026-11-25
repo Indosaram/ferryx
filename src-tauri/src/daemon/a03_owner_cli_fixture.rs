@@ -349,6 +349,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
+                capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_LANE_LIFECYCLE_CAPABILITY);
             }
             serde_json::json!(capabilities)
         } else if machine_terminal_ready {

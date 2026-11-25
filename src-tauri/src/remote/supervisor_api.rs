@@ -24,6 +24,9 @@ pub(crate) const SUPERVISOR_STANDBY_CODE: &str = "SUPERVISOR_STANDBY";
 /// Capability of a holder that applies a standby's pane observations (`POST supervisor/observe`).
 pub(crate) const SUPERVISOR_OBSERVE_CAPABILITY: &str = "supervisorObserveV1";
 
+/// Capability of a holder that serves forwarded lane lifecycle operations (`POST supervisor/lane-lifecycle`).
+pub(crate) const SUPERVISOR_LANE_LIFECYCLE_CAPABILITY: &str = "supervisorLaneLifecycleV1";
+
 /// `POST /api/v1/supervisor/observe`: a standby's observation of its own panes (keystrokes,
 /// relayed input, worker report), applied here as if local with `host_id` the paired host key
 /// this holder binds the sender machine's panes under.
@@ -47,6 +50,39 @@ pub(crate) async fn http_observe(
     let sender = device.account_machine_id.as_deref().or(device.installation_id.as_deref());
     match crate::hub_runtime::apply_observation(sender, &hosts, observation).await {
         Ok(value) => no_store(value),
+        Err(failure) => service_refusal(&failure),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct LaneLifecycleBody {
+    operation: String,
+    #[serde(default)]
+    body: serde_json::Value,
+}
+
+/// `POST /api/v1/supervisor/lane-lifecycle`: a standby machine forwards desktop lane-lifecycle
+/// operations (`read`, `identities`, `apply`, `pin-tabs`, `import`, `order`) to the holder so
+/// sidebar state stays single-source across machines. Always executes against this machine's
+/// local hub only (never re-forwards) and returns the hub's `{status, value}` envelope inside
+/// 200 OK so domain statuses such as 409 conflict cross the paired transport intact.
+pub(crate) async fn http_lane_lifecycle(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<LaneLifecycleBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = agent_control_service::http_machine_peer(&state, &headers, true) {
+        return *response;
+    }
+    let Ok(Json(request)) = body else {
+        return reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "the body must be a lane lifecycle request",
+        );
+    };
+    match crate::hub_runtime::lane_lifecycle_local(&request.operation, request.body).await {
+        Ok((status, value)) => no_store(serde_json::json!({ "status": status, "value": value })),
         Err(failure) => service_refusal(&failure),
     }
 }

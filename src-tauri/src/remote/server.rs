@@ -5054,6 +5054,7 @@ fn gateway_capability_names(
         if supervisor {
             capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
             capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
+            capabilities.push(supervisor_api::SUPERVISOR_LANE_LIFECYCLE_CAPABILITY);
         }
     } else if control && terminal_ready {
         capabilities.extend(reference_chat_control_capabilities());
@@ -10065,6 +10066,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/supervisor/observe",
             post(supervisor_api::http_observe).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/lane-lifecycle",
+            post(supervisor_api::http_lane_lifecycle).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )

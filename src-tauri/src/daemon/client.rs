@@ -2702,7 +2702,7 @@ impl DaemonClient {
                 .get("requestId")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
-            Operation::SupervisorObserve { .. } => None,
+            Operation::SupervisorObserve { .. } | Operation::LaneLifecycle { .. } => None,
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,
