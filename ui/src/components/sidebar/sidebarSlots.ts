@@ -1,6 +1,7 @@
 import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../../lib/activity";
 import { MACHINE_STATE_LABELS, pairedMachineStatus } from "../../lib/machineStatus";
 import type { PairedHostReachabilityView } from "../../lib/pairedHostReachability";
+import { pairedPathLabel, type PairedHostRouteView } from "../../lib/pairedHostRoute";
 import type { AgentState, Worktree } from "../../lib/types";
 import type { RemoteHostState } from "../../state/remoteHostStore";
 import type { StatusDotState } from "../ui/StatusDot";
@@ -116,6 +117,7 @@ export function pairedSlotStatus(
   hostId: string,
   state: RemoteHostState,
   reachability: PairedHostReachabilityView,
+  route?: PairedHostRouteView,
 ): PairedSlotStatus {
   const host = state.hosts[hostId];
   if (state.machineFeaturesEnabled === false) return { label: MACHINE_STATE_LABELS.disabled, connected: false, checking: false, reason: null };
@@ -123,7 +125,9 @@ export function pairedSlotStatus(
   if (state.nativeStatus !== "ready") return { label: MACHINE_STATE_LABELS.checking, connected: false, checking: true, reason: null };
   if (!host) return { label: "Unavailable", connected: false, checking: false, reason: null };
   const status = pairedMachineStatus({ host, nativeReady: true, accountEnrolled: false, reachability });
-  return { label: status.label, connected: status.state === "connected", checking: status.state === "checking", reason: status.reason };
+  const connected = status.state === "connected";
+  const label = connected && route?.supported ? pairedPathLabel(host.transport, route) : status.label;
+  return { label, connected, checking: status.state === "checking", reason: status.reason };
 }
 
 export function projectAttentionState(activity: ActivitySummary): AttentionState {

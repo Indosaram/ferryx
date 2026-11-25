@@ -17,6 +17,8 @@ export interface HostView {
   generation: string;
   authStatus: "paired" | "needsMachineGrant" | "revoked" | "unknown";
   online: boolean;
+  sshHostId?: string | null;
+  publishedOrigins?: { kind: string; origin: string; observedAt: number }[];
 }
 export interface MigrationReceipt { hostId: string; generation: string }
 export interface PairHostRequest { relayOrigin: string; pin: string; displayLabel: string }
@@ -295,9 +297,13 @@ function endpoint(view: HostView): HostEndpoint {
     || !validGeneration(view.generation) || view.hostId !== remoteHostKey(origin(view.relayOrigin), view.machineId)
     || !["mirror", "machine"].includes(view.grantScope)
     || !["paired", "needsMachineGrant", "revoked", "unknown"].includes(view.authStatus) || typeof view.online !== "boolean") throw new Error("INVALID_HOST_VIEW");
-  return { hostId: view.hostId, relayOrigin: view.relayOrigin, machineId: view.machineId,
+  return {
+    hostId: view.hostId, relayOrigin: view.relayOrigin, machineId: view.machineId,
     name: view.displayLabel, displayName: view.displayLabel, address: view.relayOrigin, transport: "relay",
-    generation: view.generation, grantScope: view.grantScope, authStatus: view.authStatus, online: view.online };
+    generation: view.generation, grantScope: view.grantScope, authStatus: view.authStatus, online: view.online,
+    ...(typeof view.sshHostId === "string" && view.sshHostId ? { sshHostId: view.sshHostId } : {}),
+    ...(Array.isArray(view.publishedOrigins) && view.publishedOrigins.length > 0 ? { publishedOrigins: view.publishedOrigins } : {}),
+  };
 }
 
 const ALLOWED_FAILURE_CODES = new Set([

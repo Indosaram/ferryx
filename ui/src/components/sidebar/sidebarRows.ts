@@ -1,10 +1,12 @@
 import type { PairedHostReachabilityView } from "../../lib/pairedHostReachability";
+import type { PairedHostRouteView } from "../../lib/pairedHostRoute";
 import { projectRootWorktree } from "../../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive, type ProjectGroup } from "../../lib/projectGrouping";
 import type { WorktreeOrder } from "../../lib/sidebarPersistence";
 import type { RegisteredProject } from "../../lib/tauri";
 import type { Worktree } from "../../lib/types";
 import { resolveWorktreeOwnerId } from "../../lib/worktreeOwnership";
+import { deduplicateSidebarProjects } from "./sidebarDedup";
 import type { SidebarLabelContext } from "./sidebarLabels";
 import { pairedSlotStatus } from "./sidebarSlots";
 
@@ -15,6 +17,7 @@ export type SidebarRowsInput = SidebarLabelContext & {
   readonly inactiveProjectWorktrees?: Readonly<Record<string, Worktree[]>>;
   /** Read once per build; the caller rebuilds when reachability changes. */
   readonly reachability: (hostId: string) => PairedHostReachabilityView;
+  readonly route?: (hostId: string) => PairedHostRouteView;
 };
 
 export function worktreeSortableId(workspaceId: string, worktreePath: string, rowWorkspaceId?: string) {
@@ -106,8 +109,9 @@ const sameRoot = (a: string, b: string) =>
  * plain-folder project's root row never lands under whichever project happens to be active.
  */
 export function groupWorktreesByProject(input: SidebarRowsInput) {
-  const { worktrees, projects, activeProjectId, inactiveProjectWorktrees, hosts, remoteState } = input;
-  const rowSummary = (hostId: string) => pairedSlotStatus(hostId, remoteState, input.reachability(hostId)).label;
+  const { worktrees, activeProjectId, inactiveProjectWorktrees, hosts, remoteState } = input;
+  const projects = deduplicateSidebarProjects(input.projects, hosts, remoteState);
+  const rowSummary = (hostId: string) => pairedSlotStatus(hostId, remoteState, input.reachability(hostId), input.route?.(hostId)).label;
   const groups = groupProjects(projects);
   const grouped = new Map<string, Worktree[]>();
   for (const group of groups) {

@@ -12,7 +12,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => mocks.i
 vi.mock("@tauri-apps/api/event", () => ({ listen: (...args: unknown[]) => mocks.listen(...args) }));
 vi.mock("./tauri", () => ({ bootTrace: vi.fn().mockResolvedValue(undefined) }));
 
-type State = "relay" | "attempting" | "direct" | "disconnected";
+type State = "relay" | "attempting" | "direct" | "ssh" | "disconnected";
 const route = (hostId: string, state: State) => ({ hostId, state });
 
 async function load() {
@@ -70,6 +70,9 @@ describe("pairedHostRoute store", () => {
     expect(result.current.entry?.state).toBe("relay");
     act(() => fire(route("a", "direct")));
     expect(result.current).toEqual({ supported: true, entry: route("a", "direct") });
+    act(() => fire(route("a", "ssh")));
+    expect(result.current).toEqual({ supported: true, entry: route("a", "ssh") });
+    expect(m.pairedPathLabel("relay", result.current)).toBe("SSH");
     act(() => fire(route("a", "disconnected")));
     expect(result.current.entry?.state).toBe("disconnected");
   });

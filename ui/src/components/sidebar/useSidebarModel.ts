@@ -6,6 +6,7 @@ import { useEffect, useMemo, useReducer, useSyncExternalStore } from "react";
 
 import { useAdvancedFeatures } from "../../lib/advancedFeatures";
 import { getPairedHostReachability, subscribePairedHostReachability } from "../../lib/pairedHostReachability";
+import { getPairedHostRoute, subscribePairedHostRoute } from "../../lib/pairedHostRoute";
 import type { SidebarLaneLifecycle, WorktreeOrder } from "../../lib/sidebarPersistence";
 import { useSshHosts } from "../../lib/sshHosts";
 import type { RegisteredProject } from "../../lib/tauri";
@@ -49,12 +50,13 @@ export function useSidebarModel(source: DesktopSidebarSource, persisted: Desktop
   // Paired rows read reachability non-reactively, so rebuild whenever it changes.
   const [reachabilityVersion, bumpReachability] = useReducer((version: number) => version + 1, 0);
   useEffect(() => {
-    const unsubscribe = subscribePairedHostReachability(bumpReachability);
-    return () => { unsubscribe(); };
+    const unsubReach = subscribePairedHostReachability(bumpReachability);
+    const unsubRoute = subscribePairedHostRoute(bumpReachability);
+    return () => { unsubReach(); unsubRoute(); };
   }, []);
   const rowsInput = useMemo(
-    () => ({ worktrees, projects, activeProjectId, inactiveProjectWorktrees, hosts, remoteState, reachability: getPairedHostReachability }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store read inside
+    () => ({ worktrees, projects, activeProjectId, inactiveProjectWorktrees, hosts, remoteState, reachability: getPairedHostReachability, route: getPairedHostRoute }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store reads inside
     [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState, reachabilityVersion],
   );
   const { worktreeOrder, collapsedGroupIds, laneOrder, laneLifecycles } = persisted;
