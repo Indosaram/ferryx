@@ -218,12 +218,20 @@ export function MahoMiniPane({
       className="flex h-full min-h-0 w-full flex-col overflow-hidden border-l border-border bg-background"
       data-maho-space={chosenSpace?.id ?? ""}
       data-testid="maho-mini-pane"
+      data-visible={visible ? "true" : "false"}
       aria-label="Maho Mini"
+      aria-hidden={visible ? undefined : true}
       style={paletteStyle as unknown as CSSProperties}
     >
-      <div className="flex items-center gap-1 px-2 py-1.5" role="toolbar" aria-label="Maho Mini bar">
+      {/* One row, Maho Mini's own order: `[Space chip | centered host | copy] [Open in <Space>
+          ⌘O | Space selector] [x]`. */}
+      <div
+        className="flex items-center gap-1 border-b border-border px-2 py-1"
+        role="toolbar"
+        aria-label="Maho Mini bar"
+      >
         <span
-          className="inline-flex max-w-28 shrink-0 items-center gap-1.5 truncate rounded-full px-2 py-0.5 text-[11px]"
+          className="inline-flex max-w-24 shrink-0 items-center gap-1.5 truncate rounded-full bg-muted px-2 py-0.5 text-[11px]"
           data-testid="maho-mini-space-chip"
           title={`Space: ${chosenSpace?.name ?? ""}`}
         >
@@ -235,7 +243,7 @@ export function MahoMiniPane({
           <span className="truncate">{chosenSpace?.name ?? "Space"}</span>
         </span>
         <input
-          className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-2 text-center text-xs outline-none focus:border-ring"
+          className="h-6 min-w-0 flex-1 rounded border border-border bg-background px-2 text-center text-xs outline-none focus:border-ring"
           aria-label="Mini address"
           value={draftUrl}
           placeholder={host}
@@ -255,20 +263,18 @@ export function MahoMiniPane({
         >
           {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
         </button>
-      </div>
-      <div className="flex items-center gap-1.5 px-2 pb-1.5" role="group" aria-label="Promote mini">
         <button
           type="button"
-          className="flex h-7 min-w-0 items-center gap-1.5 rounded bg-primary px-2 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+          className="flex h-6 min-w-0 shrink-0 items-center gap-1 rounded bg-primary px-2 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
           aria-label={`Open in ${chosenSpace?.name ?? "Space"}`}
           title={`Open in ${chosenSpace?.name ?? "Space"} (${shortcutLabel})`}
           onClick={promote}
         >
-          <span className="truncate">Open in {chosenSpace?.name ?? "Space"}</span>
+          <span className="max-w-28 truncate">Open in {chosenSpace?.name ?? "Space"}</span>
           <kbd className="rounded border border-primary-foreground/30 px-1 text-[10px]">{shortcutLabel}</kbd>
         </button>
         <select
-          className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-1 text-[11px] outline-none focus:border-ring"
+          className="h-6 w-24 min-w-0 shrink-0 rounded border border-border bg-background px-1 text-[11px] outline-none focus:border-ring"
           aria-label="Promote to Space"
           value={chosenSpaceId}
           onChange={(event) => setSelectedSpaceId(event.target.value)}
@@ -290,13 +296,19 @@ export function MahoMiniPane({
         </button>
       </div>
       <div className="min-h-0 flex-1">
-        <BrowserPane
-          tab={miniTabFor(miniTab)}
-          visible={visible}
-          chromeMode="maho-minimal"
-          onNavigate={(url) => navigateTo(miniTab.browserId, url)}
-          onReload={() => reload(miniTab.browserId)}
-        />
+        {/* A hidden mini keeps its transient session in the store but must not touch the native
+            surface: `BrowserPane` claims `browserViewportCoordinator` on mount and hides the
+            surface whenever it is not visible, which would blank a live worktree split or
+            Browser-mode pane showing this same `browserId`. */}
+        {visible ? (
+          <BrowserPane
+            tab={miniTabFor(miniTab)}
+            visible
+            chromeMode="maho-minimal"
+            onNavigate={(url) => navigateTo(miniTab.browserId, url)}
+            onReload={() => reload(miniTab.browserId)}
+          />
+        ) : null}
       </div>
     </section>
   );

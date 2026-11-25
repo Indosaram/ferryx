@@ -21,6 +21,8 @@ vi.mock("../../BrowserPane", () => ({
 vi.mock("../../../lib/browserTauri", () => ({
   navigateBrowser: vi.fn(() => Promise.resolve()),
   reloadBrowser: vi.fn(() => Promise.resolve()),
+  setBrowserVisible: vi.fn(() => Promise.resolve()),
+  setBrowserBounds: vi.fn(() => Promise.resolve()),
 }));
 
 import {
@@ -29,6 +31,8 @@ import {
   selectTodayTabs,
   type BrowserStore,
 } from "../../../state/browserStore";
+import { browserViewportCoordinator } from "../../../lib/browserViewportCoordinator";
+import { setBrowserVisible } from "../../../lib/browserTauri";
 import { MahoMiniPane } from "./MahoMiniPane";
 
 function makeStore(): BrowserStore {
@@ -50,6 +54,7 @@ function paneProps(store: BrowserStore) {
 describe("MahoMiniPane", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    browserViewportCoordinator.reset();
   });
 
   it("renders the live mini browser through BrowserPane with minimal chrome", () => {
@@ -185,6 +190,49 @@ describe("MahoMiniPane", () => {
 
     expect(props.onPromoted).not.toHaveBeenCalled();
     expect(store.getState().miniBrowserId).toBe("mini-1");
+  });
+
+  it("never claims or hides the native surface of a live pane while the host hides it", async () => {
+    const store = makeStore();
+    seed(store, "mini-1");
+    expect(store.setMini("mini-1").ok).toBe(true);
+
+    // A live worktree split (or Browser-mode pane) already owns the one native surface.
+    const liveOwner = browserViewportCoordinator.claim("mini-1", "worktree-split-surface", 0);
+    expect(browserViewportCoordinator.getOwner("mini-1")).toEqual({
+      surfaceId: "worktree-split-surface",
+      priority: 0,
+    });
+
+    render(<MahoMiniPane store={store} visible={false} onDestroyMiniSession={vi.fn()} />);
+    await act(async () => {});
+
+    // No BrowserPane mounts while hidden, so nothing claims the surface and nothing hides it.
+    expect(screen.queryByTestId("browser-pane-probe")).toBeNull();
+    expect(screen.getByTestId("maho-mini-pane")).toHaveAttribute("data-visible", "false");
+    expect(browserViewportCoordinator.getOwner("mini-1")).toEqual({
+      surfaceId: "worktree-split-surface",
+      priority: 0,
+    });
+    expect(liveOwner.isOwner()).toBe(true);
+    expect(vi.mocked(setBrowserVisible)).not.toHaveBeenCalledWith("mini-1", false);
+    expect(vi.mocked(setBrowserVisible)).not.toHaveBeenCalledWith("mini-1", true);
+    // The transient session itself survives: only the surface is untouched.
+    expect(store.getState().miniBrowserId).toBe("mini-1");
+
+    liveOwner.release();
+  });
+
+  it("claims the surface once the host shows it again", async () => {
+    const store = makeStore();
+    seed(store, "mini-1");
+    expect(store.setMini("mini-1").ok).toBe(true);
+
+    const { rerender } = render(<MahoMiniPane store={store} visible={false} onDestroyMiniSession={vi.fn()} />);
+    expect(screen.queryByTestId("browser-pane-probe")).toBeNull();
+
+    rerender(<MahoMiniPane store={store} visible onDestroyMiniSession={vi.fn()} />);
+    expect(screen.getByTestId("browser-pane-probe")).toHaveAttribute("data-browser-id", "mini-1");
   });
 
   it("renders nothing without a mini slot", () => {
