@@ -73,6 +73,7 @@ desktop = [
     "dep:tauri-plugin-updater",
     "dep:rodio",
     "dep:gtk",
+    "dep:gdk",
     "dep:webkit2gtk",
     "dep:javascriptcore",
 ]
@@ -113,6 +114,7 @@ remote-desktop = [
     "dep:ferryx-rd-net",
     "dep:ferryx-rd-host",
     "dep:ferryx-rd-decode",
+    "dep:ferryx-rd-render",
     "dep:ferryx-rd-app",
 ]
 
@@ -122,6 +124,7 @@ ferryx-rd-proto = { path = "../crates/ferryx-rd/ferryx-rd-proto", optional = tru
 ferryx-rd-net = { path = "../crates/ferryx-rd/ferryx-rd-net", optional = true, default-features = false }
 ferryx-rd-host = { path = "../crates/ferryx-rd/ferryx-rd-host", optional = true, default-features = false }
 ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg"] }
+ferryx-rd-render = { path = "../crates/ferryx-rd/ferryx-rd-render", optional = true }
 ferryx-rd-app = { path = "../crates/ferryx-rd/ferryx-rd-app", optional = true, features = ["ffmpeg"] }
 ferryx-browser-import = { path = "../crates/ferryx-browser-import" }
 ferryx-browser-engine-protocol = { path = "../crates/browser-engine-protocol" }
@@ -223,6 +226,7 @@ openssl = { version = "=0.10.81", features = ["vendored"] }
 tauri-plugin-updater = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg", "videotoolbox"] }
 security-framework = "3.7.0"
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFString", "CFURL", "CFBase", "CFAttributedString", "CFDictionary"] }
 objc2-core-text = { version = "0.3", default-features = false, features = ["std", "CTFont", "CTFontDescriptor", "CTFontTraits", "CTLine", "CTStringAttributes"] }
@@ -232,6 +236,7 @@ objc2 = { version = "0.6", features = ["exception"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSEvent",
+    "NSScreen",
     "NSApplication",
     "NSDockTile",
     "NSGraphicsContext",
@@ -262,6 +267,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSEnumerator",
     "NSJSONSerialization",
     "NSProcessInfo",
+    "NSNotification",
     "NSURLRequest",
 ] }
 objc2-authentication-services = { version = "0.3.2", default-features = false, features = [
@@ -311,6 +317,7 @@ block2 = "0.6"
 notify-rust = "4.18.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg", "d3d11va"] }
 windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
@@ -335,6 +342,8 @@ webview2-com = "0.38"
 windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg", "vaapi"] }
+gdk = { version = "0.18", optional = true }
 gtk = { version = "0.18", default-features = false, optional = true }
 webkit2gtk = { version = "2.0.2", default-features = false, optional = true }
 # Reads the trusted bridge's JavaScriptCore values (browser/bridge/linux.rs); same pin as wry.
@@ -349,6 +358,11 @@ tokio = { version = "1.53", features = ["test-util"] }
 # `testing` feature opens that seam; release builds never see it because dev-dependencies are
 # not built for them.
 ferryx-browser-import = { path = "../crates/ferryx-browser-import", features = ["testing"] }
+# The remote-desktop loopback contract tests drive a real HostServer over TLS-PSK and
+# encrypted UDP without a physical display. The `testing` feature opens the synthetic
+# host seam; like the importer above it only exists for `cargo test`, never for a
+# release binary.
+ferryx-rd-host = { path = "../crates/ferryx-rd/ferryx-rd-host", features = ["testing"] }
 
 # tests/wry_delegate_classes_macos.rs builds a wry webview directly; the same wry tauri runs on.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
