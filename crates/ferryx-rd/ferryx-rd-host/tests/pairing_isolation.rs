@@ -96,6 +96,7 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             consent_sender: None,
             allow_input: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             allow_clipboard: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            max_udp_payload_bytes: ferryx_rd_host::session::DEFAULT_MAX_UDP_PAYLOAD_BYTES,
         };
         let server = HostServer::bind(config).unwrap();
         let tcp_addr = server.tcp_addr().unwrap();
@@ -162,6 +163,7 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             consent_sender: None,
             allow_input: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             allow_clipboard: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            max_udp_payload_bytes: ferryx_rd_host::session::DEFAULT_MAX_UDP_PAYLOAD_BYTES,
         };
         let server2 = HostServer::bind(config2).unwrap();
         let tcp_addr2 = server2.tcp_addr().unwrap();

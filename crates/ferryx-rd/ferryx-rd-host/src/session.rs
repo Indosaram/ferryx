@@ -71,6 +71,10 @@ pub const SESSION_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SENDER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
+/// Audio capture is on for every platform constructor. A host whose audio device
+/// is missing still streams video: the failure is reported to the guest and the
+/// session keeps running. The standalone CLI's `--no-audio` opts out.
+pub const DEFAULT_HOST_CAPTURE_AUDIO: bool = true;
 /// The shared codec remains available through both legacy host paths.
 ///
 /// ```
@@ -471,6 +475,24 @@ impl ConsentPrompt {
     }
 }
 
+/// Default UDP payload budget for standalone LAN/Tailscale sessions.
+///
+/// 1200 bytes keeps every datagram inside the 1280-byte IPv6 minimum MTU after
+/// the 40-byte IPv6 header and 8-byte UDP header, with headroom for tunnel
+/// encapsulation.
+pub const DEFAULT_MAX_UDP_PAYLOAD_BYTES: usize = 1200;
+
+/// Smallest accepted UDP payload budget. 512 bytes still leaves a nonempty
+/// plaintext payload after the encrypted envelope and every media header.
+pub const MIN_MAX_UDP_PAYLOAD_BYTES: usize = 512;
+
+/// Largest accepted UDP payload budget, matching the 1400-byte wire ceiling.
+pub const MAX_MAX_UDP_PAYLOAD_BYTES: usize = 1400;
+
+/// Payload budget for QUIC datagram tunnels: 1280-byte QUIC datagram limit
+/// minus encapsulation headroom, so the tunneled datagram never fragments.
+pub const QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES: usize = 1120;
+
 #[derive(Clone)]
 pub struct HostConfig {
     pub tcp_addr: SocketAddr,
@@ -489,9 +511,21 @@ pub struct HostConfig {
     pub output_name: Option<String>,
     pub allow_input: Arc<AtomicBool>,
     pub allow_clipboard: Arc<AtomicBool>,
+    /// Maximum UDP payload (before the encrypted envelope) this host may emit.
+    /// Every sender chunk, fragment and pacing figure derives from it.
+    /// Standalone LAN/Tailscale defaults to [`DEFAULT_MAX_UDP_PAYLOAD_BYTES`];
+    /// embedders tunnelling the media through QUIC set
+    /// [`QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES`].
+    pub max_udp_payload_bytes: usize,
 }
 
 impl HostConfig {
+    /// Clamped payload budget the sender packetizer and pacing math use.
+    pub fn effective_max_udp_payload_bytes(&self) -> usize {
+        self.max_udp_payload_bytes
+            .clamp(MIN_MAX_UDP_PAYLOAD_BYTES, MAX_MAX_UDP_PAYLOAD_BYTES)
+    }
+
     pub fn host_policy(&self) -> HostPolicy {
         HostPolicy {
             allow_input: self.allow_input.load(Ordering::SeqCst),
@@ -518,11 +552,12 @@ impl HostConfig {
             display,
             frames_per_second: 60,
             bitrate: 100_000_000,
-            capture_audio: true,
+            capture_audio: DEFAULT_HOST_CAPTURE_AUDIO,
             output_name: None,
             consent_sender: None,
             allow_input: Arc::new(AtomicBool::new(true)),
             allow_clipboard: Arc::new(AtomicBool::new(true)),
+            max_udp_payload_bytes: DEFAULT_MAX_UDP_PAYLOAD_BYTES,
         })
     }
 
@@ -563,11 +598,12 @@ impl HostConfig {
             },
             frames_per_second: 60,
             bitrate: WINDOWS_DEFAULT_BITRATE,
-            capture_audio: false,
+            capture_audio: DEFAULT_HOST_CAPTURE_AUDIO,
             output_name: None,
             consent_sender: None,
             allow_input: Arc::new(AtomicBool::new(true)),
             allow_clipboard: Arc::new(AtomicBool::new(true)),
+            max_udp_payload_bytes: DEFAULT_MAX_UDP_PAYLOAD_BYTES,
         })
     }
 
@@ -611,11 +647,12 @@ impl HostConfig {
             display,
             frames_per_second: 60,
             bitrate: LINUX_DEFAULT_BITRATE,
-            capture_audio: false,
+            capture_audio: DEFAULT_HOST_CAPTURE_AUDIO,
             output_name,
             consent_sender: None,
             allow_input: Arc::new(AtomicBool::new(true)),
             allow_clipboard: Arc::new(AtomicBool::new(true)),
+            max_udp_payload_bytes: DEFAULT_MAX_UDP_PAYLOAD_BYTES,
         })
     }
 }
@@ -739,6 +776,278 @@ pub struct DisplayInfo {
 impl DisplayInfo {
     pub fn scale_factor(self) -> f32 {
         self.scale_factor_milli as f32 / 1_000.0
+    }
+}
+
+/// Deterministic media description for [`HostServer::bind_synthetic_for_test`].
+///
+/// Dev-only: embedder integration tests describe the stream they need instead of
+/// depending on a display, a capture permission or an encoder.
+#[cfg(feature = "testing")]
+#[derive(Debug, Clone)]
+pub struct SyntheticHostSpec {
+    /// Encoded frame bytes put on the wire verbatim. Every synthetic frame is a
+    /// key frame, so the sender never waits for a reference frame to arrive.
+    pub keyframe_bytes: Vec<u8>,
+    /// Codec the synthetic pipeline reports to the guest in `StreamOptionsActive`.
+    pub codec: StreamCodecPreference,
+    /// 48 kHz stereo f32 little-endian PCM, streamed in 10 ms blocks.
+    pub audio_pcm_48khz_f32_le: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Wall-clock spacing between synthetic frames.
+    pub frame_interval: Duration,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+struct SyntheticObserved {
+    restarts: Vec<(u32, u16, StreamCodecPreference)>,
+    inputs: Vec<InputEvent>,
+}
+
+/// Records what a synthetic host actually received or applied.
+///
+/// Every wait is condition-variable backed and bounded by the caller's timeout:
+/// no polling loop and no fixed sleep, so a test never passes on timing luck.
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+pub struct SyntheticHostObserver {
+    observed: Mutex<SyntheticObserved>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(feature = "testing")]
+impl SyntheticHostObserver {
+    /// `(fps, scale_permille, codec)` for every accepted `StreamOptionsRequest`,
+    /// in arrival order.
+    pub fn observed_stream_restarts(&self) -> Vec<(u32, u16, StreamCodecPreference)> {
+        self.observed
+            .lock()
+            .expect("synthetic observer poisoned")
+            .restarts
+            .clone()
+    }
+
+    /// Every input event the host accepted, across both transport lanes.
+    pub fn observed_inputs(&self) -> Vec<InputEvent> {
+        self.observed
+            .lock()
+            .expect("synthetic observer poisoned")
+            .inputs
+            .clone()
+    }
+
+    /// Blocks until a recorded restart satisfies `predicate`, or `timeout`
+    /// expires. Returns whether the predicate held.
+    pub fn wait_for_restart(
+        &self,
+        predicate: impl Fn(&(u32, u16, StreamCodecPreference)) -> bool,
+        timeout: Duration,
+    ) -> bool {
+        self.wait_until(
+            |observed| observed.restarts.iter().any(|entry| predicate(entry)),
+            timeout,
+        )
+    }
+
+    /// Blocks until a recorded input event satisfies `predicate`, or `timeout`
+    /// expires. Returns whether the predicate held.
+    pub fn wait_for_input(
+        &self,
+        predicate: impl Fn(&InputEvent) -> bool,
+        timeout: Duration,
+    ) -> bool {
+        self.wait_until(
+            |observed| observed.inputs.iter().any(|event| predicate(event)),
+            timeout,
+        )
+    }
+
+    fn wait_until(
+        &self,
+        ready: impl Fn(&SyntheticObserved) -> bool,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut observed = self
+            .observed
+            .lock()
+            .expect("synthetic observer poisoned");
+        loop {
+            if ready(&observed) {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            observed = self
+                .changed
+                .wait_timeout(observed, deadline - now)
+                .expect("synthetic observer poisoned")
+                .0;
+        }
+    }
+
+    fn record_restart(&self, fps: u32, scale_permille: u16, codec: StreamCodecPreference) {
+        self.observed
+            .lock()
+            .expect("synthetic observer poisoned")
+            .restarts
+            .push((fps, scale_permille, codec));
+        self.changed.notify_all();
+    }
+
+    fn record_inputs(&self, events: &[InputEvent]) {
+        if events.is_empty() {
+            return;
+        }
+        self.observed
+            .lock()
+            .expect("synthetic observer poisoned")
+            .inputs
+            .extend_from_slice(events);
+        self.changed.notify_all();
+    }
+}
+
+/// Produces [`SyntheticHostSpec`] frames and audio on a fixed cadence.
+#[cfg(feature = "testing")]
+struct SyntheticHostSource {
+    keyframe_bytes: Arc<[u8]>,
+    audio_pcm: Arc<[u8]>,
+    codec: StreamCodecPreference,
+    frame_interval: Duration,
+    capture_audio: bool,
+}
+
+#[cfg(feature = "testing")]
+impl SyntheticHostSource {
+    fn new(
+        spec: &SyntheticHostSpec,
+        codec: StreamCodecPreference,
+        frame_interval: Duration,
+        capture_audio: bool,
+    ) -> Self {
+        Self {
+            keyframe_bytes: Arc::from(spec.keyframe_bytes.as_slice()),
+            audio_pcm: Arc::from(spec.audio_pcm_48khz_f32_le.as_slice()),
+            codec,
+            frame_interval,
+            capture_audio,
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+impl MediaSource for SyntheticHostSource {
+    fn start_with_capabilities(
+        &self,
+        sender: SyncSender<MediaEvent>,
+        _peer: Capabilities,
+    ) -> Result<Box<dyn MediaHandle>, SessionError> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let producer_cancelled = Arc::clone(&cancelled);
+        let keyframe_bytes = Arc::clone(&self.keyframe_bytes);
+        let audio_pcm = Arc::clone(&self.audio_pcm);
+        let interval = self.frame_interval.max(Duration::from_millis(1));
+        let capture_audio = self.capture_audio;
+        let worker = thread::Builder::new()
+            .name("ferryx-rd-host-synthetic".into())
+            .spawn(move || {
+                let mut audio_offset = 0usize;
+                while !producer_cancelled.load(Ordering::Acquire) {
+                    let now = Instant::now();
+                    let frame = VideoFrame {
+                        data: keyframe_bytes.to_vec(),
+                        is_key_frame: true,
+                        capture_at: now,
+                        encode_started_at: now,
+                        encode_completed_at: now,
+                    };
+                    match sender.try_send(MediaEvent::Video(frame)) {
+                        Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                        Err(mpsc::TrySendError::Disconnected(_)) => break,
+                    }
+                    if capture_audio && !audio_pcm.is_empty() {
+                        let block = synthetic_audio_block(&audio_pcm, &mut audio_offset);
+                        match sender.try_send(MediaEvent::Audio(block)) {
+                            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                            Err(mpsc::TrySendError::Disconnected(_)) => break,
+                        }
+                    }
+                    // The frame cadence itself, not a test poll: the producer
+                    // wakes on the interval and honours cancellation between
+                    // frames.
+                    thread::park_timeout(interval);
+                }
+            })?;
+        Ok(Box::new(SyntheticHostHandle {
+            cancelled,
+            codec: self.codec,
+            worker: Some(worker),
+        }))
+    }
+}
+
+/// Ten milliseconds of 48 kHz stereo f32 audio, looping over `pcm`.
+#[cfg(feature = "testing")]
+fn synthetic_audio_block(pcm: &[u8], offset: &mut usize) -> Vec<u8> {
+    const BLOCK_BYTES: usize = 480 * 2 * 4;
+    // An empty spec would otherwise spin here forever on the media thread.
+    if pcm.is_empty() {
+        return Vec::new();
+    }
+    let mut block = Vec::with_capacity(BLOCK_BYTES);
+    while block.len() < BLOCK_BYTES {
+        let take = (pcm.len() - *offset).min(BLOCK_BYTES - block.len());
+        block.extend_from_slice(&pcm[*offset..*offset + take]);
+        *offset += take;
+        if *offset >= pcm.len() {
+            *offset = 0;
+        }
+    }
+    block
+}
+
+#[cfg(feature = "testing")]
+struct SyntheticHostHandle {
+    cancelled: Arc<AtomicBool>,
+    codec: StreamCodecPreference,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "testing")]
+impl MediaHandle for SyntheticHostHandle {
+    fn codec(&self) -> StreamCodecPreference {
+        self.codec
+    }
+
+    fn force_key_frame(&self) -> Result<(), SessionError> {
+        // Every synthetic frame is already a key frame.
+        Ok(())
+    }
+
+    fn update_bitrate(&self, _bitrate: u32) -> Result<(), SessionError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            if worker.join().is_err() {
+                warn!("synthetic host media worker panicked");
+            }
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+impl Drop for SyntheticHostHandle {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -3305,6 +3614,10 @@ pub struct HostServer {
     udp_recovery: Arc<Mutex<udp_recovery::UdpRecoveryRoutes>>,
     media_source: Arc<dyn MediaSource>,
     restart_factory: Option<RestartFactory>,
+    /// Present only for a server built by [`HostServer::bind_synthetic_for_test`]:
+    /// received input is recorded here instead of reaching a platform injector.
+    #[cfg(feature = "testing")]
+    synthetic: Option<Arc<SyntheticHostObserver>>,
     #[cfg(test)]
     synthetic_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
     lockout: Arc<Mutex<BootstrapLockout>>,
@@ -3457,6 +3770,30 @@ impl HostServer {
         self.guests.set_guest_permissions(pairing_id, permissions)
     }
 
+    /// Topology for `HostDisplayList` and for the stream-option geometry math.
+    ///
+    /// A synthetic test host reports exactly one display, sized by its spec, so
+    /// a restart request resolves the same dimensions on every machine instead
+    /// of inheriting the display the test happens to run on.
+    fn displays(&self) -> Vec<HostDisplay> {
+        #[cfg(feature = "testing")]
+        if self.synthetic.is_some() {
+            let name = if self.config.host_name.is_empty() {
+                "primary"
+            } else {
+                &self.config.host_name
+            };
+            return vec![HostDisplay {
+                index: 0,
+                width: self.config.display.pixel_width,
+                height: self.config.display.pixel_height,
+                primary: true,
+                name: truncate_str_to_bytes(name, MAX_HOST_DISPLAY_NAME_BYTES).to_owned(),
+            }];
+        }
+        host_displays(&self.config)
+    }
+
     fn permission_ceiling(&self, host_caps: Capabilities, clipboard: bool) -> GuestPermissions {
         let policy = self.config.host_policy();
         GuestPermissions {
@@ -3508,6 +3845,55 @@ impl HostServer {
         );
         let media_source = Self::default_media_source(&config, fps)?;
         Self::bind_with_media_advertising(config, media_source, false)
+    }
+
+    /// Binds a real host (TLS-PSK, encrypted UDP, stream options, audio, input)
+    /// whose media comes from `spec` instead of a display.
+    ///
+    /// Dev-only seam for embedder integration tests: `src-tauri` drives the
+    /// loopback contract without Screen Recording permission, uinput access or a
+    /// physical display. The restart factory answers `StreamOptionsRequest` with
+    /// a fresh synthetic source, so `StreamOptionsActive` follows the same code
+    /// path a real capture pipeline takes.
+    #[cfg(feature = "testing")]
+    pub fn bind_synthetic_for_test(
+        mut config: HostConfig,
+        spec: SyntheticHostSpec,
+    ) -> Result<(Self, Arc<SyntheticHostObserver>), SessionError> {
+        // The synthetic stream is the only display this host has, so the
+        // handshake geometry, `HostDisplayList` and the restart math all derive
+        // from the spec rather than from an absent capture device.
+        config.display = DisplayInfo {
+            desktop_x: 0,
+            desktop_y: 0,
+            logical_width: spec.width.max(1),
+            logical_height: spec.height.max(1),
+            pixel_width: spec.width.max(1),
+            pixel_height: spec.height.max(1),
+            scale_factor_milli: 1_000,
+        };
+        let observer = Arc::new(SyntheticHostObserver::default());
+        let capture_audio = config.capture_audio;
+        let source: Arc<dyn MediaSource> = Arc::new(SyntheticHostSource::new(
+            &spec,
+            spec.codec,
+            spec.frame_interval,
+            capture_audio,
+        ));
+        let factory_observer = Arc::clone(&observer);
+        let factory: RestartFactory = Arc::new(move |restart: &StreamRestart| {
+            factory_observer.record_restart(restart.fps, restart.scale_permille, restart.codec);
+            Arc::new(SyntheticHostSource::new(
+                &spec,
+                restart.codec,
+                spec.frame_interval,
+                capture_audio,
+            )) as Arc<dyn MediaSource>
+        });
+        let mut server =
+            Self::bind_with_media_advertising_and_factory(config, source, Some(factory), false)?;
+        server.synthetic = Some(Arc::clone(&observer));
+        Ok((server, observer))
     }
 
     #[cfg(target_os = "macos")]
@@ -3804,6 +4190,8 @@ impl HostServer {
             udp_recovery: Arc::default(),
             media_source,
             restart_factory,
+            #[cfg(feature = "testing")]
+            synthetic: None,
             #[cfg(test)]
             synthetic_starts: None,
             lockout,
@@ -4117,7 +4505,7 @@ impl HostServer {
         let output_name = self.config.output_name.clone();
         #[cfg(all(target_os = "linux", test))]
         let prepared_input = tests::admission_input(self)?;
-        let input = InputDispatch::start(move || {
+        let create_input = move || -> Result<PlatformInput, SessionError> {
             #[cfg(target_os = "macos")]
             let input = InputInjector::with_origin(
                 display.logical_width as f32,
@@ -4150,7 +4538,17 @@ impl HostServer {
             #[cfg(all(target_os = "linux", test))]
             let input = prepared_input;
             Ok(input)
-        })?;
+        };
+        // A synthetic test host records accepted input instead of driving a
+        // platform injector, so its contract tests need no uinput access,
+        // accessibility permission or display.
+        #[cfg(feature = "testing")]
+        let input = match &self.synthetic {
+            Some(observer) => InputDispatch::start_recording(Arc::clone(observer))?,
+            None => InputDispatch::start(create_input)?,
+        };
+        #[cfg(not(feature = "testing"))]
+        let input = InputDispatch::start(create_input)?;
         // Establish the diagnostic clock before any session-local timestamps.
         let _trace = host_trace::enabled();
         let session_origin = Instant::now();
@@ -4174,7 +4572,7 @@ impl HostServer {
         let idr_limiter = Arc::new(crate::idr::ForcedIdrLimiter::default());
         // Client ABR owns the encoder rate and its floor; transport bounds queues.
         let transport_bitrate = Arc::new(AtomicU64::new(u64::from(active_bitrate)));
-        let mut topology = host_displays(&self.config);
+        let mut topology = self.displays();
         let mut selected_output = self.config.output_name.clone().or_else(|| {
             topology
                 .iter()
@@ -4416,7 +4814,7 @@ impl HostServer {
                     || (state == SessionState::Authenticated && Instant::now() >= topology_check)
                 {
                     topology_check = Instant::now() + Duration::from_secs(2);
-                    let displays = host_displays(&self.config);
+                    let displays = self.displays();
                     let disappeared = selected_output
                         .as_ref()
                         .is_some_and(|name| !displays.iter().any(|d| &d.name == name));
@@ -4679,6 +5077,9 @@ impl HostServer {
                             let media_source = self.media_source.clone();
                             let sender_pipeline = pipeline.clone();
                             let sender_bitrate = active_bitrate;
+                            let sender_budget = SenderBudget::for_udp_payload_bytes(
+                                self.config.effective_max_udp_payload_bytes(),
+                            );
                             let idr_limiter = Arc::clone(&idr_limiter);
                             let transport_bitrate = transport_bitrate.clone();
                             let recovery_enabled = peer_caps.contains(Capabilities::FEC_NACK);
@@ -4694,6 +5095,7 @@ impl HostServer {
                                     audio_session_origin: Some(session_origin),
                                     audio_opus_enabled: peer_caps
                                         .contains(Capabilities::AUDIO_OPUS),
+                                    budget: sender_budget,
                                     incremental: true,
                                     idr_limiter,
                                     bitrate: sender_bitrate,
@@ -5385,7 +5787,7 @@ impl HostServer {
                                     && effective_permissions.mouse,
                                 allow_clipboard: effective_permissions.clipboard,
                             };
-                            let displays = host_displays(&self.config);
+                            let displays = self.displays();
                             send_tcp_control(
                                 &mut stream,
                                 ControlMessage::HostDisplayList(HostDisplayList { displays }),
@@ -5716,7 +6118,7 @@ impl HostServer {
                                 }
                             }
                             ControlMessage::StreamOptionsRequest(request) => {
-                                let displays = host_displays(&self.config);
+                                let displays = self.displays();
                                 match validate_stream_options(&request, &displays) {
                                     Err((reason, message)) => {
                                         send_tcp_control(
@@ -6085,8 +6487,10 @@ pub const MAX_UDP_DISCOVERY_BURST: usize = 32;
 /// ```
 ///
 /// To provide safe headroom for IP options and encapsulation headers,
-/// MahoRD targets a conservative 1200-byte UDP payload budget.
-pub const UDP_PAYLOAD_BUDGET: usize = 1200;
+/// MahoRD targets a conservative 1200-byte UDP payload budget by default.
+/// [`HostConfig::max_udp_payload_bytes`] overrides it per session (QUIC tunnels
+/// use [`QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES`]).
+pub const UDP_PAYLOAD_BUDGET: usize = DEFAULT_MAX_UDP_PAYLOAD_BYTES;
 
 /// Encrypted envelope overhead on the wire:
 /// PacketHeader::SIZE (12 B) + udp_gcm::NONCE_SIZE (12 B) + udp_gcm::TAG_SIZE (16 B) = 40 bytes.
@@ -6122,6 +6526,77 @@ const _: () = assert!(
 const _: () = assert!(
     ENCRYPTED_DATAGRAM_OVERHEAD + AudioFragmentHeader::SIZE + SENDER_MAX_AUDIO_FRAGMENT_BYTES
         <= UDP_PAYLOAD_BUDGET
+);
+
+/// Per-session MTU-safe sender geometry derived from one UDP payload budget.
+///
+/// Every emitted media datagram is
+/// `ENCRYPTED_DATAGRAM_OVERHEAD + media header + payload`, so capping each
+/// payload by `max_plaintext_payload - header` keeps the sealed datagram at or
+/// below `max_udp_payload_bytes` for video chunks, FEC parity and audio
+/// fragments alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SenderBudget {
+    /// Clamped datagram budget this geometry was derived from.
+    pub max_udp_payload_bytes: usize,
+    /// Budget minus the encrypted envelope; the plaintext payload ceiling.
+    pub max_plaintext_payload: usize,
+    /// `FrameChunk` data bytes per datagram.
+    pub video_chunk_bytes: usize,
+    /// `FrameParity` data bytes per datagram (its header is wider).
+    pub parity_chunk_bytes: usize,
+    /// `AudioFragment` data bytes per datagram.
+    pub audio_fragment_bytes: usize,
+}
+
+impl SenderBudget {
+    /// Clamps `budget` into [`MIN_MAX_UDP_PAYLOAD_BYTES`]`..=`[`MAX_MAX_UDP_PAYLOAD_BYTES`]
+    /// and derives every media payload size from it. All results are nonzero:
+    /// the floor still clears the envelope plus the widest media header.
+    pub fn for_udp_payload_bytes(budget: usize) -> Self {
+        let clamped_udp_budget =
+            budget.clamp(MIN_MAX_UDP_PAYLOAD_BYTES, MAX_MAX_UDP_PAYLOAD_BYTES);
+        let max_plaintext = clamped_udp_budget - ENCRYPTED_DATAGRAM_OVERHEAD;
+        Self {
+            max_udp_payload_bytes: clamped_udp_budget,
+            max_plaintext_payload: max_plaintext,
+            video_chunk_bytes: (max_plaintext - ferryx_rd_proto::FrameChunk::HEADER_SIZE)
+                .min(MAX_VIDEO_CHUNK_BYTES),
+            parity_chunk_bytes: (max_plaintext - ferryx_rd_proto::FrameParity::HEADER_SIZE)
+                .min(MAX_VIDEO_CHUNK_BYTES),
+            audio_fragment_bytes: (max_plaintext - AudioFragmentHeader::SIZE)
+                .min(MAX_AUDIO_FRAGMENT_BYTES),
+        }
+    }
+}
+
+impl Default for SenderBudget {
+    fn default() -> Self {
+        Self::for_udp_payload_bytes(DEFAULT_MAX_UDP_PAYLOAD_BYTES)
+    }
+}
+
+// The accepted range must stay inside the wire protocol's own limits.
+const _: () = assert!(
+    MAX_MAX_UDP_PAYLOAD_BYTES - ENCRYPTED_DATAGRAM_OVERHEAD
+        - ferryx_rd_proto::FrameParity::HEADER_SIZE
+        <= MAX_VIDEO_CHUNK_BYTES
+);
+const _: () = assert!(
+    MAX_MAX_UDP_PAYLOAD_BYTES - ENCRYPTED_DATAGRAM_OVERHEAD
+        - ferryx_rd_proto::FrameChunk::HEADER_SIZE
+        <= MAX_VIDEO_CHUNK_BYTES
+);
+const _: () = assert!(
+    MAX_MAX_UDP_PAYLOAD_BYTES - ENCRYPTED_DATAGRAM_OVERHEAD - AudioFragmentHeader::SIZE
+        <= MAX_AUDIO_FRAGMENT_BYTES
+);
+// The floor must still leave a nonempty payload behind the widest header,
+// so no derived chunk size can be zero and no division can be by zero.
+const _: () = assert!(
+    MIN_MAX_UDP_PAYLOAD_BYTES - ENCRYPTED_DATAGRAM_OVERHEAD
+        - ferryx_rd_proto::FrameParity::HEADER_SIZE
+        > 0
 );
 
 const VIDEO_SEND_DEADLINE: Duration = Duration::from_millis(100);
@@ -6171,6 +6646,8 @@ struct UdpSender {
     send_capacity: usize,
     largest_keyframe: usize,
     bitrate: u32,
+    /// MTU-safe payload geometry for every datagram this sender emits.
+    budget: SenderBudget,
     #[cfg(target_os = "linux")]
     batch: Vec<Vec<u8>>,
     trace: Option<Arc<host_trace::Trace>>,
@@ -6214,8 +6691,10 @@ impl UdpSender {
             resent += 1;
         }
         if resent > 0 {
-            self.retransmit_at =
-                Some(Instant::now().max(now) + self.burst_interval(resent * UDP_PAYLOAD_BUDGET));
+            self.retransmit_at = Some(
+                Instant::now().max(now)
+                    + self.burst_interval(resent * self.budget.max_udp_payload_bytes),
+            );
         }
         Ok(())
     }
@@ -6321,9 +6800,9 @@ impl UdpSender {
             }
         }
         let chunk_size = if self.recovery.enabled {
-            MAX_SENDER_PLAINTEXT_PAYLOAD - ferryx_rd_proto::FrameParity::HEADER_SIZE
+            self.budget.parity_chunk_bytes
         } else {
-            SENDER_MAX_VIDEO_CHUNK_BYTES
+            self.budget.video_chunk_bytes
         };
         let chunk_count = frame.data.len().div_ceil(chunk_size);
         let frame_id = self.frame_id.wrapping_add(1);
@@ -6408,7 +6887,7 @@ impl UdpSender {
         #[cfg(target_os = "linux")]
         if batching {
             batch.resize_with(batch.len().max(end - pending.index), || {
-                Vec::with_capacity(UDP_PAYLOAD_BUDGET)
+                Vec::with_capacity(self.budget.max_udp_payload_bytes)
             });
         }
         #[cfg(target_os = "macos")]
@@ -6453,7 +6932,7 @@ impl UdpSender {
                 return Err(SessionError::Io(io::Error::from(io::ErrorKind::WouldBlock)));
             }
         }
-        let sent_bytes = (end - pending.index) * UDP_PAYLOAD_BUDGET;
+        let sent_bytes = (end - pending.index) * self.budget.max_udp_payload_bytes;
         pending.index = end;
         if end < chunks {
             pending.next_at = Instant::now() + self.burst_interval(sent_bytes);
@@ -6473,8 +6952,8 @@ impl UdpSender {
                     &parity.encode()?,
                 )?;
             }
-            pending.next_at =
-                Instant::now() + self.burst_interval(self.burst_packets() * UDP_PAYLOAD_BUDGET);
+            pending.next_at = Instant::now()
+                + self.burst_interval(self.burst_packets() * self.budget.max_udp_payload_bytes);
             self.pending = Some(pending);
             return Ok(());
         }
@@ -6526,14 +7005,15 @@ impl UdpSender {
     }
 
     fn burst_packets(&self) -> usize {
-        (self.send_capacity / (UDP_PAYLOAD_BUDGET * 4)).clamp(2, 8)
+        (self.send_capacity / (self.budget.max_udp_payload_bytes * 4)).clamp(2, 8)
     }
 
     fn burst_interval(&self, bytes: usize) -> Duration {
         // Allow a bounded 4x keyframe catch-up rate, capped by the observed
         // socket capacity per 2ms. Small buffers therefore slow bursts down.
         let rate = f64::from(self.bitrate.max(1_000_000)) * 4.0;
-        let capacity_rate = self.send_capacity.max(UDP_PAYLOAD_BUDGET) as f64 * 8.0 / 0.002;
+        let capacity_rate =
+            self.send_capacity.max(self.budget.max_udp_payload_bytes) as f64 * 8.0 / 0.002;
         Duration::from_secs_f64(bytes as f64 * 8.0 / rate.min(capacity_rate))
     }
 
@@ -6666,10 +7146,11 @@ impl UdpSender {
         bytes: &[u8],
     ) -> Result<(), SessionError> {
         self.audio_frame_id = self.audio_frame_id.wrapping_add(1);
-        let fragment_count = bytes.len().div_ceil(SENDER_MAX_AUDIO_FRAGMENT_BYTES);
+        let fragment_size = self.budget.audio_fragment_bytes;
+        let fragment_count = bytes.len().div_ceil(fragment_size);
         let fragment_count = u16::try_from(fragment_count)
             .map_err(|_| SessionError::Store("audio frame has too many fragments".into()))?;
-        for (index, data) in bytes.chunks(SENDER_MAX_AUDIO_FRAGMENT_BYTES).enumerate() {
+        for (index, data) in bytes.chunks(fragment_size).enumerate() {
             let header = AudioFragmentHeader {
                 frame_id: self.audio_frame_id,
                 fragment_index: index as u16,
@@ -6810,6 +7291,99 @@ struct InputDispatch {
     queue: Arc<(Mutex<InputQueue>, std::sync::Condvar)>,
     acks: Receiver<InputAckMessage>,
     completed: thread::JoinHandle<()>,
+    /// Attached only by a synthetic test host: every event the host accepts is
+    /// recorded here, on both the TCP and the UDP input lane, before any
+    /// platform injection is attempted.
+    #[cfg(feature = "testing")]
+    recorder: Option<Arc<SyntheticHostObserver>>,
+}
+
+/// What an input worker drives.
+///
+/// A synthetic test host records accepted input without touching a platform
+/// injector, so its contract tests need neither uinput access, accessibility
+/// permission nor a display.
+enum InputWorker {
+    Platform(PlatformInput),
+    /// A synthetic test host: accepted input is recorded by the dispatch, and
+    /// nothing is injected.
+    #[cfg(feature = "testing")]
+    RecordOnly,
+}
+
+impl InputWorker {
+    /// Injects one accepted event; a recording worker has nothing to drive.
+    fn inject(&mut self, event: &InputEvent) -> bool {
+        match self {
+            Self::Platform(input) => inject_input(event, |event| input.inject(event)),
+            #[cfg(feature = "testing")]
+            Self::RecordOnly => true,
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Platform(input) => reset_input(input),
+            #[cfg(feature = "testing")]
+            Self::RecordOnly => {}
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn flush_idle_text(&mut self, now: Instant) {
+        match self {
+            Self::Platform(input) => input.flush_idle_text(now),
+            #[cfg(feature = "testing")]
+            Self::RecordOnly => {}
+        }
+    }
+}
+
+/// Drains the bounded input queue until the session closes it.
+fn run_input_worker(
+    input: &mut InputWorker,
+    worker_queue: &Arc<(Mutex<InputQueue>, std::sync::Condvar)>,
+    worker_ack_tx: &mpsc::Sender<InputAckMessage>,
+) {
+    let (lock, changed) = &**worker_queue;
+    loop {
+        let mut queue = lock.lock().expect("input queue poisoned");
+        while queue.pending.is_empty() && !queue.closed {
+            let (next, timeout) = changed
+                .wait_timeout(queue, Duration::from_millis(5))
+                .expect("input queue poisoned");
+            queue = next;
+            if timeout.timed_out() {
+                drop(queue);
+                #[cfg(target_os = "linux")]
+                input.flush_idle_text(Instant::now());
+                queue = lock.lock().expect("input queue poisoned");
+            }
+        }
+        let Some(job) = queue.pending.pop_front() else {
+            break;
+        };
+        changed.notify_all();
+        drop(queue);
+        match job {
+            // A synthetic host owns no injector, so a platform job (geometry
+            // refresh, pointer reset) has nothing to apply and is dropped.
+            QueuedInput::Job(job) => match input {
+                InputWorker::Platform(platform) => job(platform),
+                #[cfg(feature = "testing")]
+                InputWorker::RecordOnly => {}
+            },
+            QueuedInput::Event(sequence, event) => {
+                let success = input.inject(&event);
+                if let Some(ack) = input_ack(sequence, &event, success) {
+                    if worker_ack_tx.send(ack).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    input.reset();
 }
 
 fn input_ack(sequence: u32, event: &InputEvent, success: bool) -> Option<InputAckMessage> {
@@ -6855,46 +7429,14 @@ impl InputDispatch {
                 let mut input = match create() {
                     Ok(input) => {
                         let _ = ready_tx.send(Ok(()));
-                        input
+                        InputWorker::Platform(input)
                     }
                     Err(error) => {
                         let _ = ready_tx.send(Err(error));
                         return;
                     }
                 };
-                let (lock, changed) = &*worker_queue;
-                loop {
-                    let mut queue = lock.lock().expect("input queue poisoned");
-                    while queue.pending.is_empty() && !queue.closed {
-                        let (next, timeout) = changed
-                            .wait_timeout(queue, Duration::from_millis(5))
-                            .expect("input queue poisoned");
-                        queue = next;
-                        if timeout.timed_out() {
-                            drop(queue);
-                            #[cfg(target_os = "linux")]
-                            input.flush_idle_text(Instant::now());
-                            queue = lock.lock().expect("input queue poisoned");
-                        }
-                    }
-                    let Some(job) = queue.pending.pop_front() else {
-                        break;
-                    };
-                    changed.notify_all();
-                    drop(queue);
-                    match job {
-                        QueuedInput::Job(job) => job(&mut input),
-                        QueuedInput::Event(sequence, event) => {
-                            let success = inject_input(&event, |event| input.inject(event));
-                            if let Some(ack) = input_ack(sequence, &event, success) {
-                                if worker_ack_tx.send(ack).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                reset_input(&mut input);
+                run_input_worker(&mut input, &worker_queue, &worker_ack_tx);
             })?;
         ready_rx.recv().map_err(|_| SessionError::MediaStopped)??;
         Ok(Self {
@@ -6903,7 +7445,44 @@ impl InputDispatch {
             queue,
             acks,
             completed,
+            #[cfg(feature = "testing")]
+            recorder: None,
         })
+    }
+
+    /// Starts a worker that records accepted input into `recorder` and injects
+    /// nothing. Dev-only, for a synthetic test host.
+    #[cfg(feature = "testing")]
+    fn start_recording(recorder: Arc<SyntheticHostObserver>) -> Result<Self, SessionError> {
+        let applied = Arc::new(Mutex::new(AppliedInput::default()));
+        let queue = Arc::new((Mutex::new(InputQueue::default()), std::sync::Condvar::new()));
+        let worker_queue = queue.clone();
+        let (ack_tx, acks) = mpsc::channel();
+        let worker_ack_tx = ack_tx.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let completed = thread::Builder::new()
+            .name("maho-input-synthetic".into())
+            .spawn(move || {
+                let _ = ready_tx.send(Ok(()));
+                let mut input = InputWorker::RecordOnly;
+                run_input_worker(&mut input, &worker_queue, &worker_ack_tx);
+            })?;
+        ready_rx.recv().map_err(|_| SessionError::MediaStopped)??;
+        Ok(Self {
+            ack_tx,
+            applied,
+            queue,
+            acks,
+            completed,
+            recorder: Some(recorder),
+        })
+    }
+
+    #[cfg(feature = "testing")]
+    fn record(&self, events: &[InputEvent]) {
+        if let Some(recorder) = &self.recorder {
+            recorder.record_inputs(events);
+        }
     }
 
     fn enqueue(&self, job: QueuedInput) -> Result<(), SessionError> {
@@ -6944,6 +7523,8 @@ impl InputDispatch {
         if events.is_empty() {
             return Ok(());
         }
+        #[cfg(feature = "testing")]
+        self.record(&events);
         let applied = self.applied.clone();
         let ack_tx = self.ack_tx.clone();
         self.dispatch(move |input| {
@@ -6969,6 +7550,8 @@ impl InputDispatch {
     }
 
     fn inject(&self, sequence: u32, event: InputEvent) -> Result<(), SessionError> {
+        #[cfg(feature = "testing")]
+        self.record(std::slice::from_ref(&event));
         self.enqueue(QueuedInput::Event(sequence, event))
     }
 
@@ -7089,6 +7672,402 @@ mod tests {
         }
     }
 
+    /// Reads exactly one datagram off a loopback receiver, failing the test
+    /// instead of blocking forever when the sender emitted fewer packets than
+    /// expected. Both ends are loopback sockets, so the only source of a
+    /// missing datagram is the sender itself.
+    fn recv_datagram(socket: &UdpSocket, buffer: &mut [u8]) -> usize {
+        let (size, _) = socket
+            .recv_from(buffer)
+            .expect("expected another sender datagram within the read timeout");
+        size
+    }
+
+    /// Real sender geometry for one requested budget. Large socket buffers and a
+    /// high bitrate only shorten the paced burst loop; they never change the
+    /// derived chunk sizes under test.
+    fn sender_with_budget(requested_budget: usize, fec: bool) -> UdpSender {
+        let mut sender = UdpSender {
+            budget: SenderBudget::for_udp_payload_bytes(requested_budget),
+            send_capacity: 4 * 1024 * 1024,
+            bitrate: 100_000_000,
+            ..Default::default()
+        };
+        sender.recovery.enabled = fec;
+        sender
+    }
+
+    /// Seeds measured loss so a frame carries FEC parity datagrams without
+    /// needing a real NACK round trip.
+    fn seed_loss(sender: &mut UdpSender) {
+        sender.recovery.enqueue(
+            ferryx_rd_proto::FrameNack {
+                frame_id: 0,
+                loss_permille: 200,
+                rtt_ms: 5,
+                missing: Vec::new(),
+            },
+            Instant::now(),
+        );
+    }
+
+    /// The real sender packetizer must cap every video, parity and audio
+    /// datagram at the QUIC tunnel budget and stay byte-exact through the
+    /// production reassemblers.
+    #[test]
+    fn quic_tunnel_budget_caps_every_video_parity_and_audio_datagram() {
+        const BUDGET: usize = QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES;
+        const FRAME_BYTES: usize = 64 * 1024;
+        // 48 kHz stereo f32 PCM: one 10 ms block, repeated 25 times (250 ms).
+        const AUDIO_BLOCK: usize = 480 * 2 * 4;
+        const AUDIO_BLOCKS: usize = 25;
+
+        for fec in [false, true] {
+            let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let _ = rustix::net::sockopt::set_socket_recv_buffer_size(&rx, 4 * 1024 * 1024);
+            rx.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let peer = rx.local_addr().unwrap();
+            let mut cipher =
+                DatagramCipher::derive(&[0x61; 32], &[0x9c; 16], Direction::HostToClient).unwrap();
+            let mut decipher =
+                DatagramCipher::derive(&[0x61; 32], &[0x9c; 16], Direction::HostToClient).unwrap();
+            let mut sender = sender_with_budget(BUDGET, fec);
+            assert_eq!(sender.budget.max_udp_payload_bytes, BUDGET);
+            if fec {
+                seed_loss(&mut sender);
+            }
+            let chunk_cap = if fec {
+                sender.budget.parity_chunk_bytes
+            } else {
+                sender.budget.video_chunk_bytes
+            };
+
+            // When: a 64 KiB synthetic keyframe goes through the real packetizer.
+            let now = Instant::now();
+            let keyframe: Vec<u8> = (0..FRAME_BYTES).map(|i| (i % 251) as u8).collect();
+            sender
+                .send_frame(
+                    &tx,
+                    peer,
+                    &mut cipher,
+                    1920,
+                    1080,
+                    VideoFrame {
+                        data: keyframe.clone(),
+                        is_key_frame: true,
+                        capture_at: now,
+                        encode_started_at: now,
+                        encode_completed_at: now,
+                    },
+                    now,
+                )
+                .unwrap();
+
+            let mut frames = ferryx_rd_app::FrameAssembler::default();
+            let mut buffer = vec![0; 4096];
+            let mut assembled = None;
+            let mut parity_datagrams = 0_usize;
+            let mut video_chunks = 0_usize;
+            let mut largest = 0_usize;
+            loop {
+                let size = recv_datagram(&rx, &mut buffer);
+                largest = largest.max(size);
+                assert!(size > 0, "fec={fec}: sender emitted an empty datagram");
+                assert!(
+                    size <= BUDGET,
+                    "fec={fec}: {size}-byte datagram exceeds the {BUDGET}-byte budget"
+                );
+                let (header, payload) = decipher.open_datagram(&buffer[..size]).unwrap();
+                match header.packet_type {
+                    PacketType::FrameHeader => {
+                        frames
+                            .push_header(
+                                FrameHeader::decode(&payload).unwrap(),
+                                header.timestamp_ms,
+                                now,
+                            )
+                            .unwrap();
+                    }
+                    PacketType::FrameChunk => {
+                        video_chunks += 1;
+                        let chunk = FrameChunk::decode(&payload).unwrap();
+                        assert!(
+                            chunk.data.len() <= chunk_cap,
+                            "fec={fec}: video chunk {} exceeds the derived cap {chunk_cap}",
+                            chunk.data.len()
+                        );
+                        if let Some(frame) = frames.push_chunk(chunk, now).unwrap() {
+                            assembled = Some(frame);
+                        }
+                    }
+                    PacketType::FrameParity => {
+                        parity_datagrams += 1;
+                        let parity = ferryx_rd_proto::FrameParity::decode(&payload).unwrap();
+                        assert!(
+                            parity.data.len() <= chunk_cap,
+                            "fec={fec}: parity {} exceeds the derived cap {chunk_cap}",
+                            parity.data.len()
+                        );
+                    }
+                    PacketType::Ping => break,
+                    other => panic!("fec={fec}: unexpected {other:?}"),
+                }
+            }
+
+            // Then: every datagram fit, the frame reassembled exactly, and the
+            // packetizer actually filled the budget instead of emitting stubs.
+            assert_eq!(
+                assembled.expect("keyframe must reassemble").data,
+                keyframe,
+                "fec={fec}: reassembled keyframe differs from the original bytes"
+            );
+            assert!(video_chunks > 1, "fec={fec}: keyframe must span chunks");
+            assert_eq!(parity_datagrams > 0, fec, "fec={fec}: parity presence");
+            assert!(
+                largest > BUDGET / 2,
+                "fec={fec}: largest datagram {largest} suggests the sender ignored the budget"
+            );
+
+            // When: a 48 kHz PCM audio burst follows on the same session.
+            let mut audio = ferryx_rd_app::AudioFragmentReassembler::default();
+            let mut audio_datagrams = 0_usize;
+            for block in 0..AUDIO_BLOCKS {
+                let pcm: Vec<u8> = (0..AUDIO_BLOCK)
+                    .map(|i| ((i + block * 7) % 256) as u8)
+                    .collect();
+                sender.send_audio(&tx, peer, &mut cipher, &pcm).unwrap();
+                let mut reassembled = None;
+                while reassembled.is_none() {
+                    let size = recv_datagram(&rx, &mut buffer);
+                    largest = largest.max(size);
+                    assert!(
+                        size <= BUDGET,
+                        "fec={fec}: {size}-byte audio datagram exceeds the {BUDGET}-byte budget"
+                    );
+                    let (header, payload) = decipher.open_datagram(&buffer[..size]).unwrap();
+                    assert_eq!(header.packet_type, PacketType::AudioFrame);
+                    audio_datagrams += 1;
+                    let fragment = AudioFragment::decode(&payload).unwrap();
+                    assert!(
+                        fragment.data.len() <= sender.budget.audio_fragment_bytes,
+                        "fec={fec}: audio fragment {} exceeds the derived cap {}",
+                        fragment.data.len(),
+                        sender.budget.audio_fragment_bytes
+                    );
+                    reassembled = audio.push(fragment);
+                }
+                assert_eq!(
+                    reassembled.unwrap(),
+                    pcm,
+                    "fec={fec}: audio block {block} must reassemble losslessly"
+                );
+            }
+            assert!(
+                audio_datagrams > AUDIO_BLOCKS,
+                "fec={fec}: audio blocks must fragment, got {audio_datagrams} datagrams"
+            );
+            assert!(largest <= BUDGET);
+        }
+    }
+
+    /// The real 48 kHz Opus encoder path must also stay inside the QUIC tunnel
+    /// budget and reassemble into decodable 10 ms packets.
+    #[test]
+    fn quic_tunnel_budget_caps_opus_audio_burst() {
+        const BUDGET: usize = QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES;
+        // Four 10 ms blocks at 48 kHz stereo f32 -> four Opus packets.
+        const OPUS_BLOCKS: usize = 4;
+        const OPUS_PCM: usize = 480 * 2 * 4 * OPUS_BLOCKS;
+
+        let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let peer = rx.local_addr().unwrap();
+        let mut cipher =
+            DatagramCipher::derive(&[0x3b; 32], &[0x7e; 16], Direction::HostToClient).unwrap();
+        let mut decipher =
+            DatagramCipher::derive(&[0x3b; 32], &[0x7e; 16], Direction::HostToClient).unwrap();
+        let mut sender = sender_with_budget(BUDGET, false);
+        sender.audio_opus_enabled = true;
+
+        // A 440 Hz tone keeps the encoder producing real packets.
+        let samples: Vec<f32> = (0..OPUS_PCM / 8)
+            .flat_map(|i| {
+                let value = (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.3;
+                [value, value]
+            })
+            .collect();
+        let pcm: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        assert_eq!(pcm.len(), OPUS_PCM);
+        sender.send_audio(&tx, peer, &mut cipher, &pcm).unwrap();
+
+        let mut audio = ferryx_rd_app::AudioFragmentReassembler::default();
+        let mut buffer = vec![0; 4096];
+        let mut decoder = opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap();
+        let mut decoded_blocks = 0_usize;
+        while decoded_blocks < OPUS_BLOCKS {
+            let size = recv_datagram(&rx, &mut buffer);
+            assert!(
+                size <= BUDGET,
+                "{size}-byte Opus datagram exceeds the {BUDGET}-byte budget"
+            );
+            let (header, payload) = decipher.open_datagram(&buffer[..size]).unwrap();
+            assert_eq!(header.packet_type, PacketType::AudioFrame);
+            let fragment = AudioFragment::decode(&payload).unwrap();
+            assert!(
+                fragment.data.len() <= sender.budget.audio_fragment_bytes,
+                "Opus fragment {} exceeds the derived cap {}",
+                fragment.data.len(),
+                sender.budget.audio_fragment_bytes
+            );
+            let Some(mut reassembled) = audio.push(fragment) else {
+                continue;
+            };
+            assert_eq!(reassembled.first(), Some(&1), "AUDIO_OPUS marker");
+            reassembled.remove(0);
+            let mut decoded = [0.0_f32; 960];
+            assert_eq!(
+                decoder
+                    .decode_float(&reassembled, &mut decoded, false)
+                    .unwrap(),
+                480,
+                "each Opus packet must carry one 10 ms 48 kHz block"
+            );
+            decoded_blocks += 1;
+        }
+        assert_eq!(decoded_blocks, OPUS_BLOCKS);
+    }
+
+    /// Out-of-range budgets must clamp into `[512, 1400]` and still packetize
+    /// to completion: no panic, no zero-length chunking, no unbounded loop.
+    #[test]
+    fn extreme_payload_budgets_clamp_and_packetize_without_panic() {
+        for requested in [0_usize, 100, 99_999] {
+            let clamped = requested.clamp(MIN_MAX_UDP_PAYLOAD_BYTES, MAX_MAX_UDP_PAYLOAD_BYTES);
+            let budget = SenderBudget::for_udp_payload_bytes(requested);
+            assert_eq!(budget.max_udp_payload_bytes, clamped);
+            assert!(budget.max_udp_payload_bytes >= MIN_MAX_UDP_PAYLOAD_BYTES);
+            assert!(budget.max_udp_payload_bytes <= MAX_MAX_UDP_PAYLOAD_BYTES);
+            // Zero-sized chunks would make `div_ceil` divide by zero and loop
+            // forever; every derived size must be positive and in-protocol.
+            assert!(budget.video_chunk_bytes > 0);
+            assert!(budget.parity_chunk_bytes > 0);
+            assert!(budget.audio_fragment_bytes > 0);
+            assert!(budget.video_chunk_bytes <= MAX_VIDEO_CHUNK_BYTES);
+            assert!(budget.parity_chunk_bytes <= MAX_VIDEO_CHUNK_BYTES);
+            assert!(budget.audio_fragment_bytes <= MAX_AUDIO_FRAGMENT_BYTES);
+            assert!(
+                budget.max_plaintext_payload
+                    >= budget.parity_chunk_bytes + ferryx_rd_proto::FrameParity::HEADER_SIZE
+            );
+            assert!(
+                budget.max_plaintext_payload
+                    >= budget.audio_fragment_bytes + AudioFragmentHeader::SIZE
+            );
+
+            // The config helper clamps identically to the packetizer geometry.
+            let directory = tempfile::tempdir().unwrap();
+            let (consent, _rx) = mpsc::channel();
+            let mut config = test_config(
+                PairingStore::new(directory.path().join("keys.json")),
+                consent,
+            );
+            config.max_udp_payload_bytes = requested;
+            assert_eq!(config.effective_max_udp_payload_bytes(), clamped);
+
+            // Packetize on a worker thread so a non-terminating burst loop fails
+            // the test instead of hanging the suite.
+            let (done, finished) = mpsc::channel();
+            let worker = thread::spawn(move || -> usize {
+                let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+                let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+                let _ = rustix::net::sockopt::set_socket_recv_buffer_size(&rx, 4 * 1024 * 1024);
+                rx.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let peer = rx.local_addr().unwrap();
+                let mut cipher =
+                    DatagramCipher::derive(&[0x17; 32], &[0x2a; 16], Direction::HostToClient)
+                        .unwrap();
+                let mut decipher =
+                    DatagramCipher::derive(&[0x17; 32], &[0x2a; 16], Direction::HostToClient)
+                        .unwrap();
+                let mut sender = sender_with_budget(requested, true);
+                seed_loss(&mut sender);
+                let now = Instant::now();
+                sender
+                    .send_frame(
+                        &tx,
+                        peer,
+                        &mut cipher,
+                        64,
+                        64,
+                        VideoFrame {
+                            data: vec![0x5a; 4096],
+                            is_key_frame: true,
+                            capture_at: now,
+                            encode_started_at: now,
+                            encode_completed_at: now,
+                        },
+                        now,
+                    )
+                    .unwrap();
+                let audio_payload = vec![0x24; 8192];
+                sender
+                    .send_audio(&tx, peer, &mut cipher, &audio_payload)
+                    .unwrap();
+
+                let mut buffer = vec![0; 4096];
+                let mut largest = 0_usize;
+                loop {
+                    let size = recv_datagram(&rx, &mut buffer);
+                    largest = largest.max(size);
+                    let (header, _) = decipher.open_datagram(&buffer[..size]).unwrap();
+                    if header.packet_type == PacketType::Ping {
+                        break;
+                    }
+                }
+                let mut audio = ferryx_rd_app::AudioFragmentReassembler::default();
+                let mut reassembled = None;
+                while reassembled.is_none() {
+                    let size = recv_datagram(&rx, &mut buffer);
+                    largest = largest.max(size);
+                    let (header, payload) = decipher.open_datagram(&buffer[..size]).unwrap();
+                    assert_eq!(header.packet_type, PacketType::AudioFrame);
+                    reassembled = audio.push(AudioFragment::decode(&payload).unwrap());
+                }
+                assert_eq!(reassembled.unwrap(), audio_payload);
+                done.send(largest).unwrap();
+                largest
+            });
+            let largest = match finished.recv_timeout(Duration::from_secs(20)) {
+                Ok(largest) => {
+                    worker
+                        .join()
+                        .expect("packetizer worker must not panic for any accepted budget");
+                    largest
+                }
+                // A panicking worker drops its sender, so the channel closes
+                // and the join surfaces the worker's own failure message.
+                Err(mpsc::RecvTimeoutError::Disconnected) => match worker.join() {
+                    Err(payload) => std::panic::resume_unwind(payload),
+                    Ok(_) => panic!(
+                        "packetizer worker exited without reporting for requested budget {requested}"
+                    ),
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "packetization did not terminate for requested budget {requested}"
+                ),
+            };
+            assert!(
+                largest <= clamped,
+                "requested {requested}: {largest}-byte datagram exceeds clamped {clamped}"
+            );
+        }
+    }
+
     #[test]
     fn capture_failure_labels_preserve_secure_desktop_recovery() {
         use crate::windows_session::{capture_recovery, CaptureFailure, CaptureRecovery};
@@ -7158,6 +8137,89 @@ mod tests {
         let server = HostServer::bind_with_media_advertising(config, source, true).unwrap();
         assert!(server.tcp_addr().is_ok());
         assert!(server.udp_addr().is_ok());
+    }
+
+    #[test]
+    fn default_audio_capture_is_shared_by_every_platform_constructor() {
+        // macOS, Windows and Linux constructors all read this one constant, so the
+        // parity claim holds on any build host, with or without a display.
+        let default_capture_audio: bool = DEFAULT_HOST_CAPTURE_AUDIO;
+        assert!(
+            default_capture_audio,
+            "every platform constructor must default to capturing audio"
+        );
+    }
+
+    #[test]
+    fn audio_permission_follows_capture_audio_including_no_audio_override() {
+        let directory = tempdir().unwrap();
+        let (consent, _) = mpsc::channel();
+        let mut config = test_config(
+            PairingStore::new(directory.path().join("keys.json")),
+            consent,
+        );
+        // Default constructors leave capture on, so audio is advertised to the guest.
+        config.capture_audio = DEFAULT_HOST_CAPTURE_AUDIO;
+        let server = HostServer::bind_synthetic(config, 1).unwrap();
+        assert!(
+            server
+                .permission_ceiling(host_guest_capabilities(), false)
+                .audio,
+            "default hosts must advertise audio"
+        );
+
+        let (consent, _) = mpsc::channel();
+        let mut config = test_config(
+            PairingStore::new(directory.path().join("keys-2.json")),
+            consent,
+        );
+        // Mirrors the standalone CLI: `config.capture_audio = !cli.no_audio;`
+        config.capture_audio = false;
+        let server = HostServer::bind_synthetic(config, 1).unwrap();
+        assert!(
+            !server
+                .permission_ceiling(host_guest_capabilities(), false)
+                .audio,
+            "--no-audio must not advertise audio to the guest"
+        );
+    }
+
+    #[test]
+    fn audio_unavailable_does_not_stop_video_handoff() {
+        // Windows and Linux spawn audio as a non-critical worker that returns when
+        // the recorder cannot be opened; video must keep flowing afterwards.
+        let mut workers = native_pipeline::Workers::<u32>::new();
+        workers
+            .spawn("audio-unavailable", false, |_handoff| {})
+            .unwrap();
+        let (published, published_rx) = mpsc::channel();
+        workers
+            .spawn("video", false, move |handoff| {
+                published.send(handoff.publish(11)).unwrap();
+            })
+            .unwrap();
+        workers.handoff.activate();
+        assert!(published_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(!workers.handoff.is_stopped());
+        assert_eq!(workers.handoff.next().unwrap().frame, Some(11));
+        workers.stop();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reported_audio_failure_is_retryable_not_a_media_stop() {
+        let handoff = native_pipeline::Handoff::<u32>::new();
+        handoff.activate();
+        handoff.report_audio_unavailable("recorder open failed".into());
+        assert!(!handoff.is_stopped());
+        assert!(handoff.publish(3));
+        assert_eq!(
+            handoff.take_audio_error().as_deref(),
+            Some("recorder open failed")
+        );
+        assert_eq!(handoff.take_audio_error(), None);
+        assert_eq!(handoff.next().unwrap().frame, Some(3));
+        handoff.stop();
     }
 
     #[cfg(target_os = "macos")]
@@ -8373,6 +9435,7 @@ mod tests {
             consent_sender: Some(consent_sender),
             allow_input: Arc::new(AtomicBool::new(true)),
             allow_clipboard: Arc::new(AtomicBool::new(true)),
+            max_udp_payload_bytes: DEFAULT_MAX_UDP_PAYLOAD_BYTES,
         }
     }
 

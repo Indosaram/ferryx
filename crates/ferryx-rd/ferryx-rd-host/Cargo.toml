@@ -20,6 +20,12 @@ required-features = ["cli"]
 
 [features]
 default = []
+# Dev-only seam for loopback contract tests in embedders (src-tauri): a synthetic
+# MediaSource plus an observer for stream restarts and received input, so a real
+# HostServer (TLS-PSK, UDP GCM, stream options, audio, input) runs without a
+# physical display. Never part of `default`; embedders enable it from
+# `[dev-dependencies]`, which release binaries never build.
+testing = []
 macos-host = []
 # The standalone maho relay bridge (relay.rs). Ferryx carries RD over its own tunnel instead.
 maho-relay = ["dep:tokio-tungstenite", "dep:futures-util"]
