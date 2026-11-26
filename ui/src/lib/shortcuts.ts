@@ -816,6 +816,10 @@ export function useShortcuts(
         trace("reject", { reason: "shortcut-recorder" });
         return;
       }
+      if (event.target instanceof Element && event.target.closest("[data-rd-capture-keys='true']")) {
+        trace("reject", { reason: "remote-desktop-capture" });
+        return;
+      }
       for (const shortcut of shortcuts) {
         const handler = handlers[shortcut.id];
         if (!handler) {

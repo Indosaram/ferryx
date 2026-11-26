@@ -2342,6 +2342,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             invoke.message.command(),
             "cmd_rd_connect"
                 | "cmd_rd_input"
+                | "cmd_rd_special_key"
+                | "cmd_rd_set_stream_options"
+                | "cmd_rd_send_clipboard"
+                | "cmd_rd_set_audio_muted"
+                | "cmd_rd_request_keyframe"
                 | "cmd_rd_disconnect"
                 | "cmd_rd_host_state"
                 | "cmd_rd_host_set"
@@ -2350,6 +2355,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
                 crate::ipc::remote_desktop::commands::cmd_rd_connect,
                 crate::ipc::remote_desktop::commands::cmd_rd_input,
+                crate::ipc::remote_desktop::commands::cmd_rd_special_key,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_stream_options,
+                crate::ipc::remote_desktop::commands::cmd_rd_send_clipboard,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_audio_muted,
+                crate::ipc::remote_desktop::commands::cmd_rd_request_keyframe,
                 crate::ipc::remote_desktop::commands::cmd_rd_disconnect,
                 crate::ipc::remote_desktop_host::cmd_rd_host_state,
                 crate::ipc::remote_desktop_host::cmd_rd_host_set,

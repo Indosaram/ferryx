@@ -222,7 +222,26 @@ pub fn match_ssh_hosts(
 }
 
 pub fn forward_args(host: &SshHost, remote_port: u16) -> Vec<String> {
-    let mut args = vec![
+    forward_args_reusing(host, remote_port, None)
+}
+
+/// Argv for one stdio forward, optionally riding the daemon's existing SSH master.
+///
+/// Reuse is what keeps a retried attach from becoming a redial storm: every cold -W attempt
+/// repeats TCP, KEX, authentication and host-key verification, so a caller that retries twice a
+/// second pins a core spawning ssh processes. Handing the client the master's control socket
+/// turns those retries into channel opens on a connection that already exists. The reuse options
+/// come first because OpenSSH honours the earliest -o for a given keyword.
+pub fn forward_args_reusing(
+    host: &SshHost,
+    remote_port: u16,
+    master_socket: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut args = match master_socket {
+        Some(socket) => crate::ssh::master::client_reuse_args(socket),
+        None => Vec::new(),
+    };
+    args.extend([
         "-W".to_owned(),
         format!("127.0.0.1:{remote_port}"),
         "-o".to_owned(),
@@ -243,7 +262,7 @@ pub fn forward_args(host: &SshHost, remote_port: u16) -> Vec<String> {
         "PermitLocalCommand=no".to_owned(),
         "-o".to_owned(),
         "ClearAllForwardings=yes".to_owned(),
-    ];
+    ]);
     if let Some(port) = host.port {
         args.push("-p".to_owned());
         args.push(port.to_string());
@@ -295,7 +314,11 @@ async fn load_hosts_snapshot() -> Vec<SshHost> {
 
 async fn pump_stdio_forward(mut tcp: tokio::net::TcpStream, host: SshHost, remote_port: u16) {
     let program = crate::ssh::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_owned());
-    let args = forward_args(&host, remote_port);
+    // Held for the whole stream: the lease is what keeps this master counted as active, so the
+    // idle reaper cannot close the socket while bytes are still flowing through it.
+    let lease = crate::ssh::master::acquire(&host).await.ok().flatten();
+    crate::ssh::master::note_path("ssh_forward", lease.is_some());
+    let args = forward_args_reusing(&host, remote_port, lease.as_ref().map(|held| held.socket()));
     let mut cmd = Command::new(&program);
     cmd.args(&args)
         .stdin(std::process::Stdio::piped())

@@ -1147,6 +1147,22 @@ pub struct PairedDagStream {
     pub lease: CredentialLease,
 }
 
+/// Transport route taken by a remote desktop socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDesktopRoute {
+    Direct,
+    Relay,
+}
+
+impl RemoteDesktopRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+        }
+    }
+}
+
 /// Gateway socket target of the remote desktop byte bridge.
 pub const REMOTE_DESKTOP_STREAM_TARGET: &str = "/api/v1/remote-desktop/stream";
 
@@ -1204,16 +1220,14 @@ impl MachineClient {
         Ok(bytes)
     }
 
-    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
-    /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
-    /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
-    /// direct attempt sends only the Authorization header.
-    pub async fn remote_desktop_stream(
+    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host and
+    /// reports whether the connection went over a direct peer link or the relay tunnel.
+    pub async fn remote_desktop_stream_with_route(
         &self,
         service: &PairedHostService,
         host_id: String,
         generation: Epoch,
-    ) -> Result<super::secure_http::PairedSocket> {
+    ) -> Result<(super::secure_http::PairedSocket, RemoteDesktopRoute)> {
         let (host, lease) = service.capture_operation(host_id, generation).await?;
         if host.grant_scope != GrantScope::Machine {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
@@ -1238,25 +1252,43 @@ impl MachineClient {
             },
             None => None,
         };
-        let socket = match direct {
-            Some(socket) => socket,
+        let (socket, route) = match direct {
+            Some(socket) => (socket, RemoteDesktopRoute::Direct),
             None => {
                 let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
                     .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-                self.open_relay_socket(
-                    &host,
-                    &lease,
-                    &relay,
-                    &segments,
-                    &[],
-                    REMOTE_DESKTOP_STREAM_TARGET,
-                    REMOTE_DESKTOP_MAX_FRAME_BYTES,
-                )
-                .await?
+                let socket = self
+                    .open_relay_socket(
+                        &host,
+                        &lease,
+                        &relay,
+                        &segments,
+                        &[],
+                        REMOTE_DESKTOP_STREAM_TARGET,
+                        REMOTE_DESKTOP_MAX_FRAME_BYTES,
+                    )
+                    .await?;
+                (socket, RemoteDesktopRoute::Relay)
             }
         };
         service
             .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok((socket, route))
+    }
+
+    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
+    /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
+    /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
+    /// direct attempt sends only the Authorization header.
+    pub async fn remote_desktop_stream(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<super::secure_http::PairedSocket> {
+        let (socket, _) = self
+            .remote_desktop_stream_with_route(service, host_id, generation)
             .await?;
         Ok(socket)
     }

@@ -129,6 +129,7 @@ import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteD
 import { GlobalRemoteDesktopCanvas, liveRemoteDesktopSessionCount } from "./components/remoteDesktop/GlobalRemoteDesktopCanvas";
 import { RemoteDesktopActivitySidebar } from "./components/remoteDesktop/RemoteDesktopActivitySidebar";
 import { remoteDesktopStore } from "./state/remoteDesktopStore";
+import { forwardCapturedRemoteDesktopShortcut } from "./lib/remoteDesktop";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
@@ -4568,6 +4569,7 @@ function WorkspaceApp({
     let cancelled = false;
     void onCloseTabMenu(() => {
       if (activeRemoteHostRef.current) return;
+      if (forwardCapturedRemoteDesktopShortcut("cmdW")) return;
       handleCloseActiveSurface();
     }).then((dispose) => {
       if (cancelled) dispose();
