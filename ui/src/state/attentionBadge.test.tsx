@@ -124,6 +124,16 @@ describe("badge count from the attention group", () => {
     expect(selectGlobalUnreadBadgeCount(fourPanes())).toBe(0);
   });
 
+  it("counts daemon-judged paired/unopened sessions not present in loaded snapshots", () => {
+    const relaySession: FleetSession = {
+      ...fleet("remote-99", "needsYou", 10, "Approve deployment?"),
+      sessionRef: "https://relay.ferryx.dev/host/peer-1:remote-99",
+      hostId: "https://relay.ferryx.dev/host/peer-1",
+    };
+    applyDaemonSessions([fleet("b1", "unread", 10), relaySession]);
+    expect(selectGlobalUnreadBadgeCount(fourPanes())).toBe(2);
+  });
+
   it("the store's badge follows a group change with no local activity change", () => {
     const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "ws", initialWorktrees: [worktree] }));
     act(() => result.current.restoreWorkspace(fourPanes()));

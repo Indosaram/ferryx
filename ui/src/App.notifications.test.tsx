@@ -102,6 +102,7 @@ const native = {
   isStructuredIpcError: (_error: unknown) => false,
   dispatchNotification: vi.fn().mockResolvedValue(undefined),
   withdrawNotification: vi.fn().mockResolvedValue(undefined),
+  acknowledgeAgentOutcome: vi.fn().mockResolvedValue(undefined),
   playNotificationSound: vi.fn().mockResolvedValue(undefined),
   onNotificationActivated: vi.fn(async (cb: () => void) => {
     notificationActivationListener = cb;
@@ -218,6 +219,7 @@ vi.mock("./lib/tauri", () => ({
   isStructuredIpcError: (_error: unknown) => false,
   dispatchNotification: native.dispatchNotification,
   withdrawNotification: native.withdrawNotification,
+  acknowledgeAgentOutcome: native.acknowledgeAgentOutcome,
   playNotificationSound: native.playNotificationSound,
   onNotificationActivated: native.onNotificationActivated,
   takeNotificationActivations: native.takeNotificationActivations,

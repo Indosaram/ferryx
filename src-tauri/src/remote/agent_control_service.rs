@@ -36,17 +36,40 @@ pub(crate) fn note_raw_write(bus: &events::AgentEventBus, session_id: &str) {
 }
 
 /// Mark `session_id`'s current attention episode read in this daemon's read store and publish
-/// the flip. False for a session whose readings this daemon does not own: an SSH or
-/// remote-helper pane (unsupported, it stays unread by episode) and a paired host's pane (its
-/// owner marks it when the acknowledgement reaches it).
+/// the flip. Returns `false` only for a paired host's pane, whose owner daemon tracks its own
+/// read state and receives the acknowledgement over the machine channel. SSH panes are observed
+/// by this daemon's own `agent_events` bus, so acknowledging them here keeps `read` in sync.
 pub(crate) fn acknowledge_read(state: &RemoteGatewayState, session_id: &str) -> bool {
-    if state.terminal_service.remote().contains(session_id)
-        || crate::terminal::paired_runtime::Runtime::owns(session_id)
-    {
+    if crate::terminal::paired_runtime::Runtime::owns(session_id) {
         return false;
     }
     state.agent_events.acknowledge(session_id);
     true
+}
+
+/// How long an SSH provider-reported `working` state may remain completely silent (no state
+/// change and no screen output) before this daemon treats it as a stuck remote report (e.g., an
+/// agent that exited on a remote host without emitting an `idle` hook) and releases it.
+const REMOTE_WORKING_STALE_MS: i64 = 30 * 60 * 1000;
+
+fn is_stale_remote_working(
+    is_remote_ssh: bool,
+    state: AgentControlState,
+    source: AgentStateSource,
+    state_since_ms: Option<i64>,
+    screen_changed_at_ms: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    if !is_remote_ssh
+        || state != AgentControlState::Working
+        || source != AgentStateSource::Provider
+    {
+        return false;
+    }
+    let Some(latest_activity_ms) = [state_since_ms, screen_changed_at_ms].into_iter().flatten().max() else {
+        return false;
+    };
+    now_ms.saturating_sub(latest_activity_ms) >= REMOTE_WORKING_STALE_MS
 }
 
 fn refuse_if_human_typing(session_id: &str) -> Result<(), ScopeError> {
@@ -219,7 +242,7 @@ async fn observe_entry(
         _ => None,
     };
     let provider_outcome = provider.as_ref().and_then(|report| report.outcome);
-    let mut status = derive_status(provider.as_ref(), detection.map(|found| found.state), pending.is_some());
+    let mut status = derive_status(provider.as_ref(), detection.as_ref().map(|found| found.state), pending.is_some());
     // The observer's quiet timer is the only thing that can call a quiet screen idle. When it
     // has already judged this exact screen, read and list report the same state events did.
     if status.state == AgentControlState::Unknown && pending.is_none() {
@@ -236,12 +259,31 @@ async fn observe_entry(
     // `stamps` is the latest reading, or the persisted stamps of a previous run before this
     // run's first reading, so a restarted daemon still reports the real times.
     let seen = state.agent_events.stamps(session_id);
-    let state_since = seen.as_ref().filter(|seen| seen.state == status.state).and_then(|seen| seen.state_since_ms);
+    let mut state_since = seen.as_ref().filter(|seen| seen.state == status.state).and_then(|seen| seen.state_since_ms);
     let screen_revision = screen.as_ref().map(|snapshot| snapshot.revision.clone());
     let screen_changed_at = seen
         .as_ref()
         .filter(|seen| seen.screen_revision == screen_revision)
         .and_then(|seen| seen.screen_changed_at_ms);
+    let now_ms = observed_at_ms();
+    let is_remote_ssh = state.terminal_service.remote().contains(session_id);
+    if is_stale_remote_working(
+        is_remote_ssh,
+        status.state,
+        status.source,
+        state_since,
+        screen_changed_at,
+        now_ms,
+    ) {
+        if let Some(services) = &state.machine_services {
+            services.sessions.agent_state_hub().release_remote(session_id);
+        }
+        status = derive_status(None, detection.map(|found| found.state), pending.is_some());
+        state_since = seen
+            .as_ref()
+            .filter(|seen| seen.state == status.state)
+            .and_then(|seen| seen.state_since_ms);
+    }
     let last_assistant_line = match &agent {
         Some(agent) if with_last_line => {
             let identity = reference_chat_identity(state, &target, Some(agent)).await;
@@ -276,7 +318,7 @@ async fn observe_entry(
         "screenChangedAt": screen_changed_at,
         "screenReadable": readable,
         // When this entry was read, so a hub that caches a list can show how old it is.
-        "observedAt": observed_at_ms(),
+        "observedAt": now_ms,
     });
     if let Some(branch) = branch {
         entry["branch"] = serde_json::json!(branch);
@@ -291,8 +333,12 @@ async fn observe_entry(
     if failed {
         entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
     }
-    let completed = state.agent_events.completion(session_id).is_some()
-        || provider_outcome.is_some();
+    let has_agent_signal = agent.is_some()
+        || provider_outcome.is_some()
+        || status.state != AgentControlState::Unknown
+        || status.source != AgentStateSource::None;
+    let completed = has_agent_signal
+        && (state.agent_events.completion(session_id).is_some() || provider_outcome.is_some());
     if with_last_line {
         // A remote or non-native session has no transcript line; the screen's last line stands
         // in for it, but only in a pane an agent runs in.
@@ -3630,6 +3676,49 @@ mod tests {
         assert_eq!(axes(AgentControlState::Working, None, false, false).activity, AttentionActivity::Working);
         assert_eq!(axes(AgentControlState::Unknown, None, false, false).activity, AttentionActivity::Unknown);
         assert_eq!(axes(AgentControlState::Idle, None, false, true).completion, AttentionCompletion::Reported);
+    }
+
+    #[test]
+    fn stale_remote_working_detector_only_trips_for_silent_ssh_provider_working() {
+        let start = 1_000_000;
+        let stale_now = start + REMOTE_WORKING_STALE_MS;
+        assert!(is_stale_remote_working(
+            true,
+            AgentControlState::Working,
+            AgentStateSource::Provider,
+            Some(start),
+            None,
+            stale_now,
+        ));
+        assert!(!is_stale_remote_working(
+            true,
+            AgentControlState::Working,
+            AgentStateSource::Provider,
+            Some(start),
+            Some(stale_now - 60_000),
+            stale_now,
+        ), "recent screen output keeps an active remote turn working");
+        assert!(!is_stale_remote_working(
+            false,
+            AgentControlState::Working,
+            AgentStateSource::Provider,
+            Some(start),
+            None,
+            stale_now,
+        ), "local sessions rely on the foreground process observer, not a remote TTL");
+    }
+
+    #[tokio::test]
+    async fn empty_shell_without_agent_signal_is_not_stuck_unread_from_old_completion() {
+        let session_id = "agent-control-empty-shell-no-unread";
+        let (_backend, state) = pane(session_id, "$ ");
+        state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
+        state.agent_events.publish(reading(session_id, AgentControlState::Idle, AgentStateSource::Provider));
+        // Now the screen/status settles back to an unknown shell with no agent signal.
+        state.agent_events.publish(reading(session_id, AgentControlState::Unknown, AgentStateSource::None));
+        let after = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        assert_eq!(after["session"]["attention"]["axes"]["completion"], "none", "{after}");
+        assert_eq!(after["session"]["attention"]["group"], "seen", "{after}");
     }
 
     struct InertControl;

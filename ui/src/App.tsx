@@ -208,6 +208,7 @@ import {
   type RemoteSelectionRequestedPayload,
   type SpawnTerminalRequest,
 } from "./lib/tauri";
+import * as tauriApi from "./lib/tauri";
 import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
@@ -1103,6 +1104,7 @@ function WorkspaceApp({
     agents,
     tabActivity,
     worktreeActivity = {},
+    worktreeActivityByKey,
     attentionBySessionId = NO_ATTENTION,
     unreadBadgeCount: unreadBadgeCountFromStore,
     activityNotificationTargets,
@@ -1228,6 +1230,17 @@ function WorkspaceApp({
       subscribeSessionActivitySeen
         ? subscribeSessionActivitySeen((event) => {
             coordinatorRef.current?.withdrawForSession(event.workspaceId, event.sessionId);
+            const backendSessionId = findBackendSessionId(stateRef.current, event.sessionId, event.workspaceId);
+            if (backendSessionId) {
+              try {
+                const ack = tauriApi.acknowledgeAgentOutcome;
+                if (typeof ack === "function") {
+                  void ack(backendSessionId).catch(() => undefined);
+                }
+              } catch {
+                // Partial test mocks of `./lib/tauri` may omit `acknowledgeAgentOutcome`.
+              }
+            }
           })
         : undefined,
     [subscribeSessionActivitySeen],
@@ -2701,11 +2714,11 @@ function WorkspaceApp({
   const supervisorDecisionCount = usePanelDecisionCount();
   // The Worktrees rail mode's badge: agents that finished or are waiting for input in any lane.
   const worktreeAgentAttention = useMemo(
-    () => Object.values(worktreeActivity).reduce(
+    () => Object.values(worktreeActivityByKey ?? worktreeActivity).reduce(
       (sum, summary) => sum + (summary ? summary.waitingCount + summary.doneCount : 0),
       0,
     ),
-    [worktreeActivity],
+    [worktreeActivity, worktreeActivityByKey],
   );
   useDesktopSidebarPublisher({
     // One desktop sidebar model per app (consumed by remote clients): the primary publishes it.
@@ -2716,6 +2729,7 @@ function WorkspaceApp({
     inactiveProjectWorktrees,
     emptyWorkspaceIds: emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots()),
     activityByWorktreePath: worktreeActivity,
+    ...(worktreeActivityByKey ? { activityByWorktreeKey: worktreeActivityByKey } : {}),
     unreadWorktreePaths: state.unreadWorktreePaths,
     agents,
     ...(laneOrder ? { laneOrder } : {}),
@@ -5495,6 +5509,7 @@ function WorkspaceApp({
           statuses={worktreeStatuses}
           unreadWorktreePaths={state.unreadWorktreePaths}
           activityByWorktreePath={worktreeActivity}
+          {...(worktreeActivityByKey ? { activityByWorktreeKey: worktreeActivityByKey } : {})}
           {...(laneOrder ? { laneOrder } : {})}
           {...(laneLifecycles ? { laneLifecycles } : {})}
           onLaneAction={handleLaneAction}
