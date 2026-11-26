@@ -22,6 +22,7 @@ vi.mock("../../lib/tauri", () => ({
 }));
 
 const { RemoteAccessSection } = await import("./RemoteAccessSection");
+const { resetRemoteAccessStateForTests, refreshStatus } = await import("./remote/useRemoteAccessState");
 
 const PINNED = "MCowBQYDK2VwAyEAq1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8l9z0x1c=";
 
@@ -30,6 +31,7 @@ const trustOff = { ...trustOn, enabled: false, disabledBySetting: true };
 
 describe("RemoteAccessSection automatic direct trust", () => {
   beforeEach(() => {
+    resetRemoteAccessStateForTests();
     getRemoteStatus.mockResolvedValue({
       enabled: true,
       mode: "localNetwork",
@@ -45,6 +47,7 @@ describe("RemoteAccessSection automatic direct trust", () => {
 
   afterEach(() => {
     cleanup();
+    resetRemoteAccessStateForTests();
     vi.clearAllMocks();
   });
 
@@ -95,9 +98,30 @@ describe("RemoteAccessSection automatic direct trust", () => {
     });
     render(<RemoteAccessSection />);
 
-    await screen.findByRole("switch", { name: "Automatic direct trust" });
+    const toggle = await screen.findByRole("switch", { name: "Automatic direct trust" });
+    expect(toggle).not.toBeChecked();
+    expect(toggle).toBeDisabled();
+    fireEvent.click(toggle);
+    expect(setDirectAutoTrustDisabled).not.toHaveBeenCalled();
     expect(screen.getByTestId("auto-trust-state")).toHaveTextContent("FERRYX_DIRECT_AUTO_TRUST");
     expect(screen.getByTestId("pinned-account-key")).toHaveTextContent("Pinned account key: None");
+  });
+
+  it("preserves a saved trust mutation when an older refresh completes", async () => {
+    // Given a pending refresh returning the old enabled trust setting.
+    await act(async () => { render(<RemoteAccessSection />); });
+    const resolvers: Array<(value: typeof trustOn) => void> = [];
+    const stale = new Promise<typeof trustOn>(resolve => { resolvers.push(resolve); });
+    getDirectAutoTrustStatus.mockReturnValueOnce(stale);
+    const pending = refreshStatus();
+    await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Automatic direct trust" })); });
+    // When the old refresh resolves after the save.
+    await act(async () => {
+      for (const resolve of resolvers) resolve(trustOn);
+      await pending;
+    });
+    // Then the persisted disabled setting wins.
+    expect(screen.getByRole("switch", { name: "Automatic direct trust" })).not.toBeChecked();
   });
 
   it("reports a failed save and keeps the previous state", async () => {

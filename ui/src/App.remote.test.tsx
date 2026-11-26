@@ -1,10 +1,11 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RegisteredProject } from "./lib/tauri";
 import type { RegisteredRemoteProject } from "./lib/remoteProject";
 
 const native = vi.hoisted(() => ({
   registerProject: vi.fn(), registerRemoteProject: vi.fn(), listWorktrees: vi.fn(),
+  listPairedProjectWorktrees: vi.fn<typeof import("./state/pairedProjectWorktrees").listPairedProjectWorktrees>(),
   spawnTerminalDetailed: vi.fn(), spawnTerminal: vi.fn(), watchDagProject: vi.fn(),
   loadSession: vi.fn(), saveSession: vi.fn(), isTauriRuntime: vi.fn(),
   getTerminalRemoteStatus: vi.fn<typeof import("./lib/tauri").getTerminalRemoteStatus>(),
@@ -52,6 +53,7 @@ vi.mock("./lib/remoteProject", async (importOriginal) => ({
   ...await importOriginal<typeof import("./lib/remoteProject")>(),
   registerRemoteProject: native.registerRemoteProject,
 }));
+vi.mock("./state/pairedProjectWorktrees", () => ({ listPairedProjectWorktrees: native.listPairedProjectWorktrees }));
 vi.mock("./lib/sshHosts", async (importOriginal) => ({ ...await importOriginal<typeof import("./lib/sshHosts")>(), useSshHosts: () => ({
   hosts: hosts.current, loading: false, error: null, refresh: async () => hosts.current,
 }) }));
@@ -84,11 +86,13 @@ vi.mock("./components/ui/sonner", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./components/ui/sonner")>();
   return { ...actual, toast: Object.assign(actual.toast, { warning: toastMocks.warning }) };
 });
-vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: ({ initialSection, onOpenMachineProject }: {
+vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: ({ initialSection, remoteContext, onOpenMachineProject }: {
   initialSection?: string;
+  remoteContext?: import("./lib/machineNavigation").RemoteContext;
   onOpenMachineProject?: (target: import("./lib/machineNavigation").MachineProjectTarget, context: import("./lib/machineNavigation").RemoteContext) => void;
 }) => <div>
   <div data-testid="settings-section">{initialSection}</div>
+  <output data-testid="settings-remote-context">{JSON.stringify(remoteContext)}</output>
   <button onClick={() => onOpenMachineProject?.({ kind: "pairedDaemon", hostId: "h", generation: "1" }, { page: "machines", filter: "all" })}>Open paired project</button>
 </div> }));
 vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTab, onSplitPane, layout, onReconnectSshSession, onRefreshSessionIdentity }: {
@@ -110,6 +114,9 @@ vi.mock("./components/TerminalSplitView", () => ({ TerminalSplitView: ({ onAddTa
 import { App } from "./App";
 import { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY } from "./lib/storageKeys";
 import { resetWorkspaceRestore } from "./state/workspaceRestore";
+import { remoteHostStore } from "./state/remoteHostStore";
+import { clearWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
+import { clearHmrWorkspaceState } from "./state/hmrWorkspaceState";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -129,6 +136,9 @@ async function showWorktrees() { await act(async () => { fireEvent.click(screen.
 // 7e8fdfb7 uses detailed spawn for new tabs so their durable identity is available immediately.
 beforeEach(() => {
   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); hosts.current = [];
+  clearWorkspaceSnapshot(); clearHmrWorkspaceState(); remoteHostStore.reset();
+  native.listPairedProjectWorktrees.mockReset();
+  native.listPairedProjectWorktrees.mockResolvedValue([]);
   // clearAllMocks keeps implementations; a connected status from one test must not settle the next.
   native.getTerminalRemoteStatus.mockReset();
   native.isTauriRuntime.mockReturnValue(false);
@@ -158,7 +168,10 @@ beforeEach(() => {
     };
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  remoteHostStore.reset(); clearWorkspaceSnapshot(); clearHmrWorkspaceState();
+});
 
 describe("App SSH project lifecycle", () => {
   it.each(["rejected", "unexpected"])("retains the SSH backend when retry is %s without spawning a shell", async mode => {
@@ -557,6 +570,90 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { registration.resolve(registered); await registration.promise; });
     expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
     expect(screen.getByTestId("empty-workspace-view")).toBeInTheDocument();
+  });
+
+  it.each(["retry", "settings"] as const)("offers working %s when SSH registration fails with saved tabs", async (action) => {
+    // Given: an SSH project with a retained tab, parked while a local project is selected.
+    seed([remote, { workspaceId: "local", repoRoot: "/local", gitRoot: null }]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New Terminal" })); });
+    const savedTab = screen.getByTestId("active-tab").textContent;
+    await act(async () => { native.remoteSelection?.({ workspaceId: "local" }); });
+    native.registerRemoteProject.mockRejectedValueOnce({ code: "SSH_CONNECT_FAILED", message: "Connection refused" });
+    await act(async () => { native.remoteSelection?.({ workspaceId: remote.workspaceId }); });
+    const banner = screen.getByTestId("remote-registration-error");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner).toHaveTextContent("SSH_CONNECT_FAILED");
+    expect(screen.getByTestId("active-tab").textContent).toBe(savedTab);
+    expect(screen.queryByTestId("ssh-workspace-status")).not.toBeInTheDocument();
+    const attempts = native.registerRemoteProject.mock.calls.length;
+
+    // When: the user invokes the banner action.
+    await act(async () => {
+      fireEvent.click(within(banner).getByRole("button", { name: action === "retry" ? "Retry" : "Open Remote Settings" }));
+      if (action === "settings") await import("./components/SettingsDialog");
+    });
+
+    // Then: retry registers the same remote root, or settings targets that SSH machine.
+    if (action === "retry") {
+      expect(native.registerRemoteProject).toHaveBeenCalledTimes(attempts + 1);
+      expect(native.registerRemoteProject).toHaveBeenLastCalledWith({ workspaceId: remote.workspaceId, hostId: "build", repoPath: remote.repoRoot });
+      expect(screen.queryByTestId("remote-registration-error")).not.toBeInTheDocument();
+      expect(screen.getByTestId("active-tab").textContent).toBe(savedTab);
+    } else {
+      expect(screen.getByTestId("settings-section")).toHaveTextContent("remote");
+      expect(JSON.parse(screen.getByTestId("settings-remote-context").textContent ?? "null")).toEqual({ page: "machines", filter: "ssh", machine: { kind: "ssh", hostId: "build" } });
+    }
+  });
+
+  it.each(["retry", "settings"] as const)("offers working %s when paired project registration fails", async (action) => {
+    // Given: paired support is enabled, but refreshing the owning daemon's worktrees fails.
+    const paired: RegisteredProject = { workspaceId: `daemon:${"a".repeat(64)}`, repoRoot: "/srv/paired", gitRoot: null,
+      target: { kind: "pairedDaemon", hostId: "https://relay.example/host/paired" }, remoteWorkspaceId: "paired-root" };
+    remoteHostStore.setState(state => ({ ...state, nativeStatus: "ready", machineFeaturesEnabled: true }));
+    seed([paired]);
+    native.listPairedProjectWorktrees.mockRejectedValue({ code: "PAIRED_HOST_UNAVAILABLE", message: "Machine offline" });
+    await mount();
+    const banner = screen.getByTestId("remote-registration-error");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner).toHaveTextContent("PAIRED_HOST_UNAVAILABLE");
+    const attempts = native.listPairedProjectWorktrees.mock.calls.length;
+    native.listPairedProjectWorktrees.mockResolvedValue([]);
+
+    // When: the user invokes the banner action.
+    await act(async () => {
+      fireEvent.click(within(banner).getByRole("button", { name: action === "retry" ? "Retry" : "Open Remote Settings" }));
+      if (action === "settings") await import("./components/SettingsDialog");
+    });
+
+    // Then: retry refreshes the paired project without local registration, or opens paired machines.
+    if (action === "retry") {
+      expect(native.listPairedProjectWorktrees.mock.calls.length).toBeGreaterThan(attempts);
+      expect(native.listPairedProjectWorktrees).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: paired.workspaceId, target: paired.target }));
+      expect(screen.queryByTestId("remote-registration-error")).not.toBeInTheDocument();
+      expect(native.registerProject).not.toHaveBeenCalled();
+      expect(native.registerRemoteProject).not.toHaveBeenCalled();
+    } else {
+      expect(screen.getByTestId("settings-section")).toHaveTextContent("remote");
+      expect(JSON.parse(screen.getByTestId("settings-remote-context").textContent ?? "null")).toEqual({ page: "machines", filter: "paired" });
+    }
+  });
+
+  it("opens the SSH machine settings from the full-pane registration error", async () => {
+    // Given: SSH registration failed before any tab was created.
+    seed([remote]);
+    native.registerRemoteProject.mockRejectedValueOnce({ code: "SSH_CONNECT_FAILED", message: "Connection refused" });
+    await mount();
+
+    // When: the user takes SshWorkspaceStatus's settings action.
+    await act(async () => {
+      fireEvent.click(within(screen.getByTestId("ssh-workspace-status")).getByRole("button", { name: "Open SSH Settings" }));
+      await import("./components/SettingsDialog");
+    });
+
+    // Then: App's onOpenSettings callback opens the failing machine's remote settings.
+    expect(screen.getByTestId("settings-section")).toHaveTextContent("remote");
+    expect(JSON.parse(screen.getByTestId("settings-remote-context").textContent ?? "null")).toEqual({ page: "machines", filter: "ssh", machine: { kind: "ssh", hostId: "build" } });
   });
 
   it("says so when a New Terminal is discarded because the workspace changed mid-spawn", async () => {

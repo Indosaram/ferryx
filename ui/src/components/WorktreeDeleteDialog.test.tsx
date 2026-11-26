@@ -9,6 +9,7 @@ import { WorktreeDeleteDialog, type WorktreeDeleteServices } from "./WorktreeDel
 
 const native = {
   previewWorktreeDelete: vi.fn(),
+  previewRemoteWorktreeDelete: vi.fn(),
   deleteWorktree: vi.fn(),
   deleteWorktreeDestructive: vi.fn(),
   deleteRemoteWorktree: vi.fn(),
@@ -22,6 +23,17 @@ const worktree: Worktree = {
   detached: false,
   locked: null,
   prunable: null,
+};
+
+const sshWorktree: Worktree = {
+  path: "/srv/repo/.orca-worktrees/wt-feat-remote",
+  head: "abc1234",
+  branch: "refs/heads/orca/ssh-123456/feat-remote",
+  bare: false,
+  detached: false,
+  locked: null,
+  prunable: null,
+  workspaceId: "ssh:host-1",
 };
 
 const preview: BranchDeletionPreview = {
@@ -47,16 +59,21 @@ function createServices(overrides: Partial<WorktreeDeleteServices> = {}): Worktr
 beforeEach(() => {
   (window as any).isTauri = true;
   native.previewWorktreeDelete.mockReset();
+  native.previewRemoteWorktreeDelete.mockReset();
   native.deleteWorktree.mockReset();
   native.deleteWorktreeDestructive.mockReset();
   native.deleteRemoteWorktree.mockReset();
   native.previewWorktreeDelete.mockResolvedValue(preview);
+  native.previewRemoteWorktreeDelete.mockResolvedValue({ ...preview, branch: "orca/ssh-123456/feat-remote" });
   native.deleteWorktree.mockResolvedValue(undefined);
   native.deleteWorktreeDestructive.mockResolvedValue(undefined);
   native.deleteRemoteWorktree.mockResolvedValue(undefined);
   // Intercept only IPC: default services and native request routing stay real,
   // with no module mocks that could leak into the disk/lifecycle suites in Bun.
   mockIPC((command, args) => {
+    if (command === "cmd_ssh_preview_remote_worktree_delete") {
+      return native.previewRemoteWorktreeDelete(args);
+    }
     if (command === "cmd_ssh_delete_remote_worktree") {
       return native.deleteRemoteWorktree(args);
     }
@@ -164,6 +181,8 @@ describe("WorktreeDeleteDialog", () => {
       workspaceId: "project-a",
       worktree: { wsId: "ws-main", slug: "feature" },
     });
+    // A local workspace must never route its preview through the SSH command.
+    expect(native.previewRemoteWorktreeDelete).not.toHaveBeenCalled();
 
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
     expect(native.deleteWorktree).toHaveBeenCalledWith({
@@ -406,5 +425,152 @@ describe("WorktreeDeleteDialog", () => {
       await screen.findByText(/git worktree remove "\/repo\/feature-x"/),
     ).toBeInTheDocument();
     expect(native.previewWorktreeDelete).not.toHaveBeenCalled();
+  });
+
+  it("previews an SSH worktree through cmd_ssh_preview_remote_worktree_delete with real dirty and unmerged state", async () => {
+    native.previewRemoteWorktreeDelete.mockResolvedValue({
+      ...preview,
+      branch: "orca/ssh-123456/feat-remote",
+      merged: false,
+      dirtyState: { isDirty: true, files: [{ statusCode: " M", path: "src/remote.rs" }] },
+    });
+
+    await act(async () => {
+      render(
+        <WorktreeDeleteDialog
+          workspaceId="ssh:host-1"
+          worktree={sshWorktree}
+          onClose={vi.fn()}
+          onDeleted={vi.fn()}
+        />,
+      );
+    });
+
+    // The remote host answers, so the dialog never asks the local Git command.
+    expect(native.previewRemoteWorktreeDelete).toHaveBeenCalledWith({
+      workspaceId: "ssh:host-1",
+      path: sshWorktree.path,
+    });
+    expect(native.previewWorktreeDelete).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("dirty-file-preview")).toHaveTextContent("src/remote.rs");
+    expect(screen.getByTestId("worktree-delete-merge")).toHaveAttribute("data-merged", "false");
+  });
+
+  it("reports unknown remote Git status instead of fabricating a merged preview", async () => {
+    native.previewRemoteWorktreeDelete.mockRejectedValue({
+      code: "SSH_UNAVAILABLE",
+      message: "host is offline",
+      details: {},
+    });
+
+    await act(async () => {
+      render(
+        <WorktreeDeleteDialog
+          workspaceId="ssh:host-1"
+          worktree={sshWorktree}
+          onClose={vi.fn()}
+          onDeleted={vi.fn()}
+        />,
+      );
+    });
+
+    const notice = await screen.findByTestId("worktree-delete-preview-error");
+    expect(notice).toHaveAttribute("data-error-kind", "remote-git-status");
+    expect(notice).toHaveTextContent("SSH_UNAVAILABLE");
+    // No merge row at all: unknown state must not read as clean, let alone merged.
+    expect(screen.queryByText("Merge state")).not.toBeInTheDocument();
+    expect(screen.queryByText("Merged")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete remote worktree" })).toBeDisabled();
+  });
+
+  it("keeps the known dirty warning and refuses an unguarded delete when the remote preview fails", async () => {
+    native.previewRemoteWorktreeDelete.mockRejectedValue({
+      code: "SSH_UNAVAILABLE",
+      message: "host is offline",
+      details: {},
+    });
+
+    await act(async () => {
+      render(
+        <WorktreeDeleteDialog
+          workspaceId="ssh:host-1"
+          worktree={sshWorktree}
+          initialDirty
+          dirtyFiles={[{ statusCode: " M", path: "known-loss.rs" }]}
+          onClose={vi.fn()}
+          onDeleted={vi.fn()}
+        />,
+      );
+    });
+
+    expect(await screen.findByTestId("worktree-delete-preview-error")).toBeInTheDocument();
+    // The known dirty state survives the failed preview and still names the loss.
+    expect(screen.getByTestId("worktree-delete-refusal")).toHaveAttribute("data-dirty", "true");
+    expect(screen.getByTestId("dirty-file-preview")).toHaveTextContent("known-loss.rs");
+    const deleteButtons = screen.getAllByRole("button").filter((b) => b.textContent?.startsWith("Delete"));
+    expect(deleteButtons.length).toBeGreaterThan(0);
+    for (const button of deleteButtons) expect(button).toBeDisabled();
+    expect(native.deleteRemoteWorktree).not.toHaveBeenCalled();
+  });
+
+  it("preserves the DIRTY_WORKTREE refusal when the refresh preview fails", async () => {
+    native.previewRemoteWorktreeDelete
+      .mockResolvedValueOnce({ ...preview, branch: "orca/ssh-123456/feat-remote", dirtyState: { isDirty: false, files: [] } })
+      .mockRejectedValueOnce({ code: "SSH_UNAVAILABLE", message: "host went offline", details: {} });
+    native.deleteRemoteWorktree.mockRejectedValueOnce({
+      code: "DIRTY_WORKTREE",
+      message: "Worktree contains modified or untracked files",
+      details: { files: ["src/kept.rs"] },
+    });
+
+    await act(async () => {
+      render(
+        <WorktreeDeleteDialog
+          workspaceId="ssh:host-1"
+          worktree={sshWorktree}
+          onClose={vi.fn()}
+          onDeleted={vi.fn()}
+        />,
+      );
+    });
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Delete remote worktree" }));
+    });
+
+    // Both signals coexist: the refusal that explains the block, and the preview failure.
+    expect(screen.getByTestId("worktree-delete-refusal")).toHaveAttribute("data-dirty", "true");
+    expect(screen.getByTestId("worktree-delete-preview-error")).toBeInTheDocument();
+    expect(screen.getByTestId("dirty-file-preview")).toHaveTextContent("src/kept.rs");
+    expect(
+      screen.getByRole("button", { name: "Delete worktree and discard changes permanently" }),
+    ).toBeDisabled();
+  });
+
+  it("ignores a preview response that arrives after the worktree changed", async () => {
+    let resolveStale!: (value: BranchDeletionPreview) => void;
+    const stale = new Promise<BranchDeletionPreview>((resolve) => { resolveStale = resolve; });
+    const nextWorktree: Worktree = { ...worktree, path: "/repo/other", branch: "refs/heads/orca/ws-main/other" };
+    const services = createServices({
+      previewDelete: vi.fn().mockReturnValueOnce(stale).mockResolvedValueOnce({
+        ...preview,
+        branch: "orca/ws-main/other",
+        head: "def456",
+      }),
+    });
+    const view = render(
+      <WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />,
+    );
+    await act(async () => {
+      view.rerender(
+        <WorktreeDeleteDialog worktree={nextWorktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />,
+      );
+    });
+    expect(await screen.findByText("orca/ws-main/other")).toBeInTheDocument();
+
+    await act(async () => { resolveStale(preview); await stale; });
+    // The late answer for the previous worktree must not overwrite the current one.
+    expect(screen.getByText("orca/ws-main/other")).toBeInTheDocument();
+    expect(screen.queryByText("orca/ws-main/feature")).not.toBeInTheDocument();
   });
 });

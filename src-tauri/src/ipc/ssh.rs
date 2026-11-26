@@ -475,10 +475,9 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 }
 
 /// Build a live SSH target summary for a host. Shared by the Tauri command and
-/// integration QA tests; performs the credential-transaction-guarded probe and
-/// helper check without touching daemon-stored passwords.
+/// integration QA tests; callers hold the credential transaction when probing
+/// mutable credentials. This never touches daemon-stored passwords.
 pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
-    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
     let result = crate::ssh::runtime::detect(&host).await;
     let reachable = result.is_ok();
     let (environment, diagnostic) = match result {
@@ -507,7 +506,15 @@ pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
 pub async fn cmd_ssh_test_connection(
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
     host: SshHost,
+    candidate_password: Option<crate::ssh::password::Password>,
 ) -> Result<SshTargetSummary, IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    if let Some(password) = candidate_password {
+        let candidate = crate::ssh::password::push_candidate(&host, password)?;
+        let summary = ssh_test_connection_summary(host.clone()).await;
+        drop(candidate);
+        return Ok(summary);
+    }
     let summary = ssh_test_connection_summary(host.clone()).await;
     let authentication_stage_failed = summary
         .diagnostic
@@ -1368,6 +1375,22 @@ pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
         crate::ipc::worktree::WorktreeChangeKind::Created,
     )?;
     Ok(created)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_preview_remote_worktree_delete<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    path: String,
+) -> Result<crate::worktree::BranchDeletionPreview, IpcError> {
+    let store = get_ssh_store_path(&app)?;
+    let (project, host) = crate::ipc::run_blocking(move || {
+        crate::ssh::projects::resolve(&store, &workspace_id)
+    }).await?;
+    let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
+    crate::ssh::worktree::validate_path_inside_root(environment.platform, &project.repo_root, &path)?;
+    crate::ssh::worktree::preview_remote_delete(&host, &environment, &project.repo_root, &path).await
 }
 
 #[cfg(feature = "desktop")]

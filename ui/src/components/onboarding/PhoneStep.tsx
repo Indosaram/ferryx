@@ -132,7 +132,7 @@ export function PhoneStep({ paired, onPaired }: PhoneStepProps): JSX.Element {
       <div data-testid="onboarding-phone-connected" className="space-y-2">
         <WizardStatus tone="success" label="Phone connected" />
         <p className="text-[12px] text-muted-foreground">
-          Manage paired devices any time in Settings &gt; Remote access.
+          Manage paired devices any time in Settings &gt; Remote.
         </p>
       </div>
     );

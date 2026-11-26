@@ -15,9 +15,13 @@ vi.mock("./tauri", () => ({ bootTrace: vi.fn().mockResolvedValue(undefined) }));
 type State = "relay" | "attempting" | "direct" | "disconnected";
 const route = (hostId: string, state: State) => ({ hostId, state });
 
+let resetStore: (() => void) | undefined;
 async function load() {
+  resetStore?.();
   vi.resetModules();
-  return import("./pairedHostRoute");
+  const store = await import("./pairedHostRoute");
+  resetStore = store.resetPairedHostRouteForTests;
+  return store;
 }
 function fire(payload: unknown) {
   const handler = mocks.handlers.get("paired_host_route_changed");
@@ -34,9 +38,110 @@ beforeEach(() => {
     return () => mocks.handlers.delete(name);
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { resetStore?.(); vi.restoreAllMocks(); });
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => { throw new Error("uninitialized deferred"); };
+  let reject: (error: unknown) => void = () => { throw new Error("uninitialized deferred"); };
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 describe("pairedHostRoute store", () => {
+  it("renews the list precedence fence on retry without registering another listener", async () => {
+    // Given a failed first list and an event received between attempts.
+    mocks.invoke.mockRejectedValueOnce({ code: "IO" });
+    const m = await load();
+    await m.bootstrapPairedHostRoute();
+    fire(route("a", "relay"));
+    const response = deferred<unknown>();
+    const called = deferred<void>();
+    mocks.invoke.mockImplementationOnce(() => { called.resolve(); return response.promise; });
+    // When a fresh event races the retried list.
+    const retry = m.bootstrapPairedHostRoute();
+    await called.promise;
+    fire(route("b", "direct"));
+    response.resolve({ supported: true, entries: [route("a", "direct"), route("b", "attempting")] });
+    await retry;
+    // Then only this attempt's event overrides the list.
+    expect(m.getPairedHostRoute("a").entry).toEqual(route("a", "direct"));
+    expect(m.getPairedHostRoute("b").entry).toEqual(route("b", "direct"));
+    expect(mocks.listen).toHaveBeenCalledTimes(1);
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, "UNKNOWN_COMMAND", "UNSUPPORTED", "Command paired_host_route_list not found"] as const)(
+    "keeps unsupported result %s terminal until a live event", async (failure) => {
+      // Given an older daemon.
+      if (failure === false) mocks.invoke.mockResolvedValue({ supported: false, entries: [] });
+      else mocks.invoke.mockRejectedValue(failure.includes(" ") ? failure : { code: failure });
+      const m = await load();
+      await m.bootstrapPairedHostRoute();
+      // When bootstrap repeats and an event follows.
+      await m.bootstrapPairedHostRoute();
+      expect(m.getPairedHostRoute("a").supported).toBe(false);
+      fire(route("a", "direct"));
+      // Then live support is visible without another list.
+      expect(m.getPairedHostRoute("a").supported).toBe(true);
+      expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["unsupported", "failed"])("preserves event support against a stale %s list", async (outcome) => {
+    // Given an in-flight list.
+    const response = deferred<unknown>();
+    const called = deferred<void>();
+    mocks.invoke.mockImplementation(() => { called.resolve(); return response.promise; });
+    const m = await load();
+    const boot = m.bootstrapPairedHostRoute();
+    await called.promise;
+    // When a live event wins the race.
+    fire(route("a", "direct"));
+    if (outcome === "unsupported") response.resolve({ supported: false, entries: [] });
+    else response.reject({ code: "IO" });
+    await boot;
+    // Then list fallback cannot downgrade live support.
+    expect(m.getPairedHostRoute("a")).toEqual({ supported: true, entry: route("a", "direct") });
+  });
+
+  it("releases both current and late subscription handles exactly once on reset", async () => {
+    // Given a pending registration.
+    const registration = deferred<() => void>();
+    const lateDispose = vi.fn();
+    mocks.listen.mockReturnValueOnce(registration.promise);
+    const m = await load();
+    const boot = m.bootstrapPairedHostRoute();
+    // When reset precedes registration completion.
+    m.resetPairedHostRouteForTests();
+    registration.resolve(lateDispose);
+    await boot;
+    // Then the late handle is released and a new lifecycle owns its own handle.
+    expect(lateDispose).toHaveBeenCalledTimes(1);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    const currentDispose = vi.fn();
+    mocks.listen.mockResolvedValueOnce(currentDispose);
+    mocks.invoke.mockResolvedValue({ supported: true, entries: [] });
+    await m.bootstrapPairedHostRoute();
+    m.resetPairedHostRouteForTests();
+    m.resetPairedHostRouteForTests();
+    expect(currentDispose).toHaveBeenCalledTimes(1);
+    expect(lateDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries subscription registration after a listener failure", async () => {
+    // Given a failed listener registration with a successful list.
+    mocks.listen.mockRejectedValueOnce({ code: "IO" });
+    mocks.invoke.mockResolvedValue({ supported: true, entries: [] });
+    const m = await load();
+    await m.bootstrapPairedHostRoute();
+    // When bootstrap retries registration.
+    await m.bootstrapPairedHostRoute();
+    fire(route("a", "direct"));
+    // Then events reach the store through the recovered listener.
+    expect(mocks.listen).toHaveBeenCalledTimes(2);
+    expect(m.getPairedHostRoute("a").entry?.state).toBe("direct");
+  });
+
   it("stores the initial list from one invoke", async () => {
     mocks.invoke.mockResolvedValue({ supported: true, entries: [route("a", "direct"), route("b", "relay")] });
     const m = await load();
@@ -122,9 +227,11 @@ describe("pairedHostRoute store", () => {
   it("labels the path from the route when supported, else from the transport", async () => {
     const m = await load();
     expect(m.pairedPathLabel("relay", { supported: true, entry: route("a", "direct") })).toBe("Direct");
-    expect(m.pairedPathLabel("relay", { supported: true, entry: route("a", "attempting") })).toBe("Relay");
-    expect(m.pairedPathLabel("relay", { supported: true, entry: route("a", "disconnected") })).toBe("Relay");
+    expect(m.pairedPathLabel("relay", { supported: true, entry: route("a", "attempting") })).toBe("Connecting");
+    expect(m.pairedPathLabel("relay", { supported: true, entry: route("a", "disconnected") })).toBe("Offline");
+    expect(m.pairedPathLabel("relay", { supported: true, entry: route("a", "relay") })).toBe("Relay");
     expect(m.pairedPathLabel("relay", { supported: true, entry: null })).toBe("Relay");
+    expect(m.pairedPathLabel("tailscale", { supported: true, entry: null })).toBe("tailscale");
     expect(m.pairedPathLabel("relay", { supported: false, entry: null })).toBe("Relay");
     expect(m.pairedPathLabel("tailscale", { supported: false, entry: null })).toBe("tailscale");
   });

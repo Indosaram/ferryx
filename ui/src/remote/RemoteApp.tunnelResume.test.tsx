@@ -1,3 +1,4 @@
+import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { RemoteApp } from "./RemoteApp";
@@ -5,6 +6,7 @@ import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import { requireSidebarRow } from "./remoteSidebarTestUtils";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
+import { TunnelError } from "./attachTunnel";
 import * as accountAttachModule from "./accountAttach";
 import { remoteHostStore } from "../state/remoteHostStore";
 
@@ -132,4 +134,76 @@ describe("RemoteApp account tunnel resume", () => {
     });
     expect(screen.queryByText(/STREAM_CLOSED/)).toBeNull();
   });
+
+  it("a resume the relay refuses with a changed machine key names the cause and offers sign-in", async () => {
+    // Given a worktree open on a live account tunnel
+    const { tunnels, opened } = await openLiveAccountWorktree();
+
+    // When the tunnel dies and the retry is refused because the machine's attach key changed
+    for (const tunnel of tunnels) tunnel.isClosed = true;
+    opened.mockRejectedValue(new TunnelError("MACHINE_KEY_CHANGED", "attach key mismatch"));
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    // Then the strip names that cause once, and offers the one action that can fix it
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-connection-strip")).toHaveAttribute("data-reason", "MACHINE_KEY_CHANGED");
+    });
+    const action = screen.getByTestId("remote-connection-reconnect");
+    expect(action).toHaveAttribute("data-action", "sign-in");
+    expect(action).toHaveTextContent("Sign in again");
+  });
+
+  it("a resume the relay refuses as unauthorized offers sign-in", async () => {
+    // Given a worktree open on a live account tunnel
+    const { tunnels, opened } = await openLiveAccountWorktree();
+
+    // When the tunnel dies and the retry is refused because the account session is no longer valid
+    for (const tunnel of tunnels) tunnel.isClosed = true;
+    opened.mockRejectedValue(new TunnelError("UNAUTHORIZED", "session expired", 401));
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    // Then the strip reports that cause and its action is sign-in
+    await waitFor(() => {
+      expect(screen.getByTestId("remote-connection-strip")).toHaveAttribute("data-reason", "UNAUTHORIZED");
+    });
+    expect(screen.getByTestId("remote-connection-reconnect")).toHaveAttribute("data-action", "sign-in");
+  });
 });
+
+/** Opens WS on a live account tunnel; `opened` controls every later tunnel acquisition. */
+async function openLiveAccountWorktree() {
+  const tunnels: FakeTunnel[] = [];
+  storeAccountSessionToken("test-account-session-token-xyz", window.location.origin);
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.endsWith("/api/account/v1/machines")) {
+      return Promise.resolve(new Response(JSON.stringify([{ machineId: MACHINE, machineRecordId: "rec-1", publicKey: "pub-1", attachPublicKey: "attach-pub", relayOrigin: "https://relay.example.com", displayName: "omarchy", platform: "linux", online: true, enrollmentEpoch: "1", lastSeenAt: Date.now() }]), { status: 200 }));
+    }
+    if (url.includes("/grants")) {
+      return Promise.resolve(new Response(JSON.stringify({ grantId: "grant-1", pairingToken: "grant-pairing-token", relayOrigin: "https://relay.example.com", machineAttachPublicKey: "attach-pub" }), { status: 200 }));
+    }
+    if (url.endsWith("/api/v1/attach/session")) {
+      return Promise.resolve(new Response(JSON.stringify({ sessionId: `sess-alloc-${tunnels.length}` }), { status: 200 }));
+    }
+    return Promise.resolve(new Response("Not Found", { status: 404 }));
+  }));
+  const opened = vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async () => {
+    const tunnel = makeTunnel();
+    tunnels.push(tunnel);
+    return { transport: tunnel as never, close: () => { tunnel.close(); } };
+  });
+  vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
+    publicKey: "phone-initiator-pub-key-base64",
+    privateKey: "phone-initiator-priv-key-base64",
+  });
+  render(<RemoteApp />);
+  const picker = await openWorkspacePicker();
+  const row = await waitFor(() => requireSidebarRow(WS, null, picker));
+  await act(async () => { fireEvent.click(row); });
+  await waitFor(() => expect(screen.getByTestId("remote-view-mode-terminal")).toBeInTheDocument());
+  return { tunnels, opened };
+}

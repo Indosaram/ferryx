@@ -9,6 +9,8 @@ import type { ActivitySummary } from "../lib/activity";
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import { sidebarSessionSignals } from "../components/sidebar/sidebarSessionSignals";
 import { RemoteSidebar } from "./RemoteSidebar";
+import { userFacingError } from "./userFacingError";
+import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 import { sidebarModelFixture } from "./remoteSidebarTestUtils";
 import { useRemoteSidebarModel, type RemoteSidebarMachine } from "./useRemoteSidebarModel";
@@ -50,6 +52,24 @@ function Harness({ machine }: { readonly machine: RemoteSidebarMachine }) {
 }
 
 afterEach(cleanup);
+
+describe("remote sidebar desktop errors", () => {
+  it("renders the shared user-facing message when desktop loading fails", () => {
+    // Given a raw server error containing transport internals.
+    const error = { code: "MACHINE_KEY_CHANGED", message: "Noise handshake rejected: private-session-123" };
+    const section: RemoteSidebarSection = {
+      machineId: "m1", label: "Studio", state: "error", error, model: null, signals: null,
+    };
+
+    // When the desktop sidebar renders the error.
+    render(<RemoteSidebar sections={[section]} density="compact" pending={null} onSelect={() => undefined} view="worktrees" />);
+
+    // Then it uses the shared presentation contract, not the raw server payload.
+    expect(screen.getByRole("status").textContent).toBe(userFacingError(error, { action: "load the worktrees" }));
+    expect(screen.queryByText(error.message, { exact: false })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+});
 
 describe("remote sidebar after the publishing desktop disconnects", () => {
   it("falls back to its own inventory and says it is not synced", async () => {

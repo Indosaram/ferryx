@@ -216,6 +216,9 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       // Verify transport-appropriate recovering headline
       if (transport === "ssh") {
         expect(screen.getByRole("heading", { name: "Reconnecting SSH..." })).toBeInTheDocument();
+      } else if (transport === "paired") {
+        // GAP-4: a paired pane names the machine it reconnects to, distinct from local and SSH copy.
+        expect(screen.getByRole("heading", { name: "Reconnecting to paired machine..." })).toBeInTheDocument();
       } else {
         expect(screen.getByRole("heading", { name: "Reconnecting session..." })).toBeInTheDocument();
       }
@@ -228,11 +231,11 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       expect(screen.getByTestId("terminal-pane-surface")).toBeInTheDocument();
 
       // Verify appropriate buttons: Retry is always present. Only a local pane marked reconnecting
-      // may also replace its retained PTY; SSH reattaches, and a paired pane still holding a live
-      // backend is reattach-only, so neither paints a button the guard would reject.
+      // and an SSH pane, which reattaches by starting a fresh remote shell, may replace the shell.
+      // A paired pane still holding a live backend is reattach-only, so it paints no such button.
       const retryBtn = screen.getByRole("button", { name: "Retry session recovery" });
       expect(retryBtn).toBeInTheDocument();
-      if (transport === "local") {
+      if (transport === "local" || transport === "ssh") {
         expect(screen.getByRole("button", { name: "Open new shell" })).toBeInTheDocument();
       } else {
         expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();

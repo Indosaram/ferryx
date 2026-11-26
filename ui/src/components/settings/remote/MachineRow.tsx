@@ -59,7 +59,7 @@ const LABEL_CLASS: Record<MachineState, string> = {
   checking: "text-muted-foreground",
   needsAccess: "text-status-warning",
   settingUp: "text-status-warning",
-  error: "text-status-warning",
+  error: "text-destructive",
   disabled: "text-muted-foreground",
 };
 
@@ -98,7 +98,8 @@ interface MachineRowProps {
   status: MachineStatus;
   statusTitle?: string;
   selected: boolean;
-  primary: { disabled: boolean; onClick: () => void };
+  /** The row's one primary action: its label and whether it can be pressed right now. */
+  primary: { label: string; disabled: boolean; onClick: () => void } | null;
   disabledReason: string | null;
   note?: ReactNode;
   menuItems: MenuItemSpec[];
@@ -130,9 +131,11 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
           <span className="shrink-0 rounded border border-border/70 bg-muted/40 px-1.5 text-[11px] text-muted-foreground">{pathChip}</span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <Button type="button" size="sm" variant={primary.disabled ? "outline" : "default"} aria-label={`Add Project on ${actionName}`} disabled={primary.disabled} aria-describedby={primary.disabled && disabledReason ? reasonId : undefined} onClick={primary.onClick}>
-            Add Project
-          </Button>
+          {primary ? (
+            <Button type="button" size="sm" variant={primary.disabled ? "outline" : "default"} aria-label={`${primary.label} on ${actionName}`} disabled={primary.disabled} aria-describedby={primary.disabled && disabledReason ? reasonId : undefined} onClick={primary.onClick}>
+              {primary.label}
+            </Button>
+          ) : null}
           <Button type="button" variant="outline" size="sm" ref={detailsRef} aria-label={`Details for ${actionName}`} aria-haspopup="dialog" onClick={onDetails}>
             Details
           </Button>
@@ -156,7 +159,7 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
           </DropdownMenu>
         </div>
       </div>
-      {primary.disabled && disabledReason ? (
+      {primary?.disabled !== false && disabledReason ? (
         <p id={reasonId} data-testid="machine-disabled-reason" className="break-words text-[12px] text-muted-foreground">{disabledReason}</p>
       ) : null}
       {note}
@@ -198,7 +201,7 @@ export function PairedMachineRow(props: PairedMachineRowProps) {
       pathChip={pairedPathLabel(host.transport, route)}
       status={status}
       selected={props.selected}
-      primary={{ disabled, onClick: props.onAddProject }}
+      primary={{ label: "Add Project", disabled, onClick: props.onAddProject }}
       disabledReason={reason}
       menuItems={[
         { label: "Details", onSelect: props.onMenuDetails ?? props.onDetails },
@@ -226,6 +229,10 @@ export interface SshMachineRowProps {
   selected: boolean;
   busy: boolean;
   onAddProject: () => void;
+  /** Re-runs the connection test; the row's primary action while the machine is unverified. */
+  onRetry?: () => void;
+  /** Opens this machine's setup/details drawer while it still needs configuration. */
+  onSetUp?: () => void;
   onDetails: () => void;
   /** Details chosen from the "More actions" menu; defaults to onDetails. */
   onMenuDetails?: () => void;
@@ -252,7 +259,22 @@ export function SshMachineRow(props: SshMachineRowProps) {
   const { host, target, busy } = props;
   const status = sshRowStatus(props);
   const disabled = busy || Boolean(host.disabled) || !props.canOpenProject;
-  const reason = busy ? "Another action is in progress." : host.disabled ? "Machine is disabled." : !props.canOpenProject ? "Opening projects is not available here." : null;
+  const reason = busy ? "Another action is in progress." : host.disabled ? "Machine is disabled." : !props.canOpenProject ? "Opening projects is not available here." : status.reason;
+  // The row offers the one action the machine's state actually calls for: a verified machine
+  // opens a project, an unverified one retries the test, and a peer that still needs its helper
+  // opens its own setup drawer instead of re-running discovery for the whole tailnet.
+  const action = (() => {
+    switch (status.primary) {
+      case "openProject":
+        return { label: "Add Project", disabled: disabled || !status.primaryEnabled, onClick: props.onAddProject };
+      case "retry":
+        return { label: "Retry", disabled: busy || !status.primaryEnabled, onClick: props.onRetry ?? props.onAddProject };
+      case "setUp":
+        return { label: "Set up", disabled: busy || !status.primaryEnabled, onClick: props.onSetUp ?? props.onAddProject };
+      default:
+        return null;
+    }
+  })();
   return (
     <MachineRow
       rowKey={`ssh:${host.id}`}
@@ -263,7 +285,7 @@ export function SshMachineRow(props: SshMachineRowProps) {
       status={status}
       statusTitle={props.test?.error || target?.lastError || status.label}
       selected={props.selected}
-      primary={{ disabled, onClick: props.onAddProject }}
+      primary={action}
       disabledReason={reason}
       note={target?.diagnostic ? (
         <p role="note" className="break-words text-[12px] text-muted-foreground">{target.diagnostic.details?.stage ?? target.diagnostic.code}: {target.diagnostic.message}</p>

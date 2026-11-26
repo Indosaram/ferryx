@@ -12,7 +12,7 @@ import {
   resolveAccountOrigin,
   type MachineRequestView,
 } from "./accountSession";
-import { MachineApprovalCard, machineApprovalErrorMessage } from "../components/settings/remote/MachineApprovalCard";
+import { MachineApprovalCard, machineApprovalErrorMessage, type MachineApprovalOutcome } from "../components/settings/remote/MachineApprovalCard";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 
@@ -60,7 +60,7 @@ function takeApprovalCode(): string {
   }
 }
 
-function clearPendingCode(): void {
+function clearStoredPendingCode(): void {
   try {
     sessionStore()?.removeItem(APPROVE_PENDING_CODE_KEY);
   } catch {}
@@ -78,6 +78,8 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
   const [codeDraft, setCodeDraft] = useState(initialCode);
   const [userCode, setUserCode] = useState(initialCode ? normalizeUserCode(initialCode) : "");
   const [request, setRequest] = useState<MachineRequestView | null>(null);
+  const [lookupAttempt, setLookupAttempt] = useState(0);
+  const [completion, setCompletion] = useState<MachineApprovalOutcome | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -126,7 +128,7 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
     return () => {
       active = false;
     };
-  }, [origin, token, userCode]);
+  }, [origin, token, userCode, lookupAttempt]);
 
   if (!origin) {
     return (
@@ -155,11 +157,23 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
       sessionStore()?.setItem(APPROVE_PENDING_CODE_KEY, next);
     } catch {}
     setUserCode(next);
+    setLookupAttempt((attempt) => attempt + 1);
+  };
+
+  const clearPendingCode = () => {
+    clearStoredPendingCode();
+    setCodeDraft("");
+    setUserCode("");
+    setRequest(null);
+    setCompletion(null);
+    setError(null);
+    setLoading(false);
   };
 
   const signOut = () => {
     clearStoredAccountSessionToken();
     setRequest(null);
+    setCompletion(null);
     setError(null);
     setToken(null);
   };
@@ -175,12 +189,25 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
         </div>
 
         {request ? (
-          <MachineApprovalCard
-            request={request}
-            onApprove={() => approveMachineRequest(origin, token, request.requestId, userCode)}
-            onDeny={() => denyMachineRequest(origin, token, request.requestId, userCode)}
-            onDecided={clearPendingCode}
-          />
+          <>
+            <MachineApprovalCard
+              request={request}
+              onApprove={() => approveMachineRequest(origin, token, request.requestId, userCode)}
+              onDeny={() => denyMachineRequest(origin, token, request.requestId, userCode)}
+              onDecided={(outcome) => {
+                clearStoredPendingCode();
+                setCompletion(outcome);
+              }}
+            />
+            {completion ? (
+              <a href="/" className="flex h-11 w-full items-center justify-center rounded-lg text-sm font-medium text-primary underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+                Open Ferryx
+              </a>
+            ) : null}
+            <Button type="button" variant="outline" className="h-11 w-full text-sm" onClick={clearPendingCode}>
+              {completion ? "Approve another computer" : "Enter a different code"}
+            </Button>
+          </>
         ) : (
           <form className="space-y-3" onSubmit={submitCode}>
             <label htmlFor="approve-page-code" className="block text-sm font-medium">Approval code</label>

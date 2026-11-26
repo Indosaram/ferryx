@@ -72,6 +72,19 @@ function stateOf(row: HTMLElement): string | null {
   return within(row).getByTestId("tunnel-state").getAttribute("data-state");
 }
 
+/**
+ * Drains the settled promise chain of one mutation (start, then the re-read it triggers).
+ *
+ * The panel polls on a wall-clock interval, so a test must never depend on wall-clock time to
+ * see a mutation land: every step of the chain is a microtask, and awaiting them explicitly
+ * keeps the assertions independent of how long the machine takes.
+ */
+async function settle() {
+  for (let turn = 0; turn < 20; turn += 1) {
+    await Promise.resolve();
+  }
+}
+
 beforeEach(() => {
   invoke.mockReset();
 });
@@ -221,6 +234,201 @@ describe("SshTunnelsPanel actions", () => {
     expect(screen.getByTestId("ssh-tunnel-form-error").textContent).toContain("65535");
     // No start request reached the bridge for the invalid port.
     expect(startPayloads()).toEqual([]);
+  });
+});
+
+describe("SshTunnelsPanel host selection", () => {
+  const disabledHost: SshHost = {
+    id: "h0",
+    label: "Retired box",
+    hostname: "retired.example.net",
+    source: "manual",
+    authMethod: "agent",
+    disabled: true,
+  };
+
+  function fillForwardForm() {
+    fireEvent.change(screen.getByLabelText("Remote host"), { target: { value: "10.0.0.5" } });
+    fireEvent.change(screen.getByLabelText("Remote port"), { target: { value: "3000" } });
+  }
+
+  it("selects the first machine that is not disabled, never hosts[0]", async () => {
+    answerList([list([])]);
+    await act(async () => { render(<SshTunnelsPanel hosts={[disabledHost, ...hosts]} />); });
+
+    // `SshHost` carries `disabled`, not `enabled`: the trigger must hold a usable machine, so
+    // it is out of its placeholder state and the submission names that machine.
+    expect(screen.getByLabelText("Machine")).not.toHaveAttribute("data-placeholder");
+
+    fillForwardForm();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Forward port" })); });
+
+    expect(startPayloads()[0].hostId).toBe("h1");
+  });
+
+  it("updates the selection when the inventory arrives after mount", async () => {
+    answerList([list([])]);
+    let rendered!: ReturnType<typeof render>;
+    await act(async () => { rendered = render(<SshTunnelsPanel hosts={[]} />); });
+    expect(screen.getByLabelText("Machine")).toHaveAttribute("data-placeholder");
+
+    await act(async () => { rendered.rerender(<SshTunnelsPanel hosts={hosts} />); });
+    expect(screen.getByLabelText("Machine")).not.toHaveAttribute("data-placeholder");
+
+    fillForwardForm();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Forward port" })); });
+    expect(startPayloads()[0].hostId).toBe("h1");
+  });
+
+  it("clears a selected machine that becomes disabled and blocks submission", async () => {
+    answerList([list([])]);
+    let rendered!: ReturnType<typeof render>;
+    await act(async () => { rendered = render(<SshTunnelsPanel hosts={hosts} />); });
+
+    await act(async () => {
+      rendered.rerender(<SshTunnelsPanel hosts={[{ ...hosts[0], disabled: true }]} />);
+    });
+    fillForwardForm();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Forward port" })); });
+
+    const formError = screen.getByTestId("ssh-tunnel-form-error");
+    expect(formError).toHaveAttribute("data-error-kind", "no-enabled-host");
+    expect(startPayloads()).toEqual([]);
+  });
+
+  it("blocks submission with validation feedback when every machine is disabled", async () => {
+    answerList([list([])]);
+    await act(async () => { render(<SshTunnelsPanel hosts={[{ ...hosts[0], disabled: true }]} />); });
+
+    fillForwardForm();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Forward port" })); });
+
+    expect(screen.getByTestId("ssh-tunnel-form-error")).toBeTruthy();
+    expect(startPayloads()).toEqual([]);
+  });
+});
+
+describe("SshTunnelsPanel stopped rows", () => {
+  /** Mounts a listening ad-hoc tunnel, then refreshes once to retire it as stopped. */
+  async function mountStoppedAdHoc(responses: TunnelListResponse[]) {
+    answerList(responses);
+    await act(async () => { render(<SshTunnelsPanel hosts={hosts} />); });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Refresh SSH tunnels" }));
+      await settle();
+    });
+    expect(screen.getByTestId("tunnel-row").getAttribute("data-state")).toBe("stopped");
+  }
+
+  it("starts a stopped ad-hoc tunnel and leaves exactly one running row", async () => {
+    const running = view({ specId: "minted-2", runtimeId: "rt-2", label: "forward", state: "listening" });
+    answerList([list([view({ specId: "minted-1", label: "forward" })]), list([]), list([running])]);
+    await act(async () => { render(<SshTunnelsPanel hosts={hosts} />); });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Refresh SSH tunnels" }));
+      await settle();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start forward" }));
+      await settle();
+    });
+
+    // The restart is an ad-hoc start by spec, and the retired row never comes back beside it:
+    // the daemon minted a new spec id, so the old one could only linger as a stopped row.
+    const [payload] = startPayloads();
+    expect(payload).not.toHaveProperty("specId");
+    expect((payload.spec as Record<string, unknown>).id).toBeUndefined();
+    const rows = screen.getAllByTestId("tunnel-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].getAttribute("data-state")).toBe("listening");
+  });
+
+  it("restarts a stopped ad-hoc tunnel on its explicit port", async () => {
+    const adHoc = view({ specId: "minted-1", label: "forward", localPort: 8080, remotePort: 80, state: "listening" });
+    answerList([list([adHoc]), list([]), list([adHoc])]);
+    await act(async () => { render(<SshTunnelsPanel hosts={hosts} />); });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Refresh SSH tunnels" }));
+      await settle();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start forward" }));
+      await settle();
+    });
+
+    expect((startPayloads()[0].spec as Record<string, unknown>).localPort).toBe(8080);
+  });
+
+  it("dismisses a stopped ad-hoc row for good, across later refreshes", async () => {
+    const adHoc = view({ specId: "minted-1", runtimeId: "rt-1", label: "forward" });
+    // The view comes back in a later response, which is what would resurrect the retired row:
+    // the daemon answers it live again, then reports it gone a second time.
+    await mountStoppedAdHoc([list([adHoc]), list([]), list([adHoc]), list([])]);
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Dismiss forward" })); });
+    expect(screen.queryAllByTestId("tunnel-row")).toHaveLength(0);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Refresh SSH tunnels" }));
+      await settle();
+    });
+    expect(screen.getByTestId("tunnel-row").getAttribute("data-state")).toBe("listening");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Refresh SSH tunnels" }));
+      await settle();
+    });
+    // Stopping a second time must not bring the dismissed row back.
+    expect(screen.queryAllByTestId("tunnel-row")).toHaveLength(0);
+    expect(screen.getByTestId("ssh-tunnels-empty")).toBeTruthy();
+  });
+
+  it("offers no Dismiss on a saved definition's stopped row", async () => {
+    answerList([list([view({ state: "stopped", runtimeId: null })], { saved: ["spec-1"] })]);
+    await act(async () => { render(<SshTunnelsPanel hosts={hosts} />); });
+
+    expect(screen.getByRole("button", { name: "Start database" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Dismiss/ })).toBeNull();
+  });
+
+  it("offers no Dismiss on a stopped row the daemon reported itself", async () => {
+    // A stopped ad-hoc view is in the response, not in the local history: dismissing it would
+    // be a silent no-op, so the control is not offered at all.
+    answerList([list([view({ specId: "minted-1", state: "stopped", runtimeId: null })])]);
+    await act(async () => { render(<SshTunnelsPanel hosts={hosts} />); });
+
+    expect(screen.getByTestId("tunnel-row").getAttribute("data-saved")).toBe("false");
+    expect(screen.getByRole("button", { name: "Start database" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Dismiss/ })).toBeNull();
+  });
+
+  it("sends one start request for a double click on Start", async () => {
+    const resolvers: Array<() => void> = [];
+    let listAnswer = list([view({ specId: "minted-1", runtimeId: "rt-1", label: "forward" })]);
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_tunnel_list") return listAnswer;
+      if (command === "cmd_ssh_tunnel_start") {
+        await new Promise<void>((resolve) => { resolvers.push(resolve); });
+        return { view: null, acceptedRevision: 0 };
+      }
+      return { view: null, acceptedRevision: 0, stopped: true };
+    });
+
+    await act(async () => { render(<SshTunnelsPanel hosts={hosts} />); });
+    // Retire the runtime: the next read reports no views, so the row renders stopped.
+    listAnswer = list([]);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh SSH tunnels" })); });
+    expect(screen.getByTestId("tunnel-row").getAttribute("data-state")).toBe("stopped");
+
+    const start = screen.getByRole("button", { name: "Start forward" });
+    await act(async () => {
+      fireEvent.click(start);
+      fireEvent.click(start);
+    });
+
+    expect(startPayloads()).toHaveLength(1);
+    await act(async () => { for (const resolve of resolvers) resolve(); });
   });
 });
 

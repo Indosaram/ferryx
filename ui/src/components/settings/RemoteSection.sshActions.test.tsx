@@ -153,6 +153,13 @@ function chooseAddMachineMethod(name: string) {
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 }
 
+/** Picks a value in the drawer's Radix Select; the option commits on its own click. */
+async function chooseEditAuthMethod(label: string) {
+  await act(async () => { fireEvent.click(screen.getByRole("combobox", { name: "Auth Method" })); });
+  const option = await screen.findByRole("option", { name: label });
+  await act(async () => { fireEvent.click(option); });
+}
+
 /** Opens the wizard on a method whose step loads data on mount, then flushes that load. */
 async function chooseAddMachineMethodAndSettle(name: string) {
   chooseAddMachineMethod(name);
@@ -250,23 +257,27 @@ describe("RemoteSection SSH machine actions", () => {
       const pending = deferred<SshHost[]>();
       mockIpc([devServer], { cmd_ssh_update_host: () => pending.promise });
       await renderSection();
-      expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeEnabled();
+      // The machine was never tested, so the row offers the connection test, not Add Project.
+      expect(screen.getByRole("button", { name: "Retry on Dev Server" })).toBeEnabled();
 
       await chooseRowMenuItem("Dev Server", "Disable");
       expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_update_host", { host: expect.objectContaining({ id: "host-1", disabled: true }) });
-      expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Retry on Dev Server" })).toBeDisabled();
       expect(screen.getByTestId("machine-disabled-reason")).toHaveTextContent("Another action is in progress.");
 
       await act(async () => { pending.resolve([{ ...devServer, disabled: true }]); });
-      // A disabled machine stays under My machines with a visible reason.
+      // A disabled machine stays under My machines with a visible reason, and no primary action
+      // it could not honour.
       expect(screen.getByTestId("machine-status")).toHaveAttribute("data-code", "DISABLED");
-      expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeDisabled();
+      for (const label of ["Add Project on Dev Server", "Retry on Dev Server", "Set up on Dev Server"]) {
+        expect(screen.queryByRole("button", { name: label })).toBeNull();
+      }
       expect(screen.getByTestId("machine-disabled-reason")).toHaveTextContent("Machine is disabled.");
 
       mockIpc([{ ...devServer, disabled: true }]);
       await chooseRowMenuItem("Dev Server", "Enable");
       expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_update_host", { host: expect.objectContaining({ id: "host-1", disabled: false }) });
-      expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Retry on Dev Server" })).toBeEnabled();
     });
 
     it("surfaces a structured error when disabling a machine fails", async () => {
@@ -277,7 +288,7 @@ describe("RemoteSection SSH machine actions", () => {
       await chooseRowMenuItem("Dev Server", "Disable");
 
       expect(screen.getByRole("alert")).toHaveTextContent("Cannot toggle host: machine state is locked");
-      expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Retry on Dev Server" })).toBeEnabled();
     });
   });
 
@@ -355,6 +366,139 @@ describe("RemoteSection SSH machine actions", () => {
       // The old preparation belonged to the previous configuration, so the host is reachable, not ready.
       expect(drawerStatusCode()).toBe("REACHABLE");
       expect(screen.queryByText("Old integration failed")).toBeNull();
+    });
+  });
+
+  describe("password edit", () => {
+    const passwordServer: SshHost = { ...devServer, authMethod: "password" };
+
+    const commandsOf = () => invokeMock.mock.calls.map(([command]) => command as string);
+
+    it("verifies a new password before it stores the host and the credential", async () => {
+      mockIpc([passwordServer]);
+      await renderSection();
+      openDetails("Dev Server");
+      fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+      fireEvent.change(screen.getByLabelText("SSH password"), { target: { value: "new-secret" } });
+
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save Changes" })); });
+
+      const test = commandsOf().indexOf("cmd_ssh_test_connection");
+      const update = commandsOf().indexOf("cmd_ssh_update_host");
+      const store = commandsOf().indexOf("cmd_ssh_set_password");
+      // Probe first with the candidate, then save the host, and only then store the credential:
+      // a refused password must never replace the one that currently works.
+      expect(test).toBeGreaterThanOrEqual(0);
+      expect(invokeMock.mock.calls[test][1]).toMatchObject({ candidatePassword: "new-secret" });
+      expect(update).toBeGreaterThan(test);
+      expect(store).toBeGreaterThan(update);
+      expect(invokeMock.mock.calls[store][1]).toMatchObject({ password: "new-secret" });
+      // The form closed on success; the drawer stays open on the saved machine's details.
+      expect(screen.queryByRole("button", { name: "Save Changes" })).toBeNull();
+    });
+
+    it("keeps the working credential when the new password is refused", async () => {
+      mockIpc([passwordServer], {
+        cmd_ssh_test_connection: ({ host }) => ({ host, reachable: false, lastError: "Authentication failed for ubuntu", checkedAt: 1 }),
+      });
+      await renderSection();
+      openDetails("Dev Server");
+      fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+      fireEvent.change(screen.getByLabelText("SSH password"), { target: { value: "wrong-secret" } });
+
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save Changes" })); });
+
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("Authentication failed for ubuntu");
+      expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_update_host", expect.anything());
+      expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_set_password", expect.anything());
+      // The form stays open so the user can correct the password.
+      expect(screen.getByRole("button", { name: "Save Changes" })).toBeInTheDocument();
+    });
+
+    it("refuses to switch to password authentication without a password", async () => {
+      mockIpc([devServer]);
+      await renderSection();
+      openDetails("Dev Server");
+      fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+      fireEvent.click(screen.getByRole("button", { name: /Show Advanced Options/ }));
+      await chooseEditAuthMethod("Password");
+
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save Changes" })); });
+
+      const alert = within(screen.getByRole("dialog")).getByRole("alert");
+      expect(alert).toHaveAttribute("data-error-kind", "password-required");
+      expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_update_host", expect.anything());
+      expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_set_password", expect.anything());
+    });
+
+    it("clears a saved password without touching the rest of the host", async () => {
+      mockIpc([passwordServer]);
+      await renderSection();
+      openDetails("Dev Server");
+
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Clear saved password for Dev Server" })); });
+
+      expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_clear_password", { host: expect.objectContaining({ id: "host-1" }) });
+      expect(screen.getByTestId("ssh-password-feedback-host-1")).toHaveAttribute("data-tone", "success");
+      expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_update_host", expect.anything());
+      expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_delete_host", expect.anything());
+    });
+
+    it("reports a failed password clear beside the button", async () => {
+      mockIpc([passwordServer], {
+        cmd_ssh_clear_password: () => { throw { code: "IO_ERROR", message: "Keyring is locked" }; },
+      });
+      await renderSection();
+      openDetails("Dev Server");
+
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Clear saved password for Dev Server" })); });
+
+      const feedback = screen.getByTestId("ssh-password-feedback-host-1");
+      expect(feedback).toHaveAttribute("data-tone", "error");
+      expect(feedback).toHaveTextContent("Keyring is locked");
+    });
+
+    it("does not show the Clear saved password action for a key-based host", async () => {
+      mockIpc([devServer]);
+      await renderSection();
+      openDetails("Dev Server");
+
+      expect(screen.queryByRole("button", { name: "Clear saved password for Dev Server" })).toBeNull();
+    });
+  });
+
+  describe("drawer isolation", () => {
+    it("never shows a late failure of the machine the user left in the next machine's drawer", async () => {
+      const pending = deferred<void>();
+      mockIpc([devServer, bastion], { cmd_ssh_prepare_integration: () => pending.promise });
+      await renderSection();
+
+      openDetails("Dev Server");
+      fireEvent.click(screen.getByRole("button", { name: "Prepare agent integration on Dev Server" }));
+      closeDrawer();
+      openDetails("Bastion Box");
+
+      await act(async () => { pending.reject({ code: "IO_ERROR", message: "Prepare failed on the old machine" }); });
+
+      const drawer = screen.getByRole("dialog");
+      expect(within(drawer).queryByRole("alert")).toBeNull();
+      expect(screen.queryByText("Prepare failed on the old machine")).toBeNull();
+      expect(within(drawer).getByTestId("machine-drawer-status")).toHaveAttribute("data-code", "UNCHECKED");
+    });
+
+    it("drops the previous machine's edit form and confirmation when the drawer moves on", async () => {
+      mockIpc([devServer, bastion]);
+      await renderSection();
+
+      openDetails("Dev Server");
+      fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+      expect(screen.getByRole("button", { name: "Save Changes" })).toBeInTheDocument();
+      closeDrawer();
+      openDetails("Bastion Box");
+
+      const drawer = screen.getByRole("dialog");
+      expect(within(drawer).queryByRole("button", { name: "Save Changes" })).toBeNull();
+      expect(within(drawer).getByRole("button", { name: "Test connection to Bastion Box" })).toBeEnabled();
     });
   });
 

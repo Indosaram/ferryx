@@ -38,6 +38,7 @@ const remote = vi.hoisted(() => ({
 
 const ssh = vi.hoisted(() => ({
   useSshHosts: vi.fn(),
+  subscribeSshHosts: () => () => undefined,
   formatSshTarget: (host: { username?: string | null; hostname: string }) => {
     if (host.username && host.username.trim() !== "") {
       return `${host.username.trim()}@${host.hostname.trim()}`;
@@ -638,7 +639,7 @@ describe("AddProjectDialog Remote flow", () => {
     directories.listRemoteDirectories.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
     const input = screen.getByTestId("remote-repo-path-input");
     fireEvent.change(input, { target: { value: "/slow/" } });
-    expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
+    expect(screen.getByTestId("add-project-confirm-remote")).toBeEnabled();
     fireEvent.change(input, { target: { value: "/fast/" } });
     const result = { path: "/fast", parentPath: "/", homePath: "/home/ubuntu", entries: [], truncated: false };
     await act(async () => { fast.resolve(result); });
@@ -843,23 +844,23 @@ describe("AddProjectDialog Remote flow", () => {
     expect(screen.getByTestId("project-type-local")).toBeInTheDocument();
   });
 
-  it("requires browsing the typed path and derives the internal id on registration", async () => {
+  it("registers a directly typed path without a trailing separator or a browse response", async () => {
+    // Given a ready SSH folder browser.
     native.isTauriRuntime.mockReturnValue(true);
-
-    render(<AddProjectDialog onClose={vi.fn()} onRegistered={vi.fn()} />);
-
-    await act(async () => { fireEvent.click(screen.getByTestId("project-type-remote")); });
-
-    const pathInput = screen.getByTestId("remote-repo-path-input");
-    fireEvent.change(pathInput, { target: { value: "/srv/apps/cool-service" } });
-    expect(screen.getByTestId("add-project-confirm-remote")).toBeDisabled();
-    expect(screen.queryByTestId("remote-workspace-id-input")).not.toBeInTheDocument();
-    await openRemotePath("/srv/apps/cool-service");
-    remote.registerRemoteProject.mockReturnValue(new Promise(() => {}));
-    await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-remote")); });
-    expect(remote.registerRemoteProject).toHaveBeenCalledWith({
-      workspaceId: "cool-service", hostId: "host-1", repoPath: "/srv/apps/cool-service",
+    const project = { workspaceId: "ssh:typed", hostId: "host-1", repoRoot: "/srv/apps/cool-service", gitRoot: null };
+    remote.registerRemoteProject.mockResolvedValue(project);
+    const onRegistered = vi.fn();
+    await act(async () => {
+      render(<AddProjectDialog initialHostId="host-1" onClose={vi.fn()} onRegistered={onRegistered} />);
     });
+    // When a full path is typed and submitted immediately.
+    fireEvent.change(screen.getByTestId("remote-repo-path-input"), { target: { value: project.repoRoot } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Add this folder" })); });
+    // Then registration uses the typed path without requiring directory completion.
+    expect(remote.registerRemoteProject).toHaveBeenCalledWith({
+      workspaceId: "cool-service", hostId: "host-1", repoPath: project.repoRoot,
+    });
+    expect(onRegistered).toHaveBeenCalledWith(expect.objectContaining({ repoRoot: project.repoRoot }));
   });
 
   it("registers remote project successfully and maps identity to RegisteredProject target { kind: 'ssh', hostId }", async () => {

@@ -32,6 +32,7 @@ import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
+import { Button } from "./components/ui/button";
 import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { cycleAppearanceTheme, openAppearanceSurface } from "./lib/appearanceCommands";
@@ -1310,7 +1311,16 @@ function WorkspaceApp({
       ? {
           ensureTerminalEvents,
           listWorktrees: async () => {
-            const listed = await listPairedProjectWorktrees(activeProject);
+            const listed = await listPairedProjectWorktrees(activeProject).catch((error: unknown) => {
+              // Runtime refresh reports errors without rejecting registration; retain the paired
+              // failure here so its Retry and settings actions remain available.
+              if (activeProjectRef.current.workspaceId === activeProject.workspaceId) {
+                const ipcError = toIpcError(error);
+                setRegistrationError({ workspaceId: activeProject.workspaceId, code: ipcError.code,
+                  message: ipcError.message, details: ipcError.details });
+              }
+              throw error;
+            });
             return listed ?? [];
           },
           onWorktreeChanged,
@@ -2388,6 +2398,41 @@ function WorkspaceApp({
       return requestLocalRecoveryAdmission(project.workspaceId, sessionId, true, onResult);
     },
     [getOrCreateSshOwnerRetryOperation, dispatchToWorkspace, workspaceStateFor],
+  );
+
+  // A paired pane recovers through its machine's daemon (retry_owned via the paired identity
+  // refresh), never through the SSH helper's retryTerminalRemoteSession.
+  const handleReconnectPairedSession = useCallback(
+    (sessionId: string): Promise<void> => new Promise<void>((resolve, reject) => {
+      let dispose: (() => void) | null = null;
+      let settled = false;
+      dispose = handleRefreshSessionIdentity(sessionId, (result) => {
+        switch (result.kind) {
+          case "pending":
+            return;
+          case "ready":
+          case "exited":
+            settled = true;
+            resolve();
+            break;
+          case "blocked":
+            settled = true;
+            reject({ code: result.reason, message: result.reason });
+            break;
+          case "cancelled":
+            settled = true;
+            reject({ code: "RECOVERY_CANCELLED", message: "Paired session recovery did not complete" });
+            break;
+          default: {
+            const unreachable: never = result;
+            return unreachable;
+          }
+        }
+        dispose?.();
+      });
+      if (settled) dispose();
+    }),
+    [handleRefreshSessionIdentity],
   );
 
   const activeAutoResumeCancelRef = useRef<(() => void) | null>(null);
@@ -5181,6 +5226,11 @@ function WorkspaceApp({
   }, [activeRemoteHost, isNativeRuntime, isPrimary, projects.length, resolvedAgents]);
 
   const sshHostId = activeProject.target?.kind === "ssh" ? activeProject.target.hostId : null;
+  const openRemoteMachineSettings = () => handleOpenSettings("remote", {
+    page: "machines",
+    filter: activeProject.target?.kind === "pairedDaemon" ? "paired" : "ssh",
+    machine: sshHostId ? { kind: "ssh", hostId: sshHostId } : undefined,
+  });
   const activeRegistrationError = registrationError?.workspaceId === activeProject.workspaceId
     ? `${registrationError.code}: ${registrationError.message}`
     : undefined;
@@ -5327,6 +5377,47 @@ function WorkspaceApp({
             }}
           />
         ) : null}
+        {/* An SSH project with saved tabs keeps its panes on screen instead of the full-pane status,
+            and a paired project has no such status at all: both still need a retryable error. */}
+        {!activeRemoteHost &&
+        registrationError?.workspaceId === activeProject.workspaceId &&
+        ((activeProject.target?.kind === "ssh" && !showSshStatus) || activeProject.target?.kind === "pairedDaemon") ? (
+          <div
+            role="alert"
+            data-testid="remote-registration-error"
+            className="flex items-start gap-3 border-b border-border bg-card px-4 py-3"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-foreground">
+                {activeProject.target?.kind === "ssh" ? "SSH connection failed" : "Paired machine unavailable"}
+              </div>
+              <div className="mt-0.5 select-text break-words text-[12px] text-muted-foreground">
+                {registrationError.code}: {registrationError.message}
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7 shrink-0 text-[11px]"
+              onClick={() => {
+                setRegistrationError(null);
+                setRegistrationAttempt((attempt) => attempt + 1);
+              }}
+            >
+              Retry
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 shrink-0 text-[11px]"
+              onClick={openRemoteMachineSettings}
+            >
+              Open Remote Settings
+            </Button>
+          </div>
+        ) : null}
         {!activeRemoteHost ? <DesktopSupervisorSetupBanner projects={setupProjects} className="mx-3 mt-2" /> : null}
         {activeRemoteHost ? (
           <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
@@ -5359,6 +5450,7 @@ function WorkspaceApp({
                 setRegistrationAttempt((attempt) => attempt + 1);
               }
             }}
+            onOpenSettings={openRemoteMachineSettings}
           />
         ) : activeWorktree && state.layout.tabs.length === 0 ? (
           <EmptyWorkspaceView
@@ -5415,6 +5507,7 @@ function WorkspaceApp({
               await handleReconnectAgentSession(sessionId);
             }}
             onReconnectSshSession={handleReconnectSshSession}
+            onReconnectPairedSession={handleReconnectPairedSession}
             onReconnectLocalSession={handleReconnectLocalSession}
             onRefreshSessionIdentity={handleRefreshSessionIdentity}
             onOpenNewShell={handleOpenNewShell}

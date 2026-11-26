@@ -11,9 +11,9 @@ import {
   type PlanLimitState,
 } from "./accountSession";
 import { getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
-import type { TunnelTransport } from "./attachTunnel";
+import { TunnelError, type TunnelTransport } from "./attachTunnel";
 import { suggestDeviceName } from "./deviceIdentity";
-import { userFacingError } from "./userFacingError";
+import { userFacingCode, userFacingError } from "./userFacingError";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { type RemoteContextOption } from "./RemoteSessionList";
 import {
@@ -50,6 +50,14 @@ export interface ActiveMachineConnection {
   machine: AccountMachineView;
   deviceToken: string;
 }
+
+export type AcquireConnectionOutcome =
+  | { readonly ok: true; readonly connection: ActiveMachineConnection }
+  | {
+      readonly ok: false;
+      readonly code: "UNAUTHORIZED" | "MACHINE_KEY_CHANGED" | "MACHINE_OFFLINE" | "PLAN_LIMIT" | "MISSING_MACHINE" | "TRANSPORT_ERROR";
+      readonly message: string;
+    };
 
 export interface MachineDiscoveryStatus {
   machine: AccountMachineView;
@@ -98,6 +106,8 @@ export interface UseAccountWorktreesResult {
    * never closes it. The caller must close it when it is replaced.
    */
   acquireConnection: (machineId: string) => Promise<ActiveMachineConnection | null>;
+  /** Same ownership transfer, preserving the reason when a connection cannot be acquired. */
+  readonly acquireConnectionDetailed: (machineId: string) => Promise<AcquireConnectionOutcome>;
   closeAllExcept: (machineId: string | null) => void;
   /**
    * The pooled discovery tunnel to a machine without taking ownership, for read-only side
@@ -722,20 +732,18 @@ export function useAccountWorktrees(
     [accountSessionToken, probeMachine],
   );
 
-  const acquireConnection = useCallback(
-    async (machineId: string): Promise<ActiveMachineConnection | null> => {
+  const acquireConnectionDetailed = useCallback(
+    async (machineId: string): Promise<AcquireConnectionOutcome> => {
+      if (!accountSessionToken) {
+        return { ok: false, code: "UNAUTHORIZED", message: userFacingError({ code: "UNAUTHORIZED" }) };
+      }
       const existing = tunnelsRef.current.get(machineId);
       if (existing) {
         tunnelsRef.current.delete(machineId);
         // The relay drops an idle tunnel; a discovery tunnel it already closed is discarded,
         // not handed out, so the caller gets a fresh one below.
         if (existing.transport.isClosed !== true) {
-          return {
-            transport: existing.transport,
-            close: existing.close,
-            machine: existing.machine,
-            deviceToken: existing.deviceToken,
-          };
+          return { ok: true, connection: existing };
         }
         try {
           existing.close();
@@ -743,15 +751,20 @@ export function useAccountWorktrees(
       }
 
       const machine = machinesRef.current.find((m) => m.machineId === machineId);
-      if (!machine || !accountSessionToken) return null;
+      if (!machine) {
+        return { ok: false, code: "MISSING_MACHINE", message: userFacingError({ code: "NOT_FOUND" }) };
+      }
+      if (machine.online === false) {
+        return { ok: false, code: "MACHINE_OFFLINE", message: userFacingError({ code: "MACHINE_OFFLINE" }) };
+      }
 
       try {
         const attachKey = await getOrCreateAttachKey();
-        if (!attachKey) return null;
-
         const alwaysAlive = () => true;
         let link = await linkMachine(machine, attachKey, alwaysAlive, false);
-        if (!link) return null;
+        if (!link) {
+          return { ok: false, code: "TRANSPORT_ERROR", message: userFacingError(null, { action: "connect to this computer" }) };
+        }
         if (link.reused) {
           // Validate the cached device token before handing the tunnel out; re-pair only
           // when the daemon rejects it.
@@ -769,24 +782,60 @@ export function useAccountWorktrees(
               reusedTunnel.close();
             } catch {}
             link = await linkMachine(machine, attachKey, alwaysAlive, true);
-            if (!link) return null;
+            if (!link) {
+              return { ok: false, code: "TRANSPORT_ERROR", message: userFacingError(null, { action: "connect to this computer" }) };
+            }
           }
         }
 
         return {
-          transport: link.tunnel.transport,
-          close: link.tunnel.close,
-          machine,
-          deviceToken: link.deviceToken,
+          ok: true,
+          connection: {
+            transport: link.tunnel.transport,
+            close: link.tunnel.close,
+            machine,
+            deviceToken: link.deviceToken,
+          },
         };
       } catch (err) {
         const limitState = planLimitStateFromError(err);
-        if (limitState) onPlanLimitRef.current?.(limitState);
         console.warn("Account tunnel acquisition failed", err);
-        return null;
+        if (limitState) {
+          onPlanLimitRef.current?.(limitState);
+          return { ok: false, code: "PLAN_LIMIT", message: userFacingError({ code: "PLAN_LIMIT" }) };
+        }
+        const code = err instanceof AccountSessionError || err instanceof TunnelError ? err.code : userFacingCode(err);
+        const message = userFacingError(err, { action: "connect to this computer" });
+        switch (code) {
+          case "UNAUTHORIZED":
+          case "MACHINE_KEY_CHANGED":
+          case "MACHINE_OFFLINE":
+          case "PLAN_LIMIT":
+          case "MISSING_MACHINE":
+            return { ok: false, code, message };
+          case "MACHINE_NOT_FOUND":
+            return { ok: false, code: "MISSING_MACHINE", message: userFacingError({ code: "NOT_FOUND" }) };
+          default:
+            return { ok: false, code: "TRANSPORT_ERROR", message };
+        }
       }
     },
     [accountSessionToken, linkMachine],
+  );
+
+  const acquireConnection = useCallback(
+    async (machineId: string): Promise<ActiveMachineConnection | null> => {
+      const outcome = await acquireConnectionDetailed(machineId);
+      switch (outcome.ok) {
+        case true: return outcome.connection;
+        case false: return null;
+        default: {
+          const unreachable: never = outcome;
+          return unreachable;
+        }
+      }
+    },
+    [acquireConnectionDetailed],
   );
 
   const peekConnection = useCallback((machineId: string) => {
@@ -878,6 +927,7 @@ export function useAccountWorktrees(
     retryMachine,
     acknowledgeOutcome,
     acquireConnection,
+    acquireConnectionDetailed,
     closeAllExcept,
     peekConnection,
   };

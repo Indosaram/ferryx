@@ -92,6 +92,9 @@ describe("RemoteSection review fixes", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "cmd_ssh_list_hosts") return [];
       if (command === "cmd_agent_integration_get") return { enabled: true };
+      // Refresh re-runs Tailscale discovery too; without a shaped result it would publish a
+      // discovery error banner and add a second alert to the section.
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [], targets: [] };
       return undefined;
     });
   });
@@ -121,6 +124,27 @@ describe("RemoteSection review fixes", () => {
     await act(async () => { late.resolve(jsonResponse([accountMachine])); });
 
     expect(screen.queryByText("Account Box")).toBeNull();
+  });
+
+  it("refreshes every source the section shows, not just the paired inventory", async () => {
+    const { store, inventory } = createInventory();
+    await inventory.refresh();
+    const refreshInventory = vi.spyOn(inventory, "refresh");
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse([])));
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} accountOrigin={DEFAULT_RELAY_ORIGIN} accountSessionToken="tok" />);
+    });
+    invokeMock.mockClear();
+    refreshInventory.mockClear();
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh machines" })); });
+
+    // The saved SSH machines are re-read through their store, Tailscale discovery runs, and the
+    // paired inventory is refreshed — one control, every source the section renders.
+    expect(refreshInventory).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_list_hosts");
+    expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_sync_tailscale");
   });
 
   it("surfaces a failed Refresh instead of swallowing it", async () => {

@@ -133,6 +133,62 @@ describe("RemoteDesktopPane", () => {
     }));
   });
 
+  it("renders the overlay without a scrim while no frame has arrived", async () => {
+    render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_connect", expect.anything()));
+    const overlay = screen.getByTestId("remote-desktop-overlay");
+    expect(overlay).toHaveAttribute("data-scrim", "false");
+    expect(overlay).not.toHaveClass("bg-black/75");
+  });
+
+  it("paints a high-contrast scrim with light text over a frozen frame while reconnecting", async () => {
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ close: vi.fn() })));
+    render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_connect", expect.anything()));
+    act(() => channels[0].onmessage(statusFrame("connected")));
+    act(() => channels[0].onmessage(videoFrame(400, 200)));
+    await waitFor(() => expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" }));
+
+    act(() => channels[0].onmessage(statusFrame("reconnecting")));
+    const overlay = screen.getByTestId("remote-desktop-overlay");
+    expect(overlay).toHaveAttribute("data-scrim", "true");
+    expect(overlay).toHaveClass("bg-black/75");
+    const status = screen.getByTestId("remote-desktop-status");
+    expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-state", "reconnecting");
+    expect(status).toHaveAttribute("role", "status");
+    expect(status).toHaveClass("text-white");
+  });
+
+  it("keeps the scrim and high-contrast error text when a reconnect fails over a frozen frame", async () => {
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ close: vi.fn() })));
+    let connects = 0;
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_rd_connect") {
+        connects += 1;
+        if (connects > 1) throw { code: "RD_HOST_OFFLINE", message: "offline", details: {} };
+        return { rdSessionId: "rd-1" };
+      }
+      return undefined;
+    });
+    render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_connect", expect.anything()));
+    act(() => channels[0].onmessage(statusFrame("connected")));
+    act(() => channels[0].onmessage(videoFrame(400, 200)));
+    await waitFor(() => expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" }));
+
+    act(() => channels[0].onmessage(statusFrame("ended")));
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    const alert = await screen.findByRole("alert");
+    expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-state", "error");
+    expect(alert).toHaveClass("text-red-300");
+    expect(screen.getByTestId("remote-desktop-overlay")).toHaveAttribute("data-scrim", "true");
+    expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" });
+  });
+
   it("ignores input before the session reports connected", async () => {
     render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_connect", expect.anything()));

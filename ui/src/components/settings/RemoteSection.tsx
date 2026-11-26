@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
-import { DEFAULT_MACHINE_LABEL, pairedHostInventory } from "../../lib/pairedHostInventory";
+import type { MachineFilter, MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
+import { DEFAULT_MACHINE_LABEL, pairedHostInventory, type ReconcileReport } from "../../lib/pairedHostInventory";
 import type { PairedHostContext } from "../../lib/pairedDaemonProject";
-import { extractIpcErrorMessage, resetSshHostsCache, useSshHosts, type SshHost } from "../../lib/sshHosts";
+import { MACHINE_STATUS_EXPLANATIONS } from "../../lib/machineStatus";
+import { bootstrapPairedHostReachability } from "../../lib/pairedHostReachability";
+import { bootstrapPairedHostRoute } from "../../lib/pairedHostRoute";
+import { extractIpcErrorMessage, useSshHosts, type SshHost } from "../../lib/sshHosts";
 import { hasSshTunnelCapability } from "../../lib/sshTunnels";
 import { isTailscaleProvisioned, syncTailscaleMachines, useTailscaleDiscovery, useTailscaleTargetsByHost } from "../../lib/tailscaleDiscovery";
 import { remoteHostStore, type HostEndpoint, type RemoteHostStore } from "../../state/remoteHostStore";
@@ -24,7 +27,7 @@ import {
   type AccountMachineView,
   type PendingMachineRequest,
 } from "../../remote/accountSession";
-import { adoptAccountSession } from "../../lib/accountPairing";
+import { adoptAccountSession, adoptAccountSessionWithReport } from "../../lib/accountPairing";
 import { getAgentIntegration, toIpcError } from "../../lib/tauri";
 import { useRemoteDesktopSupported } from "../../lib/remoteDesktop";
 import { AccountSignIn } from "./AccountSignIn";
@@ -32,7 +35,7 @@ import { AddMachineModal, type AddMachineMethod } from "./AddMachineModal";
 import { AccountBar } from "./remote/AccountBar";
 import { AdvancedSection } from "./remote/AdvancedSection";
 import { DiscoveredList } from "./remote/DiscoveredList";
-import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent } from "./remote/MachineDrawer";
+import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent, type RepairFeedback } from "./remote/MachineDrawer";
 import { MachineList } from "./remote/MachineList";
 import { MachineApprovalCard } from "./remote/MachineApprovalCard";
 import { PairedMachineRow, pairedDisplayName, SshMachineRow, sshRowStatus } from "./remote/MachineRow";
@@ -52,6 +55,52 @@ import { useSshTunnels } from "./remote/useSshTunnels";
 
 /** Stop-only setting: "off" disables automatic account pairing. Absent means on. */
 const AUTO_PAIR_KEY = "ferryx.remote.autoPairAccountMachines";
+
+/** Account-wide failures a reconciliation pass can report, in the user's terms. */
+const REPAIR_BLOCKED_COPY: Record<string, string> = {
+  NOT_SIGNED_IN: "The daemon has no account session, so it could not re-pair anything. Sign in again.",
+  UNAUTHORIZED: "Your account session has expired. Sign in again to re-pair this machine.",
+  SESSION_EXPIRED: "Your account session has expired. Sign in again to re-pair this machine.",
+  SESSION_NOT_SAVED: "The daemon could not store your account session. Try signing in again.",
+  INVENTORY_UNAVAILABLE: "The local machine inventory is unavailable, so pairing could not be checked. Try again in a moment.",
+};
+
+/**
+ * Turns one reconciliation pass into the drawer's outcome line. Every branch names a code the
+ * daemon produced, so the message is specific without inventing prose about a failure the UI
+ * cannot see.
+ */
+function describeReconcileReport(report: ReconcileReport | null, host: HostEndpoint): RepairFeedback {
+  if (!report) {
+    return {
+      tone: "error",
+      code: "PAIRED_HOST_UNAVAILABLE",
+      message: "Re-pairing did not complete. Check the connection to your account and try again.",
+    };
+  }
+  if (report.blocked) {
+    return {
+      tone: "error",
+      code: report.blocked,
+      message: REPAIR_BLOCKED_COPY[report.blocked] ?? `Re-pairing stopped: ${report.blocked}.`,
+    };
+  }
+  const skip = report.skipped.find((entry) => entry.machineId === host.machineId);
+  if (skip) {
+    return {
+      tone: "error",
+      code: skip.code,
+      message: MACHINE_STATUS_EXPLANATIONS[skip.code] ?? `This machine could not be re-paired: ${skip.code}.`,
+    };
+  }
+  if (report.paired.includes(host.hostId)) {
+    return { tone: "success", code: "PAIRED", message: "This machine was re-paired. Its credentials are up to date." };
+  }
+  if (host.machineId && report.alreadyUsable.includes(host.machineId)) {
+    return { tone: "success", code: "ALREADY_USABLE", message: "This machine is already paired with your account, so nothing needed to change." };
+  }
+  return { tone: "neutral", code: "NO_CHANGE", message: "The account pass finished and left this machine as it was." };
+}
 
 /** Account polling cadence while the Add Machine wizard is open or a machine awaits approval. */
 export const ACCOUNT_ONBOARDING_POLL_MS = 5_000;
@@ -98,6 +147,16 @@ export function RemoteSection({
   const [accountOriginDraft, setAccountOriginDraft] = useState(accountOrigin);
   const [accountOriginError, setAccountOriginError] = useState<string | null>(null);
   const remoteDesktopSupported = useRemoteDesktopSupported();
+  // Declared first: the account-list effect below reports failures through this setter, so it
+  // must exist before that effect is created (a later binding would be a TDZ error on render).
+  const [actionError, setActionErrorState] = useState<string | null>(null);
+  /* The structured reason behind `actionError`: the drawer renders it as a token so a caller
+     asserts the cause instead of the sentence. */
+  const [actionErrorKind, setActionErrorKind] = useState<string | null>(null);
+  const setActionError = useCallback((error: string | null, kind: string | null = null) => {
+    setActionErrorState(error);
+    setActionErrorKind(kind);
+  }, []);
   const [accountToken, setAccountToken] = useState<string | null>(() => {
     if (accountSessionTokenProp !== undefined) return accountSessionTokenProp;
     return getStoredAccountSessionToken(accountOrigin);
@@ -153,7 +212,9 @@ export function RemoteSection({
     return () => {
       active = false;
     };
-  }, [accountToken, accountOrigin]);
+    // `endAccountSession` is declared below and only called from inside the callback, so it is
+    // deliberately not a dependency: listing it here would evaluate it during render (TDZ).
+  }, [accountToken, accountOrigin, setActionError]);
 
   const refreshAccountMachines = async (
     token: string,
@@ -167,6 +228,9 @@ export function RemoteSection({
     } catch (err: unknown) {
       if (requestId !== machinesRequestRef.current) return;
       if (err instanceof AccountSessionError && err.code === "UNAUTHORIZED") {
+        // The account no longer accepts this session, so the daemon must stop using it too;
+        // otherwise it keeps retrying pairing with a token the server already rejected.
+        void adoptAccountSession(origin, null);
         clearStoredAccountSessionToken();
         setAccountToken(null);
         return;
@@ -255,6 +319,9 @@ export function RemoteSection({
   const [context] = useState<RemoteContext>(
     initialContext ?? { page: "machines", filter: legacySsh ? "ssh" : "all" },
   );
+  // A deep link may scope the list to SSH machines. The scope is a dismissible view, never a
+  // trap: the pill below the header clears it back to every machine.
+  const [machineFilter, setMachineFilter] = useState<MachineFilter>(context.filter);
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   // undefined opens the wizard on "Choose a method"; a method opens it on that method's step.
@@ -315,7 +382,7 @@ export function RemoteSection({
 
   // Store & Host inventory
   const state = useSyncExternalStore(store.subscribe, store.getState);
-  const { hosts: sshHosts } = useSshHosts();
+  const { hosts: sshHosts, refresh: refreshHosts } = useSshHosts();
   const tailscaleState = useTailscaleDiscovery();
   const tailscaleTargets = useTailscaleTargetsByHost();
 
@@ -323,11 +390,12 @@ export function RemoteSection({
   const [checks, setChecks] = useState<Record<string, { generation: string; code: string }>>({});
   const [confirmForget, setConfirmForget] = useState<PairedHostContext | null>(null);
   const [repairHostId, setRepairHostId] = useState<string | null>(null);
+  const [repairBusyHostId, setRepairBusyHostId] = useState<string | null>(null);
+  const [repairFeedback, setRepairFeedback] = useState<(RepairFeedback & { hostId: string }) | null>(null);
 
   const [agentIntegrationEnabled, setAgentIntegrationEnabled] = useState(true);
   const [pendingRemoveSshHost, setPendingRemoveSshHost] = useState<SshHost | null>(null);
   const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
 
   // Details drawer: the open row key, and the control that receives focus back on close: the row's
   // Details button, or its "More actions" trigger when the drawer was opened from that menu.
@@ -342,11 +410,11 @@ export function RemoteSection({
   });
 
   const {
-    sshTestResults, setSshTestResults, sshPreparedHosts, sshRemovalResults,
+    sshTestResults, setSshTestResults, sshPreparedHosts, sshRemovalResults, sshPasswordFeedback,
     editingSshHost, setEditingSshHost, editFormData, setEditFormData, editPassword, setEditPassword,
     showAdvancedEditSsh, setShowAdvancedEditSsh, confirmDeleteSshId, setConfirmDeleteSshId,
     handleTestSsh, handlePrepareSsh, handleRemoveSshIntegration, handleToggleDisableSsh, handleDeleteSsh,
-    handleStartEditSsh, handleSaveEditSsh, tunnels,
+    handleStartEditSsh, handleSaveEditSsh, handleClearSshPassword, resetTransientState, tunnels,
   } = useSshActions({
     sshHosts,
     busy,
@@ -360,16 +428,39 @@ export function RemoteSection({
   });
 
   const lastDrawerKeyRef = useRef<string | null>(null);
+  // Bumped whenever the drawer closes or moves to another machine, so a re-pair pass that was
+  // started for the previous machine cannot write its outcome into the new one.
+  const drawerGenerationRef = useRef(0);
   const drawerOpenedFromMenuRef = useRef(false);
   const detailsRefs = useRef(new Map<string, HTMLButtonElement>());
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   // Namespaced row refs to avoid ID collisions; used to reveal the row named by initialContext.
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const pendingRevealRef = useRef(Boolean(initialContext?.machine));
+  /**
+   * Forgets everything the drawer was showing. `returnFocusTo` reads its own ref, so closing a
+   * drawer still returns focus to the control that opened it.
+   */
+  const resetDrawerState = () => {
+    drawerGenerationRef.current += 1;
+    resetTransientState();
+    setConfirmForget(null);
+    setRepairHostId(null);
+    setRepairBusyHostId(null);
+    setRepairFeedback(null);
+    setActionError(null);
+  };
   const openDrawer = (key: string, fromMenu = false) => {
+    // Moving between machines starts the new drawer clean: no leftover edit form, confirmation
+    // prompt or error from the machine the user just left.
+    if (lastDrawerKeyRef.current !== null && lastDrawerKeyRef.current !== key) resetDrawerState();
     lastDrawerKeyRef.current = key;
     drawerOpenedFromMenuRef.current = fromMenu;
     setDrawerKey(key);
+  };
+  const closeDrawer = () => {
+    setDrawerKey(null);
+    resetDrawerState();
   };
 
 
@@ -395,6 +486,19 @@ export function RemoteSection({
     return () => window.removeEventListener("focus", refresh);
   }, [inventory]);
 
+  // Reachability and route both keep their own retry state: a transient daemon failure leaves
+  // them un-bootstrapped, so coming back to the window is a cheap second chance. Both are
+  // idempotent once bootstrapped, and an unsupported backend resolves without a request.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const retry = () => {
+      void bootstrapPairedHostReachability();
+      void bootstrapPairedHostRoute();
+    };
+    window.addEventListener("focus", retry);
+    return () => window.removeEventListener("focus", retry);
+  }, []);
+
   const handleOpenProject = (target: MachineProjectTarget) => {
     if (onOpenProject) {
       onOpenProject(target, { ...context, machine: target });
@@ -404,8 +508,16 @@ export function RemoteSection({
   };
 
   const handleRefreshAll = () => {
-    if (isTauri()) void inventory.refresh();
-    resetSshHostsCache();
+    // Refresh is the one control that must re-read everything the section shows: the paired
+    // inventory, the saved SSH machines (its store, not just the cache), Tailscale discovery, and
+    // the two paired-host observers. Only the account list is conditional on being signed in.
+    if (isTauri()) {
+      void inventory.refresh();
+      void refreshHosts().catch(() => undefined);
+      void syncTailscaleMachines().catch(() => undefined);
+      void bootstrapPairedHostReachability();
+      void bootstrapPairedHostRoute();
+    }
     if (accountToken) {
       void refreshAccountMachines(accountToken, accountOrigin);
     }
@@ -460,6 +572,29 @@ export function RemoteSection({
     }
   };
 
+  /**
+   * Re-pair hands the account session to the daemon again and reports what that pass actually did.
+   * A report can be a success (`paired`), a no-op (`alreadyUsable`) or a specific refusal
+   * (`blocked` / `skipped`), so the drawer never shows a generic "done" it cannot back up.
+   */
+  const handleRepairPaired = async (host: HostEndpoint) => {
+    if (!accountToken || repairBusyHostId) return;
+    const generation = drawerGenerationRef.current;
+    setRepairBusyHostId(host.hostId);
+    setRepairFeedback(null);
+    setRepairHostId(null);
+    setActionError(null);
+    try {
+      const report = await adoptAccountSessionWithReport(accountOrigin, accountToken);
+      if (drawerGenerationRef.current !== generation) return;
+      await inventory.refresh();
+      if (drawerGenerationRef.current !== generation) return;
+      setRepairFeedback({ hostId: host.hostId, ...describeReconcileReport(report, host) });
+    } finally {
+      setRepairBusyHostId((current) => (current === host.hostId ? null : current));
+    }
+  };
+
   const nativeReady = state.nativeStatus === "ready";
   const isEnrolled = (host: HostEndpoint) => accountMachines.some((m) => m.machineId === host.machineId);
   const tailscaleTargetFor = (host: SshHost) => tailscaleTargets.get(host.id);
@@ -475,7 +610,10 @@ export function RemoteSection({
     ...mergePairedHosts(accountMachines, state, accountOrigin).map((h) => ({ kind: "paired" as const, id: h.hostId, name: h.name || DEFAULT_MACHINE_LABEL, host: h })),
     ...sshHosts.filter((h) => !isDiscovered(h)).map((h) => ({ kind: "ssh" as const, id: h.id, name: h.label || h.hostname, host: h })),
   ].sort((a, b) => a.name.localeCompare(b.name));
-  const filteredItems = mixedItems.filter((item) => matchesQuery(item, searchQuery));
+  // The filter narrows what is shown, never what exists: `total` follows the scoped list so the
+  // header count and the empty state describe the same thing the user is looking at.
+  const scopedItems = machineFilter === "ssh" ? mixedItems.filter((item) => item.kind === "ssh") : mixedItems;
+  const filteredItems = scopedItems.filter((item) => matchesQuery(item, searchQuery));
   const sshStatusInput = (host: SshHost) => ({
     host,
     target: tailscaleTargetFor(host),
@@ -533,14 +671,16 @@ export function RemoteSection({
       kind: "paired", host, nativeReady, accountEnrolled: enrolled, check: checks[host.hostId], canOpenProject: Boolean(onOpenProject), busy,
       signedIn: Boolean(accountToken),
       repairRequested: repairHostId === host.hostId,
+      repairBusy: repairBusyHostId === host.hostId,
+      repairFeedback: repairFeedback?.hostId === host.hostId ? repairFeedback : null,
       confirmingForget: confirmForget?.hostId === host.hostId,
       onCheck: () => void handleCheckPaired(host),
       onRepair: () => {
-        // An enrolled account machine re-pairs by redeeming a fresh machine grant,
-        // the same identity-checked path as Connect. Anything else enrolls first.
+        // An enrolled account machine re-pairs by handing the session to the daemon again, which
+        // redeems a fresh machine grant through the same identity-checked path as signing in.
+        // A machine the account does not know cannot be re-paired from here at all.
         if (enrolled && accountToken) {
-          setRepairHostId(null);
-          if (accountToken) void adoptAccountSession(accountOrigin, accountToken);
+          void handleRepairPaired(host);
           return;
         }
         setRepairHostId(host.hostId);
@@ -554,6 +694,7 @@ export function RemoteSection({
     drawerContent = {
       kind: "ssh", ...sshStatusInput(host), test: sshTestResults[host.id], busy, agentIntegrationEnabled,
       removalResult: sshRemovalResults[host.id],
+      passwordFeedback: sshPasswordFeedback[host.id] ?? null,
       tunnels,
       confirmingDelete: confirmDeleteSshId === host.id,
       edit: editingSshHost?.id === host.id && editFormData
@@ -571,7 +712,8 @@ export function RemoteSection({
       onTest: () => void handleTestSsh(host),
       onPrepare: () => void handlePrepareSsh(host),
       // The confirm dialog is a separate modal; close the drawer first so it is not inert under the Sheet.
-      onRemoveIntegration: () => { setDrawerKey(null); setPendingRemoveSshHost(host); },
+      onRemoveIntegration: () => { closeDrawer(); setPendingRemoveSshHost(host); },
+      onClearPassword: () => void handleClearSshPassword(host),
       onEdit: () => handleStartEditSsh(host),
       onToggleDisable: () => void handleToggleDisableSsh(host),
       onDelete: () => setConfirmDeleteSshId(host.id),
@@ -616,8 +758,27 @@ export function RemoteSection({
         </section>
       ) : null}
 
+      {machineFilter === "ssh" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            data-testid="remote-machine-filter-pill"
+            className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 py-0.5 pl-2.5 pr-1 text-[11px] text-muted-foreground"
+          >
+            Showing SSH machines
+            <button
+              type="button"
+              aria-label="Show all machines"
+              className="rounded-full px-1.5 py-0.5 font-medium text-foreground hover:bg-accent"
+              onClick={() => setMachineFilter("all")}
+            >
+              Show all
+            </button>
+          </span>
+        </div>
+      ) : null}
+
       <MachineList
-        total={mixedItems.length}
+        total={scopedItems.length}
         shown={filteredItems.length}
         searchQuery={searchQuery}
         actionError={drawerContent ? null : actionError}
@@ -665,6 +826,8 @@ export function RemoteSection({
               {...common}
               {...sshStatusInput(host)}
               onAddProject={() => handleOpenProject({ kind: "ssh", hostId: host.id })}
+              onRetry={() => void handleTestSsh(host)}
+              onSetUp={() => openDrawer(key)}
               onEdit={() => { openDrawer(key, true); handleStartEditSsh(host); }}
               onToggleDisable={() => void handleToggleDisableSsh(host)}
               onDelete={() => { openDrawer(key, true); setConfirmDeleteSshId(host.id); }}
@@ -677,7 +840,9 @@ export function RemoteSection({
         hosts={discovered}
         banner={discoveryBanner}
         refreshing={tailscaleState.refreshing}
-        onSetUp={retryTailscale}
+        // Setup is per machine: it opens that host's drawer, where the failed step and its own
+        // Retry live. Re-running discovery for the whole tailnet would not help this peer.
+        onSetUp={(host) => openDrawer(`ssh:${host.id}`)}
         onRetryDiscovery={retryTailscale}
         onDetails={(hostId) => openDrawer(`ssh:${hostId}`)}
         detailsRef={(hostId) => bindDetails(`ssh:${hostId}`)}
@@ -709,7 +874,8 @@ export function RemoteSection({
       <MachineDrawer
         content={drawerContent}
         error={actionError}
-        onClose={() => setDrawerKey(null)}
+        errorKind={actionErrorKind}
+        onClose={closeDrawer}
         returnFocusTo={() => {
           const key = lastDrawerKeyRef.current;
           if (!key) return null;

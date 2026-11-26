@@ -9,11 +9,19 @@ import { AddProjectDialog } from "./ProjectDialogs";
 const native = vi.hoisted(() => ({ invoke: vi.fn(), open: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke, isTauri: () => true }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: native.open }));
-vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [], loading: false, refresh: vi.fn() }), formatSshTarget: vi.fn() }));
-const hosts: HostEndpoint[] = ["machine-a", "machine-b"].map(machineId => ({
-  hostId: remoteHostKey("https://relay.test", machineId), machineId, generation: "7", name: machineId,
-  address: "https://relay.test", transport: "relay", authStatus: "paired", grantScope: "machine", online: true,
-}));
+vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [], loading: false, refresh: vi.fn() }), formatSshTarget: vi.fn(),
+  subscribeSshHosts: () => () => undefined }));
+const machines = ["machine-a", "machine-b"];
+let pairings = 5;
+/** The desktop store never resurrects a removed host at a generation it has seen, so every test pairs afresh. */
+function pairHosts(): (HostEndpoint & { readonly generation: string })[] {
+  pairings += 2;
+  return machines.map(machineId => ({
+    hostId: remoteHostKey("https://relay.test", machineId), machineId, generation: String(pairings), name: machineId,
+    address: "https://relay.test", transport: "relay", authStatus: "paired", grantScope: "machine", online: true,
+  }));
+}
+let hosts = pairHosts();
 function fixture(kind: string) { return fixtures.find(row => row.kind === kind)!.value; }
 function listing(path: string) { return { path, homePath: "/home/test", parentPath: "/", truncated: false,
   entries: [{ name: ".秘密 folder", path: `${path}/.秘密 folder`, hidden: true }] }; }
@@ -21,6 +29,7 @@ function gate<T>() { let resolve!: (value: T) => void; const promise = new Promi
 let respond: (request: PairedHostOperationRequest) => Promise<unknown>;
 beforeEach(() => {
   native.invoke.mockReset(); native.open.mockReset();
+  hosts = pairHosts();
   remoteHostStore.setState(s => ({ ...s, hosts: Object.fromEntries(hosts.map(h => [h.hostId, h])), nativeStatus: "ready", machineFeaturesEnabled: true }));
   respond = async request => request.operation.kind === "capabilities" ? { ...fixture("capabilities"), machineId: hosts.find(h => h.hostId === request.hostId)!.machineId }
     : request.operation.kind === "directories" ? listing(request.operation.path ?? "/home/test")
@@ -46,12 +55,15 @@ it("browses paired home, cancels stale host results, requests hidden folders, an
     return normal(request);
   };
   const registered = await mount(); await entered.promise;
-  await act(async () => { fireEvent.change(screen.getByLabelText("Paired machine"), { target: { value: hosts[1].hostId } }); });
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Paired machine" }), { key: "ArrowDown" });
+  });
+  await act(async () => { fireEvent.click(screen.getByRole("option", { name: hosts[1].name })); });
   expect(screen.getByRole("combobox", { name: "Remote repository path" })).toHaveValue("/home/test");
   await act(async () => { release.resolve(listing("/stale")); });
   expect(screen.getByRole("combobox", { name: "Remote repository path" })).toHaveValue("/home/test");
   await act(async () => { fireEvent.click(screen.getByRole("switch")); });
-  expect(native.invoke).toHaveBeenCalledWith("paired_host_operation", { request: { hostId: hosts[1].hostId, generation: "7", operation: { kind: "directories", path: undefined, includeHidden: true } } });
+  expect(native.invoke).toHaveBeenCalledWith("paired_host_operation", { request: { hostId: hosts[1].hostId, generation: hosts[1].generation, operation: { kind: "directories", path: undefined, includeHidden: true } } });
   await act(async () => { fireEvent.click(screen.getByRole("option", { name: ".秘密 folder" })); });
   await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-paired")); });
   expect(registered).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: identities[1].workspaceId, remoteWorkspaceId: "project-a", target: { kind: "pairedDaemon", hostId: hosts[1].hostId } }));
@@ -79,6 +91,56 @@ it.each(["cross-host", "malformed-id"])("rejects %s registration instead of adop
   expect(screen.getByRole("alert")).toBeInTheDocument();
   expect(native.invoke.mock.calls.every(([command]) => command === "paired_host_operation")).toBe(true);
 });
+it("keeps an initial target locked when inventory arrives asynchronously", async () => {
+  // Given a targeted dialog whose machine inventory has not arrived yet.
+  remoteHostStore.setState(s => ({ ...s, hosts: {} }));
+  const arriving = pairHosts();
+  render(<AddProjectDialog initialTarget={{ kind: "pairedDaemon", hostId: arriving[1].hostId, generation: arriving[1].generation }}
+    onClose={vi.fn()} onRegistered={vi.fn()} />);
+  // When inventory arrives with a different machine first.
+  await act(async () => {
+    remoteHostStore.setState(s => ({ ...s, hosts: Object.fromEntries(arriving.map(h => [h.hostId, h])) }));
+  });
+  // Then the initial target is shown before opening the disabled selector, and owns every request.
+  const selector = screen.getByRole("combobox", { name: "Paired machine" });
+  expect(selector).toBeDisabled();
+  expect(selector).toHaveTextContent(arriving[1].name);
+  expect(native.invoke).toHaveBeenCalled();
+  expect(native.invoke.mock.calls.every(([, args]) => args.request.hostId === arriving[1].hostId)).toBe(true);
+});
+
+it("preserves an explicit machine selection when inventory updates", async () => {
+  // Given a user-selected second machine.
+  await mount();
+  fireEvent.keyDown(screen.getByRole("combobox", { name: "Paired machine" }), { key: "ArrowDown" });
+  await act(async () => { fireEvent.click(screen.getByRole("option", { name: hosts[1].name })); });
+  native.invoke.mockClear();
+  // When a fresh inventory snapshot arrives with the default machine first.
+  await act(async () => {
+    remoteHostStore.setState(s => ({ ...s, hosts: { ...s.hosts } }));
+  });
+  // Then selection stays on the user's machine without restarting browsing.
+  expect(screen.getByRole("combobox", { name: "Paired machine" })).toHaveTextContent(hosts[1].name);
+  expect(native.invoke).not.toHaveBeenCalled();
+});
+
+it("registers a directly typed paired path without a trailing separator", async () => {
+  // Given a ready paired folder browser.
+  const registered = await mount();
+  // When a path is typed and submitted without waiting for completions.
+  fireEvent.change(screen.getByRole("combobox", { name: "Remote repository path" }), {
+    target: { value: "/srv/typed-project" },
+  });
+  await act(async () => { fireEvent.click(screen.getByTestId("add-project-confirm-paired")); });
+  // Then the selected machine receives the typed path and its project is adopted.
+  expect(native.invoke).toHaveBeenCalledWith("paired_host_operation", { request: {
+    hostId: hosts[0].hostId, generation: hosts[0].generation, operation: { kind: "registerProject", request: {
+      requestId: expect.any(String), repoPath: "/srv/typed-project",
+    } },
+  } });
+  expect(registered).toHaveBeenCalledOnce();
+});
+
 it("returns to the unchanged Local and SSH choices", async () => {
   await mount();
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
@@ -89,7 +151,7 @@ it("invalidates a selected folder when its host generation changes", async () =>
   const registered = await mount();
   const pending = gate<unknown>(); const normal = respond;
   respond = request => request.operation.kind === "directories" ? pending.promise : normal(request);
-  await act(async () => { remoteHostStore.setState(s => ({ ...s, hosts: { ...s.hosts, [hosts[0].hostId]: { ...hosts[0], generation: "8" } } })); });
+  await act(async () => { remoteHostStore.setState(s => ({ ...s, hosts: { ...s.hosts, [hosts[0].hostId]: { ...hosts[0], generation: String(pairings + 1) } } })); });
   expect(screen.getByTestId("add-project-confirm-paired")).toBeDisabled();
   await act(async () => { pending.resolve(listing("/new")); });
   expect(registered).not.toHaveBeenCalled();

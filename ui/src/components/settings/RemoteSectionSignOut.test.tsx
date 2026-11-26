@@ -28,9 +28,14 @@ describe("RemoteSection Sign-out & Auth Error Handling", () => {
     localStorage.clear();
     sessionStorage.clear();
     vi.restoreAllMocks();
-    invokeMock.mockImplementation(async (command: string) =>
-      command === "cmd_agent_integration_get" ? { enabled: true } : undefined,
-    );
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_agent_integration_get") return { enabled: true };
+      // Refresh now re-reads the saved SSH machines and Tailscale discovery; empty shaped results
+      // keep this suite about the account session instead of those sources.
+      if (command === "cmd_ssh_list_hosts") return [];
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [], targets: [] };
+      return undefined;
+    });
   });
 
   afterEach(() => {
@@ -151,5 +156,54 @@ describe("RemoteSection Sign-out & Auth Error Handling", () => {
     await waitFor(() => {
       expect(accountSessionModule.getStoredAccountSessionToken(customOrigin)).toBeNull();
     });
+  });
+
+  it("tells the daemon to drop a session the account server rejected", async () => {
+    const store = createRemoteHostStore();
+    const inventory = createPairedHostInventory(store);
+    await inventory.refresh();
+
+    accountSessionModule.storeAccountSessionToken("expired-session-tok", customOrigin);
+
+    let listCalls = 0;
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/account/v1/machines")) {
+        listCalls += 1;
+        // The first list is the mount read; Refresh is what reaches the expired session path.
+        if (listCalls === 1) {
+          return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        return new Response(JSON.stringify({ code: "UNAUTHORIZED", message: "Session expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      // Pending approval requests are an optional surface; its own read must not be mistaken
+      // for the machine list.
+      return new Response("Not found", { status: 404 });
+    });
+
+    await act(async () => {
+      render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          accountOrigin={customOrigin}
+          accountSessionToken="expired-session-tok"
+        />
+      );
+    });
+    invokeMock.mockClear();
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh machines" })); });
+
+    // The daemon would otherwise keep pairing with a token the server already rejected.
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("paired_host_adopt_account_session", {
+        accountOrigin: customOrigin,
+        sessionToken: null,
+      });
+    });
+    expect(accountSessionModule.getStoredAccountSessionToken(customOrigin)).toBeNull();
   });
 });
