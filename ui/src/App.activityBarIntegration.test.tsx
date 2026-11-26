@@ -176,8 +176,36 @@ vi.mock("./lib/browserTauri", async (importOriginal) => ({
   setBrowserVisible: vi.fn(async () => undefined),
 }));
 
-// Remote Desktop keeps its own canvas; the probe records whether the shell kept it mounted,
-// and the store spy records whether anything asked for a disconnect.
+// Remote Desktop keeps its own canvas; the probe records whether the shell kept it mounted.
+// The store itself is a controllable fake so the rail badge is driven through App's real
+// subscription instead of reaching into a module singleton.
+const rdStore = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  let state: { sessions: Record<string, unknown> } = { sessions: {} };
+  const notify = () => { for (const listener of listeners) listener(); };
+  return {
+    getState: () => state,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    setSessions: (sessions: Record<string, unknown>) => {
+      state = { sessions };
+      notify();
+    },
+    reset: () => {
+      state = { sessions: {} };
+      notify();
+    },
+    connect: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+    getSession: (hostId: string) => state.sessions[hostId] ?? null,
+    list: () => Object.values(state.sessions),
+  };
+});
+
+vi.mock("./state/remoteDesktopStore", () => ({ remoteDesktopStore: rdStore }));
+
 vi.mock("./components/remoteDesktop/GlobalRemoteDesktopCanvas", () => ({
   GlobalRemoteDesktopCanvas: ({ active, activeHostId }: { active: boolean; activeHostId: string | null }) => (
     <div data-testid="global-rd-canvas" data-active={String(active)} data-host-id={activeHostId ?? ""} />
@@ -186,17 +214,11 @@ vi.mock("./components/remoteDesktop/GlobalRemoteDesktopCanvas", () => ({
     Object.keys(state.sessions ?? {}).length,
 }));
 
-// The Settings dialog is a lazy heavy tree; this stub exposes exactly the one handoff the
-// Activity Bar integration owns: Settings > Remote handing a machine to Remote Desktop mode.
+// The Settings dialog is a lazy heavy tree; the Activity Bar suite never drives it, so it is
+// replaced with a placeholder that keeps the shell's Suspense contract visible.
 vi.mock("./components/SettingsDialog", () => ({
-  SettingsDialog: ({ open, onOpenRemoteDesktop }: { open: boolean; onOpenRemoteDesktop?: (hostId: string, label: string) => void }) =>
-    open ? (
-      <div data-testid="settings-dialog" role="dialog" aria-label="Settings">
-        <button type="button" onClick={() => onOpenRemoteDesktop?.("host-1", "Studio")}>
-          Open remote desktop
-        </button>
-      </div>
-    ) : null,
+  SettingsDialog: ({ open }: { open: boolean }) =>
+    open ? <div data-testid="settings-dialog" role="dialog" aria-label="Settings" /> : null,
 }));
 
 const workspace = {
@@ -261,7 +283,6 @@ import { App } from "./App";
 import { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, ACTIVITY_MODE_STORAGE_KEY } from "./lib/storageKeys";
 import { browserStore } from "./state/browserStore";
 import { remoteHostStore } from "./state/remoteHostStore";
-import { remoteDesktopStore } from "./state/remoteDesktopStore";
 
 /** The rail's mode button, by its user-facing name. */
 function railTab(name: "Supervisor" | "Worktrees" | "Browser" | "Remote Desktop") {
@@ -279,6 +300,7 @@ describe("Activity Bar shell integration", () => {
     browserStore.reset();
     remoteHostStore.setHosts([]);
     remoteHostStore.setActiveHost(null);
+    rdStore.reset();
     vi.clearAllMocks();
 
     vi.spyOn(workspaceStoreModule, "useWorkspaceStore").mockImplementation((() => ({
@@ -322,7 +344,6 @@ describe("Activity Bar shell integration", () => {
   });
 
   it("keeps the worktree surface and the Remote Desktop canvas mounted across all four modes", async () => {
-    const disconnect = vi.spyOn(remoteDesktopStore, "disconnect");
     render(<App />);
 
     const surface = await screen.findByTestId("workspace-surface");
@@ -351,7 +372,7 @@ describe("Activity Bar shell integration", () => {
     expect(screen.getByTestId("workspace-surface")).toBeVisible();
     // The RD canvas is still mounted, only hidden: a live session must survive a mode switch.
     expect(screen.getByTestId("global-rd-canvas")).toHaveAttribute("data-active", "false");
-    expect(disconnect).not.toHaveBeenCalled();
+    expect(rdStore.disconnect).not.toHaveBeenCalled();
   });
 
   it("draws the Maho drawer and canvas in Browser mode and collapses the drawer on Cmd+B while the rail stays", async () => {
@@ -421,26 +442,30 @@ describe("Activity Bar shell integration", () => {
     expect(browserStore.getState().tabs["docs-1"]?.folderId).toBeDefined();
   });
 
-  it("hands a Settings > Remote machine to Remote Desktop mode and shows the connected count on the rail", async () => {
-    const connect = vi.spyOn(remoteDesktopStore, "connect").mockResolvedValue(undefined as never);
+  it("counts a live Remote Desktop session on the rail and shows the mode's drawer", async () => {
+    // A connected session is the rail's Remote Desktop badge. The session lives in the global
+    // store, which is what makes it survive the mode switches the previous case covers.
+    rdStore.setSessions({
+      "host-1": {
+        hostId: "host-1",
+        label: "Studio",
+        rdSessionId: "rd-host-1",
+        status: "connected",
+        wireState: null,
+        reason: null,
+      },
+    });
+
     render(<App />);
     await screen.findByTestId("workspace-surface");
 
-    // The rail's Settings button opens the dialog; its machine row performs the handoff.
-    act(() => {
-      screen.getByTestId("activity-settings").click();
-    });
-    // The dialog is lazy-loaded, and the shell renders a placeholder while the chunk loads; the
-    // handoff button only exists once the real (mocked) module resolved, so it is awaited with a
-    // budget that covers a cold dynamic import on a loaded runner.
-    const handoff = await screen.findByRole("button", { name: "Open remote desktop" }, { timeout: 15_000 });
-    act(() => { handoff.click(); });
+    await waitFor(() => expect(screen.getByTestId("activity-mode-remoteDesktop-badge")).toHaveTextContent("1"));
 
-    await waitFor(() => expect(connect).toHaveBeenCalledWith("host-1", "Studio"));
-    expect(screen.queryByRole("button", { name: "Open remote desktop" })).toBeNull();
-    // The mode switched to Remote Desktop: its drawer is the mode's own surface.
+    act(() => { railTab("Remote Desktop").click(); });
     expect(await screen.findByTestId("activity-drawer-remote-desktop")).toBeInTheDocument();
     expect(localStorage.getItem(ACTIVITY_MODE_STORAGE_KEY)).toBe("remoteDesktop");
+    // The canvas is the mode's main area, and it is the one that was already mounted.
+    expect(screen.getByTestId("global-rd-canvas")).toHaveAttribute("data-active", "true");
   });
   // Rendering the whole App under jsdom takes several seconds on a cold shared runner, and this
   // case additionally waits on a lazy dynamic import. The deadline only moves past what a loaded
