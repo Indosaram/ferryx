@@ -313,11 +313,21 @@ async fn delete_worktree<R: Runtime>(
 
     WorkspaceRegistry::validate_workspace_id(&workspace_id).map_err(IpcError::from)?;
     // Capture the managed path before the daemon removes the checkout/record.
-    let deleted_path = registry
-        .manager(&workspace_id)
-        .map_err(IpcError::from)?
-        .worktree_path_for(&identity.ws_id, &identity.slug)
-        .map_err(IpcError::from)?;
+    // Resolution stats every managed dir and reads worktree settings, so it runs on
+    // the blocking pool: no synchronous filesystem or settings I/O on an async thread.
+    let deleted_path = {
+        let registry = registry.clone();
+        let workspace_id = workspace_id.clone();
+        let identity = identity.clone();
+        run_blocking(move || {
+            registry
+                .manager(&workspace_id)
+                .map_err(IpcError::from)?
+                .worktree_path_for(&identity.ws_id, &identity.slug)
+                .map_err(IpcError::from)
+        })
+        .await?
+    };
     let pruned = match worktree_response(
         app.state::<Arc<DaemonClient>>()
             .send_request(DaemonRequest::DeleteWorktree {
@@ -439,21 +449,16 @@ pub async fn cmd_worktree_status<R: Runtime>(
     Ok(status)
 }
 
-/// Status for the Changes panel: a managed worktree goes through `cmd_worktree_status` (dirty
-/// tracking and events); a checkout addressed by path only reads `git status`.
+/// Reads Changes panel status once after resolving the managed worktree or jailed checkout.
+/// Sidebar dirty tracking and events remain the responsibility of `cmd_worktree_status`.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_changes_status<R: Runtime>(
-    app: AppHandle<R>,
+    _app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
     request: WorktreePushRequest,
 ) -> Result<DirtyState, IpcError> {
     let WorktreePushRequest { workspace_id, worktree, worktree_path } = request;
-    if let (Some(identity), None) = (&worktree, &worktree_path) {
-        // Keep the sidebar's dirty tracking and its events for managed worktrees.
-        let request = WorktreeStatusRequest { workspace_id: workspace_id.clone(), worktree: identity.clone() };
-        cmd_worktree_status(app, registry.clone(), request).await?;
-    }
     with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, git_changes_status).await
 }
 
@@ -983,6 +988,99 @@ mod change_event_tests {
     use super::*;
     use crate::worktree::{run_git, CreateWorktreeOptions};
     use tauri::Listener;
+
+    #[tokio::test]
+    async fn cmd_worktree_changes_status_preserves_paths_and_validates_targets() {
+        let (dir, registry, identity, wt, outside, plain) = run_blocking(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            run_git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+            run_git(&repo, &["config", "user.name", "Changes status fixture"]).unwrap();
+            run_git(&repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+            run_git(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+            std::fs::write(repo.join("old file.txt"), "base\n").unwrap();
+            run_git(&repo, &["add", "old file.txt"]).unwrap();
+            run_git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
+            let registry = WorkspaceRegistry::new();
+            registry.register("changes-status", &repo).unwrap();
+            let manager = registry.manager("changes-status").unwrap();
+            let identity = WorktreeIdentity { ws_id: "status".into(), slug: "files".into() };
+            let path = manager.worktree_path_for(&identity.ws_id, &identity.slug).unwrap();
+            let wt = manager.create_worktree(CreateWorktreeOptions::new(
+                &identity.ws_id, &identity.slug, &path,
+            )).unwrap();
+            let outside = dir.path().join("outside");
+            run_git(&repo, &["worktree", "add", "-q", "--detach", outside.to_str().unwrap()]).unwrap();
+            let plain = repo.join("plain");
+            std::fs::create_dir(&plain).unwrap();
+            assert!(!manager.observe_dirty_state(&wt.path).unwrap().0.is_dirty);
+            run_git(&wt.path, &["mv", "old file.txt", "\u{d55c}\u{ae00} \u{d30c}\u{c77c}.txt"]).unwrap();
+            std::fs::create_dir(wt.path.join("dir")).unwrap();
+            std::fs::write(wt.path.join("dir/new file.txt"), "new\n").unwrap();
+            Ok((dir, registry, identity, wt, outside, plain))
+        }).await.unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+            tx.send(event.payload().to_string()).unwrap();
+        });
+        let managed = WorktreePushRequest {
+            workspace_id: "changes-status".into(),
+            worktree: Some(identity.clone()),
+            worktree_path: None,
+        };
+        let by_path = WorktreePushRequest {
+            workspace_id: "changes-status".into(),
+            worktree: None,
+            worktree_path: Some(wt.path.clone()),
+        };
+        for request in [managed.clone(), by_path.clone()] {
+            let state = cmd_worktree_changes_status(app.handle().clone(), app.state(), request)
+                .await.unwrap();
+            assert!(state.is_dirty);
+            assert_eq!(state.files.len(), 2);
+            assert!(state.files.iter().any(|file| {
+                file.path == "\u{d55c}\u{ae00} \u{d30c}\u{c77c}.txt" && file.status_code == "R "
+            }));
+            assert!(state.files.iter().any(|file| {
+                file.path == "dir/new file.txt" && file.status_code == "??"
+            }));
+        }
+        let mut both = managed.clone();
+        both.worktree_path = by_path.worktree_path.clone();
+        let mut neither = by_path.clone();
+        neither.worktree_path = None;
+        for request in [both, neither] {
+            let error = cmd_worktree_changes_status(app.handle().clone(), app.state(), request)
+                .await.unwrap_err();
+            assert_eq!(error.code, IpcErrorCode::InvalidArgument);
+        }
+        for path in [outside, plain] {
+            let mut request = by_path.clone();
+            request.worktree_path = Some(path);
+            assert!(cmd_worktree_changes_status(app.handle().clone(), app.state(), request)
+                .await.is_err());
+        }
+        let mut missing_workspace = managed.clone();
+        missing_workspace.workspace_id = "missing".into();
+        let mut missing_identity = managed;
+        missing_identity.worktree.as_mut().unwrap().slug = "missing".into();
+        for request in [missing_workspace, missing_identity] {
+            assert!(cmd_worktree_changes_status(app.handle().clone(), app.state(), request)
+                .await.is_err());
+        }
+        // The command is read-only: it must not run the sidebar's dirty observation first.
+        assert!(rx.try_recv().is_err(), "Changes status must not emit sidebar dirty events");
+        drop(app);
+        run_blocking(move || {
+            dir.close().unwrap();
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn stage_unstage_and_push_emit_worktree_changed() {

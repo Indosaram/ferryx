@@ -21,6 +21,8 @@ use crate::ipc::run_blocking;
 #[cfg(feature = "desktop")]
 use crate::ipc::worktree::emit_worktree_changed;
 use crate::ipc::worktree::WorktreeChangeKind;
+#[cfg(any(feature = "desktop", test))]
+use crate::worktree::git::{with_git_budget, GitBudget};
 use crate::worktree::registry::WorkspaceRegistry;
 use crate::worktree::{Worktree, WorktreeIdentity, WorktreeManager};
 use parking_lot::Mutex;
@@ -70,6 +72,19 @@ pub struct WorktreeRescanCache {
     /// scan. Tracked independently of the baseline entry so a wedged first
     /// sweep still takes effect even when that sweep's real scan also fails.
     wedged: Mutex<HashSet<String>>,
+}
+
+impl WorktreeRescanCache {
+    /// Drops cached state for workspaces that are no longer registered.
+    /// Without this, a removed workspace's baseline and wedge marker would
+    /// outlive it for the life of the process, and a later re-registration
+    /// under the same ID would inherit a stale baseline that suppresses the
+    /// events its new checkout deserves.
+    #[cfg(any(feature = "desktop", test))]
+    fn retain_workspaces(&self, active: &HashSet<String>) {
+        self.entries.lock().retain(|id, _| active.contains(id));
+        self.wedged.lock().retain(|id| active.contains(id));
+    }
 }
 
 #[derive(Debug)]
@@ -152,7 +167,17 @@ pub fn read_worktree_admin_fingerprint(repo_root: &Path) -> Option<String> {
                 let checkout_exists = if gitdir.is_empty() {
                     false
                 } else {
-                    PathBuf::from(&gitdir).exists()
+                    // Git 2.48+ may write a `gitdir` relative to this admin
+                    // entry (`worktree.useRelativePaths`); resolving it
+                    // against the process cwd would misreport the checkout
+                    // as missing.
+                    let target = PathBuf::from(&gitdir);
+                    let checkout = if target.is_absolute() {
+                        target
+                    } else {
+                        entry_dir.join(target)
+                    };
+                    checkout.exists()
                 };
                 parts.push(format!("checkout-exists:{name}:{checkout_exists}"));
                 parts.push(format!(
@@ -558,6 +583,30 @@ where
 /// by `MissedTickBehavior::Delay`.
 const WORKSPACE_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Runs one workspace sweep with a `GitBudget` installed for its whole
+/// duration. The budget MUST be installed here, on the blocking-domain
+/// worker: `run_git` reads it from a thread-local, so installing it on the
+/// async caller would leave every `git` child unbounded. With the budget in
+/// scope an expired deadline kills a hung child through its Unix
+/// process-group / Windows job-object containment instead of leaking the
+/// blocking worker and orphaning `git`.
+#[cfg(any(feature = "desktop", test))]
+fn sweep_workspace_with_budget<F>(
+    cache: &WorktreeRescanCache,
+    workspace_id: &str,
+    manager: &WorktreeManager,
+    now: Instant,
+    probe: &F,
+    budget: GitBudget,
+) -> Vec<DetectedWorktreeChange>
+where
+    F: Fn(&Path) -> ProbeOutcome,
+{
+    with_git_budget(budget, || {
+        sweep_workspace_with_probe(cache, workspace_id, manager, now, probe)
+    })
+}
+
 #[cfg(feature = "desktop")]
 /// Spawns the GUI-process rescan task: every 30s, sweep all registered git
 /// workspaces and emit `worktree_changed` for externally changed worktrees.
@@ -576,20 +625,44 @@ pub fn spawn_worktree_rescan_task<R: tauri::Runtime>(
         loop {
             ticker.tick().await;
             let now = Instant::now();
-            for (workspace_id, manager) in registry.list() {
+            let workspaces = registry.list();
+            // Prune cache state for workspaces removed since the previous
+            // tick so their baselines and wedge markers cannot outlive them.
+            let active_ids: HashSet<String> = workspaces
+                .iter()
+                .map(|(workspace_id, _)| workspace_id.clone())
+                .collect();
+            cache.retain_workspaces(&active_ids);
+            for (workspace_id, manager) in workspaces {
                 let workspace_cache = Arc::clone(&cache);
                 // Owned copy for the blocking closure; the original stays for
                 // logging in the match arms below.
                 let closure_workspace_id = workspace_id.clone();
                 let scan = tokio::time::timeout(
-                    WORKSPACE_SCAN_TIMEOUT,
+                    // Deliberately wider than the GitBudget: the budget is
+                    // what kills a hung git child, this only keeps a wedged
+                    // sweep from delaying every other workspace forever.
+                    WORKSPACE_SCAN_TIMEOUT + Duration::from_secs(5),
                     run_blocking(move || {
-                        Ok(sweep_workspace_with_probe(
+                        // Installed on the blocking worker, never on the
+                        // async caller: the budget is thread-local, so it
+                        // must live on the thread that spawns git children.
+                        let (_grant, revoked) = tokio::sync::watch::channel(false);
+                        let budget = GitBudget {
+                            deadline: Instant::now() + WORKSPACE_SCAN_TIMEOUT,
+                            revoked,
+                            cancelled: std::sync::Arc::new(
+                                std::sync::atomic::AtomicBool::new(false),
+                            ),
+                            cancellation: None,
+                        };
+                        Ok(sweep_workspace_with_budget(
                             &workspace_cache,
                             &closure_workspace_id,
                             &manager,
                             now,
                             &probe_fingerprint,
+                            budget,
                         ))
                     }),
                 )
@@ -661,6 +734,25 @@ mod tests {
             locked: None,
             prunable: None,
         }
+    }
+
+    /// Lexical `to` expressed relative to the absolute directory `from_dir`.
+    fn relative_path(from_dir: &Path, to: &Path) -> PathBuf {
+        let from: Vec<_> = from_dir.components().collect();
+        let target: Vec<_> = to.components().collect();
+        let common = from
+            .iter()
+            .zip(&target)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let mut relative = PathBuf::new();
+        for _ in common..from.len() {
+            relative.push("..");
+        }
+        for component in &target[common..] {
+            relative.push(component.as_os_str());
+        }
+        relative
     }
 
     #[test]
@@ -1099,6 +1191,191 @@ mod tests {
         let fresh_cache = WorktreeRescanCache::default();
         assert!(sweep_with_probe(&fresh_cache, &registry, now, &probe).is_empty());
         assert!(fresh_cache.wedged.lock().contains("ws-a"));
+    }
+
+    #[test]
+    fn fingerprint_resolves_relative_gitdir_for_checkout_presence() {
+        let (_temp, manager) = setup_test_repo();
+        let root = manager.repo_root().to_path_buf();
+        // Ask Git for the 2.48+ relative `gitdir` layout. Older Git rejects the
+        // key; the fallback below then writes the file the same way.
+        let _ = git::run_git(&root, &["config", "worktree.useRelativePaths", "true"]);
+        let wt_path = manager.worktree_path_for("ws-a", "relative").unwrap();
+        manager
+            .create_worktree(CreateWorktreeOptions::new("ws-a", "relative", &wt_path))
+            .unwrap();
+
+        let expected = std::fs::canonicalize(wt_path.join(".git")).unwrap();
+        let worktrees_dir = root.join(".git").join("worktrees");
+        let (entry_name, entry_dir) = std::fs::read_dir(&worktrees_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find_map(|entry| {
+                let dir = entry.path();
+                let recorded = std::fs::read_to_string(dir.join("gitdir")).ok()?;
+                let recorded = PathBuf::from(recorded.trim());
+                // Resolve exactly like the probe: relative targets are
+                // relative to the admin entry, not to the process cwd.
+                let resolved = if recorded.is_absolute() {
+                    recorded
+                } else {
+                    dir.join(recorded)
+                };
+                if std::fs::canonicalize(resolved).ok()? != expected {
+                    return None;
+                }
+                Some((entry.file_name().into_string().ok()?, dir))
+            })
+            .expect("admin entry for the created worktree");
+
+        let entry_dir = std::fs::canonicalize(&entry_dir).unwrap();
+        let recorded = std::fs::read_to_string(entry_dir.join("gitdir")).unwrap();
+        if Path::new(recorded.trim()).is_absolute() {
+            let relative = relative_path(&entry_dir, &expected);
+            std::fs::write(entry_dir.join("gitdir"), relative.to_string_lossy().as_bytes())
+                .unwrap();
+        }
+        let recorded = std::fs::read_to_string(entry_dir.join("gitdir")).unwrap();
+        assert!(
+            !Path::new(recorded.trim()).is_absolute(),
+            "the fixture must exercise a relative gitdir, got {recorded:?}"
+        );
+
+        let with_checkout = read_worktree_admin_fingerprint(&root).expect("fingerprint");
+        assert!(
+            with_checkout.contains(&format!("checkout-exists:{entry_name}:true")),
+            "a relative gitdir must resolve against its admin entry: {with_checkout}"
+        );
+
+        std::fs::remove_dir_all(&wt_path).unwrap();
+        let without_checkout = read_worktree_admin_fingerprint(&root).expect("fingerprint");
+        assert!(
+            without_checkout.contains(&format!("checkout-exists:{entry_name}:false")),
+            "a removed checkout must be reported absent: {without_checkout}"
+        );
+        assert_ne!(
+            with_checkout, without_checkout,
+            "checkout presence must change the fingerprint"
+        );
+    }
+
+    #[test]
+    fn retain_workspaces_prunes_removed_workspaces_from_entries_and_wedged() {
+        let (_temp, _manager, registry) = register_git_workspace();
+        let plain = tempfile::TempDir::new().unwrap();
+        registry.register("plain", plain.path()).unwrap();
+        let cache = WorktreeRescanCache::default();
+        let now = Instant::now();
+
+        assert!(sweep_registry_once(&cache, &registry, now).is_empty());
+        cache.wedged.lock().insert("plain".to_string());
+        {
+            let entries = cache.entries.lock();
+            assert!(entries.contains_key("ws-a"));
+            assert!(entries.contains_key("plain"));
+        }
+
+        // Exactly what a tick computes before scanning: the live ID set.
+        assert!(registry.unregister("plain"));
+        let active_ids: HashSet<String> = registry
+            .list()
+            .into_iter()
+            .map(|(workspace_id, _)| workspace_id)
+            .collect();
+        cache.retain_workspaces(&active_ids);
+
+        {
+            let entries = cache.entries.lock();
+            assert!(
+                !entries.contains_key("plain"),
+                "removed workspaces must not keep a baseline in entries"
+            );
+            assert!(
+                entries.contains_key("ws-a"),
+                "active workspaces keep their baseline"
+            );
+        }
+        assert!(
+            !cache.wedged.lock().contains("plain"),
+            "removed workspaces must not keep a wedge marker"
+        );
+
+        // The surviving baseline still suppresses a redundant scan.
+        assert!(sweep_registry_once(&cache, &registry, now + Duration::from_secs(30)).is_empty());
+
+        // The prune covers both maps in one pass, including an empty registry.
+        cache.wedged.lock().insert("ghost".to_string());
+        cache.retain_workspaces(&HashSet::new());
+        assert!(cache.entries.lock().is_empty());
+        assert!(cache.wedged.lock().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn expired_git_budget_aborts_scan_without_advancing_last_scan_or_spawning_git() {
+        let (_temp, manager, registry) = register_git_workspace();
+        let cache = WorktreeRescanCache::default();
+        let now = Instant::now();
+
+        // A real baseline first, so there is a `last_scan` the sweep could
+        // wrongly advance. It also pins the cached git-backing state, so the
+        // aborted sweep fails inside `list_worktrees` (where the budget is
+        // observable) rather than while detecting the backing.
+        assert!(sweep_registry_once(&cache, &registry, now).is_empty());
+        assert!(manager.is_git_backed());
+        let (primed_last_scan, primed_fingerprint) = {
+            let entries = cache.entries.lock();
+            let entry = entries.get("ws-a").expect("baseline entry");
+            (entry.last_scan, entry.fingerprint.clone())
+        };
+
+        let (started, _observed) = tokio::sync::oneshot::channel::<u32>();
+        git::CHILD_STARTED.with(|slot| *slot.borrow_mut() = Some(started));
+        let (_grant, revoked) = tokio::sync::watch::channel(false);
+        let budget = GitBudget {
+            // Already expired by the time the sweep admits a git child.
+            deadline: Instant::now(),
+            revoked,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancellation: None,
+        };
+        // A changed fingerprint opens the gate so the sweep really attempts a
+        // real scan instead of skipping on an unchanged probe result.
+        let changed = |_root: &Path| ProbeOutcome::Done(Some("changed".to_string()));
+        let changes = sweep_workspace_with_budget(
+            &cache,
+            "ws-a",
+            &manager,
+            now + Duration::from_secs(30),
+            &changed,
+            budget,
+        );
+        assert!(changes.is_empty(), "an aborted scan detects nothing");
+
+        // `bounded_output` takes the sender only after a child is spawned, so
+        // a still-present sender proves no `git` process was started.
+        let child_started = git::CHILD_STARTED.with(|slot| slot.borrow_mut().take().is_none());
+        assert!(
+            !child_started,
+            "an expired GitBudget must reject the scan before spawning git"
+        );
+
+        {
+            let entries = cache.entries.lock();
+            let entry = entries.get("ws-a").expect("baseline entry survives");
+            assert_eq!(
+                entry.last_scan, primed_last_scan,
+                "a budget-aborted scan must not advance last_scan"
+            );
+            assert_eq!(
+                entry.fingerprint, primed_fingerprint,
+                "a budget-aborted scan must not record a fingerprint"
+            );
+        }
+
+        // The budget must not leak into the caller's thread after the sweep:
+        // a leaked expired budget would make this call fail with TIMEOUT.
+        assert!(git::run_git(manager.repo_root(), &["rev-parse", "HEAD"]).is_ok());
     }
 
     #[test]

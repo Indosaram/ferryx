@@ -124,8 +124,10 @@ impl WorkspaceRegistry {
     }
 
     pub fn revision(&self) -> u64 {
+        // Read the registry offset and manager contributions from the same membership snapshot.
+        let workspaces = self.workspaces.read();
         let registry_rev = self.revision.load(std::sync::atomic::Ordering::Acquire);
-        let mgr_revs: u64 = self.workspaces.read().values().map(|m| m.revision()).sum();
+        let mgr_revs: u64 = workspaces.values().map(|m| m.revision()).sum();
         registry_rev.wrapping_add(mgr_revs)
     }
 
@@ -148,12 +150,16 @@ impl WorkspaceRegistry {
             return false;
         };
         let mut workspaces = self.workspaces.write();
-        let removed = workspaces.remove(workspace_id).is_some();
-        if removed {
-            self.revision
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(manager) = workspaces.remove(workspace_id) {
+            // Transfer the removed manager's contribution before publishing its removal.
+            self.revision.fetch_add(
+                manager.revision().saturating_add(1),
+                std::sync::atomic::Ordering::AcqRel,
+            );
+            true
+        } else {
+            false
         }
-        removed
     }
 
     pub fn manager(&self, workspace_id: &str) -> Result<WorktreeManager, WorktreeError> {
@@ -290,6 +296,34 @@ mod tests {
         assert!(!registry.contains("ws-a"));
         assert!(registry.list().is_empty());
         assert!(registry.revision() > revision_before);
+    }
+
+    #[test]
+    fn unregister_preserves_removed_manager_revisions_and_advances_strictly() {
+        let (_dir, registry) = plain_workspace("ws-a");
+        let other_dir = TempDir::new().unwrap();
+        registry.register("ws-b", other_dir.path()).unwrap();
+        let removed_manager = registry.manager("ws-a").unwrap();
+        let remaining_manager = registry.manager("ws-b").unwrap();
+        for _ in 0..8 {
+            removed_manager.bump_revision();
+        }
+        for _ in 0..3 {
+            remaining_manager.bump_revision();
+        }
+        let before = registry.revision();
+        assert!(registry.unregister("ws-a"));
+        assert_eq!(registry.revision(), before + 1);
+
+        // A retained clone of a removed manager no longer contributes to this registry.
+        removed_manager.bump_revision();
+        assert_eq!(registry.revision(), before + 1);
+        remaining_manager.bump_revision();
+        assert_eq!(registry.revision(), before + 2);
+        assert!(registry.unregister("ws-b"));
+        assert_eq!(registry.revision(), before + 3);
+        assert!(!registry.unregister("ws-b"));
+        assert_eq!(registry.revision(), before + 3);
     }
 
     #[test]

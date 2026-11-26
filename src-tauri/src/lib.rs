@@ -2070,6 +2070,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_sync_desktop_sidebar,
         cmd_layout_get,
         cmd_layout_put,
+        cmd_layout_wait,
         ipc::project_remote::cmd_project_register_remote,
         ipc::project_remote::cmd_ssh_list_directories,
         cmd_project_unregister,

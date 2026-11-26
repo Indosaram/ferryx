@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use parking_lot::Mutex;
@@ -190,7 +190,16 @@ fn read_windows_file(path: &Path) -> Vec<PersistedWindow> {
     }
 }
 
-fn write_windows_file(path: &Path, windows: &[PersistedWindow]) -> Result<(), IpcError> {
+static WINDOWS_FILE_LOCK: Mutex<()> = Mutex::new(());
+static WINDOWS_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn write_windows_file(
+    path: &Path,
+    live: &[PersistedWindow],
+    closed: &HashSet<String>,
+) -> Result<(), IpcError> {
+    let _write_guard = WINDOWS_FILE_LOCK.lock();
+    let windows = merge_windows(read_windows_file(path), live, closed);
     let io_error = |error: std::io::Error| {
         IpcError::new(
             IpcErrorCode::IoError,
@@ -200,9 +209,10 @@ fn write_windows_file(path: &Path, windows: &[PersistedWindow]) -> Result<(), Ip
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io_error)?;
     }
-    let json = serde_json::to_vec_pretty(windows)
+    let json = serde_json::to_vec_pretty(&windows)
         .map_err(|error| IpcError::internal(format!("Failed to encode the window list: {error}")))?;
-    let tmp_path = path.with_extension("json.tmp");
+    let seq = WINDOWS_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), seq));
     std::fs::write(&tmp_path, json).map_err(io_error)?;
     std::fs::rename(&tmp_path, path).map_err(|error| {
         let _ = std::fs::remove_file(&tmp_path);
@@ -216,7 +226,8 @@ fn closed_labels() -> &'static Mutex<HashSet<String>> {
     CLOSED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-static SAVE_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static SAVE_DIRTY: AtomicBool = AtomicBool::new(false);
+static SAVE_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Current logical placement of a live window.
 fn window_placement<R: Runtime>(window: &Window<R>) -> Option<PersistedWindow> {
@@ -251,24 +262,32 @@ async fn save_windows<R: Runtime>(app: &AppHandle<R>) -> Result<(), IpcError> {
     let path = windows_file_path(app)?;
     let live = live_secondary_placements(app);
     let closed = std::mem::take(&mut *closed_labels().lock());
-    run_blocking(move || {
-        let merged = merge_windows(read_windows_file(&path), &live, &closed);
-        write_windows_file(&path, &merged)
-    })
-    .await
+    run_blocking(move || write_windows_file(&path, &live, &closed)).await
 }
 
 /// Schedules a debounced save; calls within the debounce window collapse into one write.
 pub fn schedule_windows_save<R: Runtime>(app: &AppHandle<R>) {
-    if SAVE_SCHEDULED.swap(true, Ordering::AcqRel) {
+    // A single total order across both flags closes the worker-exit handoff race.
+    SAVE_DIRTY.store(true, Ordering::SeqCst);
+    if SAVE_RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(SAVE_DEBOUNCE).await;
-        SAVE_SCHEDULED.store(false, Ordering::Release);
-        if let Err(error) = save_windows(&app).await {
-            tracing::warn!(?error, "Could not save the window list");
+        loop {
+            tokio::time::sleep(SAVE_DEBOUNCE).await;
+            SAVE_DIRTY.store(false, Ordering::SeqCst);
+            if let Err(error) = save_windows(&app).await {
+                tracing::warn!(?error, "Could not save the window list");
+            }
+            if SAVE_DIRTY.load(Ordering::SeqCst) {
+                continue;
+            }
+            SAVE_RUNNING.store(false, Ordering::SeqCst);
+            // A caller either started a successor or left dirty work for us to reclaim.
+            if !SAVE_DIRTY.load(Ordering::SeqCst) || SAVE_RUNNING.swap(true, Ordering::SeqCst) {
+                break;
+            }
         }
     });
 }
@@ -841,9 +860,54 @@ mod tests {
         let path = dir.path().join("nested").join(WINDOWS_FILE_NAME);
         assert!(read_windows_file(&path).is_empty());
         let windows = vec![entry("ws-a", 1.0)];
-        write_windows_file(&path, &windows).unwrap();
+        write_windows_file(&path, &windows, &HashSet::new()).unwrap();
         assert_eq!(read_windows_file(&path), windows);
-        assert!(!path.with_extension("json.tmp").exists());
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_window_writes_merge_updates_and_closed_labels() {
+        const WRITERS: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(WINDOWS_FILE_NAME);
+        let existing: Vec<_> = (0..WRITERS)
+            .map(|index| entry(&format!("ws-old-{index}"), 0.0))
+            .collect();
+        write_windows_file(&path, &existing, &HashSet::new()).unwrap();
+        let start = std::sync::Barrier::new(WRITERS);
+        std::thread::scope(|scope| {
+            for index in 0..WRITERS {
+                let path = &path;
+                let start = &start;
+                scope.spawn(move || {
+                    let closed = HashSet::from([format!("ws-old-{index}")]);
+                    let label = format!("ws-live-{index}");
+                    start.wait();
+                    for round in 0..8 {
+                        write_windows_file(path, &[entry(&label, round as f64)], &closed).unwrap();
+                        let bytes = std::fs::read(path).unwrap();
+                        let saved: Vec<PersistedWindow> = serde_json::from_slice(&bytes).unwrap();
+                        assert!(saved.iter().any(|window| window.label == label));
+                    }
+                });
+            }
+        });
+        let mut saved = read_windows_file(&path);
+        saved.sort_by(|a, b| a.label.cmp(&b.label));
+        let expected: Vec<_> = (0..WRITERS)
+            .map(|index| entry(&format!("ws-live-{index}"), 7.0))
+            .collect();
+        assert_eq!(saved, expected);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn window_write_cleans_up_temp_file_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(WINDOWS_FILE_NAME);
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_windows_file(&path, &[entry("ws-a", 1.0)], &HashSet::new()).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
