@@ -1,26 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, Radio, Trash2 } from "lucide-react";
 
 import {
   createPairingCode,
-  disableRemoteGateway,
-  enableRemoteGateway,
   getAgentControlSettings,
-  getDirectAutoTrustStatus,
-  getRemoteStatus,
-  listRemoteDevices,
-  revokeRemoteDevice,
   setAgentControlSettings,
-  setRemoteDevicePermission,
-  setDirectAutoTrustDisabled,
   type AgentControlSettings,
   type DeviceInfo,
   type DevicePermission,
-  type DirectAutoTrustStatus,
   type RemoteGatewayStatus,
 } from "../../lib/tauri";
 
 import { SettingRow, SettingsHeading } from "./primitives";
+import {
+  applyRelayUrl, notifyPairingMinted, refreshStatus, revokeDevice, setAutoTrustDisabled,
+  setDevicePermission, startPairingRefresh, switchToLocalNetwork, toggleRemoteAccess,
+  useRemoteAccessState,
+} from "./remote/useRemoteAccessState";
 import { DEFAULT_RELAY_ORIGIN } from "../../lib/pairedHostInventory";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -29,6 +25,8 @@ import { Card } from "../ui/card";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { SegmentedControl } from "../ui/SegmentedControl";
+
+const refreshAfterPairingChange = () => { void refreshStatus(); };
 
 const DEFAULT_RELAY_PLACEHOLDER = DEFAULT_RELAY_ORIGIN;
 
@@ -135,10 +133,23 @@ export function PairDeviceCard({ disabled, className = "mt-8 space-y-3", onMinte
 
   useEffect(() => {
     if (!pairing) return;
-    const tick = () => setRemaining(Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)));
+    const stopRefresh = startPairingRefresh(pairing.expiresAt);
+    // Declared before `tick`, so the synchronous first tick can never read the handle in its TDZ.
+    let timer: number | undefined;
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000));
+      setRemaining(left);
+      if (left === 0) {
+        if (timer !== undefined) window.clearInterval(timer);
+        stopRefresh();
+      }
+    };
+    timer = window.setInterval(tick, 1000);
     tick();
-    const timer = window.setInterval(tick, 1000);
-    return () => window.clearInterval(timer);
+    return () => {
+      if (timer !== undefined) window.clearInterval(timer);
+      stopRefresh();
+    };
   }, [pairing]);
 
   const mint = async () => {
@@ -149,6 +160,7 @@ export function PairDeviceCard({ disabled, className = "mt-8 space-y-3", onMinte
       const created = await createPairingCode(minted);
       setPairing({ code: created.code, expiresAt: Date.now() + created.expiresInSeconds * 1000, role: minted });
       setRemaining(created.expiresInSeconds);
+      notifyPairingMinted();
       onMinted?.();
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to create a pairing code"));
@@ -303,108 +315,76 @@ function AgentControlCard({ devices }: { devices: DeviceInfo[] }) {
   );
 }
 
+function GatewayReadiness({ status }: { readonly status: RemoteGatewayStatus }) {
+  let ready: boolean;
+  let label: string;
+  switch (status.mode) {
+    case "relay":
+      ready = Boolean(status.relayConnected && status.controlChannelConnected);
+      label = ready ? "Relay Ready" : "Connecting to Relay";
+      break;
+    case "localNetwork":
+    case "tailscale":
+      ready = Boolean(status.localIp || status.boundAddress);
+      label = ready ? "Local Ready" : "Starting";
+      break;
+    case "off":
+      return null;
+    default: {
+      const unreachable: never = status.mode;
+      return unreachable;
+    }
+  }
+  return <Badge variant="secondary" role="status" className={`mb-4 text-[11px] ${ready ? "text-status-success" : "text-status-warning"}`}>{label}</Badge>;
+}
+
 /** hideTitle: the embedding container already shows the "Access to This Machine" title. */
 export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: { detailsOnly?: boolean; hideTitle?: boolean } = {}) {
-  const [status, setStatus] = useState<PairingGatewayStatus | null>(null);
-  const statusRef = useRef<PairingGatewayStatus | null>(null);
-  statusRef.current = status;
-  const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const { status, devices, loading, appliedRelayUrl, statusError, devicesError, autoTrust, autoTrustBusy } = useRemoteAccessState();
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   const [roleBusyId, setRoleBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [relayUrl, setRelayUrl] = useState("");
-  const [appliedRelayUrl, setAppliedRelayUrl] = useState("");
-  const previousMode = useRef<RemoteGatewayStatus["mode"] | null>(null);
-  const [statusError, setStatusError] = useState(false);
-  const [devicesError, setDevicesError] = useState(false);
-  const [autoTrust, setAutoTrust] = useState<DirectAutoTrustStatus | null>(null);
-  const [autoTrustBusy, setAutoTrustBusy] = useState(false);
-
-  const refreshStatus = useCallback(async (): Promise<RemoteGatewayStatus | null> => {
-    const [s, devList] = await Promise.all([
-      getRemoteStatus().catch(() => { setStatusError(true); return null; }),
-      listRemoteDevices().catch(() => { setDevicesError(true); return null; }),
-    ]);
-    if (s) {
-      statusRef.current = s;
-      setStatus(s);
-      setStatusError(false);
-      setAppliedRelayUrl(s.relayUrl ?? "");
-      setRelayUrl((current) => current || s.relayUrl || "");
-      if (s.mode !== "off") previousMode.current = s.mode;
-    }
-    if (devList) { setDevices(devList); setDevicesError(false); }
-    return s;
-  }, []);
+  const [relayUrl, setRelayUrl] = useState(appliedRelayUrl);
+  const [relayUrlDirty, setRelayUrlDirty] = useState(false);
 
   useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
-
-  useEffect(() => {
-    let cancelled = false;
-    // Optional surface: a host without the command (or a browser build) simply hides the panel.
-    void Promise.resolve()
-      .then(() => getDirectAutoTrustStatus())
-      .then((next) => { if (!cancelled && next) setAutoTrust(next); })
-      .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, []);
+    if (!relayUrlDirty) setRelayUrl(appliedRelayUrl);
+  }, [appliedRelayUrl, relayUrlDirty]);
 
   const handleAutoTrustToggle = async (enabled: boolean) => {
-    setAutoTrustBusy(true);
     setActionError(null);
     try {
-      setAutoTrust(await setDirectAutoTrustDisabled(!enabled));
+      await setAutoTrustDisabled(!enabled);
     } catch (error: unknown) {
       setActionError(error instanceof Error ? error.message : "Failed to update automatic trust");
-    } finally {
-      setAutoTrustBusy(false);
     }
   };
 
   const handleToggle = async (enabled: boolean) => {
-    setLoading(true);
     setActionError(null);
     try {
-      if (!enabled) {
-        const s = await disableRemoteGateway();
-        statusRef.current = s;
-        setStatus(s);
-        await refreshStatus();
-      } else {
-        const trimmedRelay = relayUrl.trim();
-        const s = await enableRemoteGateway({
-          mode: trimmedRelay ? "relay" : previousMode.current === "tailscale" ? "tailscale" : "localNetwork",
-          relayUrl: trimmedRelay || undefined,
-        });
-        statusRef.current = s;
-        setStatus(s);
-        await refreshStatus();
-      }
+      await toggleRemoteAccess(enabled, relayUrl);
     } catch (error: unknown) {
-      setActionError(error instanceof Error ? error.message : "Failed to update remote access");
-    } finally {
-      setLoading(false);
+      setActionError(errorMessage(error, "Failed to update remote access"));
     }
   };
 
   const handleApplyRelay = async () => {
-    const trimmedRelay = relayUrl.trim();
-    setLoading(true);
     setActionError(null);
     try {
-      const s = await enableRemoteGateway({ mode: "relay", relayUrl: trimmedRelay });
-      statusRef.current = s;
-      setStatus(s);
-      setAppliedRelayUrl(s.relayUrl ?? trimmedRelay);
-      setRelayUrl(s.relayUrl ?? trimmedRelay);
-      await refreshStatus();
+      await applyRelayUrl(relayUrl);
+      setRelayUrlDirty(false);
     } catch (error: unknown) {
-      setActionError(error instanceof Error ? error.message : "Failed to apply relay URL");
-    } finally {
-      setLoading(false);
+      setActionError(errorMessage(error, "Failed to apply relay URL"));
+    }
+  };
+
+  const handleSwitchToLocal = async () => {
+    setActionError(null);
+    try {
+      await switchToLocalNetwork();
+    } catch (error: unknown) {
+      setActionError(errorMessage(error, "Failed to switch to local network"));
     }
   };
 
@@ -413,8 +393,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
     setActionError(null);
     setRoleBusyId(dev.id);
     try {
-      const updated = await setRemoteDevicePermission(dev.id, permission);
-      setDevices((current) => current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+      await setDevicePermission(dev.id, permission);
     } catch (error: unknown) {
       setActionError(errorMessage(error, "Failed to change the device role"));
     } finally {
@@ -425,18 +404,18 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
   const handleRevoke = async (deviceId: string) => {
     setActionError(null);
     try {
-      if (!await revokeRemoteDevice(deviceId)) throw new Error("Could not revoke device. Refresh and retry.");
+      if (!await revokeDevice(deviceId)) {
+        setActionError("Could not revoke device. Refresh and retry.");
+        return;
+      }
       setConfirmRevokeId(null);
-      await refreshStatus();
     } catch (error: unknown) {
       setActionError(error instanceof Error ? error.message : "Failed to revoke device");
     }
   };
 
-  const refreshAfterPairingChange = useCallback(() => { void refreshStatus(); }, [refreshStatus]);
-
   if (detailsOnly) return <section aria-label="Gateway diagnostics" className="space-y-2 text-sm">
-    {statusError ? <p role="alert">Gateway status unavailable.</p> : null}
+    {statusError ? <p role="alert">Gateway status unavailable. <Button variant="outline" size="sm" onClick={() => void refreshStatus()}>Retry</Button></p> : null}
     <AccessFactsCard status={status} statusError={statusError} onPairingExpired={refreshAfterPairingChange} />
     {status?.gateStatus && typeof status.gateStatus === "object" && "insecureLanGated" in status.gateStatus ? (
       <p data-testid="gateway-gate-warning" role="note">
@@ -456,7 +435,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
       <h2 id="settings-remote-heading" className="sr-only">
         Remote Access
       </h2>
-      {statusError ? <p role="alert">Gateway status unavailable. Reopen this section to retry.</p> : null}
+      {statusError ? <p role="alert">Gateway status unavailable. <Button variant="outline" size="sm" onClick={() => void refreshStatus()}>Retry</Button></p> : null}
       {actionError ? (
         <Alert
           variant="destructive"
@@ -467,11 +446,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
         </Alert>
       ) : null}
       {status?.enabled ? (
-        <Badge variant="secondary" role="status" className="mb-4 text-[11px] text-status-success">
-          {status.relayConnected && status.controlChannelConnected
-            ? "Relay Ready"
-            : status.localIp || status.boundAddress ? "Local Ready" : "Connecting"}
-        </Badge>
+        <GatewayReadiness status={status} />
       ) : null}
       <AccessFactsCard status={status} statusError={statusError} onPairingExpired={refreshAfterPairingChange} />
       <div className="border-y border-border">
@@ -501,7 +476,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
               aria-label="Relay / Signaling Server URL"
               placeholder={DEFAULT_RELAY_PLACEHOLDER}
               value={relayUrl}
-              onChange={(e) => setRelayUrl(e.target.value)}
+              onChange={(e) => { setRelayUrlDirty(true); setRelayUrl(e.target.value); }}
               className="h-8 w-full max-w-64 rounded-md px-2 text-[12px] md:text-[12px] sm:w-64"
             />
             <Button
@@ -513,6 +488,11 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
             >
               Apply relay URL
             </Button>
+            {status?.mode === "relay" ? (
+              <Button type="button" variant="outline" size="sm" disabled={loading || statusError} onClick={() => void handleSwitchToLocal()}>
+                Use local network
+              </Button>
+            ) : null}
           </div>
         </div>
 
@@ -537,19 +517,19 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
             <Switch
               id="remote-auto-trust"
               aria-label="Automatic direct trust"
-              checked={!autoTrust.disabledBySetting}
-              disabled={autoTrustBusy}
+              checked={!autoTrust.disabledByEnv && !autoTrust.disabledBySetting}
+              disabled={autoTrust.disabledByEnv || autoTrustBusy}
               onCheckedChange={(checked) => void handleAutoTrustToggle(checked)}
             />
           </SettingRow>
         ) : null}
       </div>
 
-      <PairDeviceCard disabled={!status?.enabled || statusError} onMinted={refreshAfterPairingChange} />
+      <PairDeviceCard disabled={!status?.enabled || statusError} />
 
       <div className="mt-8 space-y-3">
         <h3 className="text-[12px] font-semibold">Authorized Devices</h3>
-        {devicesError ? <p role="alert">Authorized devices unavailable. Reopen this section to retry.</p> : null}
+        {devicesError ? <p role="alert">Authorized devices unavailable. <Button variant="outline" size="sm" onClick={() => void refreshStatus()}>Retry</Button></p> : null}
         <Card className="divide-y divide-border rounded-lg border border-border bg-card shadow-none">
           {devices.length === 0 ? (
             <div className="p-4 text-center text-[12px] text-muted-foreground">No paired devices.</div>

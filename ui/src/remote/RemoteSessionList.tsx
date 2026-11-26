@@ -509,6 +509,8 @@ type RemoteWorkspaceMirrorProps = {
   activeMachineId?: string | null;
   /** Each machine's sidebar as its desktop publishes it, one section per machine. */
   sidebarSections?: readonly RemoteSidebarSection[];
+  /** Re-probes one machine whose sidebar section is offline or errored; absent hides Retry. */
+  onRetrySection?: (machineId: string) => void;
   /** Account mode: the Supervisor tab's content; absent hides the tab. */
   supervisor?: RemoteSidebarSupervisor;
   onSidebarViewChange?: (view: SidebarViewId) => void;
@@ -627,6 +629,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   creationError,
   activeMachineId = null,
   sidebarSections = [],
+  onRetrySection,
   supervisor,
   onSidebarViewChange,
   requestedView = null,
@@ -744,6 +747,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
           view={inline || phoneDrawer ? "worktrees" : view}
           {...(inline || phoneDrawer ? {} : { onViewChange: changeView })}
           {...(supervisor && !inline && !phoneDrawer ? { supervisor } : {})}
+          {...(onRetrySection ? { onRetrySection } : {})}
           status={pickerStatus}
         />
         {sidebarEmpty && !pickerStatus ? (

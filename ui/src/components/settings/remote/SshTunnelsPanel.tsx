@@ -4,7 +4,7 @@
  * absence of a runtime id in a newer response is the only stop signal this client has, and a
  * snapshot older than the stale threshold loses its confident `listening` badge.
  */
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, RefreshCw } from "lucide-react";
 
 import { extractIpcErrorMessage, type SshHost } from "../../../lib/sshHosts";
@@ -22,6 +22,7 @@ import {
   TUNNEL_STALE_BADGE_CLASSES,
   TUNNEL_STATE_BADGE_CLASSES,
   tunnelBadge,
+  viewKey,
   type TunnelRow,
 } from "./tunnelPresentation";
 import { useSshTunnels, type UseSshTunnelsResult } from "./useSshTunnels";
@@ -72,13 +73,17 @@ function StateBadge({ row, stale }: { row: TunnelRow; stale: boolean }) {
   );
 }
 
-function TunnelRowView({ row, hostLabel, stale, busy, onRestore, onStop }: {
+function TunnelRowView({ row, hostLabel, stale, busy, dismissible, onRestore, onStart, onStop, onDismiss }: {
   row: TunnelRow;
   hostLabel: string;
   stale: boolean;
   busy: boolean;
+  /** Whether this stopped row exists only in the panel's local history. */
+  dismissible: boolean;
   onRestore: () => void;
+  onStart: () => void;
   onStop: () => void;
+  onDismiss: () => void;
 }) {
   const reason = row.state === "failed" ? describeTunnelFailure(row.failure, row.failurePiece) : "";
   return (
@@ -126,6 +131,33 @@ function TunnelRowView({ row, hostLabel, stale, busy, onRestore, onStop }: {
             Restore
           </Button>
         ) : null}
+        {row.state === "stopped" ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-label={`Start ${row.label}`}
+            disabled={busy}
+            onClick={onStart}
+          >
+            Start
+          </Button>
+        ) : null}
+        {dismissible ? (
+          // Only a row the local history invented can be dismissed: it exists nowhere else,
+          // while a saved definition's stopped row belongs to the store the operator still
+          // edits, and a stopped view the daemon reported would come straight back.
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label={`Dismiss ${row.label}`}
+            disabled={busy}
+            onClick={onDismiss}
+          >
+            Dismiss
+          </Button>
+        ) : null}
         {row.state === "listening" || row.state === "reconnecting" ? (
           <Button type="button" variant="outline" size="sm" aria-label={`Stop ${row.label}`} disabled={busy} onClick={onStop}>
             Stop
@@ -153,9 +185,18 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
   const tunnels = snapshot ?? own;
   const now = clock ?? Date.now;
   const [form, setForm] = useState({ hostId: "", label: "", localPort: "", remoteHost: "", remotePort: "" });
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormErrorState] = useState<string | null>(null);
+  /* Why the form refused: a token the panel renders so a caller asserts the cause, not the copy. */
+  const [formErrorKind, setFormErrorKind] = useState<string | null>(null);
+  const setFormError = (message: string | null, kind: string | null = null) => {
+    setFormErrorState(message);
+    setFormErrorKind(kind);
+  };
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The state disables the buttons on the next render; the ref refuses a second click that
+  // arrives before React has committed it, so one click is one request.
+  const busyRef = useRef(false);
 
   const hostLabels = useMemo(() => {
     const map = new Map<string, string>();
@@ -163,12 +204,33 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
     return map;
   }, [hosts]);
 
+  // `SshHost` carries `disabled`, not `enabled`: only a machine that is not disabled can take
+  // a forward. The list is a memo so the selection effect below depends on identity, not on
+  // the parent's array allocation.
+  const eligibleHosts = useMemo(() => hosts.filter((host) => host.disabled !== true), [hosts]);
+
+  // The inventory arrives asynchronously and rows can be disabled or removed while the form is
+  // open, so the selection follows the eligible set: first eligible machine when nothing valid
+  // is chosen, cleared when none is. It never keeps a host the operator can no longer use.
+  useEffect(() => {
+    setForm((prev) => {
+      if (eligibleHosts.some((host) => host.id === prev.hostId)) return prev;
+      const nextHostId = eligibleHosts[0]?.id ?? "";
+      return prev.hostId === nextHostId ? prev : { ...prev, hostId: nextHostId };
+    });
+  }, [eligibleHosts]);
+
   const rows = useMemo(() => buildTunnelRows(tunnels.list, tunnels.retired), [tunnels.list, tunnels.retired]);
+  // The keys only the local history knows about: a stopped row for one of these is the panel's
+  // own invention and can be dismissed, unlike a stopped view the daemon reported.
+  const retiredKeys = useMemo(() => new Set(tunnels.retired.map(viewKey)), [tunnels.retired]);
   const stale = isSnapshotStale(tunnels.receivedAt, now());
 
   if (!gated) return null;
 
   const runMutation = async (action: () => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setActionError(null);
     try {
@@ -176,6 +238,7 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
     } catch (error) {
       setActionError(extractIpcErrorMessage(error, "The tunnel action failed."));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -185,26 +248,33 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
     setFormError(null);
     const remoteHost = form.remoteHost.trim();
     if (remoteHost === "") {
-      setFormError("Remote host is required.");
+      setFormError("Remote host is required.", "remote-host-required");
       return;
     }
     const remotePort = parsePort(form.remotePort);
     if (remotePort.kind === "blank") {
-      setFormError("Remote port is required.");
+      setFormError("Remote port is required.", "remote-port-required");
       return;
     }
     if (remotePort.kind === "invalid") {
-      setFormError("Remote port must be an integer between 1 and 65535.");
+      setFormError("Remote port must be an integer between 1 and 65535.", "remote-port-invalid");
       return;
     }
     const localPort = parsePort(form.localPort);
     if (localPort.kind === "invalid") {
-      setFormError("Local port must be an integer between 1 and 65535.");
+      setFormError("Local port must be an integer between 1 and 65535.", "local-port-invalid");
       return;
     }
-    const hostId = form.hostId || hosts[0]?.id;
-    if (!hostId) {
-      setFormError("Add an SSH machine before forwarding a port.");
+    const hostId = form.hostId;
+    // No silent `hosts[0]` fallback: an empty or disabled selection is a validation failure the
+    // operator sees, never a forward through a machine they did not pick.
+    if (!eligibleHosts.some((host) => host.id === hostId)) {
+      setFormError(
+        eligibleHosts.length === 0
+          ? "No enabled SSH machine can take a forward."
+          : "Select an SSH machine that is not disabled.",
+        eligibleHosts.length === 0 ? "no-enabled-host" : "host-not-eligible",
+      );
       return;
     }
     const localPortValue = localPort.kind === "ok" ? localPort.value : null;
@@ -263,8 +333,11 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
               hostLabel={hostLabels.get(row.hostId) ?? row.hostId}
               stale={stale}
               busy={busy}
+              dismissible={!row.saved && retiredKeys.has(row.key)}
               onRestore={() => void runMutation(() => tunnels.startSaved(row))}
+              onStart={() => void runMutation(() => tunnels.startSaved(row))}
               onStop={() => void runMutation(() => tunnels.stop(row))}
+              onDismiss={() => tunnels.dismissStopped(row)}
             />
           ))}
         </ul>
@@ -288,7 +361,9 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
             </SelectTrigger>
             <SelectContent>
               {hosts.map((host) => (
-                <SelectItem key={host.id} value={host.id}>{host.label || host.hostname}</SelectItem>
+                <SelectItem key={host.id} value={host.id} disabled={host.disabled === true}>
+                  {host.label || host.hostname}
+                </SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -342,7 +417,7 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
           </div>
         </div>
         {formError ? (
-          <p role="alert" data-testid="ssh-tunnel-form-error" className="text-[12px] text-destructive">{formError}</p>
+          <p role="alert" data-testid="ssh-tunnel-form-error" data-error-kind={formErrorKind ?? undefined} className="text-[12px] text-destructive">{formError}</p>
         ) : null}
         <div className="flex justify-end">
           <Button type="submit" size="sm" disabled={busy}>Forward port</Button>

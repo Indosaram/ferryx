@@ -22,11 +22,34 @@ import {
 import { unmanagedWorktreeDeleteError } from "../lib/unmanagedWorktree";
 import { useModalDialog } from "./useModalDialog";
 
+// allow: SIZE_OK — owns one indivisible flow: the single-worktree delete lifecycle
+// (preview, refusal, confirmation, mutation errors). It already exceeded the soft ceiling at
+// HEAD; splitting it would add files outside this task's allowed scope.
+
 // Destructive deletion is irreversible, so the confirmation has to name what is being
 // discarded rather than describing it in the abstract. Long lists are truncated with a
 // remainder count so the dialog cannot be pushed off-screen by a large dirty worktree.
 const DIRTY_FILES_SHOWN = 8;
 type DeletePreview = BranchDeletionPreview | Awaited<ReturnType<ReturnType<typeof createPairedWorktreeActions>["previewDelete"]>>;
+
+/** The safe-delete refusal seeded by a known-dirty row or by the backend itself. */
+function dirtyRefusal(): StructuredIpcError {
+  return {
+    code: "DIRTY_WORKTREE",
+    message:
+      "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
+    details: {},
+  };
+}
+
+/** Files the backend named in a refusal, so the loss stays visible when a refresh fails. */
+function refusalDirtyFiles(error: StructuredIpcError | null): DirtyFile[] {
+  const detail: unknown = error?.details?.files;
+  if (!Array.isArray(detail)) return [];
+  return detail.flatMap((entry: unknown) =>
+    typeof entry === "string" ? [{ statusCode: "", path: entry }] : [],
+  );
+}
 
 export type WorktreeDeleteServices = {
   previewDelete: (worktree: Worktree) => Promise<BranchDeletionPreview>;
@@ -75,6 +98,7 @@ export function WorktreeDeleteDialog({
   onDeleted,
   services,
   initialDirty = false,
+  dirtyFiles: knownDirtyFiles,
 }: WorktreeDeleteDialogProps) {
   const paired = project?.target?.kind === "pairedDaemon" || isPairedWorkspaceId(workspaceId) || isPairedWorkspaceId(worktree.workspaceId);
   const isRemoteWorkspace = paired || Boolean(
@@ -93,62 +117,66 @@ export function WorktreeDeleteDialog({
   const actionError = (cause: unknown): StructuredIpcError => cause instanceof PairedOperationError
     ? { code: cause.code, message: pairedActionMessage(cause) } : toIpcError(cause);
   const [preview, setPreview] = useState<DeletePreview | null>(null);
-  const [error, setError] = useState<StructuredIpcError | null>(
-    initialDirty
-      ? {
-          code: "DIRTY_WORKTREE",
-          message:
-            "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
-          details: {},
-        }
-      : null,
+  // Preview failures and mutation failures answer different questions: "what is the state?"
+  // versus "why was this refused?". Keeping them apart means a failed refresh can never
+  // erase the refusal that told the user why safe deletion was blocked.
+  const [previewError, setPreviewError] = useState<StructuredIpcError | null>(null);
+  const [deleteError, setDeleteError] = useState<StructuredIpcError | null>(
+    initialDirty ? dirtyRefusal() : null,
   );
   const [destructiveRequired, setDestructiveRequired] = useState(initialDirty && !paired);
   const [busy, setBusy] = useState(false);
   // `busy` only lands after a re-render, so two clicks dispatched in the same batch
   // would both still read `false`; this ref is the actual duplicate-IPC barrier.
   const deletingRef = useRef(false);
+  // Every preview request takes the next epoch; a response only lands if it still owns it.
+  // Without this, a slow preview for the previous worktree could describe the new one.
+  const previewEpoch = useRef(0);
   // Paired previews carry branch metadata only; force deletion remains unavailable there.
   const dirtyState = preview && "dirtyState" in preview ? preview.dirtyState : undefined;
-  const dirtyFiles = dirtyState?.files ?? [];
-  const hasDirtyLoss = dirtyState?.isDirty || error?.code === "DIRTY_WORKTREE";
+  // Falls back to the row's known dirty files and to the refusal's own file list, so an
+  // unreachable preview still names exactly what the destructive action would discard.
+  const dirtyFiles = dirtyState?.files
+    ?? (knownDirtyFiles?.length ? knownDirtyFiles : refusalDirtyFiles(deleteError));
+  const hasDirtyLoss = dirtyState?.isDirty || deleteError?.code === "DIRTY_WORKTREE";
   // Escape closes only this dialog (it is rendered inside WorktreeDiskDialog's backdrop)
   // and, like a backdrop click, is ignored while a preview or delete is in flight.
   const { dialogRef } = useModalDialog({ onEscape: onClose, dismissible: !busy });
 
   useEffect(() => {
-    let cancelled = false;
+    const epoch = ++previewEpoch.current;
     setPreview(null);
+    setPreviewError(null);
     if (initialDirty) {
-      setError({
-        code: "DIRTY_WORKTREE",
-        message:
-          "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
-        details: {},
-      });
+      setDeleteError(dirtyRefusal());
       setDestructiveRequired(!paired);
     } else {
-      setError(null);
+      setDeleteError(null);
       setDestructiveRequired(false);
     }
     setBusy(true);
     void resolvedServices
       .previewDelete(worktree)
       .then((result: DeletePreview) => {
-        if (!cancelled) {
-          setPreview(result);
-          setDestructiveRequired(!paired && "dirtyState" in result && result.dirtyState.isDirty);
-          setError(null);
-        }
+        if (previewEpoch.current !== epoch) return;
+        setPreview(result);
+        setDestructiveRequired(!paired && "dirtyState" in result && result.dirtyState.isDirty);
+        // A fresh preview is authoritative about the worktree's current state, so it may
+        // retire a refusal; a *failed* preview never does (see the catch below).
+        setDeleteError(null);
+        setPreviewError(null);
       })
       .catch((cause) => {
-        if (!cancelled) setError(actionError(cause));
+        if (previewEpoch.current !== epoch) return;
+        // Unknown state is reported as unknown: no merge row is drawn, and nothing implies
+        // the worktree is clean or the branch is merged.
+        setPreviewError(actionError(cause));
       })
       .finally(() => {
-        if (!cancelled) setBusy(false);
+        if (previewEpoch.current === epoch) setBusy(false);
       });
     return () => {
-      cancelled = true;
+      previewEpoch.current += 1;
     };
   }, [resolvedServices, worktree, initialDirty, paired]);
 
@@ -160,45 +188,66 @@ export function WorktreeDeleteDialog({
   const handleSafeDelete = async () => {
     if (busy || deletingRef.current) return;
     deletingRef.current = true;
+    // The mutation owns the preview slot from here: a preview still in flight for the
+    // previous state must not overwrite what this refusal reports.
+    const epoch = ++previewEpoch.current;
     setBusy(true);
-    setError(null);
+    setDeleteError(null);
     try {
       await resolvedServices.deleteSafe(worktree);
       finishDelete();
     } catch (cause) {
+      // Always recorded: this refusal explains the click the user just made, so a stale
+      // response must never be able to silence it.
       const ipcError = actionError(cause);
-      setError(ipcError);
+      setDeleteError(ipcError);
       const requiresDestructive = !paired && (ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE");
       setDestructiveRequired(requiresDestructive);
       if (requiresDestructive) {
+        // Refresh what the destructive action would discard, keeping the refusal on screen:
+        // a failed refresh is a preview problem, never a reason to erase the refusal.
         setPreview(null);
+        setPreviewError(null);
         try {
-          setPreview(await resolvedServices.previewDelete(worktree));
-        } catch (previewError) {
-          setError(actionError(previewError));
+          const refreshed = await resolvedServices.previewDelete(worktree);
+          if (previewEpoch.current === epoch) setPreview(refreshed);
+        } catch (previewCause) {
+          if (previewEpoch.current === epoch) setPreviewError(actionError(previewCause));
         }
       }
     } finally {
       deletingRef.current = false;
-      setBusy(false);
+      // A preview that started after this attempt owns the busy state now.
+      if (previewEpoch.current === epoch) setBusy(false);
     }
   };
 
   const handleDestructiveDelete = async () => {
     if (busy || deletingRef.current || !preview) return;
     deletingRef.current = true;
+    const epoch = ++previewEpoch.current;
     setBusy(true);
-    setError(null);
+    setDeleteError(null);
     try {
       await resolvedServices.deleteDestructive(worktree);
       finishDelete();
     } catch (cause) {
-      setError(actionError(cause));
+      setDeleteError(actionError(cause));
     } finally {
       deletingRef.current = false;
-      setBusy(false);
+      if (previewEpoch.current === epoch) setBusy(false);
     }
   };
+
+  // SSH deletion removes the remote worktree directory only; the branch stays on the host.
+  // Every destructive label and note below must say exactly that.
+  const sshWorktree = isRemoteWorkspace && !paired;
+  // The banner already spells out a refusal; repeating it in the error box is noise.
+  const refusalShownInBanner = destructiveRequired
+    && (deleteError?.code === "DIRTY_WORKTREE" || deleteError?.code === "UNMERGED_BRANCH");
+  const destructiveLabel = hasDirtyLoss
+    ? "Delete worktree and discard changes permanently"
+    : (sshWorktree ? "Delete remote worktree permanently" : "Delete unmerged branch permanently");
 
   return (
     <div
@@ -247,7 +296,12 @@ export function WorktreeDeleteDialog({
               <PreviewRow label="Branch" value={preview.branch} icon={<GitBranch className="size-3" />} />
               <PreviewRow label="HEAD" value={preview.head} mono />
               <PreviewRow label="Upstream" value={preview.upstream ?? "None"} />
-              <PreviewRow label="Merge state" value={preview.merged ? "Merged" : "Not merged"} />
+              <PreviewRow
+                label="Merge state"
+                value={preview.merged ? "Merged" : "Not merged"}
+                testId="worktree-delete-merge"
+                dataMerged={preview.merged}
+              />
               <PreviewRow
                 label="Divergence"
                 value={preview.upstream === null ? "No upstream" : `${preview.ahead ?? "—"} ahead · ${preview.behind ?? "—"} behind`}
@@ -256,8 +310,38 @@ export function WorktreeDeleteDialog({
             </div>
           ) : null}
 
+          {previewError && !preview ? (
+            <div
+              data-testid="worktree-delete-preview-error"
+              data-error-kind={isRemoteWorkspace ? "remote-git-status" : "git-status"}
+              className="rounded-md border border-status-warning-border bg-status-warning-container px-3 py-2 text-status-warning-on"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-semibold">
+                    {isRemoteWorkspace ? "Could not inspect remote Git status" : "Could not inspect Git status"}
+                  </div>
+                  <div className="mt-0.5 text-[11px] leading-relaxed">
+                    {isRemoteWorkspace
+                      ? "The remote host did not report the worktree's uncommitted changes, upstream, or merge state. Nothing about its cleanliness is known from here."
+                      : "The worktree's uncommitted changes, upstream, and merge state are unknown."}
+                  </div>
+                  <div className="mt-1 font-mono text-[10px] opacity-80">
+                    <span className="font-semibold">{previewError.code}</span>
+                    <span> {previewError.message}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {destructiveRequired ? (
-            <div className="space-y-2 rounded-lg border border-destructive/35 bg-destructive/10 p-3">
+            <div
+              data-testid="worktree-delete-refusal"
+              data-dirty={hasDirtyLoss ? "true" : "false"}
+              className="space-y-2 rounded-lg border border-destructive/35 bg-destructive/10 p-3"
+            >
               <div className="flex items-start gap-2 text-destructive">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                 <div>
@@ -267,7 +351,9 @@ export function WorktreeDeleteDialog({
                   <p className="mt-1 text-[11px] leading-relaxed text-destructive/85">
                     {hasDirtyLoss
                       ? "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently."
-                      : "Safe deletion refused to discard unmerged commits. Destructive deletion is a separate explicit action."}
+                      : sshWorktree
+                        ? "Safe deletion refused to discard unmerged commits. This removes the remote worktree directory only; the Git branch and its commits stay on the host."
+                        : "Safe deletion refused to discard unmerged commits. Destructive deletion is a separate explicit action."}
                   </p>
                   {dirtyFiles.length > 0 ? (
                     <div className="mt-2" data-testid="dirty-file-preview">
@@ -297,17 +383,20 @@ export function WorktreeDeleteDialog({
                 onClick={() => void handleDestructiveDelete()}
                 className="w-full rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
               >
-                {hasDirtyLoss
-                  ? "Delete worktree and discard changes permanently"
-                  : "Delete unmerged branch permanently"}
+                {destructiveLabel}
               </button>
+              {sshWorktree ? (
+                <p className="text-[10px] leading-relaxed text-destructive/70">
+                  This removes the worktree directory on the SSH host. The Git branch is kept.
+                </p>
+              ) : null}
             </div>
           ) : null}
 
-          {error && (!destructiveRequired || !preview) ? (
+          {deleteError && !refusalShownInBanner ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive">
-              <div className="font-semibold">{error.code}</div>
-              <div className="mt-0.5 text-[11px]">{error.message}</div>
+              <div className="font-semibold">{deleteError.code}</div>
+              <div className="mt-0.5 text-[11px]">{deleteError.message}</div>
             </div>
           ) : null}
 
@@ -337,9 +426,22 @@ export function WorktreeDeleteDialog({
   );
 }
 
-function PreviewRow({ label, value, mono = false, icon, dataState }: { label: string; value: string; mono?: boolean; icon?: React.ReactNode; dataState?: string }) {
+function PreviewRow({ label, value, mono = false, icon, dataState, testId, dataMerged }: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  icon?: React.ReactNode;
+  dataState?: string;
+  testId?: string;
+  dataMerged?: boolean;
+}) {
   return (
-    <div data-testid={dataState ? "worktree-delete-divergence" : undefined} data-state={dataState} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-b-0">
+    <div
+      data-testid={testId ?? (dataState ? "worktree-delete-divergence" : undefined)}
+      data-state={dataState}
+      data-merged={dataMerged === undefined ? undefined : dataMerged ? "true" : "false"}
+      className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-b-0"
+    >
       <span className="flex w-24 shrink-0 items-center gap-1 text-muted-foreground">{icon}{label}</span>
       <span className={`min-w-0 flex-1 truncate text-right text-foreground ${mono ? "font-mono" : ""}`}>{value}</span>
     </div>

@@ -13,6 +13,7 @@ import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Switch } from "../../ui/switch";
+import { describeTunnelFailure } from "./tunnelPresentation";
 
 /**
  * The saved-tunnel editor inside the SSH machine drawer.
@@ -55,6 +56,9 @@ export interface TunnelSaveConflict {
   expectedRevision: number | null;
 }
 
+/** The one tunnel mutation in flight; a second click is refused, not queued. */
+export type TunnelPendingAction = "save" | "start" | "stop" | "reset";
+
 /** Everything the section needs; `useSshActions` produces this object once per section. */
 export interface SshTunnelsEditorHandlers {
   /** The daemon's advertised capabilities; `undefined`/`[]` both read as "absent". */
@@ -65,6 +69,8 @@ export interface SshTunnelsEditorHandlers {
   /** Where a reset quarantined the unreadable file, once one succeeded. */
   resetPath: string | null;
   conflict: TunnelSaveConflict | null;
+  /** The mutation this hook has in flight, if any: every control stays disabled while set. */
+  pendingAction?: TunnelPendingAction | null;
   onRefresh: () => void;
   /**
    * Whether the section may read the list itself when it opens with no snapshot yet. A caller
@@ -222,7 +228,10 @@ export function SshTunnelsEditor(props: SshTunnelsEditorProps) {
 }
 
 function SshTunnelsBody(props: SshTunnelsEditorProps) {
-  const { host, busy, list, loading, error, conflict, resetPath } = props;
+  const { host, pendingAction, list, loading, error, conflict, resetPath } = props;
+  // A section-wide action and a tunnel mutation both block the same controls: one in flight
+  // is enough, and a second click must not send a second request.
+  const busy = props.busy || pendingAction != null;
   const [draft, setDraft] = useState<TunnelDraft | null>(null);
   const [formError, setFormError] = useState<TunnelDraftError | null>(null);
   // A refused save keeps the specs the operator typed, so the force path saves them and
@@ -470,7 +479,7 @@ function SshTunnelsBody(props: SshTunnelsEditorProps) {
                   </span>
                   {view?.failure ? (
                     <span data-testid={`ssh-tunnel-failure-${spec.id}`} data-failure={view.failure} className="text-[11px] text-destructive">
-                      {view.failure}
+                      {describeTunnelFailure(view.failure, view.failurePiece)}
                     </span>
                   ) : null}
                 </div>

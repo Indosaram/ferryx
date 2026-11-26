@@ -7,7 +7,7 @@ import * as accountSessionModule from "./accountSession";
 import { AccountSessionError, type MachineRequestView } from "./accountSession";
 
 const relayUrl = "https://relay.example.com";
-const nowSecs = Math.floor(Date.now() / 1000);
+const nowSecs = Date.parse("2026-11-26T00:00:00Z") / 1000;
 const request: MachineRequestView = {
   requestId: "req-1",
   machineId: "mach-new",
@@ -29,6 +29,8 @@ async function flush() {
 describe("ApprovePage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(nowSecs * 1000);
     sessionStorage.clear();
     window.history.replaceState(null, "", "/approve?code=abcd-efgh");
     vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
@@ -36,6 +38,7 @@ describe("ApprovePage", () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     window.history.replaceState(null, "", "/");
   });
 
@@ -77,6 +80,83 @@ describe("ApprovePage", () => {
     expect(approve).toHaveBeenCalledWith(relayUrl, "tok", "req-1", "ABCD-EFGH");
     expect(deny).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(APPROVE_PENDING_CODE_KEY)).toBeNull();
+  });
+
+  it("retries the identical code when the first lookup fails transiently", async () => {
+    // Given: a transient failure for the initial approval code.
+    vi.spyOn(accountSessionModule, "getStoredAccountSessionToken").mockReturnValue("tok");
+    const lookup = vi.spyOn(accountSessionModule, "lookupMachineRequest")
+      .mockRejectedValueOnce(new TypeError("Network unavailable"))
+      .mockResolvedValueOnce(request);
+    render(<ApprovePage relayUrl={relayUrl} />);
+    await flush();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+
+    // When: the unchanged code is submitted again.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Find computer" })); });
+
+    // Then: a second lookup recovers the request.
+    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(lookup).toHaveBeenLastCalledWith(relayUrl, "tok", "ABCD-EFGH");
+    expect(screen.getByTestId("machine-approval-card")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("returns to empty code entry when a different code is requested", async () => {
+    // Given: a loaded approval card.
+    vi.spyOn(accountSessionModule, "getStoredAccountSessionToken").mockReturnValue("tok");
+    const lookup = vi.spyOn(accountSessionModule, "lookupMachineRequest").mockResolvedValue(request);
+    render(<ApprovePage relayUrl={relayUrl} />);
+    await flush();
+
+    // When: the user chooses a different code.
+    fireEvent.click(screen.getByRole("button", { name: "Enter a different code" }));
+
+    // Then: the card and stored code are cleared without another lookup.
+    expect(screen.queryByTestId("machine-approval-card")).toBeNull();
+    expect(screen.getByLabelText("Approval code")).toHaveValue("");
+    expect(sessionStorage.getItem(APPROVE_PENDING_CODE_KEY)).toBeNull();
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["Approve", "Deny"] as const)("offers home navigation when %s completes", async (decision) => {
+    // Given: a loaded request with successful decision endpoints.
+    vi.spyOn(accountSessionModule, "getStoredAccountSessionToken").mockReturnValue("tok");
+    vi.spyOn(accountSessionModule, "lookupMachineRequest").mockResolvedValue(request);
+    const approve = vi.spyOn(accountSessionModule, "approveMachineRequest").mockResolvedValue({ machineId: "mach-new" });
+    const deny = vi.spyOn(accountSessionModule, "denyMachineRequest").mockResolvedValue(undefined);
+    render(<ApprovePage relayUrl={relayUrl} />);
+    await flush();
+
+    // When: the user completes the selected decision.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: decision })); });
+
+    // Then: confirmation and navigation replace the decision actions.
+    expect({ Approve: approve, Deny: deny }[decision]).toHaveBeenCalledWith(relayUrl, "tok", "req-1", "ABCD-EFGH");
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Ferryx" })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("button", { name: "Approve another computer" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(sessionStorage.getItem(APPROVE_PENDING_CODE_KEY)).toBeNull();
+  });
+
+  it("starts another approval when a completed request is cleared", async () => {
+    // Given: a completed approval.
+    vi.spyOn(accountSessionModule, "getStoredAccountSessionToken").mockReturnValue("tok");
+    vi.spyOn(accountSessionModule, "lookupMachineRequest").mockResolvedValue(request);
+    vi.spyOn(accountSessionModule, "approveMachineRequest").mockResolvedValue({ machineId: "mach-new" });
+    render(<ApprovePage relayUrl={relayUrl} />);
+    await flush();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Approve" })); });
+
+    // When: another computer needs approval.
+    fireEvent.click(screen.getByRole("button", { name: "Approve another computer" }));
+
+    // Then: empty code entry replaces the completed request.
+    expect(screen.getByLabelText("Approval code")).toHaveValue("");
+    expect(screen.queryByTestId("machine-approval-card")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Open Ferryx" })).toBeNull();
   });
 
   it("signs in, then continues to the lookup with the remembered code", async () => {
@@ -140,12 +220,15 @@ describe("ApprovePage", () => {
 describe("RemoteApp /approve route", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(nowSecs * 1000);
     sessionStorage.clear();
     localStorage.clear();
   });
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     window.history.replaceState(null, "", "/");
   });
 

@@ -55,11 +55,13 @@ vi.mock("./TerminalPane", () => ({
     searchOpen,
     headerHovered,
     needsAttention,
+    onReconnect,
   }: {
     session: TerminalSession;
     searchOpen?: boolean;
     headerHovered?: boolean;
     needsAttention?: boolean;
+    onReconnect?: (sessionId: string) => unknown;
   }) => (
     <div
       data-testid="terminal-pane"
@@ -67,7 +69,9 @@ vi.mock("./TerminalPane", () => ({
       data-search-open={String(Boolean(searchOpen))}
       data-header-hovered={String(Boolean(headerHovered))}
       data-needs-attention={String(Boolean(needsAttention))}
-    />
+    >
+      <button type="button" data-testid="mock-pane-reconnect" onClick={() => onReconnect?.(session.id)} />
+    </div>
   ),
 }));
 
@@ -645,6 +649,34 @@ describe("TerminalSplitView group and pane rendering", () => {
       expect(onEqualizeGroupRun).toHaveBeenCalledExactlyOnceWith("");
       now.mockRestore();
     });
+  });
+
+  it.each([
+    ["paired", "daemon:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "paired"],
+    ["ssh", "ssh:host-a:repo", "ssh"],
+  ] as const)("routes a %s pane's reconnect to its own transport handler", (_kind, workspaceId, expected) => {
+    // Given: a remote pane that still owns its backend, with both remote reconnect handlers wired.
+    const onReconnectSshSession = vi.fn();
+    const onReconnectPairedSession = vi.fn();
+    const sessions = { "session-1": { ...session("session-1", "backend-1"), workspaceId } };
+    render(
+      <TerminalSplitView
+        layout={singleTabLayout()}
+        sessions={sessions}
+        onReconnectSshSession={onReconnectSshSession}
+        onReconnectPairedSession={onReconnectPairedSession}
+      />,
+    );
+
+    // When: the pane asks to reconnect.
+    fireEvent.click(screen.getByTestId("mock-pane-reconnect"));
+
+    // Then: only the handler for that pane's transport runs.
+    const [chosen, other] = expected === "paired"
+      ? [onReconnectPairedSession, onReconnectSshSession]
+      : [onReconnectSshSession, onReconnectPairedSession];
+    expect(chosen).toHaveBeenCalledExactlyOnceWith("session-1");
+    expect(other).not.toHaveBeenCalled();
   });
 
   it("passes searchOpen true only to the pane matching searchLeafId", () => {

@@ -40,6 +40,7 @@ import {
   useRemoteDesktopSession,
   type RemoteDesktopStatus,
 } from "../state/remoteDesktopStore";
+import { cn } from "../lib/cn";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
@@ -560,6 +561,12 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
           : "Connecting…";
   const canRetry = status === "error" || status === "idle" || wireState === "ended";
   const showOverlay = status !== "connected" || !hasFrame;
+  // A frozen frame is arbitrary image content, so the overlay needs its own opaque scrim for
+  // readable status text; without a frame the pane is already black and needs none.
+  const scrim = hasFrame;
+  const statusColor = status === "error"
+    ? scrim ? "text-red-300" : "text-destructive"
+    : scrim ? "text-white" : "text-muted-foreground";
   const isConnected = status === "connected";
   const displays = meta?.displays ?? [];
   const clipboardAllowed = meta?.clipboardAllowed ?? true;
@@ -1003,11 +1010,18 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
           onBlur={releasePressedKeys}
         />
         {showOverlay ? (
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center">
+          <div
+            data-testid="remote-desktop-overlay"
+            data-scrim={scrim ? "true" : "false"}
+            className={cn(
+              "pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center",
+              scrim && "bg-black/75 text-white backdrop-blur-sm",
+            )}
+          >
             <p
               role={status === "error" ? "alert" : "status"}
               data-testid="remote-desktop-status"
-              className={`text-[12px] ${status === "error" ? "text-destructive" : "text-muted-foreground"}`}
+              className={cn("text-[12px]", statusColor)}
             >
               {statusText}
             </p>
@@ -1016,7 +1030,12 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
                 type="button"
                 size="sm"
                 variant="outline"
-                className="pointer-events-auto"
+                className={cn(
+                  "pointer-events-auto",
+                  // The outline variant paints bg-background, which is white in the light theme; over a
+                  // dark scrim that leaves white-on-white text, so pin the scrim palette explicitly.
+                  scrim && "border-white/40 bg-black/60 text-white hover:bg-black/80 hover:text-white",
+                )}
                 onClick={handleReconnect}
               >
                 Reconnect

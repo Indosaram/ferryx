@@ -364,6 +364,33 @@ describe("AccountLoginPage", () => {
       expect(onLoginSuccess).not.toHaveBeenCalled();
     });
 
+    it.each([
+      { condition: "the link expires", elapsed: 10 * 60 * 1000, terminal: false },
+      { condition: "polling fails terminally", elapsed: 2000, terminal: true },
+    ])("requests a fresh link when $condition", async ({ elapsed, terminal }) => {
+      // Given: a pending sign-in link.
+      vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
+      const requestSpy = vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle: "r".repeat(64) });
+      const pollSpy = vi.spyOn(accountSessionModule, "pollLogin").mockResolvedValue({ status: "pending" });
+      if (terminal) {
+        pollSpy.mockRejectedValueOnce(new accountSessionModule.AccountSessionError("LOGIN_HANDLE_INVALID", "invalid", 400));
+      }
+      render(<AccountLoginPage relayUrl={relayUrl} onLoginSuccess={vi.fn()} />);
+      fireEvent.change(screen.getByTestId("account-email-input"), { target: { value: "retry@example.com" } });
+      await act(async () => { fireEvent.click(screen.getByTestId("request-magic-link-btn")); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(elapsed); });
+      const resend = screen.getByTestId("resend-magic-link-btn");
+      expect(resend).toBeEnabled();
+
+      // When: the user resends the ended sign-in request.
+      await act(async () => { fireEvent.click(resend); });
+
+      // Then: another link is requested for the same account and cooldown restarts.
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(requestSpy).toHaveBeenLastCalledWith(relayUrl, "retry@example.com");
+      expect(resend).toBeDisabled();
+    });
+
     it("CASE D: cleans up polling interval on unmount without leaking timer", async () => {
       const loginHandle = "f".repeat(64);
       vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
@@ -481,7 +508,8 @@ describe("AccountLoginPage", () => {
       expect(banner.textContent).not.toContain("LOGIN_CODE_USED");
     });
 
-    it("enables resending the link after 30 seconds of waiting", async () => {
+    it("enables resending the link when the 30-second cooldown ends", async () => {
+      // Given: a newly requested sign-in link.
       vi.useFakeTimers();
       vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
       const requestSpy = vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle: "h".repeat(64) });
@@ -495,10 +523,13 @@ describe("AccountLoginPage", () => {
       const resend = screen.getByTestId("resend-magic-link-btn");
       expect(resend).toBeDisabled();
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(30_000);
-      });
-      expect(resend).not.toBeDisabled();
+      // When: the cooldown approaches its boundary, then ends.
+      await act(async () => { await vi.advanceTimersByTimeAsync(29_000); });
+      expect(resend).toBeDisabled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+
+      // Then: resending is enabled only after all 30 seconds.
+      expect(resend).toBeEnabled();
       await act(async () => {
         fireEvent.click(resend);
       });

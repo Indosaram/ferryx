@@ -247,18 +247,17 @@ export type WorktreeDeleteServices = {
 
 export function createRemoteWorktreeDeleteServices(workspaceId: string): WorktreeDeleteServices {
   return {
+    // The remote host owns the truth: dirty files, upstream, and HEAD-merge state come from
+    // real Git state on that machine. Never fabricate a clean/merged preview here — a guessed
+    // `merged: true` is exactly what tells a user to discard work they still need.
     previewDelete: async (worktree) => {
-      const branchName = (worktree.branch ?? "").replace(/^refs\/heads\//, "");
-      return {
-        dirtyState: { isDirty: false, files: [] },
-        missing: false,
-        branch: branchName || (worktree.path.split(/[/\\]/).pop() ?? "worktree"),
-        head: worktree.head ?? "",
-        upstream: null,
-        merged: true,
-        ahead: null,
-        behind: null,
-      };
+      if (!isTauri()) {
+        throw new Error("Remote worktree inspection is available only in the Ferryx desktop runtime");
+      }
+      return invoke<BranchDeletionPreview>("cmd_ssh_preview_remote_worktree_delete", {
+        workspaceId,
+        path: worktree.path,
+      });
     },
     deleteSafe: async (worktree) => {
       await deleteRemoteWorktree({

@@ -128,6 +128,75 @@ describe("Tailscale discovery lifecycle", () => {
     expect(getTailscaleDiscoverySnapshot().hosts.map((item) => item.id)).toEqual(["existing", "new"]);
   });
 
+  it("preserves readiness with the latest host object after presentation edits", async () => {
+    // Given a provisioned Tailscale target.
+    const original = host("box");
+    mocks.invoke.mockResolvedValue({ hosts: [original], targets: [{ host: original, reachable: true, helper: "installed", checkedAt: 1 }] });
+    await syncTailscaleMachines();
+    // When presentation-only fields change.
+    const edited: SshHost = { ...original, label: "Office", shell: "pwsh", tunnels: [] };
+    mergeTailscaleSshHosts([edited]);
+    // Then readiness survives and the host presentation is current.
+    const target = getTailscaleDiscoverySnapshot().targetsByHost.get(original.id);
+    expect(isTailscaleProvisioned(target)).toBe(true);
+    expect(target?.host).toBe(edited);
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { hostname: "new.tailnet" }, { port: 2222 }, { username: "other" },
+    { authMethod: "password" as const }, { identityFile: "/new/key" },
+    { jumpHost: "gateway" }, { disabled: true },
+  ])("invalidates readiness and rechecks connection edits %s", async (edit) => {
+    // Given a provisioned target and a deferred replacement probe.
+    const original = host("box");
+    const response = deferred<{ hosts: SshHost[]; targets: [] }>();
+    mocks.invoke.mockResolvedValueOnce({ hosts: [original], targets: [{ host: original, reachable: true, helper: "installed", checkedAt: 1 }] })
+      .mockReturnValueOnce(response.promise);
+    await syncTailscaleMachines();
+    // When connection fields change.
+    const edited = { ...original, ...edit };
+    mergeTailscaleSshHosts([edited]);
+    // Then the old endpoint's readiness is removed before its replacement returns.
+    expect(getTailscaleDiscoverySnapshot().targetsByHost.has(original.id)).toBe(false);
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    const completed = deferred<void>();
+    const unsubscribe = subscribeTailscaleDiscovery(() => {
+      if (!getTailscaleDiscoverySnapshot().refreshing) completed.resolve();
+    });
+    response.resolve({ hosts: [edited], targets: [] });
+    await completed.promise;
+    unsubscribe();
+  });
+
+  it("fences an old ready result after a connection edit and removal during sync", async () => {
+    // Given an existing target and a pending refresh of its old endpoint.
+    const original = host("box");
+    mocks.invoke.mockResolvedValueOnce({ hosts: [original], targets: [{ host: original, reachable: true, helper: "installed", checkedAt: 1 }] });
+    await syncTailscaleMachines();
+    const stale = deferred<unknown>();
+    const replacement = deferred<{ hosts: SshHost[]; targets: [] }>();
+    const called = deferred<void>();
+    mocks.invoke.mockReturnValueOnce(stale.promise).mockImplementationOnce(() => { called.resolve(); return replacement.promise; });
+    const sync = syncTailscaleMachines();
+    // When an edit and deletion supersede that refresh.
+    mergeTailscaleSshHosts([{ ...original, hostname: "changed.tailnet" }]);
+    mergeTailscaleSshHosts([]);
+    stale.resolve({ hosts: [original], targets: [{ host: original, reachable: true, helper: "installed", checkedAt: 2 }] });
+    await sync;
+    await called.promise;
+    // Then the stale result cannot resurrect the removed target or inventory.
+    expect(getTailscaleDiscoverySnapshot().hosts).toEqual([]);
+    expect(getTailscaleDiscoverySnapshot().targetsByHost.size).toBe(0);
+    const completed = deferred<void>();
+    const unsubscribe = subscribeTailscaleDiscovery(() => {
+      if (!getTailscaleDiscoverySnapshot().refreshing) completed.resolve();
+    });
+    replacement.resolve({ hosts: [], targets: [] });
+    await completed.promise;
+    unsubscribe();
+  });
+
   it("marks a host provisioned only when SSH succeeds and helper is installed", () => {
     const target = { host: host("ready"), reachable: true, helper: "installed" as const, checkedAt: 1 };
     expect(isTailscaleProvisioned(target)).toBe(true);

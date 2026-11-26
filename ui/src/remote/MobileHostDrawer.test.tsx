@@ -178,6 +178,21 @@ describe("MobileHostDrawer", () => {
     }
   });
 
+  it("keeps paired host selection available when the local computer is hidden", () => {
+    // Given a relay-origin drawer with one paired host.
+    remoteHostStore.setHosts([makeHost()]);
+    const onOpenChange = vi.fn();
+    render(<MobileHostDrawer open showLocalComputer={false} onOpenChange={onOpenChange} />);
+    expect(screen.queryByTestId("mobile-host-option-local")).not.toBeInTheDocument();
+
+    // When the paired host is selected.
+    fireEvent.click(screen.getByTestId("mobile-host-option-host-1"));
+
+    // Then the host is selected and the drawer closes without a local-origin reset.
+    expect(remoteHostStore.getState().activeHostId).toBe("host-1");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it("selects local (null) via remoteHostStore.setActiveHost when the local option is tapped", () => {
     remoteHostStore.setHosts([makeHost({ hostId: "host-1", name: "Studio Mac" })]);
     remoteHostStore.setActiveHost("host-1");

@@ -13,6 +13,7 @@ import type { SshHost } from "../../../lib/sshHosts";
 import type { StoreStatus, TunnelListResponse, TunnelSpec, TunnelView } from "../../../lib/sshTunnels";
 import { SSH_TUNNEL_CAPABILITY, SSH_TUNNEL_COMMANDS } from "../../../lib/sshTunnels";
 import { SshTunnelsEditor } from "./SshTunnelsEditor";
+import { describeTunnelFailure } from "./tunnelPresentation";
 import { useHostTunnels } from "./useHostTunnels";
 
 /**
@@ -333,5 +334,65 @@ describe("SshTunnelsEditor", () => {
     await waitFor(() => expect(tunnelCalls(SSH_TUNNEL_COMMANDS.stop)).toHaveLength(1));
     expect((tunnelCalls(SSH_TUNNEL_COMMANDS.stop)[0] as [string, Record<string, unknown>])[1]).toEqual({ runtimeId: "runtime-9" });
     expect(tunnelCalls(SSH_TUNNEL_COMMANDS.start)).toHaveLength(0);
+  });
+
+  it("renders a runtime failure through describeTunnelFailure, never the raw code", async () => {
+    await renderEditor([
+      listResponse({
+        definitions: [{ hostId: host.id, specs: [spec()] }],
+        views: [view({ state: "failed", runtimeId: null, failure: "port_in_use" })],
+      }),
+    ]);
+
+    const failure = await screen.findByTestId("ssh-tunnel-failure-spec-1");
+    // The machine token stays on the attribute; the text is the shared formatter's sentence.
+    expect(failure).toHaveAttribute("data-failure", "port_in_use");
+    expect(failure.textContent).toBe(describeTunnelFailure("port_in_use", null));
+    expect(failure.textContent).not.toContain("port_in_use");
+  });
+
+  it("narrows an unsupported_config failure with its piece text", async () => {
+    await renderEditor([
+      listResponse({
+        definitions: [{ hostId: host.id, specs: [spec()] }],
+        views: [view({ state: "failed", runtimeId: null, failure: "unsupported_config", failurePiece: "match_block" })],
+      }),
+    ]);
+
+    const failure = await screen.findByTestId("ssh-tunnel-failure-spec-1");
+    expect(failure.textContent).toBe(describeTunnelFailure("unsupported_config", "match_block"));
+  });
+
+  it("sends one start request for a double click while the first is in flight", async () => {
+    const resolvers: Array<() => void> = [];
+    await renderEditor(
+      [
+        listResponse({
+          definitions: [{ hostId: host.id, specs: [spec()] }],
+          views: [view({ state: "stopped", runtimeId: null })],
+          hostRevisions: [{ hostId: host.id, revision: 5 }],
+        }),
+      ],
+      {
+        handlers: {
+          [SSH_TUNNEL_COMMANDS.start]: () => new Promise((resolve) => {
+            resolvers.push(() => resolve({ view: null, acceptedRevision: 5 }));
+          }),
+        },
+      },
+    );
+
+    const start = await screen.findByRole("button", { name: "Start tunnel Postgres" });
+    // Both clicks land in one commit: the button cannot be disabled yet, so the refusal has to
+    // come from the hook's in-flight guard, not from the disabled attribute.
+    await act(async () => {
+      fireEvent.click(start);
+      fireEvent.click(start);
+    });
+
+    expect(tunnelCalls(SSH_TUNNEL_COMMANDS.start)).toHaveLength(1);
+    // While the mutation is in flight every control of the section is disabled.
+    expect(start).toBeDisabled();
+    await act(async () => { for (const resolve of resolvers) resolve(); });
   });
 });

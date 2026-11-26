@@ -72,6 +72,7 @@ export type RemoteSidebarProps = {
   readonly density: SidebarDensity;
   readonly pending: RemoteSidebarPending | null;
   readonly onSelect: (target: RemoteSidebarTarget) => void;
+  readonly onRetrySection?: (machineId: string) => void;
   readonly view: SidebarViewId;
   readonly onViewChange?: (view: SidebarViewId) => void;
   readonly supervisor?: { readonly content: ReactNode };
@@ -86,22 +87,27 @@ function isPendingRow(pending: RemoteSidebarPending | null, machineId: string, n
     pending.worktreeSlug === node.worktreeSlug;
 }
 
-function SectionState({ section, touch }: { readonly section: RemoteSidebarSection; readonly touch: boolean }) {
+function SectionState({ section, sidebar }: { readonly section: RemoteSidebarSection; readonly sidebar: RemoteSidebarProps }) {
+  const touch = sidebar.density === "touch";
   const classes = cn("px-3 py-2 text-muted-foreground", touch ? "text-sm" : "text-[11px]");
   if (section.state === "loading") {
     return <p role="status" className={classes}>Loading worktrees…</p>;
   }
-  if (!section.error) return null;
-  const text =
-    section.state === "offline"
-      ? "Can't reach this computer right now."
-      : touch
-        ? userFacingError(section.error, { action: "load the worktrees" })
-        : `Worktrees unavailable: ${section.error.message}`;
+  if (!section.error && section.state !== "offline" && section.state !== "error") return null;
+  /* An offline machine is a presence fact, not a failed request: the copy says it is unreachable
+     instead of naming an action the user just watched fail. A real error is worded by its code. */
+  const text = section.state === "offline"
+    ? "Can't reach this computer right now."
+    : userFacingError(section.error, { action: "load the worktrees" });
   return (
-    <p role="status" className={classes}>
-      {section.model ? `${text} Showing the last list.` : text}
-    </p>
+    <div className={classes}>
+      <p role="status">{section.model ? `${text} Showing the last list.` : text}</p>
+      {sidebar.onRetrySection && (section.state === "error" || section.state === "offline") ? (
+        <button type="button" onClick={() => sidebar.onRetrySection?.(section.machineId)} className={cn("rounded px-2 underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring", touch ? "min-h-11" : "min-h-6")}>
+          Retry
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -188,7 +194,7 @@ function MachineSection({ section, sidebar, first, heading, sharedQuery }: Secti
         </div>
       ) : null}
       {first ? sidebar.status : null}
-      <SectionState section={section} touch={touch} />
+      <SectionState section={section} sidebar={sidebar} />
       {model && live ? (
         <SidebarView
           model={model}

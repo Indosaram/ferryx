@@ -149,6 +149,13 @@ export function TerminalPane({
     };
   }, [session.id, session.backendSessionId]);
   const sleepingSessionIds = useSleepingSessionIds();
+  // The store is the source of truth for native paired-terminal support, and it flips while the
+  // app runs (an upgrade installs the proxy, a setting is toggled). Reading it through the store's
+  // subscription keeps the pane in step; a one-shot getState() would freeze the first answer.
+  const pairedMachineFeaturesEnabled = useSyncExternalStore(
+    remoteHostStore.subscribe,
+    () => remoteHostStore.getState().machineFeaturesEnabled,
+  );
 
   const splitIntent = localSplitIntent(session);
   const splitPending = Boolean(splitIntent && session.reconnectLifecycle !== "idle" && session.reconnectLifecycle !== "failed");
@@ -157,6 +164,10 @@ export function TerminalPane({
   // local pane: it takes the local presentation and is resumed (agent) or reopened (shell) on the
   // same remote host. Only a pane that still owns a remote target uses the SSH reattach overlay.
   const isSshSession = isRemoteWorkspaceId(session.workspaceId) && !isStandbyBackendSessionId(session.backendSessionId);
+  // A paired pane talks to its own machine's daemon, not to an SSH helper. It takes the local
+  // presentation (a paired backend is replaced through the daemon, never reattached by an SSH
+  // helper), but its copy must name the paired machine instead of a local shell.
+  const isPairedSession = isPairedWorkspaceId(session.workspaceId) && !isStandbyBackendSessionId(session.backendSessionId);
   const isRemoteGone = session.backendUnavailableReason === REMOTE_SESSION_GONE_REASON &&
     isStandbyBackendSessionId(session.backendSessionId);
   const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
@@ -192,6 +203,8 @@ export function TerminalPane({
     session.lifecycle === "exited"
   ))));
   const isExited = isSshSession ? showSshOverlay : isRecoveryBlocked || isRecoveryRecovering || isLocalExited;
+  /* The overlay's machine-readable phase, so tests and styling read a token instead of the copy. */
+  const paneState = isLocalReconnecting || isSshReconnecting ? "reconnecting" : isExited ? "disconnected" : "live";
   const isSuspended =
     !isExited && (sleepingSessionIds.has(session.id) || session.processState === "suspended");
   const isAgentSession = Boolean(
@@ -284,9 +297,10 @@ export function TerminalPane({
 
   const handleOpenNewShell = async () => {
     // A local reconnecting overlay is itself "pending", but the user must always be able to escape a
-    // session that may never come back (e.g. every PTY died with an OS reboot). Only a replacement
-    // already in flight (`pendingLocal`) blocks that escape.
-    if ((isPending && !isLocalReconnecting) || pendingLocal || !onOpenNewShell) return;
+    // session that may never come back (e.g. every PTY died with an OS reboot). A remote overlay is
+    // pending for the same reason: its own reconnect may never settle. Only a replacement already
+    // in flight (`pendingLocal`) blocks that escape.
+    if ((isPending && !isLocalReconnecting && !isSshSession) || pendingLocal || !onOpenNewShell) return;
     setPendingLocal(true);
     setReplacementError(null);
     try {
@@ -410,7 +424,6 @@ export function TerminalPane({
         </div>
       );
     }
-    const pairedMachineFeaturesEnabled = remoteHostStore.getState().machineFeaturesEnabled === true;
     if (!pairedMachineFeaturesEnabled || !onOpenNewShell) {
       return <div data-testid="paired-terminal-unavailable" role="status" className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
         <div>
@@ -567,6 +580,8 @@ export function TerminalPane({
           aria-describedby={errorDescription ? descId : undefined}
           ref={statusBarRef}
           data-testid="terminal-pane-overlay"
+          data-pane-state={paneState}
+          data-paired={isPairedSession ? "true" : "false"}
           data-pane-status-bar={statusBarHidden ? "pending" : "docked"}
           data-pane-status-edge={statusBarEdge}
           aria-keyshortcuts={isPending || isTransientOutage || !statusBarHasAction ? undefined : "Enter"}
@@ -612,7 +627,9 @@ export function TerminalPane({
                 : isLocalReconnecting
                   ? session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "binding"
                     ? "Starting shell..."
-                    : "Reconnecting session..."
+                    : isPairedSession
+                      ? "Reconnecting to paired machine..."
+                      : "Reconnecting session..."
                   : isRecoveryBlocked
                     ? "Session recovery blocked"
                     : isStandbyShell
@@ -623,7 +640,9 @@ export function TerminalPane({
                         : "Shell not running"
                     : isAgentSession
                       ? "Session disconnected"
-                      : session.exitCode != null && session.exitCode !== 0
+                      : isPairedSession && !isRecoveryExited
+                        ? "Paired terminal disconnected"
+                        : session.exitCode != null && session.exitCode !== 0
                         ? `Shell exited (code ${session.exitCode})`
                         : "Shell exited"}
             </h2>
@@ -703,15 +722,58 @@ export function TerminalPane({
                       <span>Reconnecting to remote session...</span>
                     </div>
                     {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" className="h-7 shrink-0 text-[11px]" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={pendingLocal}
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="h-7 shrink-0 text-[11px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
                   </>
                 ) : isSshExpired ? (
-                  <p className="min-w-0 truncate text-[12px] text-muted-foreground">
-                    The remote process has exited or is no longer available on the host.
-                  </p>
+                  <>
+                    <p className="min-w-0 truncate text-[12px] text-muted-foreground">
+                      The remote process has exited or is no longer available on the host.
+                    </p>
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={pendingLocal}
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="h-7 shrink-0 text-[11px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
+                  </>
                 ) : isSshLegacyLost ? (
-                  <p className="min-w-0 truncate text-[12px] text-muted-foreground">
-                    This session was started before process-preserving reconnection was supported and cannot be restored.
-                  </p>
+                  <>
+                    <p className="min-w-0 truncate text-[12px] text-muted-foreground">
+                      This session was started before process-preserving reconnection was supported and cannot be restored.
+                    </p>
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={pendingLocal}
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="h-7 shrink-0 text-[11px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
+                  </>
                 ) : (
                   <>
                     <p className="min-w-0 truncate text-[12px] text-muted-foreground">
@@ -730,6 +792,19 @@ export function TerminalPane({
                       {isPending ? <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : null}
                       <span>{isPending ? "Reconnecting..." : "Reconnect SSH"}</span>
                     </Button>
+                    {onOpenNewShell ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={pendingLocal}
+                        aria-label="Open new shell"
+                        onClick={handleOpenNewShell}
+                        className="h-7 shrink-0 text-[11px]"
+                      >
+                        <span>Open new shell</span>
+                      </Button>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -910,7 +985,7 @@ export function TerminalPane({
                   <>
                     <div role="status" className="flex min-w-0 items-center gap-2 truncate text-[12px] text-muted-foreground">
                       <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
-                      <span>{recoveryState?.reason ?? "Reconnecting to session..."}</span>
+                      <span>{recoveryState?.reason ?? (isPairedSession ? "Reconnecting to paired machine..." : "Reconnecting to session...")}</span>
                     </div>
                     {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" className="h-7 shrink-0 text-[11px]" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
                     {onOpenNewShell && canReplaceShellSession(session) ? (
@@ -940,7 +1015,9 @@ export function TerminalPane({
                         variant="secondary"
                         disabled={isPending}
                         aria-busy={isPending}
-                        aria-label={isPending ? "Reconnecting shell" : canRetryRecovery ? "Retry session recovery" : "Reconnect shell"}
+                        aria-label={isPending
+                          ? isPairedSession ? "Reconnecting paired session" : "Reconnecting shell"
+                          : canRetryRecovery ? "Retry session recovery" : isPairedSession ? "Reconnect paired session" : "Reconnect shell"}
                         onClick={handleReconnect}
                         className="h-7 shrink-0 text-[11px]"
                       >
@@ -952,7 +1029,7 @@ export function TerminalPane({
                         ) : (
                           <>
                             <RefreshCw className="size-3.5" aria-hidden="true" />
-                            <span>{canRetryRecovery ? "Retry" : "Reconnect shell"}</span>
+                            <span>{canRetryRecovery ? "Retry" : isPairedSession ? "Reconnect paired session" : "Reconnect shell"}</span>
                           </>
                         )}
                       </Button>

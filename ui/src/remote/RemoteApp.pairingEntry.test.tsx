@@ -2,6 +2,8 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteApp } from "./RemoteApp";
+import { isDefaultRelayOrigin, RELAY_PAIRING_INCOMPLETE, servesAccountApi } from "./PairingPage";
+import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
 import { remoteHostKey, remoteHostStore } from "../state/remoteHostStore";
 import { clearStoredAccountSessionToken } from "./accountSession";
 
@@ -162,5 +164,105 @@ describe("RemoteApp pairing entry", () => {
 
     expect(screen.getByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Pair this phone" })).toBeNull();
+  });
+
+  it("a relay exchange that answers without a machine id reports an error instead of storing an unusable host", async () => {
+    // Given a relay pairing page whose exchange succeeds without the host identity
+    window.history.replaceState(null, "", "/pair?relay=1");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      if (String(input).includes("/api/v1/pair/exchange")) return Response.json({ token: "orphan-token" });
+      return new Response("{}", { status: 404 });
+    }));
+    await act(async () => { render(<RemoteApp />); });
+
+    // When the person submits a valid-looking code
+    await submitCode("482913");
+
+    // Then the answer is reported, and no credential lands under a slot no host can use
+    expect(await screen.findByText(RELAY_PAIRING_INCOMPLETE)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(RELAY_PAIRING_INCOMPLETE);
+    expect(Object.keys(remoteHostStore.getState().hosts)).toEqual([]);
+    expect(localStorage.getItem(`ferryx_remote_token_local:${window.location.origin}`)).toBeNull();
+    expect(window.location.pathname).toBe("/pair");
+  });
+
+  it("going back from the pairing entry returns to sign-in", async () => {
+    // Given a phone that opened the pairing entry
+    window.history.replaceState(null, "", "/pair");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 404 })));
+    await act(async () => { render(<RemoteApp />); });
+    expect(screen.getByRole("heading", { name: "Pair this phone" })).toBeInTheDocument();
+
+    // When the browser goes back to the root
+    await act(async () => {
+      window.history.pushState(null, "", "/");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    // Then the entry is left, not still shown over the root the browser moved to
+    expect(await screen.findByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Pair this phone" })).toBeNull();
+  });
+
+  it("a relay page's pairing entry keeps the relay marker so a reload stays on the relay", async () => {
+    // Given a relay page (the desktop's link marker is present) showing sign-in
+    window.history.replaceState(null, "", "/?relay=1");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 404 })));
+    await act(async () => { render(<RemoteApp />); });
+
+    // When pairing with a code is chosen
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair with a code instead" })); });
+
+    // Then the history entry keeps the marker that classifies the page
+    expect(window.location.pathname).toBe("/pair");
+    expect(window.location.search).toBe("?relay=1");
+    expect(screen.getByRole("heading", { name: "Pair this phone" })).toBeInTheDocument();
+  });
+
+  it("a direct gateway's pairing entry adds no relay marker", async () => {
+    // Given a direct gateway page showing sign-in
+    window.history.replaceState(null, "", "/");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 404 })));
+    await act(async () => { render(<RemoteApp />); });
+
+    // When pairing with a code is chosen
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair with a code instead" })); });
+
+    // Then the entry is the plain LAN route the gateway serves
+    expect(window.location.pathname).toBe("/pair");
+    expect(window.location.search).toBe("");
+  });
+});
+
+describe("relay origin classification", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("treats an origin whose account health route answers JSON as the relay", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(Response.json({ status: "ok" })));
+
+    await expect(servesAccountApi("https://relay.example.com")).resolves.toBe(true);
+  });
+
+  it.each([
+    { name: "the desktop gateway's SPA fallback 404", response: () => new Response("<!doctype html>", { status: 404 }) },
+    { name: "an HTML answer at 200", response: () => new Response("<html></html>", { status: 200, headers: { "Content-Type": "text/html" } }) },
+  ])("treats $name as a direct gateway, not a relay", async ({ response }) => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => response()));
+
+    await expect(servesAccountApi("http://127.0.0.1:43821")).resolves.toBe(false);
+  });
+
+  it("treats a failed health probe as a direct gateway so a blip cannot reclassify the page", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => { throw new TypeError("Failed to fetch"); }));
+
+    await expect(servesAccountApi("http://127.0.0.1:43821")).resolves.toBe(false);
+  });
+
+  it("classifies only the product relay origin as the relay by origin", () => {
+    expect(isDefaultRelayOrigin(DEFAULT_RELAY_ORIGIN)).toBe(true);
+    expect(isDefaultRelayOrigin(window.location.origin)).toBe(false);
   });
 });

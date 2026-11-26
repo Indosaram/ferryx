@@ -132,6 +132,7 @@ export type MobileHostDrawerProps = {
   onDisconnect?: () => void;
   onSignOut?: () => void;
   isAccountSession?: boolean;
+  readonly showLocalComputer?: boolean;
 };
 
 /**
@@ -139,7 +140,7 @@ export type MobileHostDrawerProps = {
  * sidebar switcher behavior (switching only ever updates `activeHostId`) but uses a
  * bottom-sheet layout sized for touch targets instead of a compact popover.
  */
-export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, isAccountSession }: MobileHostDrawerProps) {
+export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, isAccountSession, showLocalComputer = true }: MobileHostDrawerProps) {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const hosts = useMemo(() => selectHostList(state), [state]);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
@@ -263,7 +264,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
       footer={footer}
     >
       <div className="space-y-1">
-          <button
+          {showLocalComputer ? <button
             type="button"
             aria-current={state.activeHostId === null || undefined}
             data-testid="mobile-host-option-local"
@@ -276,7 +277,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
             <Laptop className="size-4 shrink-0" aria-hidden="true" />
             <span className="min-w-0 flex-1 truncate text-sm font-medium">This computer</span>
             {state.activeHostId === null ? <Check className="size-4 shrink-0" aria-hidden="true" /> : null}
-          </button>
+          </button> : null}
 
           {hosts.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-chat-foreground-secondary">

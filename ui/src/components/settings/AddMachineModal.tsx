@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -28,6 +28,7 @@ import {
 import { isStructuredIpcError } from "../../lib/tauri";
 import {
   extractIpcErrorMessage,
+  formatSshTarget,
   getSshConfigPathOverride,
   importSshConfig,
   installFerryxNode,
@@ -56,6 +57,7 @@ import { Card } from "../ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { applySshTarget, hostnamePasteHandler, SshCommandField } from "./remote/SshCommandField";
 import { parseSshTarget, type ParsedSshTarget } from "../../lib/sshTarget";
 import { MachineApprovalCard, machineApprovalErrorMessage } from "./remote/MachineApprovalCard";
@@ -205,6 +207,36 @@ function formatExpiry(expiresAtSecs: number, nowMs: number): string {
   return minutes >= 120 ? `at ${at}` : `in ${minutes} min (${at})`;
 }
 
+/**
+ * The selected subset of an SSH config, in the format the config parser reads.
+ *
+ * The import IPC parses and stores the whole text it is handed, so per-host selection is
+ * expressed by rebuilding a config that holds only the chosen blocks: every host here came
+ * from a parse of the same file, so the round trip preserves each host's fields.
+ */
+export function selectedHostsConfig(hosts: readonly SshHost[]): string {
+  const lines: string[] = [];
+  for (const host of hosts) {
+    lines.push(`Host ${host.label}`);
+    lines.push(`  HostName ${host.hostname}`);
+    if (host.username) lines.push(`  User ${host.username}`);
+    if (host.port) lines.push(`  Port ${host.port}`);
+    // Only IdentityFile is read through the parser's quoted-value path (ssh/config.rs
+    // parse_ssh_value); unquoted, a space or `#` in the path would truncate it.
+    if (host.identityFile) {
+      lines.push(`  IdentityFile "${host.identityFile.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+    }
+    if (host.jumpHost) lines.push(`  ProxyJump ${host.jumpHost}`);
+  }
+  return lines.join("\n");
+}
+
+const SSH_AUTH_OPTIONS: ReadonlyArray<{ value: SshAuthMethod; label: string }> = [
+  { value: "agent", label: "SSH Agent" },
+  { value: "key", label: "Key File" },
+  { value: "password", label: "Password" },
+];
+
 const FOCUSABLE =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -233,7 +265,14 @@ export interface AddMachineModalProps {
 export function AddMachineModal(props: AddMachineModalProps) {
   const { isOpen, onClose } = props;
   const [busy, setBusy] = useState(false);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  // Selects portal into the dialog: a body-level portal sits outside the dialog's focus scope, and
+  // the two Radix focus scopes then bounce focus between each other until the stack overflows.
+  const [dialogContainer, setDialogContainer] = useState<HTMLDivElement | null>(null);
+  const setContentNode = useCallback((node: HTMLDivElement | null) => {
+    contentRef.current = node;
+    setDialogContainer(node);
+  }, []);
   const triggerRef = useRef<HTMLElement | null>(null);
   const openRef = useRef(isOpen);
   openRef.current = isOpen;
@@ -289,7 +328,7 @@ export function AddMachineModal(props: AddMachineModalProps) {
   return (
     <Dialog open={isOpen} onOpenChange={(next) => { if (!next) handleClose(); }}>
       <DialogContent
-        ref={contentRef}
+        ref={setContentNode}
         closeDisabled={busy}
         onKeyDown={handleKeyDown}
         // Escape is handled in onKeyDown so it can stop propagation; outside clicks never
@@ -306,6 +345,7 @@ export function AddMachineModal(props: AddMachineModalProps) {
           setBusy={setBusy}
           onClose={handleClose}
           isActive={() => openRef.current}
+          dialogContainer={dialogContainer}
         />
       </DialogContent>
     </Dialog>
@@ -316,6 +356,7 @@ interface AddMachineWizardProps extends AddMachineModalProps {
   busy: boolean;
   setBusy: (busy: boolean) => void;
   isActive: () => boolean;
+  dialogContainer: HTMLElement | null;
 }
 
 function AddMachineWizard({
@@ -334,6 +375,7 @@ function AddMachineWizard({
   busy,
   setBusy,
   isActive,
+  dialogContainer,
 }: AddMachineWizardProps) {
   const idPrefix = useId();
   const [step, setStep] = useState<"choose" | "details">(isAddMachineMethod(initialMethod) ? "details" : "choose");
@@ -353,6 +395,8 @@ function AddMachineWizard({
   const [configPathOverride, setConfigPathOverrideState] = useState<string | null>(() =>
     getSshConfigPathOverride(),
   );
+  // Every discovered host starts checked; the set is reset when a different config loads.
+  const [selectedConfigHosts, setSelectedConfigHosts] = useState<ReadonlySet<string>>(() => new Set());
 
   // Status state
   const [error, setError] = useState<string | null>(null);
@@ -401,6 +445,7 @@ function AddMachineWizard({
       .then(cfg => {
         if (!stale && alive()) {
           setSystemConfig(cfg);
+          setSelectedConfigHosts(new Set((cfg?.hosts ?? []).map(host => host.id)));
           if (cfg && cfg.hosts.length > 0) {
             setImportSubMode("system");
           }
@@ -489,10 +534,13 @@ function AddMachineWizard({
     };
 
     try {
-      if (candidateHost.authMethod === "password") {
-        await setSshPassword(candidateHost, sshPassword);
-      }
-      const summary = await testSshConnection(candidateHost);
+      // The typed password is a candidate only: it rides along with the probe and is
+      // persisted after the host is saved, so a failed add never touches the credentials
+      // of a host that already exists.
+      const summary = await testSshConnection(
+        candidateHost,
+        candidateHost.authMethod === "password" ? sshPassword : undefined,
+      );
       if (!alive()) return;
 
       if (!summary.reachable) {
@@ -502,6 +550,17 @@ function AddMachineWizard({
 
       await updateSshHost(candidateHost);
       if (!alive()) return;
+
+      if (candidateHost.authMethod === "password") {
+        try {
+          await setSshPassword(candidateHost, sshPassword);
+        } catch (err) {
+          if (!alive()) return;
+          reportError(err, "The machine was saved, but its SSH password could not be stored.");
+          return;
+        }
+        if (!alive()) return;
+      }
 
       const target: MachineProjectTarget = { kind: "ssh", hostId: candidateHost.id };
       setSshPasswordInput("");
@@ -562,13 +621,24 @@ function AddMachineWizard({
     }
   };
 
-  const handleImportSystemAll = async () => {
-    if (busy || !systemConfig?.rawText) return;
+  const chosenConfigHosts = (systemConfig?.hosts ?? []).filter(host => selectedConfigHosts.has(host.id));
+
+  const toggleConfigHost = (id: string) => {
+    setSelectedConfigHosts(current => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleImportSystemSelected = async () => {
+    if (busy || chosenConfigHosts.length === 0) return;
     setBusy(true);
     setError(null);
 
     try {
-      const importedHosts = await importSshConfig(systemConfig.rawText);
+      const importedHosts = await importSshConfig(selectedHostsConfig(chosenConfigHosts));
       if (!alive()) return;
 
       if (Array.isArray(importedHosts) && importedHosts.length > 0) {
@@ -684,6 +754,7 @@ function AddMachineWizard({
               <Button
                 type="button"
                 data-result-action
+                disabled={busy}
                 onClick={() => {
                   onOfferProject?.(successTarget.target);
                   onClose();
@@ -691,7 +762,7 @@ function AddMachineWizard({
               >
                 Add Project
               </Button>
-              <Button type="button" variant="outline" onClick={onClose}>
+              <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
                 Done
               </Button>
             </div>
@@ -709,7 +780,7 @@ function AddMachineWizard({
               Imported machines are recorded as unchecked. Test the connection from machine details before adding remote projects.
             </p>
             <div className="flex justify-center gap-3 pt-2">
-              <Button type="button" data-result-action onClick={onClose}>
+              <Button type="button" data-result-action disabled={busy} onClick={onClose}>
                 Done
               </Button>
             </div>
@@ -860,15 +931,37 @@ function AddMachineWizard({
 
             <div className="space-y-1">
               <Label htmlFor="ssh-auth-method" className="text-[11px] font-medium">Authentication method</Label>
-              <select id="ssh-auth-method" aria-label="Authentication method" disabled={busy}
-                className="h-9 w-full rounded-md border border-input bg-background px-3 text-[12px]"
+              <Select
                 value={sshForm.authMethod}
-                onChange={e => { setSshForm(f => ({ ...f, authMethod: e.target.value as SshAuthMethod })); setSshPasswordInput(""); }}>
-                <option value="agent">SSH Agent</option>
-                <option value="key">Key File</option>
-                <option value="password">Password</option>
-              </select>
+                disabled={busy}
+                onValueChange={value => { setSshForm(f => ({ ...f, authMethod: value as SshAuthMethod })); setSshPasswordInput(""); }}
+              >
+                <SelectTrigger id="ssh-auth-method" aria-label="Authentication method" className="text-[12px]">
+                  {/* Explicit text: a bare SelectValue stays blank until the menu has opened once. */}
+                  <SelectValue>{SSH_AUTH_OPTIONS.find(option => option.value === sshForm.authMethod)?.label}</SelectValue>
+                </SelectTrigger>
+                <SelectContent container={dialogContainer}>
+                  {SSH_AUTH_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={option.value} className="text-[12px]">
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
+            {sshForm.authMethod === "key" ? (
+              <div className="space-y-1">
+                <Label htmlFor="ssh-identity" className="text-[11px] font-medium">Identity File</Label>
+                <Input
+                  id="ssh-identity"
+                  aria-label="Identity file"
+                  disabled={busy}
+                  value={sshForm.identityFile}
+                  placeholder="~/.ssh/id_ed25519"
+                  onChange={e => setSshForm(f => ({ ...f, identityFile: e.target.value }))}
+                />
+              </div>
+            ) : null}
             {sshForm.authMethod === "password" ? <div className="space-y-1">
               <Label htmlFor="ssh-password" className="text-[11px] font-medium">SSH password</Label>
               <Input id="ssh-password" type="password" autoComplete="off" required disabled={busy}
@@ -891,19 +984,21 @@ function AddMachineWizard({
 
             {showAdvancedSsh ? (
               <div className="space-y-3 border-t border-border/50 pt-2">
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="space-y-1">
-                    <Label htmlFor="ssh-identity" className="text-[11px] font-medium">Identity File</Label>
-                    <Input
-                      id="ssh-identity"
-                      aria-label="Identity file"
-                      disabled={busy}
-                      value={sshForm.identityFile}
-                      placeholder="~/.ssh/id_ed25519"
-                      onChange={e => setSshForm(f => ({ ...f, identityFile: e.target.value }))}
-                    />
+                {sshForm.authMethod !== "key" ? (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <Label htmlFor="ssh-identity" className="text-[11px] font-medium">Identity File</Label>
+                      <Input
+                        id="ssh-identity"
+                        aria-label="Identity file"
+                        disabled={busy}
+                        value={sshForm.identityFile}
+                        placeholder="~/.ssh/id_ed25519"
+                        onChange={e => setSshForm(f => ({ ...f, identityFile: e.target.value }))}
+                      />
+                    </div>
                   </div>
-                </div>
+                ) : null}
 
                 <div className="space-y-1">
                   <Label htmlFor="ssh-jump-host" className="text-[11px] font-medium">Jump Host</Label>
@@ -954,18 +1049,16 @@ function AddMachineWizard({
               </p>
             ) : null}
             <div className="flex gap-2 border-b border-border/60 pb-2">
-              {systemConfig?.exists ? (
-                <Button
-                  type="button"
-                  variant={importSubMode === "system" ? "default" : "outline"}
-                  size="sm"
-                  className="text-[12px]"
-                  disabled={busy}
-                  onClick={() => setImportSubMode("system")}
-                >
-                  System Config ({systemConfig.hosts.length})
-                </Button>
-              ) : null}
+              <Button
+                type="button"
+                variant={importSubMode === "system" ? "default" : "outline"}
+                size="sm"
+                className="text-[12px]"
+                disabled={busy}
+                onClick={() => setImportSubMode("system")}
+              >
+                System Config{systemConfig?.exists ? ` (${systemConfig.hosts.length})` : ""}
+              </Button>
               <Button
                 type="button"
                 variant={importSubMode === "paste" ? "default" : "outline"}
@@ -978,7 +1071,7 @@ function AddMachineWizard({
               </Button>
             </div>
 
-            {importSubMode === "system" && systemConfig ? (
+            {importSubMode === "system" ? (
               <>
                 <Card className="space-y-3 border-border bg-muted/20 p-3.5">
                   <div className="space-y-1 text-[12px]">
@@ -987,25 +1080,20 @@ function AddMachineWizard({
                         {configPathOverride ? "Custom SSH Config" : "System SSH Config"}
                       </span>
                       <span className="font-mono text-[11px] text-muted-foreground">
-                        {systemConfig.hosts.length} hosts found
+                        {systemConfig?.hosts.length ?? 0} hosts found
                       </span>
                     </div>
                     <p className="break-all text-[11px] text-muted-foreground">
-                      {systemConfig.path || "~/.ssh/config"}
+                      {systemConfig?.path || "~/.ssh/config"}
                     </p>
+                    {systemConfig && !systemConfig.exists ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        No SSH config at that path. Choose another file, or paste a configuration.
+                      </p>
+                    ) : null}
                   </div>
 
                   <div className="flex flex-wrap gap-2 pt-1">
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="text-[12px]"
-                      disabled={busy || systemConfig.hosts.length === 0}
-                      aria-label="Import all system hosts"
-                      onClick={handleImportSystemAll}
-                    >
-                      {busy ? "Importing…" : `Import All (${systemConfig.hosts.length} hosts)`}
-                    </Button>
                     {isTauri() ? (
                       <Button
                         type="button"
@@ -1036,6 +1124,53 @@ function AddMachineWizard({
                     ) : null}
                   </div>
                 </Card>
+
+                {systemConfig && systemConfig.hosts.length > 0 ? (
+                  <fieldset className="space-y-2" disabled={busy}>
+                    <legend className="sr-only">Hosts to import</legend>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-medium text-muted-foreground">Hosts to import</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        disabled={busy}
+                        onClick={() =>
+                          setSelectedConfigHosts(
+                            chosenConfigHosts.length === systemConfig.hosts.length
+                              ? new Set<string>()
+                              : new Set(systemConfig.hosts.map(host => host.id)),
+                          )
+                        }
+                      >
+                        {chosenConfigHosts.length === systemConfig.hosts.length ? "Clear" : "Select All"}
+                      </Button>
+                    </div>
+                    <ul className="max-h-48 space-y-1 overflow-y-auto">
+                      {systemConfig.hosts.map(host => (
+                        <li key={host.id}>
+                          <label className="flex items-center gap-2 rounded-md border border-border px-2 py-1.5 text-[12px]">
+                            <input
+                              type="checkbox"
+                              aria-label={`Import ${host.label}`}
+                              checked={selectedConfigHosts.has(host.id)}
+                              disabled={busy}
+                              onChange={() => toggleConfigHost(host.id)}
+                            />
+                            <span className="min-w-0">
+                              <span className="block font-medium text-foreground">{host.label}</span>
+                              <span className="block break-all font-mono text-[11px] text-muted-foreground">
+                                {formatSshTarget(host)}:{host.port ?? 22}
+                              </span>
+                            </span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  </fieldset>
+                ) : null}
+
                 <div className="flex items-center gap-2 border-t border-border pt-3">
                   <Button type="button" variant="ghost" size="sm" className="text-[12px]" disabled={busy} onClick={goBack}>
                     Back
@@ -1043,6 +1178,16 @@ function AddMachineWizard({
                   <span className="flex-1" />
                   <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={busy} onClick={onClose}>
                     Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="text-[12px]"
+                    disabled={busy || chosenConfigHosts.length === 0}
+                    aria-label="Import selected system hosts"
+                    onClick={handleImportSystemSelected}
+                  >
+                    {busy ? "Importing…" : `Import Selected (${chosenConfigHosts.length})`}
                   </Button>
                 </div>
               </>
@@ -1165,6 +1310,8 @@ function InstallStep({ onIssueInstallKey, accountMachines, onBack, onDone }: Ins
   const [issuing, setIssuing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [baseline, setBaseline] = useState<ReadonlySet<string> | null>(null);
+  // Drives the live expiry countdown; without it the "in N min" text freezes at issue time.
+  const [now, setNow] = useState(() => Date.now());
   const mountedRef = useRef(false);
   const requestedRef = useRef(false);
   const issuingRef = useRef(false);
@@ -1203,6 +1350,16 @@ function InstallStep({ onIssueInstallKey, accountMachines, onBack, onDone }: Ins
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const expiresAtMs = issued ? issued.expiresAt * 1000 : null;
+  const expired = expiresAtMs !== null && now >= expiresAtMs;
+
+  // Tick once a second while a key is showing, and stop for good at expiry.
+  useEffect(() => {
+    if (expiresAtMs === null || expired) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [expiresAtMs, expired]);
+
   if (!onIssueInstallKey) {
     return (
       <div className="space-y-4">
@@ -1239,8 +1396,13 @@ function InstallStep({ onIssueInstallKey, accountMachines, onBack, onDone }: Ins
         <div data-testid="install-key-card" className="space-y-3">
           <CommandBlock label="Linux and macOS" command={issued.installCommand.sh} testId="install-command-sh" />
           <CommandBlock label="Windows PowerShell" command={issued.installCommand.ps1} testId="install-command-ps1" />
-          <p data-testid="install-key-expiry" className="text-[11px] text-muted-foreground">
-            Single use. The key expires {formatExpiry(issued.expiresAt, Date.now())}; it is shown only here.
+          <p
+            data-testid="install-key-expiry"
+            data-expired={expired ? "true" : "false"}
+            data-remaining-ms={expiresAtMs === null ? undefined : Math.max(0, expiresAtMs - now)}
+            className="text-[11px] text-muted-foreground"
+          >
+            {expired ? "Single use. The key has expired; create a new one." : `Single use. The key expires ${formatExpiry(issued.expiresAt, now)}; it is shown only here.`}
           </p>
           {joined.length > 0 ? (
             <p role="status" data-testid="install-machine-joined" className="flex items-center gap-2 text-[12px] text-foreground">
@@ -1259,7 +1421,7 @@ function InstallStep({ onIssueInstallKey, accountMachines, onBack, onDone }: Ins
       <div className="flex items-center gap-2 border-t border-border pt-3">
         <Button type="button" variant="ghost" size="sm" className="text-[12px]" onClick={onBack}>Back</Button>
         <span className="flex-1" />
-        <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={issuing} onClick={() => void issue()}>
+        <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={issuing} onClick={() => { setNow(Date.now()); void issue(); }}>
           {issuing ? "Creating…" : "New key"}
         </Button>
         <Button type="button" size="sm" className="text-[12px]" onClick={onDone}>Done</Button>

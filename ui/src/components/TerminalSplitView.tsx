@@ -279,6 +279,7 @@ type TerminalSplitViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectPairedSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
@@ -351,6 +352,7 @@ export function TerminalSplitView({
   onCloseSearch,
   onReconnectAgentSession,
   onReconnectSshSession,
+  onReconnectPairedSession,
   onReconnectLocalSession,
   onRefreshSessionIdentity,
   onOpenNewShell,
@@ -623,6 +625,7 @@ export function TerminalSplitView({
     onCloseSearch,
     onReconnectAgentSession,
     onReconnectSshSession,
+    onReconnectPairedSession,
     onReconnectLocalSession,
     onRefreshSessionIdentity,
     onOpenNewShell,
@@ -849,6 +852,7 @@ type TabGroupViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectPairedSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
@@ -920,6 +924,7 @@ function TabGroupView({
   onCloseSearch,
   onReconnectAgentSession,
   onReconnectSshSession,
+  onReconnectPairedSession,
   onReconnectLocalSession,
   onRefreshSessionIdentity,
   onOpenNewShell,
@@ -1088,6 +1093,7 @@ function TabGroupView({
                     onCloseSearch={onCloseSearch}
                     onReconnectAgentSession={onReconnectAgentSession}
                     onReconnectSshSession={onReconnectSshSession}
+                    onReconnectPairedSession={onReconnectPairedSession}
                     onReconnectLocalSession={onReconnectLocalSession}
                     onRefreshSessionIdentity={onRefreshSessionIdentity}
                     onOpenNewShell={onOpenNewShell}
@@ -1144,6 +1150,7 @@ type PaneRendererProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectPairedSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
@@ -1196,6 +1203,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         onCloseSearch={props.onCloseSearch}
         onReconnectAgentSession={props.onReconnectAgentSession}
         onReconnectSshSession={props.onReconnectSshSession}
+        onReconnectPairedSession={props.onReconnectPairedSession}
         onReconnectLocalSession={props.onReconnectLocalSession}
         onRefreshSessionIdentity={props.onRefreshSessionIdentity}
         onOpenNewShell={props.onOpenNewShell}
@@ -1263,6 +1271,7 @@ type PaneLeafViewProps = {
   onCloseSearch?: () => void;
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
+  onReconnectPairedSession?: (sessionId: string) => Promise<void> | void;
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
@@ -1309,6 +1318,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onCloseSearch,
   onReconnectAgentSession,
   onReconnectSshSession,
+  onReconnectPairedSession,
   onReconnectLocalSession,
   onRefreshSessionIdentity,
   onOpenNewShell,
@@ -1804,8 +1814,12 @@ const PaneLeafView = React.memo(function PaneLeafView({
               // gone (standby) recovers like a local pane: resume the agent or open a new shell.
               const remoteTargetOwned = Boolean(session && session.backendSessionId !== null &&
                 !isStandbyBackendSessionId(session.backendSessionId));
+              const isPairedPane = Boolean(session && isPairedWorkspaceId(session.workspaceId));
               const isRemotePane = Boolean(session && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)));
-              const onReconnect = isRemotePane && remoteTargetOwned
+              // A paired pane recovers through its machine's daemon, never through the SSH helper.
+              const onReconnect = isPairedPane && remoteTargetOwned
+                ? (onReconnectPairedSession ?? onReconnectAgentSession)
+                : isRemotePane && remoteTargetOwned
                 ? (onReconnectSshSession ?? onReconnectAgentSession)
                 : isAgent
                   ? onReconnectAgentSession

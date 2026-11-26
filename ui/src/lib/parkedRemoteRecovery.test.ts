@@ -136,6 +136,38 @@ describe("startParkedRemoteRecovery", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("disposes every paired retry once on mount and ignores queued callbacks after handoff", () => {
+    // Given two parked sessions and another parked workspace.
+    const paired = "daemon:studio:site";
+    const other = "daemon:other:site";
+    const h = harness(
+      [{ workspaceId: paired }, { workspaceId: other }],
+      { [paired]: state(paired, [session("p1", paired), session("p2", paired)]), [other]: state(other, [session("p3", other)]) },
+    );
+    // When the first workspace mounts, then becomes parked again.
+    h.mount(paired);
+    h.mount("local-other");
+    h.pairedReady.get("p1")?.(session("p1", paired, { remoteConnectionState: "connected" }));
+    h.pairedReady.get("p2")?.(session("p2", paired, { remoteConnectionState: "connected" }));
+    // Then ownership remains handed off while the other workspace remains active.
+    expect(h.pairedDispose).toHaveBeenCalledTimes(2);
+    expect(h.dispatch).not.toHaveBeenCalled();
+    h.stop();
+    h.stop();
+    expect(h.pairedDispose).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores a queued paired callback after stop", () => {
+    // Given a pending paired recovery callback.
+    const paired = "daemon:studio:site";
+    const h = harness([{ workspaceId: paired }], { [paired]: state(paired, [session("p1", paired)]) });
+    // When the owner stops before callback delivery.
+    h.stop();
+    h.pairedReady.get("p1")?.(session("p1", paired, { remoteConnectionState: "connected" }));
+    // Then no state restoration is dispatched.
+    expect(h.dispatch).not.toHaveBeenCalled();
+  });
+
   it("stop ends every SSH reconciliation, paired retry and the mount subscription", () => {
     const paired = "daemon:studio:site";
     const { stop, sshStop, pairedDispose, listeners } = harness(
