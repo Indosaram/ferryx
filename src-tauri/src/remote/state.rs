@@ -864,6 +864,8 @@ pub struct RemoteGatewayState {
     pub socket_tickets:
         parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
     pub host_lease: Arc<crate::remote::direct_lease::HostLeaseState>,
+    /// Loopback source address of each live direct bridge stream -> its QUIC datagram peer.
+    pub direct_datagram_peers: Arc<crate::paired_host::direct::datagram::LoopbackPeerRegistry>,
     /// Account-relay enrollment decision for the account-gated direct path. Resolved once at
     /// remote-server startup on a blocking worker, never per offer on the reactor. `false`
     /// leaves LAN, static-token and selfhost direct trust paths untouched.
@@ -1209,6 +1211,7 @@ impl RemoteGatewayState {
             remote_desktop,
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             host_lease: Arc::new(crate::remote::direct_lease::HostLeaseState::new()),
+            direct_datagram_peers: Arc::default(),
             host_lease_required: std::sync::atomic::AtomicBool::new(false),
             host_lease_wired: std::sync::atomic::AtomicBool::new(false),
             browser_backend: parking_lot::RwLock::new(Arc::new(

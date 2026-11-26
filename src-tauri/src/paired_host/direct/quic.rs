@@ -8,6 +8,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub const DIRECT_ALPN: &[u8] = b"ferryx-direct-v1";
+pub const DIRECT_DATAGRAM_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum DirectTransportError {
@@ -28,7 +29,11 @@ pub fn make_transport_config() -> Result<Arc<TransportConfig>, DirectTransportEr
     transport.max_idle_timeout(Some(idle_timeout));
     transport.max_concurrent_bidi_streams(VarInt::from_u32(64));
     transport.max_concurrent_uni_streams(VarInt::from_u32(0));
-    transport.datagram_receive_buffer_size(None);
+    // Remote-desktop media rides unreliable datagrams. The ALPN stays `ferryx-direct-v1`:
+    // an older peer simply advertises no datagram support and senders fall back to streams.
+    transport.datagram_receive_buffer_size(Some(DIRECT_DATAGRAM_BUFFER_BYTES));
+    transport.datagram_send_buffer_size(DIRECT_DATAGRAM_BUFFER_BYTES);
+    transport.mtu_discovery_config(Some(quinn::MtuDiscoveryConfig::default()));
     Ok(Arc::new(transport))
 }
 

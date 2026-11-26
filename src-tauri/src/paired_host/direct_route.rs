@@ -7,6 +7,7 @@
 //! marked `Disconnected` synchronously from its `closed()` watcher, which also
 //! drops the loopback adapter, so the next request goes back to the relay.
 use parking_lot::Mutex;
+use super::direct::datagram::{DatagramMux, DirectDatagramPeer};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -40,6 +41,7 @@ pub struct DirectGuard {
     tasks: Vec<tokio::task::AbortHandle>,
     connection: Option<quinn::Connection>,
     endpoint: Option<quinn::Endpoint>,
+    datagram_mux: Option<Arc<DatagramMux>>,
 }
 
 impl DirectGuard {
@@ -48,10 +50,23 @@ impl DirectGuard {
             tasks: Vec::new(),
             connection: Some(connection),
             endpoint: Some(endpoint),
+            datagram_mux: None,
         }
     }
     pub fn track(&mut self, task: tokio::task::AbortHandle) {
         self.tasks.push(task);
+    }
+    /// Attaches the mux fed by this connection's datagram reader (track the reader too).
+    pub fn with_datagram_mux(mut self, mux: Arc<DatagramMux>) -> Self {
+        self.datagram_mux = Some(mux);
+        self
+    }
+    /// `None` without a connection or a datagram mux.
+    pub fn datagram_peer(&self) -> Option<DirectDatagramPeer> {
+        Some(DirectDatagramPeer {
+            connection: self.connection.clone()?,
+            mux: Arc::clone(self.datagram_mux.as_ref()?),
+        })
     }
 }
 
@@ -59,6 +74,9 @@ impl Drop for DirectGuard {
     fn drop(&mut self) {
         for task in &self.tasks {
             task.abort();
+        }
+        if let Some(mux) = &self.datagram_mux {
+            mux.clear();
         }
         if let Some(connection) = &self.connection {
             connection.close(quinn::VarInt::from_u32(0), b"route closed");
@@ -154,6 +172,19 @@ impl DirectRoutes {
     pub fn direct_for(&self, host_id: &str) -> Option<(String, u64)> {
         match self.entries.lock().get(host_id) {
             Some(Entry { state: RouteState::Direct { origin }, epoch, .. }) => Some((origin.clone(), *epoch)),
+            _ => None,
+        }
+    }
+
+    /// Datagram access to the live direct route, only for the epoch the caller resolved.
+    pub fn datagram_handle(&self, host_id: &str, epoch: u64) -> Option<DirectDatagramPeer> {
+        match self.entries.lock().get(host_id) {
+            Some(Entry {
+                state: RouteState::Direct { .. },
+                epoch: current,
+                guard: Some(guard),
+                ..
+            }) if *current == epoch => guard.datagram_peer(),
             _ => None,
         }
     }

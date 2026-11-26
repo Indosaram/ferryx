@@ -1164,6 +1164,34 @@ fn relay_session_kind(ticket_target: &str) -> crate::remote::relay_server::Sessi
 pub const REMOTE_DESKTOP_MAX_FRAME_BYTES: usize = 256 * 1024;
 const REMOTE_DESKTOP_PAIR_MAX_BYTES: usize = 64 * 1024;
 const REMOTE_DESKTOP_DIRECT_BUDGET: Duration = Duration::from_secs(3);
+/// Request header a direct remote desktop stream sends to opt into QUIC datagram media.
+pub const RD_DGRAM_OPT_IN_HEADER: &str = "x-ferryx-rd-dgram";
+/// HTTP 101 response header carrying the hex datagram channel id the host minted.
+pub const RD_DGRAM_ID_HEADER: &str = "x-ferryx-rd-dgram-id";
+
+/// Which path carries a remote desktop stream socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RdBridgeTransport {
+    /// The direct QUIC adapter at `epoch`; `dgram_channel_id` is set when the host accepted
+    /// datagram media for this stream.
+    Direct {
+        epoch: u64,
+        dgram_channel_id: Option<u64>,
+    },
+    Relay,
+}
+
+/// A remote desktop stream socket plus the transport it was opened on.
+pub struct RdStreamConnection {
+    pub socket: super::secure_http::PairedSocket,
+    pub transport: RdBridgeTransport,
+}
+
+/// The datagram channel id in an HTTP 101 response, `None` when absent or not hex `u64`.
+fn rd_dgram_channel_id(headers: &tokio_tungstenite::tungstenite::http::HeaderMap) -> Option<u64> {
+    let value = headers.get(RD_DGRAM_ID_HEADER)?.to_str().ok()?;
+    u64::from_str_radix(value.trim(), 16).ok()
+}
 
 impl MachineClient {
     /// `POST /api/v1/remote-desktop/pair` on a Machine-scope paired host and returns the
@@ -1207,13 +1235,26 @@ impl MachineClient {
     /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
     /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
     /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
-    /// direct attempt sends only the Authorization header.
+    /// direct attempt sends only the Authorization header and the datagram opt-in.
     pub async fn remote_desktop_stream(
         &self,
         service: &PairedHostService,
         host_id: String,
         generation: Epoch,
     ) -> Result<super::secure_http::PairedSocket> {
+        self.remote_desktop_stream_with_transport(service, host_id, generation)
+            .await
+            .map(|connection| connection.socket)
+    }
+
+    /// [`Self::remote_desktop_stream`], also reporting the transport: a direct dial opts into
+    /// QUIC datagram media and carries the channel id the host answered with, if any.
+    pub async fn remote_desktop_stream_with_transport(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<RdStreamConnection> {
         let (host, lease) = service.capture_operation(host_id, generation).await?;
         if host.grant_scope != GrantScope::Machine {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
@@ -1229,7 +1270,13 @@ impl MachineClient {
         let base = super::direct_client::request_base(&host)?;
         let direct = match base.direct_epoch {
             Some(epoch) => match self.remote_desktop_direct_socket(&base.url, &lease).await {
-                Ok(socket) => Some(socket),
+                Ok((socket, dgram_channel_id)) => Some(RdStreamConnection {
+                    socket,
+                    transport: RdBridgeTransport::Direct {
+                        epoch,
+                        dgram_channel_id,
+                    },
+                }),
                 Err(error) if super::direct_client::is_transport_failure(&error) => {
                     super::direct_client::report_direct_loss(&host, epoch);
                     None
@@ -1238,12 +1285,12 @@ impl MachineClient {
             },
             None => None,
         };
-        let socket = match direct {
-            Some(socket) => socket,
+        let connection = match direct {
+            Some(connection) => connection,
             None => {
                 let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
                     .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-                self.open_relay_socket(
+                let socket = self.open_relay_socket(
                     &host,
                     &lease,
                     &relay,
@@ -1252,20 +1299,24 @@ impl MachineClient {
                     REMOTE_DESKTOP_STREAM_TARGET,
                     REMOTE_DESKTOP_MAX_FRAME_BYTES,
                 )
-                .await?
+                .await?;
+                RdStreamConnection {
+                    socket,
+                    transport: RdBridgeTransport::Relay,
+                }
             }
         };
         service
             .current_generation(host.host_id.clone(), generation)
             .await?;
-        Ok(socket)
+        Ok(connection)
     }
 
     async fn remote_desktop_direct_socket(
         &self,
         base: &Url,
         lease: &CredentialLease,
-    ) -> Result<super::secure_http::PairedSocket> {
+    ) -> Result<(super::secure_http::PairedSocket, Option<u64>)> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut url = base.clone();
         url.path_segments_mut()
@@ -1284,6 +1335,10 @@ impl MachineClient {
                 .parse()
                 .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
         );
+        request.headers_mut().insert(
+            RD_DGRAM_OPT_IN_HEADER,
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_static("1"),
+        );
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(REMOTE_DESKTOP_MAX_FRAME_BYTES))
             .max_frame_size(Some(REMOTE_DESKTOP_MAX_FRAME_BYTES));
@@ -1292,10 +1347,13 @@ impl MachineClient {
             _ = cancelled.changed() => Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
             result = tokio::time::timeout(
                 Duration::from_secs(15),
-                super::secure_http::connect_net_websocket(request, config),
-            ) => result
-                .map_err(|_| ClientError::local("TIMEOUT"))?
-                .map_err(|_| ClientError::local("HOST_UNAVAILABLE")),
+                super::secure_http::connect_net_websocket_with_response(request, config),
+            ) => {
+                let (socket, response) = result
+                    .map_err(|_| ClientError::local("TIMEOUT"))?
+                    .map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?;
+                Ok((socket, rd_dgram_channel_id(response.headers())))
+            }
         }
     }
 }
@@ -2595,5 +2653,28 @@ pub async fn supervisor_secure_request(
             Duration::from_secs(120),
             super::secure_http::shared_request(&target, method, path, &headers, body, limit, method == "GET"),
         ) => result.map_err(|_| ClientError::local("TIMEOUT"))?,
+    }
+}
+
+#[cfg(test)]
+mod rd_dgram_header_tests {
+    use super::{rd_dgram_channel_id, RD_DGRAM_ID_HEADER};
+    use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue};
+
+    fn with(value: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(RD_DGRAM_ID_HEADER, HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn dgram_channel_id_parses_hex_and_rejects_everything_else() {
+        assert_eq!(rd_dgram_channel_id(&with("00000000000000ff")), Some(0xff));
+        assert_eq!(rd_dgram_channel_id(&with(" DEADBEEF00000001 ")), Some(0xDEAD_BEEF_0000_0001));
+        assert_eq!(rd_dgram_channel_id(&with("ffffffffffffffff")), Some(u64::MAX));
+        assert_eq!(rd_dgram_channel_id(&with("not-hex")), None);
+        assert_eq!(rd_dgram_channel_id(&with("")), None);
+        assert_eq!(rd_dgram_channel_id(&with("1ffffffffffffffff")), None, "overflows u64");
+        assert_eq!(rd_dgram_channel_id(&HeaderMap::new()), None);
     }
 }

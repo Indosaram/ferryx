@@ -1,8 +1,10 @@
 use crate::paired_host::direct::{
-    bridge_quic_connection_to_tcp, create_quic_endpoint, discover_public_endpoint,
-    execute_nonce_punch, BridgeError, DirectConnectionOffer, EphemeralCert,
+    bridge_quic_connection_to_tcp_with_registry, create_quic_endpoint, discover_public_endpoint,
+    execute_nonce_punch, spawn_datagram_reader, BridgeError, DatagramMux, DirectConnectionOffer,
+    EphemeralCert, LoopbackPeerRegistry,
 };
 use std::net::{SocketAddr, SocketAddrV4};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
@@ -27,6 +29,15 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Same for the connection's datagram reader; aborting it clears the datagram mux.
+struct AbortOnDropUnit(JoinHandle<()>);
+
+impl Drop for AbortOnDropUnit {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(super) struct HostJob {
     pub socket: UdpSocket,
     pub cert: EphemeralCert,
@@ -35,6 +46,8 @@ pub(super) struct HostJob {
     pub gateway: SocketAddr,
     pub deadline: Duration,
     pub cancellation: Option<tokio::sync::broadcast::Receiver<()>>,
+    /// Where bridged loopback connections publish their direct datagram peer; `None` disables.
+    pub datagram_peers: Option<Arc<LoopbackPeerRegistry>>,
 }
 
 impl HostJob {
@@ -78,7 +91,14 @@ impl HostJob {
             endpoint.close(0u32.into(), b"accept failed");
             return;
         };
-        let mut bridge = AbortOnDrop(bridge_quic_connection_to_tcp(connection, self.gateway));
+        let mux = DatagramMux::new();
+        let _dgram_reader = AbortOnDropUnit(spawn_datagram_reader(connection.clone(), Arc::clone(&mux)));
+        let registry = self.datagram_peers.take().map(|reg| (reg, mux));
+        let mut bridge = AbortOnDrop(bridge_quic_connection_to_tcp_with_registry(
+            connection,
+            self.gateway,
+            registry,
+        ));
         match self.cancellation.as_mut() {
             Some(cancel_rx) => {
                 tokio::select! {
@@ -227,6 +247,8 @@ mod tests {
             );
 
             let (cancel_tx, cancel_rx) = broadcast::channel(16);
+            let datagram_peers = Arc::new(LoopbackPeerRegistry::default());
+            let mut registry_len = datagram_peers.subscribe_len();
 
             let host_job = HostJob {
                 socket: host_sock,
@@ -236,6 +258,7 @@ mod tests {
                 gateway: echo_addr,
                 deadline: Duration::from_secs(5),
                 cancellation: Some(cancel_rx),
+                datagram_peers: Some(Arc::clone(&datagram_peers)),
             };
 
             let mut host_job_task = TaskGuard::new(tokio::spawn(host_job.run()));
@@ -283,12 +306,37 @@ mod tests {
                 .expect("read echo payload");
             assert_eq!(&echo_buf, test_payload);
 
+            // The gateway sees the bridge's loopback source address; it resolves to this QUIC peer.
+            let bridged_peer = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match echo_events_rx.recv().await {
+                        Ok(EchoServerEvent::Accepted { peer }) => return peer,
+                        Ok(_) => continue,
+                        Err(e) => panic!("event rx error: {e}"),
+                    }
+                }
+            })
+            .await
+            .expect("echo accepted the bridged connection");
+            assert_eq!(datagram_peers.len(), 1);
+            let registered = datagram_peers
+                .lookup(&bridged_peer)
+                .expect("bridged loopback address registered");
+            assert_eq!(registered.connection.remote_address(), SocketAddr::V4(client_addr));
+            drop(registered);
+
             cancel_tx.send(()).expect("send cancel signal");
 
             tokio::time::timeout(Duration::from_secs(3), host_job_task.join())
                 .await
                 .expect("host job joined within timeout")
                 .expect("host job ok");
+            // Cancellation aborts the bridge; its stream task drops the registry guard.
+            tokio::time::timeout(Duration::from_secs(3), registry_len.wait_for(|n| *n == 0))
+                .await
+                .expect("registry emptied after cancellation")
+                .expect("registry alive");
+            assert!(datagram_peers.lookup(&bridged_peer).is_none());
 
             let mut closed_peer = None;
             let receive_close = tokio::time::timeout(Duration::from_secs(3), async {
@@ -362,6 +410,7 @@ mod tests {
                 gateway: echo_addr,
                 deadline: Duration::from_secs(5),
                 cancellation: None,
+                datagram_peers: None,
             };
 
             let mut host_job_task2 = TaskGuard::new(tokio::spawn(host_job2.run()));
@@ -680,6 +729,7 @@ mod tests {
                 gateway: echo_addr,
                 deadline: Duration::from_secs(5),
                 cancellation: None, // No account cancellation watch wired
+                datagram_peers: None,
             };
             let mut non_account_host_job_task = TaskGuard::new(tokio::spawn(non_account_host_job.run()));
             tokio::time::timeout(
@@ -787,6 +837,7 @@ mod tests {
                 gateway: echo_addr,
                 deadline: Duration::from_secs(5),
                 cancellation: Some(cancel_tx.subscribe()),
+                datagram_peers: None,
             };
 
             let mut host_job_task = TaskGuard::new(tokio::spawn(host_job.run()));
@@ -1060,6 +1111,7 @@ mod tests {
                 gateway: echo_addr,
                 deadline: Duration::from_secs(5),
                 cancellation: Some(cancel_tx.subscribe()),
+                datagram_peers: None,
             };
 
             let mut host_job_task2 = TaskGuard::new(tokio::spawn(host_job2.run()));

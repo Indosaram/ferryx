@@ -1,3 +1,4 @@
+use super::datagram::{DatagramMux, DirectDatagramPeer, LoopbackPeerRegistry};
 use quinn::{Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,6 +24,17 @@ pub fn bridge_quic_connection_to_tcp(
     connection: Connection,
     local_gateway_addr: SocketAddr,
 ) -> JoinHandle<Result<(), BridgeError>> {
+    bridge_quic_connection_to_tcp_with_registry(connection, local_gateway_addr, None)
+}
+
+/// Like [`bridge_quic_connection_to_tcp`], but each bridged TCP connection's loopback source
+/// address is published in `registry` (with `connection` and its datagram mux) for as long as
+/// that stream is forwarded, so the local gateway can find the direct peer behind a request.
+pub fn bridge_quic_connection_to_tcp_with_registry(
+    connection: Connection,
+    local_gateway_addr: SocketAddr,
+    registry: Option<(Arc<LoopbackPeerRegistry>, Arc<DatagramMux>)>,
+) -> JoinHandle<Result<(), BridgeError>> {
     tokio::spawn(async move {
         let mut join_set = JoinSet::new();
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_BRIDGE_STREAMS));
@@ -45,9 +57,18 @@ pub fn bridge_quic_connection_to_tcp(
                                     continue;
                                 }
                             };
+                            let peer = registry.as_ref().map(|(reg, mux)| {
+                                (
+                                    Arc::clone(reg),
+                                    DirectDatagramPeer {
+                                        connection: connection.clone(),
+                                        mux: Arc::clone(mux),
+                                    },
+                                )
+                            });
                             join_set.spawn(async move {
                                 let _permit = permit;
-                                if let Err(e) = forward_quic_to_tcp(send, recv, local_gateway_addr).await {
+                                if let Err(e) = forward_quic_to_tcp(send, recv, local_gateway_addr, peer).await {
                                     tracing::debug!("Error forwarding QUIC to TCP: {e}");
                                 }
                             });
@@ -126,8 +147,14 @@ async fn forward_quic_to_tcp(
     mut send_stream: SendStream,
     mut recv_stream: RecvStream,
     local_gateway_addr: SocketAddr,
+    peer: Option<(Arc<LoopbackPeerRegistry>, DirectDatagramPeer)>,
 ) -> Result<(), BridgeError> {
     let tcp_stream = TcpStream::connect(local_gateway_addr).await?;
+    // Registered before any byte is pumped, so the gateway can resolve the peer on its first read.
+    let _peer_guard = match peer {
+        Some((registry, peer)) => Some(registry.register(tcp_stream.local_addr()?, peer)),
+        None => None,
+    };
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
     let quic_to_tcp = async {
