@@ -176,13 +176,13 @@ pub fn query_window_refresh_rate<R: tauri::Runtime>(
             tracing::debug!(%error, "display refresh query dispatch failed");
             return fallback_info();
         }
-        return match receiver.recv_timeout(Duration::from_millis(500)) {
+        match receiver.recv_timeout(Duration::from_millis(500)) {
             Ok(info) => info,
             Err(error) => {
                 tracing::debug!(%error, "display refresh query did not finish");
                 fallback_info()
             }
-        };
+        }
     }
     #[cfg(target_os = "windows")]
     {

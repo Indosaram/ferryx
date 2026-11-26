@@ -393,6 +393,8 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   useEffect(() => {
     let cancelled = false;
     let rdSessionId: string | null = null;
+    // Captured here so the cleanup closure below does not read the ref after it may have changed.
+    const pressedKeys = pressedKeysRef.current;
     setStatus({ phase: "connecting", reason: null });
     setPresentBackend("canvas2d");
     setNativePresented(false);
@@ -478,8 +480,8 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
       // A key held at unmount would stay down on the remote host for the life of that session.
       // The release goes out directly: the sender is about to close and may still be mid-flight,
       // where a queued event would be dropped with it.
-      const heldKeys = [...pressedKeysRef.current];
-      pressedKeysRef.current.clear();
+      const heldKeys = [...pressedKeys];
+      pressedKeys.clear();
       if (rdSessionId && heldKeys.length > 0) {
         void rdInput(rdSessionId, heldKeys.map((code) => ({ kind: "key" as const, code, down: false }))).catch(
           (error: unknown) => {

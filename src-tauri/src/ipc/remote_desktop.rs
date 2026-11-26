@@ -3120,7 +3120,7 @@ mod transport {
 
                 // First pump on channel 1.
                 let (socket, host_ws) = ws_pair().await;
-                let (mut viewer, pump_tcp, udp, viewer_udp, _stop_tx, stop_rx) = parts().await;
+                let (viewer, pump_tcp, udp, viewer_udp, _stop_tx, stop_rx) = parts().await;
                 let first_pump = tokio::spawn({
                     let udp = Arc::clone(&udp);
                     let telemetry = Arc::clone(&telemetry);
@@ -3276,8 +3276,9 @@ mod transport {
                         .await
                         .expect("viewer send");
                     let message = host_ws.next().await.expect("open").expect("frame");
+                    let data = message.into_data();
                     let (channel, got) =
-                        wire::decode_bridge_frame(&message.into_data()).expect("bridge frame");
+                        wire::decode_bridge_frame(&data).expect("bridge frame");
                     assert_eq!(channel, wire::BRIDGE_UDP, "UDP rides the WebSocket");
                     assert_eq!(got, &payload[..]);
                     assert_eq!(transport_mode(&telemetry), expected);

@@ -120,7 +120,7 @@ pub fn validate_frame_dimensions(
             limit: max_dim,
         });
     }
-    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(RdSurfaceUnavailable::SurfaceCreationFailed(format!(
             "NV12 dimensions must be positive and even, got {width}x{height}"
         )));
