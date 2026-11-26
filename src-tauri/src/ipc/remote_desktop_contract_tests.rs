@@ -257,6 +257,7 @@ impl Harness {
                 assert_eq!(stats.codec, "hevc");
                 assert!(stats.decode_us.is_some());
                 assert!(stats.present_us.is_some());
+                println!("RD_CONTRACT_STATS_JSON={}", serde_json::to_string(&stats).unwrap());
                 let audio = self.shared.audio.lock();
                 assert_eq!(audio.queued_samples() % 2, 0, "stereo PCM");
                 let (active, underruns, drops) = audio.stats();
@@ -329,6 +330,7 @@ fn live_refresh_change_requests_75_fps_and_updates_stats() {
     assert!(viewer::send_stream_options(&h.session, &h.shared, false));
     assert!(h.observer.wait_for_restart(|&(fps, _, _)| fps == 75, BOUND));
     assert_eq!(h.stats().target_fps, 75);
+    println!("RD_CONTRACT_STATS_75HZ_JSON={}", serde_json::to_string(&h.stats()).unwrap());
     h.shutdown();
 }
 
