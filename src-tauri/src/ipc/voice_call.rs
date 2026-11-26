@@ -1,6 +1,7 @@
 //! Speech in and out for the Supervisor voice call: the microphone recording becomes text, and
-//! the supervisor's own receipt becomes audio. Both use the hub's speech settings and the same
-//! provider calls the Discord huddle uses (`ferryx_hub::voice`), so one key configures both.
+//! the supervisor's own receipt becomes audio. Spoken replies always go through the OpenAI
+//! Realtime voice on the machine's Codex sign-in (`ferryx_hub::realtime_speech`); no speech key
+//! is used for them.
 //!
 //! Nothing here touches the daemon. A transcript goes back to the UI, which sends it through
 //! `cmd_supervisor_request` exactly like a typed message, and the spoken reply is the receipt of
@@ -44,17 +45,16 @@ fn unavailability(built: bool, enabled: bool, has_stt: bool, has_codex: bool) ->
     None
 }
 
-/// Spoken replies are the only part that needs a paid key: the Codex sign-in covers dictation but
-/// exposes no speech synthesis, so a keyless machine can hear nothing back yet.
-fn speak_unavailability(built: bool, enabled: bool, has_tts: bool) -> Option<&'static str> {
+/// Spoken replies run only on the Realtime voice, which the Codex sign-in pays for.
+fn speak_unavailability(built: bool, enabled: bool, has_codex: bool) -> Option<&'static str> {
     if !built {
         return Some("This build has no speech support.");
     }
     if !enabled {
         return Some("Voice is switched off. Set OMON_VOICE_ENABLED=1 to talk to the supervisor.");
     }
-    if !has_tts {
-        return Some("Spoken replies need a speech key. Set OPENAI_API_KEY or OMON_TTS_API_KEY.");
+    if !has_codex {
+        return Some("Spoken replies use the realtime voice on your Codex sign-in. Run `codex login`.");
     }
     None
 }
@@ -109,10 +109,11 @@ pub struct VoiceCallStatus {
     pub reason: Option<&'static str>,
     /// Which credential pays for dictation, so the surface can say "free" without guessing.
     pub stt_source: Option<&'static str>,
-    /// Dictation can work while spoken replies cannot: the Codex sign-in has no synthesis.
+    /// Spoken replies need the Codex sign-in for the realtime voice.
     pub speak_available: bool,
     pub speak_reason: Option<&'static str>,
     pub stt_model: Option<String>,
+    /// The realtime model that speaks replies.
     pub tts_model: Option<String>,
     pub tts_voice: String,
     /// The rate and channel count the surface records and the provider returns.
@@ -152,7 +153,7 @@ mod live {
     /// because it spends provider credit and needs real credentials; run it with
     /// `cargo test --lib voice_call::live -- --ignored`.
     #[tokio::test]
-    #[ignore = "live: needs real STT/TTS credentials"]
+    #[ignore = "live: needs a real Codex sign-in"]
     async fn a_spoken_sentence_transcribes_back_to_itself() {
         let sentence = "The supervisor voice call is working correctly.";
         let spoken = cmd_voice_call_speak(sentence.to_owned())
@@ -183,7 +184,7 @@ pub fn cmd_voice_call_status() -> VoiceCallStatus {
     let speak_reason = speak_unavailability(
         cfg!(feature = "hub-voice"),
         voice_enabled(&settings),
-        settings.tts().is_some(),
+        codex,
     );
     let reason = unavailability(
         cfg!(feature = "hub-voice"),
@@ -204,7 +205,7 @@ pub fn cmd_voice_call_status() -> VoiceCallStatus {
         speak_available: speak_reason.is_none(),
         speak_reason,
         stt_model: settings.stt().map(|endpoint| endpoint.model.clone()),
-        tts_model: settings.tts().map(|endpoint| endpoint.model.clone()),
+        tts_model: Some(realtime_model()),
         tts_voice: settings.tts_voice().to_owned(),
         sample_rate: ferryx_hub::voice::OPENAI_PCM_RATE,
         channels: ferryx_hub::voice::OPENAI_PCM_CHANNELS,
@@ -213,6 +214,22 @@ pub fn cmd_voice_call_status() -> VoiceCallStatus {
         silence_ms: settings.silence().as_millis() as u64,
     }
 }
+
+/// The realtime model for spoken replies: `OMON_REALTIME_MODEL`, else the Codex app's own.
+fn realtime_model() -> String {
+    let file = ferryx_hub::hub_env::read_file_env();
+    std::env::var("OMON_REALTIME_MODEL")
+        .ok()
+        .or_else(|| file.get("OMON_REALTIME_MODEL").cloned())
+        .map(|model| model.trim().to_owned())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| REALTIME_DEFAULT_MODEL.to_owned())
+}
+
+#[cfg(feature = "hub-voice")]
+const REALTIME_DEFAULT_MODEL: &str = ferryx_hub::realtime_speech::DEFAULT_REALTIME_MODEL;
+#[cfg(not(feature = "hub-voice"))]
+const REALTIME_DEFAULT_MODEL: &str = "gpt-realtime-1.5";
 
 /// Where the owner's speech key lives: the hub env file, never an IPC response.
 const SPEECH_KEY_VAR: &str = "OPENAI_API_KEY";
@@ -343,7 +360,7 @@ pub async fn cmd_voice_call_speak(text: String) -> Result<SpokenAudio, IpcError>
     if let Some(reason) = speak_unavailability(
         cfg!(feature = "hub-voice"),
         voice_enabled(&settings),
-        settings.tts().is_some(),
+        codex_dictation_available(),
     ) {
         return Err(refusal(UNAVAILABLE, reason));
     }
@@ -380,12 +397,9 @@ async fn speak_pcm(
     settings: &ferryx_hub::voice::VoiceSettings,
     text: &str,
 ) -> Result<Vec<u8>, IpcError> {
-    let endpoint = settings
-        .tts()
-        .ok_or_else(|| refusal(UNAVAILABLE, "No text-to-speech endpoint is configured."))?;
-    ferryx_hub::voice::synthesize_pcm(endpoint, settings.tts_voice(), text)
+    ferryx_hub::realtime_speech::synthesize_pcm(&realtime_model(), settings.tts_voice(), text)
         .await
-        .map_err(|error| refusal(PROVIDER_FAILED, format!("Text to speech failed: {error}")))
+        .map_err(|error| refusal(PROVIDER_FAILED, format!("Realtime voice failed: {error}")))
 }
 
 #[cfg(not(feature = "hub-voice"))]
@@ -447,9 +461,10 @@ mod tests {
     }
 
     #[test]
-    fn spoken_replies_still_need_a_paid_key() {
-        let no_tts = speak_unavailability(true, true, false).unwrap();
-        assert!(no_tts.contains("OPENAI_API_KEY"));
+    fn spoken_replies_need_only_the_codex_sign_in() {
+        let no_login = speak_unavailability(true, true, false).unwrap();
+        assert!(no_login.contains("codex login"));
+        assert!(!no_login.contains("OPENAI_API_KEY"));
         assert_eq!(speak_unavailability(true, true, true), None);
         assert!(speak_unavailability(false, true, true).is_some());
         assert!(speak_unavailability(true, false, true).is_some());

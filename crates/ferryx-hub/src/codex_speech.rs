@@ -55,6 +55,16 @@ fn login_at(path: &std::path::Path) -> Option<CodexLogin> {
     Some(CodexLogin { access_token: access_token.to_owned(), account_id })
 }
 
+impl CodexLogin {
+    pub(crate) fn access_token(&self) -> &str {
+        &self.access_token
+    }
+
+    pub(crate) fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+}
+
 /// Whether dictation can run on the Codex sign-in alone, without reading the token out.
 pub fn available() -> bool {
     login().is_some()
