@@ -442,4 +442,7 @@ describe("Activity Bar shell integration", () => {
     expect(await screen.findByTestId("activity-drawer-remote-desktop")).toBeInTheDocument();
     expect(localStorage.getItem(ACTIVITY_MODE_STORAGE_KEY)).toBe("remoteDesktop");
   });
-});
+  // Rendering the whole App under jsdom takes several seconds on a cold shared runner, and this
+  // case additionally waits on a lazy dynamic import. The deadline only moves past what a loaded
+  // machine can exceed; it does not change what the case asserts.
+}, 60_000);
