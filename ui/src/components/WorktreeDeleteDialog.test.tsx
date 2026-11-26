@@ -381,6 +381,92 @@ describe("WorktreeDeleteDialog", () => {
     expect(onDeleted).toHaveBeenCalledOnce();
   });
 
+  it("fires the delete IPC once for a rapid double-click while the delete is pending", async () => {
+    // All three clicks are dispatched inside one act scope while the delete IPC is unresolved.
+    // Whatever reaches the handler must collapse to exactly one backend call and one report;
+    // the handler's `busy || deletingRef.current` guard is what enforces that when a click
+    // arrives before React commits the disabled re-render.
+    const pendingDeletes: Array<{ resolve: () => void; reject: (cause: unknown) => void }> = [];
+    native.deleteWorktree.mockImplementation(() => new Promise<void>((resolve, reject) => {
+      pendingDeletes.push({ resolve, reject });
+    }));
+    const onDeleted = vi.fn();
+    await act(async () => {
+      render(<WorktreeDeleteDialog worktree={worktree} onClose={vi.fn()} onDeleted={onDeleted} />);
+    });
+
+    const deleteButton = screen.getByRole("button", { name: "Delete worktree and branch" });
+    await act(async () => {
+      for (let click = 0; click < 3; click++) {
+        deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      }
+    });
+    expect(native.deleteWorktree).toHaveBeenCalledTimes(1);
+    expect(pendingDeletes).toHaveLength(1);
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(deleteButton).toBeDisabled();
+
+    // Settle with a failure so the dialog stays mounted, then prove the guard released: a later
+    // deliberate click must reach the backend again rather than staying latched forever.
+    await act(async () => {
+      pendingDeletes[0]!.reject({ code: "GIT_ERROR", message: "delete failed", details: {} });
+    });
+    screen.getByText("GIT_ERROR");
+
+    await act(async () => { fireEvent.click(deleteButton); });
+    expect(native.deleteWorktree).toHaveBeenCalledTimes(2);
+    expect(onDeleted).not.toHaveBeenCalled();
+
+    await act(async () => { pendingDeletes[1]!.resolve(); });
+    expect(onDeleted).toHaveBeenCalledOnce();
+  });
+
+  it("blocks Close, Cancel, backdrop and Escape while deleting and re-enables them once it settles", async () => {
+    let failDelete!: (cause: unknown) => void;
+    const pendingDelete = new Promise<void>((_resolve, reject) => { failDelete = reject; });
+    // Keep the rejection observed so the pending promise never counts as unhandled.
+    void pendingDelete.catch(() => undefined);
+    const onClose = vi.fn();
+    const onDeleted = vi.fn();
+    await act(async () => {
+      render(<WorktreeDeleteDialog worktree={worktree} onClose={onClose} onDeleted={onDeleted} />);
+    });
+    native.deleteWorktree.mockReturnValueOnce(pendingDelete);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
+    });
+
+    // Close and Cancel are disabled outright, so no activation can reach onClose.
+    expect(screen.getByRole("button", { name: "Close delete dialog" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+
+    // Backdrop click and Escape are refused by the dialog's own guards.
+    const backdrop = screen.getByRole("dialog", { name: "Delete worktree" }).parentElement as HTMLElement;
+    await act(async () => {
+      fireEvent.mouseDown(backdrop);
+      fireEvent.keyDown(document.body, { key: "Escape" });
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Settle the delete with a failure so the dialog stays mounted for the re-enable check.
+    await act(async () => {
+      failDelete({ code: "GIT_ERROR", message: "delete failed", details: {} });
+      await pendingDelete.catch(() => undefined);
+    });
+    screen.getByText("GIT_ERROR");
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Close delete dialog" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Close delete dialog" })); });
+    expect(onClose).toHaveBeenCalledOnce();
+    await act(async () => { fireEvent.mouseDown(backdrop); });
+    expect(onClose).toHaveBeenCalledTimes(2);
+    await act(async () => { fireEvent.keyDown(document.body, { key: "Escape" }); });
+    expect(onClose).toHaveBeenCalledTimes(3);
+  });
+
   it("tells the user how to remove a worktree Ferryx did not create", async () => {
     const unmanaged: Worktree = {
       path: "/repo/feature-x",

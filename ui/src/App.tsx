@@ -25,6 +25,7 @@ import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharing
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
 import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
+import { isSameWorktreePath } from "./components/sidebar/sidebarSupervisor";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
 import { agentHistoryProviderLabel, type AgentHistoryEntry } from "./lib/agentHistory";
@@ -182,6 +183,8 @@ import {
 } from "./lib/tauri";
 import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
+import { useTailscaleTargetsByHost } from "./lib/tailscaleDiscovery";
+import { createPairedDaemonProjectAdapter } from "./lib/pairedDaemonProject";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
 import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
@@ -504,6 +507,56 @@ export function secondaryWindowBootstrap(
 function pairedHostMachineId(hostId: string): string {
   const marker = hostId.lastIndexOf("/host/");
   return marker < 0 ? hostId : decodeURIComponent(hostId.slice(marker + "/host/".length));
+}
+
+/**
+ * Platform of the host the active workspace's tabs actually run on, for `TabBar`'s shell presets.
+ *
+ * A paired host reports its own platform in the capability handshake, and a Tailscale SSH peer
+ * reports one when discovery probes it. Everything else (a local project, or an SSH host nobody
+ * has probed) is unknown and answers null, which leaves `TabBar` on this desktop's platform.
+ */
+function useTargetHostPlatform(project: RegisteredProject): string | null {
+  const target = project.target;
+  const pairedHostId = target?.kind === "pairedDaemon" ? target.hostId : null;
+  const sshHostId = target?.kind === "ssh" ? target.hostId : null;
+  // The pairing generation pins which host incarnation may answer; a re-pair re-asks.
+  const pairedGeneration = useSyncExternalStore(
+    remoteHostStore.subscribe,
+    () => (pairedHostId ? remoteHostStore.getState().hosts[pairedHostId]?.generation : undefined),
+  );
+  const tailscaleTargets = useTailscaleTargetsByHost();
+  const [pairedPlatform, setPairedPlatform] = useState<string | null>(null);
+
+  useEffect(() => {
+    // A different host, or a re-pair (new generation), never inherits the previous answer.
+    setPairedPlatform(null);
+    if (!pairedHostId || !pairedGeneration) return;
+    // Its own adapter: negotiating on the layout-sync adapter would clear that adapter's
+    // admission, so a failed probe here could strand layout sync on UNSUPPORTED_CAPABILITY.
+    const adapter = createPairedDaemonProjectAdapter({ hostId: pairedHostId, generation: pairedGeneration });
+    let cancelled = false;
+    void adapter.capabilities().then(
+      (capabilities) => {
+        if (!cancelled) setPairedPlatform(capabilities.platform);
+      },
+      () => {
+        // An unreachable host leaves the platform unknown rather than guessing one.
+        if (!cancelled) setPairedPlatform(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [pairedHostId, pairedGeneration]);
+
+  return useMemo(() => {
+    if (pairedHostId) return pairedPlatform;
+    if (!sshHostId) return null;
+    // Discovery reports "posix" or "windows"; "posix" is passed through as probed rather than
+    // narrowed to one OS, because the only reader keys off "windows".
+    return tailscaleTargets.get(sshHostId)?.environment?.platform ?? null;
+  }, [pairedHostId, pairedPlatform, sshHostId, tailscaleTargets]);
 }
 
 /**
@@ -1744,6 +1797,7 @@ function WorkspaceApp({
   // Layout sync: after a local layout change the host publishes it (300ms debounce) and every
   // window long-polls for remote changes. A remote document only reshapes this view.
   const pairedLayoutAdapterForSync = usePairedLayoutAdapter(activeProject);
+  const targetHostPlatform = useTargetHostPlatform(activeProject);
   useLayoutSync({
     project: activeProject,
     state,
@@ -3647,9 +3701,14 @@ function WorkspaceApp({
     const activeTabId = currentState.layout.activeTabId;
     if (!activeTabId) return;
 
+    // Any tab kind can host a split: a browser tab with a terminal pane, a file tab with a
+    // browser pane. Closing the surface means closing the focused pane when there is one, and
+    // the whole tab only when the pane tree is a single leaf — except for a browser tab, whose
+    // webview is owned by the tab and always closes whole.
     const activeTab = currentState.layout.tabs.find((tab) => tab.id === activeTabId);
+    if (!activeTab) return;
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTabId];
-    if (activeTab && activeTab.kind !== "browser" && activeLayout) {
+    if (activeTab.kind !== "browser" && activeLayout) {
       const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
       if (activeLeafId) {
         handleClosePane(activeTabId, activeLeafId);
@@ -3733,10 +3792,8 @@ function WorkspaceApp({
       }
       const currentState = stateRef.current;
       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
-      if (!activeTab || activeTab.kind === "browser") {
-        switchDebug("split.active.refused.no-terminal-tab", {
-          reason: activeTab ? `tab-kind=${activeTab.kind}` : "no-active-tab",
-        });
+      if (!activeTab) {
+        switchDebug("split.active.refused.no-terminal-tab", { reason: "no-active-tab" });
         return;
       }
       const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
@@ -3745,6 +3802,9 @@ function WorkspaceApp({
       } else if (!activeLayout.activeLeafId) {
         switchDebug("split.active.fallback.leaf-default.active-leaf-missing", { reason: `tabId=${activeTab.id}` });
       }
+      // Splitting is a pane action, so it targets the focused leaf whatever the tab kind is. The
+      // store still refuses a source leaf that hosts no terminal session (a browser pane), which
+      // is where that decision belongs.
       const targetLeafId = activeLayout?.activeLeafId ??
         (activeLayout?.root ? collectLeafIds(activeLayout.root)[0] : "leaf-default");
       switchDebug("split.active.requested", {
@@ -5315,6 +5375,7 @@ function WorkspaceApp({
           <TerminalSplitView
             layout={state.layout}
             fileTabWorktreePath={activeWorktree.path}
+            targetHostPlatform={targetHostPlatform}
             sessions={state.sessions}
             unreadTabIds={state.unreadTabIds}
             activityByTabId={tabActivity}
@@ -5528,8 +5589,8 @@ function WorkspaceApp({
               delete next[deleteTarget.path];
               return next;
             });
-            if (activeWorktree?.path === deleteTarget.path) {
-              const remaining = state.worktrees.filter((w) => w.path !== deleteTarget.path);
+            if (activeWorktree && isSameWorktreePath(activeWorktree.path, deleteTarget.path)) {
+              const remaining = state.worktrees.filter((w) => !isSameWorktreePath(w.path, deleteTarget.path));
               const ownerId = deleteOwnerId;
               const ownerProject = deleteOwnerProject;
               const fallback =

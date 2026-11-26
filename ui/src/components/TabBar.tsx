@@ -84,6 +84,12 @@ type TabBarProps = {
   supervisorActingTabIds?: Record<string, boolean>;
   /** Resolved live text/tooltip per terminal tab; falls back to `tab.label` when absent. */
   tabDisplayById?: Record<string, TerminalTabDisplay | undefined>;
+  /**
+   * Platform of the host the tabs will run on (e.g. a remote/pair host). When provided it
+   * outranks the local `getSystemPermissionsStatus().platform` for shell presets, so a
+   * Windows target gets Windows profiles while driven from a macOS/Linux client.
+   */
+  targetHostPlatform?: string | null;
 };
 
 const WINDOWS_SHELL_OPTIONS = [
@@ -172,6 +178,7 @@ export function TabBar({
   activityByTabId,
   supervisorActingTabIds,
   tabDisplayById,
+  targetHostPlatform,
 }: TabBarProps) {
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -186,7 +193,10 @@ export function TabBar({
   const newTerminalChord = shortcutLabel("tab.newTerminal", isMac, shortcutOverrides);
   // The shell profile menu follows the HOST platform reported by the backend, never
   // the browser OS: the remote web client can drive a host of a different platform.
-  const isWindows = hostPlatform === "windows";
+  // A caller-supplied target host platform (the host the tabs will actually run on)
+  // outranks the local one so presets match the target, not the client.
+  const effectivePlatform = targetHostPlatform ?? hostPlatform;
+  const isWindows = effectivePlatform === "windows";
   const { settings: browserSettings } = useBrowserSettings();
   const advancedFeatures = useAdvancedFeatures();
   // Hidden entry point only: the tab.newBrowser shortcut stays bound in App.

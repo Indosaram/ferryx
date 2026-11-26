@@ -1,5 +1,5 @@
 import { AlertTriangle, GitBranch, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DEFAULT_WORKSPACE_ID,
@@ -105,6 +105,9 @@ export function WorktreeDeleteDialog({
   );
   const [destructiveRequired, setDestructiveRequired] = useState(initialDirty && !paired);
   const [busy, setBusy] = useState(false);
+  // `busy` only lands after a re-render, so two clicks dispatched in the same batch
+  // would both still read `false`; this ref is the actual duplicate-IPC barrier.
+  const deletingRef = useRef(false);
   // Paired previews carry branch metadata only; force deletion remains unavailable there.
   const dirtyState = preview && "dirtyState" in preview ? preview.dirtyState : undefined;
   const dirtyFiles = dirtyState?.files ?? [];
@@ -155,6 +158,8 @@ export function WorktreeDeleteDialog({
   };
 
   const handleSafeDelete = async () => {
+    if (busy || deletingRef.current) return;
+    deletingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -174,12 +179,14 @@ export function WorktreeDeleteDialog({
         }
       }
     } finally {
+      deletingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleDestructiveDelete = async () => {
-    if (busy || !preview) return;
+    if (busy || deletingRef.current || !preview) return;
+    deletingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -188,6 +195,7 @@ export function WorktreeDeleteDialog({
     } catch (cause) {
       setError(actionError(cause));
     } finally {
+      deletingRef.current = false;
       setBusy(false);
     }
   };
@@ -215,7 +223,13 @@ export function WorktreeDeleteDialog({
             <Trash2 className="size-4 text-destructive" />
             Delete worktree
           </div>
-          <button type="button" onClick={onClose} aria-label="Close delete dialog" className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onClose}
+            aria-label="Close delete dialog"
+            className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+          >
             <X className="size-4" />
           </button>
         </header>
@@ -298,7 +312,12 @@ export function WorktreeDeleteDialog({
           ) : null}
 
           <div className="flex justify-end gap-2">
-            <button type="button" onClick={onClose} className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onClose}
+              className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+            >
               Cancel
             </button>
             {!destructiveRequired ? (

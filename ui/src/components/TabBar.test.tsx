@@ -919,4 +919,72 @@ describe("TabBar", () => {
       Object.defineProperty(navigator, "userAgent", { value: originalUserAgent, configurable: true });
     }
   });
+
+  describe("target host platform", () => {
+    const windowsShellLabels = ["PowerShell", "Windows PowerShell", "Command Prompt", "WSL"];
+
+    function expectNoWindowsShells() {
+      for (const label of windowsShellLabels) {
+        expect(findEntryRecursively(menuItems(), label)).toBeUndefined();
+      }
+      expect(findEntryRecursively(menuItems(), "new-terminal:pwsh")).toBeUndefined();
+      expect(findEntryRecursively(menuItems(), "new-terminal:cmd")).toBeUndefined();
+    }
+
+    function expectWindowsShells() {
+      for (const label of windowsShellLabels) {
+        expect(findEntryRecursively(menuItems(), label)).toBeDefined();
+      }
+    }
+
+    it("shows Windows shell presets for a windows target host while the local host is macos", async () => {
+      const ready = stubHostPlatform("macos");
+      const onAdd = vi.fn();
+      const props = {
+        groupId: "group-target-win",
+        tabs: [terminalTab("tab-1", "main")],
+        activeTabId: "tab-1",
+        onActivate: vi.fn(),
+        onClose: vi.fn(),
+        onAdd,
+      };
+      const { rerender } = render(<TabBar {...props} />);
+      await act(async () => { await ready; });
+
+      // Baseline: the local macOS host offers no Windows presets at all.
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expectNoWindowsShells();
+
+      // A windows target outranks the local platform.
+      rerender(<TabBar {...props} targetHostPlatform="windows" />);
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expectWindowsShells();
+
+      act(() => { nativeMenu.lastCall?.onAction("new-terminal:pwsh"); });
+      expect(onAdd).toHaveBeenLastCalledWith("pwsh");
+    });
+
+    it("keeps POSIX presets for a linux target host while the local host is windows", async () => {
+      const ready = stubHostPlatform("windows");
+      const props = {
+        groupId: "group-target-linux",
+        tabs: [terminalTab("tab-1", "main")],
+        activeTabId: "tab-1",
+        onActivate: vi.fn(),
+        onClose: vi.fn(),
+        onAdd: vi.fn(),
+      };
+      const { rerender } = render(<TabBar {...props} />);
+      await act(async () => { await ready; });
+
+      // Baseline: the local Windows host does offer Windows presets.
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expectWindowsShells();
+
+      // A linux target outranks the local platform.
+      rerender(<TabBar {...props} targetHostPlatform="linux" />);
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expectNoWindowsShells();
+    });
+  });
 });

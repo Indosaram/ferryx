@@ -213,6 +213,11 @@ type TerminalSplitViewProps = {
   layout: LayoutState;
   sessions: Record<string, TerminalSession>;
   fileTabWorktreePath?: string | null;
+  /**
+   * Platform of the host these tabs run on. Undefined means "unknown", which lets TabBar fall
+   * back to this desktop's own platform.
+   */
+  targetHostPlatform?: string | null;
   onActivateTab?: (tabId: string) => void;
   onCloseTab?: (tabId: string) => void;
   onCloseOtherTabs?: (tabId: string) => void;
@@ -291,6 +296,7 @@ export function TerminalSplitView({
   layout,
   sessions,
   fileTabWorktreePath = null,
+  targetHostPlatform = null,
   onActivateTab = () => undefined,
   onCloseTab = () => undefined,
   onCloseOtherTabs,
@@ -344,9 +350,11 @@ export function TerminalSplitView({
   onBackendSessionUnavailable,
 }: TerminalSplitViewProps) {
   const normalizedLayout = normalizeLayout(layout);
+  // A split's focused leaf lives in layoutsByTabId, so a pane/session change must recompute the
+  // tab labels even when the tabs array itself is unchanged.
   const tabDisplayById = useMemo(
     () => computeTerminalTabDisplay(normalizedLayout.tabs, normalizedLayout, sessions, activityBySessionId),
-    [normalizedLayout.tabs, sessions, activityBySessionId],
+    [normalizedLayout.tabs, normalizedLayout.layoutsByTabId, sessions, activityBySessionId],
   );
   const groups = normalizedLayout.tabGroups ?? {};
   const groupLayout = normalizedLayout.tabGroupLayout ?? null;
@@ -358,6 +366,16 @@ export function TerminalSplitView({
   // When a pane hovers the tab row, its drag overlay previews as a tab instead of a pane.
   const [paneOverTabRow, setPaneOverTabRow] = useState(false);
   const previewedTabIdRef = useRef<string | null>(null);
+  // A divider press owns the whole window until its pointer is released: the mask below keeps a
+  // native surface from eating that release, and hiding the native surfaces keeps a browser
+  // webview from painting over the live ratio.
+  const [resizingDirection, setResizingDirection] = useState<PaneDirection | null>(null);
+  const handleResizeStart = React.useCallback((direction: PaneDirection) => {
+    setResizingDirection(direction);
+  }, []);
+  const handleResizeEnd = React.useCallback(() => {
+    setResizingDirection(null);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 12 } }),
@@ -374,6 +392,12 @@ export function TerminalSplitView({
     () => createWorkspaceCollisionDetection(isRedundantSplit),
     [normalizedLayout],
   );
+
+  // A tab whose pane tree is a single leaf has no second pane to move a pane beside.
+  const isSinglePaneTab = (tabId: string) => {
+    const tabLayout = normalizedLayout.layoutsByTabId?.[tabId];
+    return !tabLayout || tabLayout.root.type === "leaf";
+  };
 
   const splitTerminalTab = (tabId: string, direction: PaneDirection) => {
     const tab = normalizedLayout.tabs.find((candidate) => candidate.id === tabId);
@@ -472,6 +496,9 @@ export function TerminalSplitView({
           firstGroupId ??
           "";
         if (command.sourceTabId === command.targetTabId) {
+          // Dropping a tab on an edge of its own only pane has nowhere to split from: the pane it
+          // would move beside is the pane it already fills, so spawning one would duplicate it.
+          if (isSinglePaneTab(command.sourceTabId)) return false;
           onSplitPane(command.targetTabId, command.targetLeafId, command.direction, {
             position: command.position,
           });
@@ -491,9 +518,7 @@ export function TerminalSplitView({
           Object.values(groups).find((g) => g.tabIds.includes(command.targetTabId))?.id ??
           firstGroupId ??
           "";
-        const sourceLayout = normalizedLayout.layoutsByTabId?.[command.sourceTabId];
-        const isSinglePane = !sourceLayout || sourceLayout.root.type === "leaf";
-        if (isSinglePane) {
+        if (isSinglePaneTab(command.sourceTabId)) {
           onMoveTabToSplit?.(
             command.sourceTabId,
             targetGroupId,
@@ -545,6 +570,7 @@ export function TerminalSplitView({
     groups,
     sessions,
     fileTabWorktreePath,
+    targetHostPlatform,
     onActivateTab,
     onCloseTab,
     onCloseOtherTabs,
@@ -592,7 +618,9 @@ export function TerminalSplitView({
     onResetAgentState,
     onBackendSessionUnavailable,
     splitTerminalTab,
-    browserPanesVisible: activeDrag === null,
+    browserPanesVisible: activeDrag === null && resizingDirection === null,
+    onResizeStart: handleResizeStart,
+    onResizeEnd: handleResizeEnd,
     dropFeedbackLeafId,
   };
 
@@ -623,6 +651,8 @@ export function TerminalSplitView({
             leadingSpacer={leadingSpacer}
             onSetGroupRatio={onSetGroupRatio}
             onEqualizeGroupRun={onEqualizeGroupRun}
+            onResizeStart={handleResizeStart}
+            onResizeEnd={handleResizeEnd}
             groupProps={sharedGroupProps}
           />
         ) : (
@@ -630,6 +660,7 @@ export function TerminalSplitView({
             tabs={[]}
             activeTabId=""
             tabDisplayById={tabDisplayById}
+            targetHostPlatform={targetHostPlatform}
             onActivate={onActivateTab}
             onClose={onCloseTab}
             onAdd={onAddTab}
@@ -646,6 +677,19 @@ export function TerminalSplitView({
           />
         )}
       </div>
+      {resizingDirection !== null ? (
+        // The mask swallows the pointerup so a native surface under the cursor cannot eat it and
+        // leave the resize (and the full-screen mask) stuck forever. It is aria-hidden because it
+        // is not a real dialog, so it opts in explicitly: hidden surfaces no longer suppress pane
+        // input, but this one must keep making native surfaces yield.
+        <div
+          role="dialog"
+          aria-hidden="true"
+          data-native-terminal-force-yield="true"
+          data-testid="pane-resize-mask"
+          className={resizingDirection === "horizontal" ? "fixed inset-0 z-50 cursor-col-resize" : "fixed inset-0 z-50 cursor-row-resize"}
+        />
+      ) : null}
       <DragOverlay
         dropAnimation={null}
         modifiers={overlay?.kind === "tab" ? [snapOverlayToPointer] : undefined}
@@ -676,10 +720,12 @@ type TabGroupLayoutRendererProps = {
   leadingSpacer: number;
   onSetGroupRatio: (path: string, ratio: number) => void;
   onEqualizeGroupRun: (path: string) => void;
+  onResizeStart: (direction: PaneDirection) => void;
+  onResizeEnd: () => void;
   groupProps: Omit<TabGroupViewProps, "groupId" | "leadingSpacer">;
 };
 
-function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSetGroupRatio, onEqualizeGroupRun, groupProps }: TabGroupLayoutRendererProps) {
+function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSetGroupRatio, onEqualizeGroupRun, onResizeStart, onResizeEnd, groupProps }: TabGroupLayoutRendererProps) {
   if (node.type === "group") {
     return (
       <TabGroupView
@@ -706,6 +752,8 @@ function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSet
           leadingSpacer={leadingSpacer}
           onSetGroupRatio={onSetGroupRatio}
           onEqualizeGroupRun={onEqualizeGroupRun}
+          onResizeStart={onResizeStart}
+          onResizeEnd={onResizeEnd}
           groupProps={groupProps}
         />
       </div>
@@ -713,6 +761,8 @@ function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSet
         direction={node.direction}
         ratio={ratio}
         ariaLabel="Resize tab groups"
+        onResizeStart={onResizeStart}
+        onResizeEnd={onResizeEnd}
         onRatioChange={(newRatio) => onSetGroupRatio(path, newRatio)}
         onEqualize={() => onEqualizeGroupRun(path)}
       />
@@ -724,6 +774,8 @@ function TabGroupLayoutRenderer({ node, path, firstGroupId, leadingSpacer, onSet
           leadingSpacer={leadingSpacer}
           onSetGroupRatio={onSetGroupRatio}
           onEqualizeGroupRun={onEqualizeGroupRun}
+          onResizeStart={onResizeStart}
+          onResizeEnd={onResizeEnd}
           groupProps={groupProps}
         />
       </div>
@@ -737,6 +789,7 @@ type TabGroupViewProps = {
   groups: Record<string, TabGroup>;
   sessions: Record<string, TerminalSession>;
   fileTabWorktreePath?: string | null;
+  targetHostPlatform?: string | null;
   leadingSpacer: number;
   onActivateTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
@@ -795,6 +848,8 @@ type TabGroupViewProps = {
   splitTerminalTab: (tabId: string, direction: PaneDirection) => void;
   onResetAgentState?: (tabId: string) => void;
   browserPanesVisible: boolean;
+  onResizeStart: (direction: PaneDirection) => void;
+  onResizeEnd: () => void;
   dropFeedbackLeafId: string | null;
 } & PaneChatProps;
 
@@ -804,6 +859,7 @@ function TabGroupView({
   groups,
   sessions,
   fileTabWorktreePath = null,
+  targetHostPlatform = null,
   leadingSpacer,
   onActivateTab,
   onCloseTab,
@@ -853,6 +909,8 @@ function TabGroupView({
   onBackendSessionUnavailable,
   splitTerminalTab,
   browserPanesVisible,
+  onResizeStart,
+  onResizeEnd,
   dropFeedbackLeafId,
 }: TabGroupViewProps) {
   const group = groups[groupId];
@@ -909,6 +967,7 @@ function TabGroupView({
         activityByTabId={activityByTabId}
         supervisorActingTabIds={supervisorActingTabIds}
         tabDisplayById={tabDisplayById}
+        targetHostPlatform={targetHostPlatform}
         {...fileTabMenuHandlers}
         onActivate={onActivateTab}
         onClose={onCloseTab}
@@ -1001,6 +1060,8 @@ function TabGroupView({
                     activityBySessionId={activityBySessionId}
                     groupFocused={isFocused && isTabActive}
                     browserPanesVisible={browserPanesVisible && isTabActive}
+                    onResizeStart={onResizeStart}
+                    onResizeEnd={onResizeEnd}
                     dropFeedbackLeafId={isTabActive ? dropFeedbackLeafId : null}
                     onNavigateBrowserTab={onNavigateBrowserTab}
                     onReloadBrowserTab={onReloadBrowserTab}
@@ -1054,6 +1115,8 @@ type PaneRendererProps = {
   activityBySessionId?: Record<string, TerminalActivity>;
   groupFocused: boolean;
   browserPanesVisible: boolean;
+  onResizeStart: (direction: PaneDirection) => void;
+  onResizeEnd: () => void;
   dropFeedbackLeafId: string | null;
   path: string;
   searchLeafId?: string | null;
@@ -1143,6 +1206,8 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         ariaLabel="Resize terminal panes"
         onDragStart={() => resolveSeam(tabLayout.root, path)}
         onEqualize={() => props.onEqualizePaneRun(tab.id, path)}
+        onResizeStart={props.onResizeStart}
+        onResizeEnd={props.onResizeEnd}
         onRatioChange={(newRatio, options) => {
           props.onSetRatio(tab.id, path, newRatio, options);
         }}
@@ -1748,6 +1813,9 @@ type PaneResizeDividerProps = {
   onDragStart?: () => ResolvedSeam | null;
   onEqualize?: () => void;
   onRatioChange: (ratio: number, options?: { isolated?: boolean; seam?: ResolvedSeam | null }) => void;
+  /** Tells the layout owner that a resize owns the window, so native surfaces can yield. */
+  onResizeStart?: (direction: PaneDirection) => void;
+  onResizeEnd?: () => void;
   ariaLabel?: string;
 };
 
@@ -1757,6 +1825,8 @@ function PaneResizeDivider({
   onDragStart,
   onEqualize,
   onRatioChange,
+  onResizeStart,
+  onResizeEnd,
   ariaLabel = "Resize terminal panes",
 }: PaneResizeDividerProps) {
   const dividerRef = useRef<HTMLDivElement>(null);
@@ -1773,6 +1843,15 @@ function PaneResizeDivider({
     };
   }, []);
 
+  // An interrupted drag (window blur, capture transfer, element removal) must still end the
+  // resize: the mask and the resize cursor live in the layout owner and would never be cleared
+  // by a pointerup that goes to a native surface instead of this window.
+  const handleLostPointerCapture = () => {
+    if (!cleanupRef.current) return;
+    cleanupRef.current();
+    cleanupRef.current = null;
+  };
+
   const handlePointerDown = (event: React.PointerEvent) => {
     event.preventDefault();
     const parent = dividerRef.current?.parentElement;
@@ -1783,6 +1862,15 @@ function PaneResizeDivider({
       cleanupRef.current = null;
     }
 
+    // Capturing keeps pointermove/pointerup routed here even when the cursor crosses a native
+    // surface, which would otherwise swallow the release and leave the resize running forever.
+    const pointerId = event.pointerId;
+    try {
+      event.currentTarget.setPointerCapture?.(pointerId);
+    } catch {
+      // The pointer may already be released; the window listeners still end the drag.
+    }
+    onResizeStart?.(direction);
     document.body.style.cursor = isHorizontal ? "col-resize" : "row-resize";
 
     const seam = onDragStart?.() ?? null;
@@ -1796,6 +1884,9 @@ function PaneResizeDivider({
     const seamRef = { current: seam };
     const pendingRatioRef = { current: null as number | null };
     let frameId: number | null = null;
+    // pointerup, lostpointercapture and unmount can all arrive for one press; the resize must
+    // be torn down exactly once so the owner is told a single time that it ended.
+    let finished = false;
 
     const flushRatio = (r: number) => {
       onRatioChange(r, { isolated: isolatedRef.current, seam: seamRef.current });
@@ -1844,11 +1935,21 @@ function PaneResizeDivider({
     };
 
     const cleanup = () => {
+      if (finished) return;
+      finished = true;
+      // Clear the ref first: releasing capture fires lostpointercapture synchronously, and that
+      // handler must find nothing left to tear down.
+      cleanupRef.current = null;
+      try {
+        const element = dividerRef.current;
+        if (element?.hasPointerCapture?.(pointerId)) element.releasePointerCapture(pointerId);
+      } catch {
+        // Capture may already be gone; the listeners below are the real teardown.
+      }
       document.body.style.cursor = "";
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", cleanup);
-      cleanupRef.current = null;
       if (frameId !== null) {
         cancelAnimationFrame(frameId);
         frameId = null;
@@ -1857,6 +1958,7 @@ function PaneResizeDivider({
         flushRatio(pendingRatioRef.current);
         pendingRatioRef.current = null;
       }
+      onResizeEnd?.();
     };
 
     const handlePointerUp = () => {
@@ -1901,6 +2003,7 @@ function PaneResizeDivider({
       aria-valuenow={Math.round(ratio * 100)}
       data-divider-hit-target="true"
       onPointerDown={handlePointerDown}
+      onLostPointerCapture={handleLostPointerCapture}
       className={`no-drag relative z-20 shrink-0 touch-none ${
         isHorizontal ? "w-px cursor-col-resize" : "h-px cursor-row-resize"
       }`}
