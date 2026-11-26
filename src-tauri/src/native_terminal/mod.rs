@@ -46,7 +46,7 @@ pub mod snapshot_codec;
 #[cfg(feature = "native-terminal")]
 pub mod snapshot_slot;
 #[cfg(feature = "native-terminal")]
-mod surface_error;
+pub(crate) mod surface_error;
 #[cfg(feature = "native-terminal")]
 pub mod surface_host;
 #[cfg(feature = "native-terminal")]
