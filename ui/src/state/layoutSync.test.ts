@@ -1,20 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { TerminalSession, WorkspaceTab } from "../lib/types";
+import {
+  createBrowserPaneContent,
+  createChangesPaneContent,
+  createFilePaneContent,
+  createRemoteDesktopPaneContent,
+  isTerminalTab,
+  type TerminalSession,
+  type TerminalTab,
+  type Worktree,
+  type WorkspaceTab,
+} from "../lib/types";
 import { createLayoutState, layoutReducer } from "./layout";
 import {
   applySharedLayout,
   createLayoutSyncLoop,
   decodeSharedLayout,
+  isValidSharedFileRelPath,
+  isValidSharedWorktreeKey,
   publishPersistedLayouts,
+  sharedFileRelPath,
   toRevision,
   toSharedLayout,
+  wireWorktreeKey,
   type SharedLayout,
   type SharedTab,
 } from "./layoutSync";
 
 function terminalTab(id: string, sessionId: string, label = id): WorkspaceTab {
   return { id, label, sessionId };
+}
+
+/** The rebuilt layout's first tab, narrowed so tests can read the terminal-only `sessionId`. */
+function firstTerminalTab(layout: ReturnType<typeof createLayoutState>): TerminalTab {
+  const tab = layout.tabs[0];
+  if (!tab || !isTerminalTab(tab)) throw new Error(`expected a terminal tab, got ${tab?.kind ?? "none"}`);
+  return tab;
 }
 
 function session(id: string, backendSessionId: string): TerminalSession {
@@ -409,3 +430,275 @@ describe("createLayoutSyncLoop", () => {
   });
 });
 
+
+function worktree(path: string, identity?: { wsId: string; slug: string } | null): Worktree {
+  return {
+    ...(identity === undefined ? {} : { identity }),
+    path,
+    head: "abc123",
+    branch: null,
+    bare: false,
+    detached: false,
+    locked: null,
+    prunable: null,
+  };
+}
+
+describe("wireWorktreeKey", () => {
+  it("derives the same bucket for the desktop and a paired client of one managed worktree", () => {
+    // The paired client sees the host's worktree through its identity, never through a path.
+    const desktop = worktree("/Users/alice/repo/.ferryx-worktrees/ws/feat-1", { wsId: "ws", slug: "feat-1" });
+    const paired = worktree("C:\\Users\\alice\\repo\\.ferryx-worktrees\\ws\\feat-1", { wsId: "ws", slug: "feat-1" });
+    expect(wireWorktreeKey(desktop, "/Users/alice/repo")).toBe("wt:feat-1");
+    expect(wireWorktreeKey(paired, "/Users/alice/repo")).toBe("wt:feat-1");
+  });
+
+  it("names the main checkout `main` and never a path", () => {
+    expect(wireWorktreeKey(worktree("/Users/alice/repo"), "/Users/alice/repo/")).toBe("main");
+    expect(wireWorktreeKey(worktree("."), "/Users/alice/repo")).toBe("main");
+  });
+
+  it("digests an unmanaged external worktree into 16 hex characters", () => {
+    const external = wireWorktreeKey(worktree("/Volumes/scratch/feature-b"), "/Users/alice/repo");
+    expect(external).toMatch(/^ext:[0-9a-f]{16}$/);
+    // Deterministic and path-free: the same checkout always lands in the same bucket.
+    expect(wireWorktreeKey(worktree("/Volumes/scratch/feature-b"), "/Users/alice/repo")).toBe(external);
+    expect(external).not.toContain("scratch");
+    expect(external).not.toContain("feature-b");
+    expect(isValidSharedWorktreeKey(external ?? "")).toBe(true);
+    // A different checkout cannot collide by accident with a managed slug.
+    expect(wireWorktreeKey(worktree("/Volumes/scratch/feature-c"), "/Users/alice/repo")).not.toBe(external);
+  });
+
+  it("refuses a slug the host would reject instead of leaking its path", () => {
+    const unsafe = worktree("/Users/alice/repo/.ferryx-worktrees/ws/../escape", { wsId: "ws", slug: "../escape" });
+    const key = wireWorktreeKey(unsafe, "/Users/alice/repo");
+    expect(key).toMatch(/^ext:[0-9a-f]{16}$/);
+    expect(isValidSharedWorktreeKey(key ?? "")).toBe(true);
+  });
+
+  it("accepts exactly the three key forms the host validates", () => {
+    for (const key of ["main", "wt:feat-1", "wt:a.b_c-d", "ext:0123456789abcdef"]) {
+      expect(isValidSharedWorktreeKey(key)).toBe(true);
+    }
+    for (const key of ["", "/Users/alice/repo", "C:\\repo", "wt:", "wt:../x", "wt:a/b", "ext:XYZ", "ext:123", "feat-1"]) {
+      expect(isValidSharedWorktreeKey(key)).toBe(false);
+    }
+  });
+});
+
+describe("sharedFileRelPath", () => {
+  it("makes a workspace file relative and drops anything outside it", () => {
+    expect(sharedFileRelPath("/Users/alice/repo/src/a.ts", "/Users/alice/repo")).toBe("src/a.ts");
+    expect(sharedFileRelPath("src/a.ts", "/Users/alice/repo")).toBe("src/a.ts");
+    expect(sharedFileRelPath("C:\\repo\\src\\a.ts", "C:\\repo")).toBe("src/a.ts");
+    // Outside the workspace, or no root to make it relative to: nothing is published.
+    expect(sharedFileRelPath("/etc/passwd", "/Users/alice/repo")).toBeUndefined();
+    expect(sharedFileRelPath("/Users/alice/repo/src/a.ts")).toBeUndefined();
+    expect(sharedFileRelPath("/Users/alice/repo/../secret", "/Users/alice/repo")).toBeUndefined();
+  });
+
+  it("matches the host's relative-path contract", () => {
+    expect(isValidSharedFileRelPath("src/a.ts")).toBe(true);
+    for (const path of ["", "/src/a.ts", "src\\a.ts", "../a.ts", "src/../a.ts", "C:/a.ts", "a".repeat(513)]) {
+      expect(isValidSharedFileRelPath(path)).toBe(false);
+    }
+  });
+});
+
+describe("non-terminal pane leaves", () => {
+  function mixedLayout(): ReturnType<typeof createLayoutState> {
+    const initial = createLayoutState([terminalTab("tab", "s1")], "tab");
+    return layoutReducer(initial, {
+      type: "SPLIT_PANE",
+      tabId: "tab",
+      direction: "horizontal",
+      newLeafId: "leaf-browser",
+      ratio: 0.5,
+      content: createBrowserPaneContent({ browserId: "b1", url: "https://example.com" }),
+    });
+  }
+
+  it("publishes the non-terminal leaf with its kind and metadata", () => {
+    const shared = toSharedLayout(mixedLayout(), { s1: session("s1", "backend-1") }, undefined, "/Users/alice/repo");
+    const paneTree = shared[0].paneTree;
+    expect(paneTree).toMatchObject({
+      type: "split",
+      first: { type: "leaf", leafId: "leaf-init", backendSessionId: "backend-1" },
+      second: {
+        type: "leaf",
+        leafId: "leaf-browser",
+        backendSessionId: "",
+        paneKind: "browser",
+        browserId: "b1",
+        url: "https://example.com",
+      },
+    });
+  });
+
+  it("publishes a workspace-relative file path and never an absolute one", () => {
+    const fileContent = createFilePaneContent({
+      path: "/Users/alice/repo/src/a.ts",
+      backendSessionId: "",
+      line: 3,
+      col: null,
+      workspaceId: "ws",
+      previewId: "p1",
+    });
+    const layout = layoutReducer(createLayoutState([terminalTab("tab", "s1")], "tab"), {
+      type: "SPLIT_PANE", tabId: "tab", direction: "vertical", newLeafId: "leaf-file", content: fileContent,
+    });
+    const shared = toSharedLayout(layout, { s1: session("s1", "backend-1") }, undefined, "/Users/alice/repo");
+    const serialized = JSON.stringify(shared);
+    expect(serialized).toContain('"fileRelPath":"src/a.ts"');
+    expect(serialized).not.toContain("/Users/alice");
+
+    const outside = toSharedLayout(
+      layoutReducer(createLayoutState([terminalTab("tab2", "s2")], "tab2"), {
+        type: "SPLIT_PANE", tabId: "tab2", direction: "vertical", newLeafId: "leaf-out",
+        content: createFilePaneContent({
+          path: "/etc/passwd", backendSessionId: "", line: null, col: null, workspaceId: null, previewId: "p2",
+        }),
+      }),
+      {},
+      undefined,
+      "/Users/alice/repo",
+    );
+    expect(JSON.stringify(outside)).not.toContain("fileRelPath");
+    expect(JSON.stringify(outside)).not.toContain("/etc/passwd");
+  });
+
+  it("round-trips a mixed split without minting a shared-session ghost terminal", () => {
+    const before = mixedLayout();
+    const shared = toSharedLayout(before, { s1: session("s1", "backend-1") }, undefined, "/Users/alice/repo");
+    const doc: SharedLayout = { workspaceId: "ws", worktreeKey: "wt:feat-1", revision: 2, tabs: shared };
+    const decoded = decodeSharedLayout(JSON.parse(JSON.stringify(doc)));
+    expect(decoded.worktreeKey).toBe("wt:feat-1");
+
+    const { layout } = applySharedLayout(createLayoutState(), decoded, (id) => (id === "backend-1" ? "s1" : null));
+    const panes = layout.layoutsByTabId.tab;
+    expect(Object.values(panes.sessionIdsByLeafId).filter(Boolean)).toEqual(["s1"]);
+    expect(panes.sessionIdsByLeafId["leaf-browser"]).toBe("");
+    expect(panes.contentsByLeafId?.["leaf-browser"]).toMatchObject({ kind: "browser", browser: { browserId: "b1" } });
+    expect(Object.values(panes.sessionIdsByLeafId).some((id) => id.startsWith("shared-session:"))).toBe(false);
+    expect(firstTerminalTab(layout).sessionId).toBe("s1");
+  });
+
+  it("restores changes, dag and remoteDesktop leaves from their metadata", () => {
+    const doc: SharedLayout = {
+      workspaceId: "ws",
+      revision: 1,
+      tabs: [{
+        id: "tab", kind: "terminal", label: "tab", pinned: false,
+        paneTree: {
+          type: "split", direction: "horizontal", ratio: 0.5,
+          first: { type: "leaf", leafId: "l-changes", backendSessionId: "", paneKind: "changes" },
+          second: {
+            type: "split", direction: "vertical", ratio: 0.5,
+            first: { type: "leaf", leafId: "l-dag", backendSessionId: "", paneKind: "dag", dagRunId: "run-1" },
+            second: { type: "leaf", leafId: "l-rd", backendSessionId: "", paneKind: "remoteDesktop", hostId: "host-1" },
+          },
+        },
+      }],
+    };
+    const { layout } = applySharedLayout(createLayoutState(), doc, () => null);
+    const contents = layout.layoutsByTabId.tab.contentsByLeafId ?? {};
+    expect(contents["l-changes"]).toMatchObject({ kind: "changes" });
+    expect(contents["l-dag"]).toMatchObject({ kind: "dag", dag: { runId: "run-1" } });
+    expect(contents["l-rd"]).toEqual(createRemoteDesktopPaneContent("host-1"));
+    expect(Object.values(layout.layoutsByTabId.tab.sessionIdsByLeafId)).toEqual(["", "", ""]);
+  });
+
+  it("keeps a browser tab as a bare entry with no pane tree", () => {
+    const browser: WorkspaceTab = {
+      kind: "browser", id: "browser", label: "Docs", browserId: "b1", url: "https://example.com", pinned: true,
+    };
+    const layout = layoutReducer(createLayoutState([browser], "browser"), {
+      type: "SPLIT_PANE", tabId: "browser", direction: "horizontal", newLeafId: "leaf-extra",
+      content: createChangesPaneContent({ workspaceId: "ws", worktreePath: "/repo/main", worktree: null }),
+    });
+    // A single-pane non-terminal tab has no leaf metadata to publish at all.
+    expect(toSharedLayout(layout, {}, undefined, "/repo")).toEqual([
+      { id: "browser", kind: "browser", label: "Docs", pinned: true, paneTree: null },
+    ]);
+  });
+});
+
+describe("rebuildTab session identity", () => {
+  it("gives a newly received remote terminal tab its live session id", () => {
+    const doc: SharedLayout = {
+      workspaceId: "ws",
+      revision: 4,
+      tabs: [{
+        id: "remote-tab", kind: "terminal", label: "remote", pinned: false,
+        paneTree: {
+          type: "split", direction: "horizontal", ratio: 0.5,
+          first: { type: "leaf", leafId: "l1", backendSessionId: "backend-1" },
+          second: { type: "leaf", leafId: "l2", backendSessionId: "", paneKind: "browser", browserId: "b1", url: "https://x.test" },
+        },
+      }],
+    };
+    const { layout } = applySharedLayout(createLayoutState(), doc, (id) => (id === "backend-1" ? "s1" : null));
+    const tab = layout.tabs[0];
+    expect(tab).toMatchObject({ id: "remote-tab", kind: "terminal", sessionId: "s1" });
+    expect(layout.layoutsByTabId["remote-tab"].activeLeafId).toBe("l1");
+    expect(layout.layoutsByTabId["remote-tab"].sessionIdsByLeafId["l1"]).toBe("s1");
+  });
+
+  it("prefers the active leaf's session when a split tab has several terminals", () => {
+    const doc: SharedLayout = {
+      workspaceId: "ws",
+      revision: 1,
+      tabs: [{
+        id: "t", kind: "terminal", label: "t", pinned: false,
+        paneTree: {
+          type: "split", direction: "horizontal", ratio: 0.5,
+          first: { type: "leaf", leafId: "l1", backendSessionId: "backend-1" },
+          second: { type: "leaf", leafId: "l2", backendSessionId: "backend-2" },
+        },
+      }],
+    };
+    const { layout } = applySharedLayout(createLayoutState(), doc, (id) => `front-${id}`);
+    expect(layout.layoutsByTabId.t.sessionIdsByLeafId.l1).toBe("front-backend-1");
+    expect(firstTerminalTab(layout).sessionId).toBe("front-backend-1");
+  });
+});
+
+describe("legacy layoutSyncV1 documents", () => {
+  const legacy: SharedLayout = {
+    workspaceId: "ws",
+    revision: 3,
+    tabs: [{
+      id: "tab", kind: "terminal", label: "tab", pinned: false,
+      paneTree: { type: "leaf", leafId: "leaf-a", backendSessionId: "backend-1" },
+    }],
+  };
+
+  it("decodes a document with no worktreeKey and no pane metadata", () => {
+    const decoded = decodeSharedLayout(JSON.parse(JSON.stringify(legacy)));
+    expect(decoded).toEqual(legacy);
+    expect(decoded.worktreeKey).toBeUndefined();
+  });
+
+  it("applies it without inventing metadata", () => {
+    const { layout } = applySharedLayout(createLayoutState(), decodeSharedLayout(legacy), () => "s1");
+    expect(layout.layoutsByTabId.tab.contentsByLeafId).toMatchObject({ "leaf-a": { kind: "terminal", sessionId: "s1" } });
+    expect(firstTerminalTab(layout).sessionId).toBe("s1");
+  });
+
+  it("rejects a worktreeKey or leaf kind the host would refuse", () => {
+    expect(() => decodeSharedLayout({ ...legacy, worktreeKey: "/Users/alice/repo" }))
+      .toThrow(/INVALID_SHARED_LAYOUT:layout.worktreeKey/);
+    expect(() => decodeSharedLayout({
+      ...legacy,
+      tabs: [{ ...legacy.tabs[0], paneTree: { type: "leaf", leafId: "l", backendSessionId: "", paneKind: "video" } }],
+    })).toThrow(/INVALID_SHARED_LAYOUT:pane.paneKind/);
+    expect(() => decodeSharedLayout({
+      ...legacy,
+      tabs: [{
+        ...legacy.tabs[0],
+        paneTree: { type: "leaf", leafId: "l", backendSessionId: "", paneKind: "file", fileRelPath: "/etc/passwd" },
+      }],
+    })).toThrow(/INVALID_SHARED_LAYOUT:pane.fileRelPath/);
+  });
+});

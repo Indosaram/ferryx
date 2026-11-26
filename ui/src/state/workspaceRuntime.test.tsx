@@ -43,6 +43,54 @@ function createServices() {
 }
 
 describe("useWorkspaceRuntime", () => {
+  it("keeps a current workspace error when a stale refresh rejects after switching", async () => {
+    let rejectStale!: (error: unknown) => void;
+    const staleList = new Promise<Worktree[]>((_resolve, reject) => { rejectStale = reject; });
+    const currentError = { code: "WORKSPACE_NOT_FOUND", message: "Current workspace missing", details: {} };
+    const services: WorkspaceRuntimeServices = {
+      ensureTerminalEvents: vi.fn(async () => undefined),
+      listWorktrees: vi.fn((id) => id === "old" ? staleList : Promise.reject(currentError)),
+      onWorktreeChanged: vi.fn(async () => () => undefined),
+      isTauriRuntime: vi.fn(() => true),
+    };
+    // Gate initialization so each refresh is explicitly triggered and awaited.
+    const { result, rerender, unmount } = renderHook(({ workspaceId }) => useWorkspaceRuntime({
+      workspaceId, registeredWorkspaceId: null, activeWorktreePath: null,
+      syncWorktrees: vi.fn(async () => undefined), ensureTabForWorktree: vi.fn(async () => null), services,
+    }), { initialProps: { workspaceId: "old" } });
+    try {
+      let staleRefresh!: Promise<void>;
+      act(() => { staleRefresh = result.current.refreshWorktrees(); });
+      rerender({ workspaceId: "current" });
+      await act(async () => { await result.current.refreshWorktrees(); });
+      expect(result.current.runtimeError).toEqual(currentError);
+      await act(async () => {
+        rejectStale({ code: "UNKNOWN", message: "Stale error", details: {} });
+        await staleRefresh;
+      });
+      expect(result.current.runtimeError).toEqual(currentError);
+    } finally {
+      unmount();
+    }
+  });
+
+  it("prefers the active worktree across Windows casing, separators and trailing slash changes", async () => {
+    const { services } = createServices();
+    const selected = { ...worktree, path: "c:/repo/.ferryx-worktrees/ws/wt/" };
+    services.listWorktrees.mockResolvedValue([worktree, selected]);
+    const ensureTabForWorktree = vi.fn(async () => "selected");
+    const { result, unmount } = renderHook(() => useWorkspaceRuntime({
+      registeredWorkspaceId: null, activeWorktreePath: "C:\\Repo\\.ferryx-worktrees\\ws\\wt",
+      syncWorktrees: vi.fn(async () => undefined), ensureTabForWorktree, services,
+    }));
+    try {
+      await act(async () => { await result.current.refreshWorktrees(); });
+      expect(ensureTabForWorktree).toHaveBeenCalledExactlyOnceWith(selected);
+    } finally {
+      unmount();
+    }
+  });
+
   it("registers terminal/worktree listeners before the initial refresh and opens a valid tab", async () => {
     const { services } = createServices();
     const syncWorktrees = vi.fn(async () => undefined);

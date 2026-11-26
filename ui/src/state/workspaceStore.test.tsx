@@ -2472,3 +2472,114 @@ describe("canonicalWorktreeKey and SET_WORKTREES verbatim prefix tolerance", () 
     expect(next.layout.tabs).toHaveLength(1);
   });
 });
+
+describe("bell unread badge lifecycle", () => {
+  /** Two terminal tabs in two tab groups, both carrying a bell badge. */
+  function bellState(): WorkspaceState {
+    const primary: TerminalTab = { id: "tab-primary", label: "primary", sessionId: "session-1" };
+    const secondary: TerminalTab = { id: "tab-secondary", label: "secondary", sessionId: "session-2" };
+    return {
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {
+        "session-1": restoredSession("session-1", "restored-backend-1"),
+        "session-2": restoredSession("session-2", "restored-backend-2"),
+      },
+      layout: {
+        tabs: [primary, secondary],
+        activeTabId: primary.id,
+        layoutsByTabId: {
+          [primary.id]: {
+            root: { type: "leaf", leafId: "leaf-primary" },
+            activeLeafId: "leaf-primary",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-primary": "session-1" },
+          },
+          [secondary.id]: {
+            root: { type: "leaf", leafId: "leaf-secondary" },
+            activeLeafId: "leaf-secondary",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-secondary": "session-2" },
+          },
+        },
+        tabGroups: {
+          G1: { id: "G1", tabIds: [primary.id], activeTabId: primary.id },
+          G2: { id: "G2", tabIds: [secondary.id], activeTabId: secondary.id },
+        },
+        tabGroupLayout: {
+          type: "split", direction: "horizontal", ratio: 0.5,
+          first: { type: "group", groupId: "G1" },
+          second: { type: "group", groupId: "G2" },
+        },
+        focusedGroupId: "G1",
+      },
+      unreadTabIds: {},
+      bellUnreadTabIds: { "tab-primary": true, "tab-secondary": true },
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+  }
+
+  it("clears the closed tab's bell and leaves the surviving tab's badge", () => {
+    const next = workspaceReducer(bellState(), { type: "CLOSE_TAB", tabId: "tab-secondary" });
+
+    expect(next.layout.tabs.map((tab) => tab.id)).toEqual(["tab-primary"]);
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab is activated", () => {
+    const next = workspaceReducer(bellState(), { type: "ACTIVATE_TAB", tabId: "tab-secondary" });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab moves to another group", () => {
+    const next = workspaceReducer(bellState(), {
+      type: "MOVE_TAB_TO_GROUP",
+      sourceTabId: "tab-secondary",
+      targetGroupId: "G1",
+    });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab moves into a split group", () => {
+    const next = workspaceReducer(bellState(), {
+      type: "MOVE_TAB_TO_SPLIT",
+      sourceTabId: "tab-secondary",
+      targetGroupId: "G1",
+      direction: "horizontal",
+    });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab moves into a pane split", () => {
+    const next = workspaceReducer(bellState(), {
+      type: "MOVE_TAB_TO_PANE_SPLIT",
+      sourceTabId: "tab-secondary",
+      targetTabId: "tab-primary",
+      targetLeafId: "leaf-primary",
+      direction: "horizontal",
+    });
+
+    expect(next.layout.tabs.map((tab) => tab.id)).toEqual(["tab-primary"]);
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when focusing an existing session", () => {
+    const next = workspaceReducer(bellState(), { type: "FOCUS_EXISTING_SESSION", sessionId: "session-2" });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+});

@@ -1,5 +1,5 @@
 import type { TerminalSessionSummary, Worktree } from "../lib/types";
-import type { PreSpawnedBackend, WorkspaceState } from "./workspaceStore";
+import { canonicalWorktreeKey, type PreSpawnedBackend, type WorkspaceState } from "./workspaceStore";
 
 export type OrphanAdoptionPlanEntry = { backend: PreSpawnedBackend; worktree: Worktree };
 
@@ -31,7 +31,7 @@ export function planOrphanAdoption(
       .filter((id): id is string => typeof id === "string" && id.length > 0),
   );
   const live = new Map(liveSessions.map((summary) => [summary.sessionId, summary]));
-  const activeWorktree = state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? state.worktrees[0];
+  const activeWorktree = state.worktrees.find((worktree) => canonicalWorktreeKey(worktree.path) === canonicalWorktreeKey(state.activeWorktreePath ?? "")) ?? state.worktrees[0];
   for (const sessionId of new Set(sessionIds)) {
     if (attached.has(sessionId)) {
       plan.alreadyAttached.push(sessionId);
@@ -42,7 +42,7 @@ export function planOrphanAdoption(
       plan.missing.push(sessionId);
       continue;
     }
-    const worktree = state.worktrees.find((candidate) => candidate.path === summary.worktreePath) ?? activeWorktree;
+    const worktree = state.worktrees.find((candidate) => canonicalWorktreeKey(candidate.path) === canonicalWorktreeKey(summary.worktreePath ?? "")) ?? activeWorktree;
     if (!worktree) {
       plan.missing.push(sessionId);
       continue;

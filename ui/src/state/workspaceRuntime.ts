@@ -11,6 +11,7 @@ import {
 import { ensureTerminalEvents } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
 import type { StructuredIpcError, Worktree, WorktreeChangedPayload } from "../lib/types";
+import { canonicalWorktreeKey } from "./workspaceStore";
 
 export type WorkspaceRuntimeServices = {
   ensureTerminalEvents: () => Promise<void>;
@@ -220,7 +221,7 @@ export function useWorkspaceRuntime({
           });
           if (!isCurrent()) return;
           stage = "ensure";
-          const preferred = worktrees.find((worktree) => worktree.path === activeWorktreePathRef.current) ?? worktrees[0];
+          const preferred = worktrees.find((worktree) => canonicalWorktreeKey(worktree.path) === canonicalWorktreeKey(activeWorktreePathRef.current ?? "")) ?? worktrees[0];
           if (preferred) {
             switchDebug("worktree.refresh.ensure.start", {
               workspaceId,
@@ -250,6 +251,7 @@ export function useWorkspaceRuntime({
             message: ipcError.message,
             current: isCurrent(),
           });
+          if (!isCurrent()) return;
           reportRuntimeErrorRef.current(error);
         }
       })().finally(() => {

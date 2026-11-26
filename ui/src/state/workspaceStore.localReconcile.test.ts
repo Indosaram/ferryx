@@ -10,6 +10,7 @@ import {
   subscribeWorkspaceSnapshots,
 } from "./workspaceSnapshotCache";
 import {
+  localRecoveryBlockReason,
   requestLocalRecoveryAdmission,
   resetLocalRecoveryForTests,
   setLocalRecoveryClockForTests,
@@ -800,5 +801,32 @@ describe("local recovery retry identity_conflict revalidation", () => {
 
       clearWorkspaceSnapshot("ssh:server-1");
     });
+  });
+});
+
+describe("localRecoveryBlockReason", () => {
+  it("keeps a known daemon block code verbatim", () => {
+    expect(localRecoveryBlockReason("SESSION_EXPIRED")).toBe("SESSION_EXPIRED");
+    expect(localRecoveryBlockReason("PAIRED_HOST_UNAUTHORIZED")).toBe("PAIRED_HOST_UNAUTHORIZED");
+    expect(localRecoveryBlockReason("UNSUPPORTED_PROTOCOL")).toBe("UNSUPPORTED_PROTOCOL");
+    expect(localRecoveryBlockReason("identity_conflict")).toBe("identity_conflict");
+  });
+
+  it("keeps an unknown daemon code instead of collapsing it into identity_conflict", () => {
+    // A newer owner can report a code this build does not name; the pane must still show it.
+    expect(localRecoveryBlockReason("FUTURE_DAEMON_REASON")).toBe("FUTURE_DAEMON_REASON");
+    expect(localRecoveryBlockReason("HOST_POLICY_LOCKED")).toBe("HOST_POLICY_LOCKED");
+  });
+
+  it("trims a padded code before returning it", () => {
+    expect(localRecoveryBlockReason("  SESSION_EXPIRED  ")).toBe("SESSION_EXPIRED");
+    expect(localRecoveryBlockReason(" HOST_POLICY_LOCKED ")).toBe("HOST_POLICY_LOCKED");
+  });
+
+  it("falls back to identity_conflict when the owner reports no code", () => {
+    expect(localRecoveryBlockReason(null)).toBe("identity_conflict");
+    expect(localRecoveryBlockReason(undefined)).toBe("identity_conflict");
+    expect(localRecoveryBlockReason("")).toBe("identity_conflict");
+    expect(localRecoveryBlockReason("   ")).toBe("identity_conflict");
   });
 });

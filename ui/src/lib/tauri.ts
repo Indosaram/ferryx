@@ -1812,13 +1812,17 @@ export async function loadSession(): Promise<import('./types').PersistedWorkspac
 /**
  * Reads one workspace's shared layout document. `afterRevision` turns the call into a
  * long poll: the daemon answers as soon as the document is newer than that revision.
+ * `worktreeKey` selects one worktree bucket of the workspace (`main`, `wt:<slug>`, `ext:<hex>`);
+ * omitting it reads the workspace-level document a legacy client publishes.
  */
 export async function layoutGet(
   workspaceId: string,
   afterRevision?: number | null,
+  worktreeKey?: string,
 ): Promise<SharedLayout> {
   const raw = await invokeCommand<unknown>('cmd_layout_get', {
     workspaceId,
+    ...(worktreeKey === undefined ? {} : { worktreeKey }),
     ...(afterRevision == null ? {} : { afterRevision }),
   });
   return decodeSharedLayout(raw);
@@ -1832,8 +1836,14 @@ export async function layoutPut(
   workspaceId: string,
   baseRevision: number,
   tabs: SharedTab[],
+  worktreeKey?: string,
 ): Promise<{ layout: SharedLayout; conflict: boolean }> {
-  const raw = await invokeCommand<unknown>('cmd_layout_put', { workspaceId, baseRevision, tabs });
+  const raw = await invokeCommand<unknown>('cmd_layout_put', {
+    workspaceId,
+    ...(worktreeKey === undefined ? {} : { worktreeKey }),
+    baseRevision,
+    tabs,
+  });
   const envelope = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
   const conflict = envelope?.conflict === true;
   return { layout: decodeSharedLayout(envelope && 'layout' in envelope ? envelope.layout : raw), conflict };

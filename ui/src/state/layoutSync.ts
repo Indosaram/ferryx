@@ -1,14 +1,45 @@
 import {
+  createBrowserPaneContent,
+  createChangesPaneContent,
+  createDagPaneContent,
+  createFilePaneContent,
+  createRemoteDesktopPaneContent,
   createTerminalPaneContent,
   isTerminalTab,
   type LayoutState,
   type PaneContent,
   type TabPaneLayout,
   type TerminalSession,
+  type Worktree,
   type WorkspaceTab,
 } from "../lib/types";
+import { isSameWorktreePath } from "../components/sidebar/sidebarSupervisor";
 import { normalizeLayout } from "./layout";
 import { clampRatio, collectLeafIds, type PaneDirection } from "./paneTree";
+
+/** Leaf kinds the shared document may name; mirrors the Rust `SHARED_PANE_KINDS` contract. */
+export const SHARED_PANE_KINDS = ["terminal", "browser", "file", "changes", "dag", "remoteDesktop"] as const;
+
+export type SharedPaneKind = (typeof SHARED_PANE_KINDS)[number];
+
+export function isSharedPaneKind(value: unknown): value is SharedPaneKind {
+  return typeof value === "string" && (SHARED_PANE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Additive, optional metadata a non-terminal leaf carries. A terminal leaf publishes none of
+ * it, so a legacy `layoutSyncV1` reader sees exactly the two fields it always saw.
+ * Names mirror the Rust `SharedPane::Leaf` camelCase fields.
+ */
+export type SharedPaneLeafMetadata = {
+  paneKind?: SharedPaneKind;
+  browserId?: string;
+  url?: string;
+  /** Workspace-relative POSIX path; never an absolute desktop path. */
+  fileRelPath?: string;
+  dagRunId?: string;
+  hostId?: string;
+};
 
 /**
  * Wire document shared between a host workspace and its paired clients.
@@ -16,7 +47,7 @@ import { clampRatio, collectLeafIds, type PaneDirection } from "./paneTree";
  * split mode) is deliberately absent - each window keeps its own.
  */
 export type SharedPane =
-  | { type: "leaf"; leafId: string; backendSessionId: string }
+  | ({ type: "leaf"; leafId: string; backendSessionId: string } & SharedPaneLeafMetadata)
   | {
       type: "split";
       direction: PaneDirection;
@@ -36,6 +67,11 @@ export type SharedTab = {
 
 export type SharedLayout = {
   workspaceId: string;
+  /**
+   * `main`, `wt:<slug>` or `ext:<16 hex>`; absent is the workspace-level document a legacy
+   * client publishes and reads. Never a filesystem path.
+   */
+  worktreeKey?: string;
   revision: number;
   tabs: SharedTab[];
 };
@@ -53,6 +89,130 @@ export const EMPTY_SHARED_LAYOUT = (workspaceId: string): SharedLayout => ({
   revision: 0,
   tabs: [],
 });
+
+const MAX_SHARED_WORKTREE_KEY_BYTES = 4 + 128;
+const MAX_SHARED_FILE_REL_PATH_BYTES = 512;
+const WORKTREE_SLUG_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
+function utf8Length(value: string): number {
+  return typeof TextEncoder === "function" ? new TextEncoder().encode(value).length : value.length;
+}
+
+/** Whether `key` is a bucket name the host's `validate_shared_worktree_key` accepts. */
+export function isValidSharedWorktreeKey(key: string): boolean {
+  if (key === "main") return true;
+  if (!key || utf8Length(key) > MAX_SHARED_WORKTREE_KEY_BYTES) return false;
+  if (key.startsWith("wt:")) {
+    const slug = key.slice(3);
+    return WORKTREE_SLUG_PATTERN.test(slug) && !slug.includes("..");
+  }
+  if (key.startsWith("ext:")) return /^[0-9a-f]{16,64}$/.test(key.slice(4));
+  return false;
+}
+
+/** Whether `path` is the workspace-relative POSIX path the host accepts for a `file` leaf. */
+export function isValidSharedFileRelPath(path: string): boolean {
+  if (!path || utf8Length(path) > MAX_SHARED_FILE_REL_PATH_BYTES) return false;
+  if (path.startsWith("/") || path.includes("\\")) return false;
+  for (const character of path) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) return false;
+  }
+  if (path.split("/").some((segment) => segment === "..")) return false;
+  return !/^[A-Za-z]:/.test(path);
+}
+
+/**
+ * Path canonicalisation used only to derive a wire key. Mirrors `workspaceStore.canonicalWorktreeKey`
+ * but stays local: this module is imported by the transport layer, which the store itself imports.
+ */
+function canonicalWirePath(path: string): string {
+  if (!path) return "";
+  if (/^\\\\\?\\/.test(path) || /^[a-zA-Z]:[\\/]/.test(path)) {
+    return path
+      .replace(/^\\\\\?\\UNC\\/i, "\\\\")
+      .replace(/^\\\\\?\\/, "")
+      .replace(/\\/g, "/")
+      .replace(/\/+$/, "")
+      .toLowerCase();
+  }
+  return path.replace(/\/+$/, "");
+}
+
+/** Canonical form used to key local `worktreeLayouts` entries; never published. */
+export function canonicalWorktreeLayoutKey(path: string): string {
+  return canonicalWirePath(path);
+}
+
+/** The existing `worktreeLayouts` key for `path`, or `path` itself when none is stored yet. */
+export function worktreeLayoutKey(
+  layouts: Record<string, LayoutState> | undefined,
+  path: string,
+): string {
+  const canonical = canonicalWorktreeLayoutKey(path);
+  for (const stored of Object.keys(layouts ?? {})) {
+    if (canonicalWorktreeLayoutKey(stored) === canonical) return stored;
+  }
+  return path;
+}
+
+/** 32-bit FNV-1a; two seeded passes give a 64-bit digest without BigInt. */
+function fnv1a32(text: string, seed: number): number {
+  let hash = seed >>> 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash ^ text.charCodeAt(index)) >>> 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/** Deterministic 16 lowercase hex characters for a worktree path: `[0-9a-f]{16}`. */
+export function worktreePathDigest(path: string): string {
+  const canonical = canonicalWirePath(path);
+  const high = fnv1a32(canonical, 0x811c9dc5).toString(16).padStart(8, "0");
+  const low = fnv1a32(canonical, 0x9e3779b9).toString(16).padStart(8, "0");
+  return high + low;
+}
+
+/** The `worktreeKey` a document is bucketed under, or `undefined` for the workspace-level
+ * document. Managed worktrees travel as their identity slug, the main checkout as `main`, and an
+ * unmanaged external worktree as a digest - a raw path (or any part of one) never leaves the
+ * machine.
+ */
+export function wireWorktreeKey(
+  worktree: Pick<Worktree, "identity" | "path"> | undefined,
+  repoRoot?: string | null,
+): string | undefined {
+  const slug = worktree?.identity?.slug;
+  if (typeof slug === "string" && WORKTREE_SLUG_PATTERN.test(slug) && !slug.includes("..")) return `wt:${slug}`;
+  const path = worktree?.path;
+  if (typeof path !== "string" || !path) return undefined;
+  if (path === "." || (typeof repoRoot === "string" && repoRoot !== "" && isSameWorktreePath(path, repoRoot))) return "main";
+  return `ext:${worktreePathDigest(path)}`;
+}
+
+/**
+ * The workspace-relative POSIX path a `file` leaf may publish, or `undefined` when the path is
+ * absolute and outside the workspace (a desktop path must never reach the document).
+ */
+export function sharedFileRelPath(path: string, workspaceRoot?: string | null): string | undefined {
+  if (!path) return undefined;
+  const target = path.replace(/\\/g, "/");
+  const isAbsolute = target.startsWith("/") || /^[A-Za-z]:\//.test(target);
+  if (!isAbsolute) {
+    const relative = target.replace(/^\.\//, "");
+    return isValidSharedFileRelPath(relative) ? relative : undefined;
+  }
+  if (typeof workspaceRoot !== "string" || !workspaceRoot) return undefined;
+  const root = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!root) return undefined;
+  const caseInsensitive = /^[A-Za-z]:/.test(root);
+  const comparableRoot = caseInsensitive ? root.toLowerCase() : root;
+  const comparableTarget = caseInsensitive ? target.toLowerCase() : target;
+  if (!comparableTarget.startsWith(`${comparableRoot}/`)) return undefined;
+  const relative = target.slice(root.length + 1);
+  return isValidSharedFileRelPath(relative) ? relative : undefined;
+}
 
 /** u64 revisions arrive as JSON numbers from Tauri and as decimal strings from the machine API. */
 export function toRevision(value: unknown): number | null {
@@ -72,6 +232,8 @@ export function toSharedLayout(
   workspaceLayout: LayoutState,
   sessions: LayoutSyncSessions,
   backendForLeaf?: (frontendSessionId: string) => string | null,
+  /** Root a `file` leaf's absolute path is made relative to; omitted leaves `fileRelPath` out. */
+  workspaceRoot?: string | null,
 ): SharedTab[] {
   const resolveBackend = (frontendSessionId: string): string => {
     const explicit = backendForLeaf?.(frontendSessionId);
@@ -88,16 +250,23 @@ export function toSharedLayout(
     if (!isTerminalTab(tab)) return { ...base, paneTree: null };
     const tabLayout = workspaceLayout.layoutsByTabId?.[tab.id];
     if (!tabLayout) return { ...base, paneTree: null };
-    return { ...base, paneTree: toSharedPane(tabLayout.root, tabLayout.sessionIdsByLeafId, resolveBackend) };
+    return {
+      ...base,
+      paneTree: toSharedPane(tabLayout.root, tabLayout.sessionIdsByLeafId, tabLayout.contentsByLeafId, resolveBackend, workspaceRoot),
+    };
   });
 }
 
 function toSharedPane(
   node: TabPaneLayout["root"],
   sessionIdsByLeafId: Record<string, string>,
+  contentsByLeafId: Record<string, PaneContent> | undefined,
   resolveBackend: (frontendSessionId: string) => string,
+  workspaceRoot?: string | null,
 ): SharedPane {
   if (node.type === "leaf") {
+    const metadata = sharedLeafMetadata(contentsByLeafId?.[node.leafId], workspaceRoot);
+    if (metadata) return { type: "leaf", leafId: node.leafId, backendSessionId: "", ...metadata };
     const frontendSessionId = sessionIdsByLeafId[node.leafId] ?? "";
     return {
       type: "leaf",
@@ -109,9 +278,40 @@ function toSharedPane(
     type: "split",
     direction: node.direction,
     ratio: clampRatio(node.ratio),
-    first: toSharedPane(node.first, sessionIdsByLeafId, resolveBackend),
-    second: toSharedPane(node.second, sessionIdsByLeafId, resolveBackend),
+    first: toSharedPane(node.first, sessionIdsByLeafId, contentsByLeafId, resolveBackend, workspaceRoot),
+    second: toSharedPane(node.second, sessionIdsByLeafId, contentsByLeafId, resolveBackend, workspaceRoot),
   };
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/** Metadata for a non-terminal leaf; `null` means "publish a plain terminal leaf". */
+function sharedLeafMetadata(
+  content: PaneContent | undefined,
+  workspaceRoot?: string | null,
+): SharedPaneLeafMetadata | null {
+  if (!content || content.kind === "terminal") return null;
+  if (content.kind === "browser") {
+    const browserId = nonEmpty(content.browser?.browserId ?? content.browserId);
+    const url = nonEmpty(content.browser?.url ?? content.url);
+    return { paneKind: "browser", ...(browserId ? { browserId } : {}), ...(url ? { url } : {}) };
+  }
+  if (content.kind === "file") {
+    const fileRelPath = sharedFileRelPath(content.path, workspaceRoot);
+    return { paneKind: "file", ...(fileRelPath ? { fileRelPath } : {}) };
+  }
+  if (content.kind === "changes") return { paneKind: "changes" };
+  if (content.kind === "remoteDesktop") {
+    const hostId = nonEmpty(content.hostId);
+    return { paneKind: "remoteDesktop", ...(hostId ? { hostId } : {}) };
+  }
+  if (content.kind === "dag") {
+    const dagRunId = nonEmpty(content.dag?.runId ?? content.runId);
+    return { paneKind: "dag", ...(dagRunId ? { dagRunId } : {}) };
+  }
+  return null;
 }
 
 export type ApplySharedLayoutResult = {
@@ -121,6 +321,16 @@ export type ApplySharedLayoutResult = {
 };
 
 export type ResolveLayoutSession = (backendSessionId: string) => string | null;
+
+/** Joins a workspace-relative POSIX path onto its root, so a restored `file` pane can open it. */
+function joinWorkspacePath(root: string | null | undefined, relative: string): string {
+  if (!relative || !root) return relative;
+  const separator = /^[A-Za-z]:[\\/]|\\/.test(root) && !root.includes("/") ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/, "")}${separator}${separator === "\\" ? relative.replace(/\//g, "\\") : relative}`;
+}
+
+/** Where a rebuilt document lands: the workspace root turns a `file` leaf's relative path back into one. */
+export type ApplySharedLayoutOptions = { workspaceRoot?: string | null };
 
 /**
  * Rebuilds local tabs and pane trees from a shared document. Leaves keep the frontend
@@ -132,6 +342,7 @@ export function applySharedLayout(
   currentLayout: LayoutState,
   doc: SharedLayout,
   resolveSession: ResolveLayoutSession,
+  options: ApplySharedLayoutOptions = {},
 ): ApplySharedLayoutResult {
   const reuse = indexLocalLeaves(currentLayout);
   const unattached = new Set<string>();
@@ -150,10 +361,10 @@ export function applySharedLayout(
       if (existingLayout) layoutsByTabId[sharedTab.id] = existingLayout;
       continue;
     }
-    const tab = rebuildTab(existing, sharedTab);
-    tabs.push(tab);
-    layoutsByTabId[sharedTab.id] = rebuildPaneLayout(sharedTab.paneTree, reuse, resolveSession, unattached,
-      currentLayout.layoutsByTabId?.[sharedTab.id]);
+    const tabLayout = rebuildPaneLayout(sharedTab.paneTree, reuse, resolveSession, unattached,
+      currentLayout.layoutsByTabId?.[sharedTab.id], doc.workspaceId, options.workspaceRoot);
+    layoutsByTabId[sharedTab.id] = tabLayout;
+    tabs.push(rebuildTab(existing, sharedTab, tabLayout));
   }
 
   const activeTabId = currentLayout.activeTabId && tabs.some((tab) => tab.id === currentLayout.activeTabId)
@@ -258,13 +469,35 @@ function indexLocalLeaves(layout: LayoutState): Map<string, ReusableLeaf> {
   return index;
 }
 
-function rebuildTab(existing: WorkspaceTab | undefined, sharedTab: SharedTab): WorkspaceTab {
+/** The session the rebuilt tree shows: the active leaf's terminal session, else the first one. */
+function primaryTerminalSessionId(tabLayout: TabPaneLayout): string {
+  const ordered = tabLayout.activeLeafId
+    ? [tabLayout.activeLeafId, ...Object.keys(tabLayout.sessionIdsByLeafId).filter((leafId) => leafId !== tabLayout.activeLeafId)]
+    : Object.keys(tabLayout.sessionIdsByLeafId);
+  for (const leafId of ordered) {
+    const sessionId = tabLayout.sessionIdsByLeafId[leafId];
+    if (sessionId && tabLayout.contentsByLeafId?.[leafId]?.kind === "terminal") return sessionId;
+  }
+  for (const leafId of ordered) {
+    const sessionId = tabLayout.sessionIdsByLeafId[leafId];
+    if (sessionId) return sessionId;
+  }
+  return "";
+}
+
+function rebuildTab(
+  existing: WorkspaceTab | undefined,
+  sharedTab: SharedTab,
+  tabLayout: TabPaneLayout,
+): WorkspaceTab {
   const label = sharedTab.label || existing?.label || sharedTab.id;
   const pinned = sharedTab.pinned ? true : undefined;
   if (existing && isTerminalTab(existing)) {
     return { ...existing, label, pinned };
   }
-  return { kind: "terminal", id: sharedTab.id, label, sessionId: "", pinned };
+  // A remote document that mints this tab still has to name a real session: a tab whose
+  // `sessionId` stays empty has no pane the window can attach to.
+  return { kind: "terminal", id: sharedTab.id, label, sessionId: primaryTerminalSessionId(tabLayout), pinned };
 }
 
 function rebuildPaneLayout(
@@ -273,12 +506,22 @@ function rebuildPaneLayout(
   resolveSession: ResolveLayoutSession,
   unattached: Set<string>,
   previous: TabPaneLayout | undefined,
+  workspaceId: string,
+  workspaceRoot: string | null | undefined,
 ): TabPaneLayout {
   const sessionIdsByLeafId: Record<string, string> = {};
   const contentsByLeafId: Record<string, PaneContent> = {};
 
   const visit = (node: SharedPane): TabPaneLayout["root"] => {
     if (node.type === "leaf") {
+      const restored = restoreLeafContent(node, workspaceId, workspaceRoot);
+      if (restored) {
+        // A non-terminal leaf owns no backend session: an empty frontend id is the "no PTY"
+        // marker, so no `shared-session:` ghost terminal is minted for it.
+        sessionIdsByLeafId[node.leafId] = "";
+        contentsByLeafId[node.leafId] = restored;
+        return { type: "leaf", leafId: node.leafId };
+      }
       const backendSessionId = node.backendSessionId ?? "";
       let frontendSessionId = backendSessionId ? resolveSession(backendSessionId) : null;
       if (!frontendSessionId && backendSessionId) unattached.add(backendSessionId);
@@ -311,6 +554,44 @@ function rebuildPaneLayout(
   };
 }
 
+/**
+ * The pane a non-terminal leaf describes, or `null` when the leaf is an ordinary terminal.
+ * `file` leaves are rebuilt from the workspace-relative path the document carries; a path this
+ * window cannot resolve is restored as a bare file pane rather than dropped.
+ */
+function restoreLeafContent(
+  node: Extract<SharedPane, { type: "leaf" }>,
+  workspaceId: string,
+  workspaceRoot: string | null | undefined,
+): PaneContent | null {
+  const kind = node.paneKind;
+  if (!kind || kind === "terminal") return null;
+  if (kind === "browser") {
+    return createBrowserPaneContent({
+      browserId: node.browserId ?? "",
+      url: node.url ?? "about:blank",
+    });
+  }
+  if (kind === "file") {
+    return createFilePaneContent({
+      path: joinWorkspacePath(workspaceRoot, node.fileRelPath ?? ""),
+      backendSessionId: "",
+      line: null,
+      col: null,
+      workspaceId: null,
+      previewId: "",
+    });
+  }
+  if (kind === "changes") {
+    // The checkout is local: the document only says "a changes pane lives here", so it is
+    // restored against the workspace it came from and the main checkout until a local path wins.
+    return createChangesPaneContent({ workspaceId, worktreePath: ".", worktree: null });
+  }
+  if (kind === "remoteDesktop") return createRemoteDesktopPaneContent(node.hostId ?? "");
+  if (kind === "dag") return createDagPaneContent({ runId: node.dagRunId ?? null });
+  return null;
+}
+
 /** Strict-ish decoder for a `SharedLayout` payload; rejects anything the UI cannot rebuild. */
 export function decodeSharedLayout(value: unknown): SharedLayout {
   const record = asRecord(value, "layout");
@@ -319,6 +600,7 @@ export function decodeSharedLayout(value: unknown): SharedLayout {
     : invalid("layout.workspaceId");
   const revision = toRevision(record.revision);
   if (revision === null) invalid("layout.revision");
+  const worktreeKey = decodeWorktreeKey(record.worktreeKey);
   if (!Array.isArray(record.tabs)) invalid("layout.tabs");
   const tabs = record.tabs.map((raw, index): SharedTab => {
     const tab = asRecord(raw, `layout.tabs[${index}]`);
@@ -333,7 +615,25 @@ export function decodeSharedLayout(value: unknown): SharedLayout {
       paneTree: tab.paneTree === null || tab.paneTree === undefined ? null : decodeSharedPane(tab.paneTree),
     };
   });
-  return { workspaceId, revision: revision as number, tabs };
+  return {
+    workspaceId,
+    ...(worktreeKey ? { worktreeKey } : {}),
+    revision: revision as number,
+    tabs,
+  };
+}
+
+/** `undefined` for a legacy document; anything present must be a key the host would accept. */
+function decodeWorktreeKey(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !isValidSharedWorktreeKey(value)) invalid("layout.worktreeKey");
+  return value;
+}
+
+function decodeOptionalText(value: unknown, what: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value === "") invalid(what);
+  return value;
 }
 
 function decodeSharedPane(value: unknown): SharedPane {
@@ -341,7 +641,25 @@ function decodeSharedPane(value: unknown): SharedPane {
   if (node.type === "leaf") {
     if (typeof node.leafId !== "string" || !node.leafId) invalid("pane.leafId");
     if (typeof node.backendSessionId !== "string") invalid("pane.backendSessionId");
-    return { type: "leaf", leafId: node.leafId, backendSessionId: node.backendSessionId };
+    const metadata: SharedPaneLeafMetadata = {};
+    if (node.paneKind !== undefined && node.paneKind !== null) {
+      if (!isSharedPaneKind(node.paneKind)) invalid("pane.paneKind");
+      metadata.paneKind = node.paneKind;
+    }
+    const browserId = decodeOptionalText(node.browserId, "pane.browserId");
+    if (browserId) metadata.browserId = browserId;
+    const url = decodeOptionalText(node.url, "pane.url");
+    if (url) metadata.url = url;
+    const fileRelPath = decodeOptionalText(node.fileRelPath, "pane.fileRelPath");
+    if (fileRelPath) {
+      if (!isValidSharedFileRelPath(fileRelPath)) invalid("pane.fileRelPath");
+      metadata.fileRelPath = fileRelPath;
+    }
+    const dagRunId = decodeOptionalText(node.dagRunId, "pane.dagRunId");
+    if (dagRunId) metadata.dagRunId = dagRunId;
+    const hostId = decodeOptionalText(node.hostId, "pane.hostId");
+    if (hostId) metadata.hostId = hostId;
+    return { type: "leaf", leafId: node.leafId, backendSessionId: node.backendSessionId, ...metadata };
   }
   if (node.type === "split") {
     if (node.direction !== "horizontal" && node.direction !== "vertical") invalid("pane.direction");

@@ -82,7 +82,7 @@ export type WorktreeListRowContext = Pick<
 export function worktreeListRowProps(worktree: Worktree, context: WorktreeListRowContext): WorktreeRowProps {
   const effectiveWorkspaceId = worktree.workspaceId ?? context.sortableWorkspaceId;
   const active =
-    worktree.path === context.activePath &&
+    isSameWorktreePath(worktree.path, context.activePath) &&
     (!context.activeWorkspaceId || !effectiveWorkspaceId || effectiveWorkspaceId === context.activeWorkspaceId);
   // Paired terminal proxy is unavailable: path-only local terminal data
   // must never light up a machine row with the same absolute path.
@@ -229,7 +229,7 @@ export const WorktreeRow = memo(function WorktreeRow({
           if (branchName) {
             void navigator.clipboard.writeText(branchName).then(() => {
               toast.success("Copied branch name to clipboard");
-            });
+            }).catch(() => {});
           }
         } else if (id === "show-changes") {
           onShowChanges?.(worktree);

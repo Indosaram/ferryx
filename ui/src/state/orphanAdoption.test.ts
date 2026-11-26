@@ -15,6 +15,25 @@ function state(sessions: Record<string, Partial<TerminalSession>>): WorkspaceSta
 }
 
 describe("planOrphanAdoption", () => {
+  it("matches Windows orphan paths across case, slash and trailing separator changes", () => {
+    const snapshot = state({});
+    const feature = worktree("C:\\Repo\\.ferryx-worktrees\\ws\\wt");
+    snapshot.worktrees.push(feature);
+    const plan = planOrphanAdoption(["b1"], snapshot, [
+      { sessionId: "b1", worktreePath: "c:/repo/.ferryx-worktrees/ws/wt/", running: true },
+    ]);
+    expect(plan.adopt[0].worktree).toBe(feature);
+  });
+
+  it("normalizes the active path when an orphan needs a fallback", () => {
+    const snapshot = state({});
+    const active = worktree("C:/Repo/feature");
+    snapshot.worktrees.push(active);
+    snapshot.activeWorktreePath = "c:\\repo\\FEATURE\\";
+    const plan = planOrphanAdoption(["b1"], snapshot, [{ sessionId: "b1", worktreePath: "/unknown" }]);
+    expect(plan.adopt[0].worktree).toBe(active);
+  });
+
   it("adopts live sessions into their own worktree with the daemon attach identity", () => {
     const plan = planOrphanAdoption(["b1"], state({}), [
       { sessionId: "b1", worktreePath: "/repo/feature", daemonEpoch: "e1", incarnation: "i1", running: true },

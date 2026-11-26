@@ -1,7 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { remoteHostStore, type RemoteHostStore } from "../state/remoteHostStore";
 import { decodeMachineJson, decodePairedProject, decodeU64, type DiscoveredRepositories } from "./pairedDaemonContracts";
-import { decodeSharedLayout, type SharedLayout } from "../state/layoutSync";
+import { decodeSharedLayout, isValidSharedWorktreeKey, type SharedLayout } from "../state/layoutSync";
 import type { AgentContinueStartup } from "./tauri";
 import type { AgentProviderSession } from "./types";
 
@@ -31,8 +31,8 @@ export type PairedHostOperation =
   | { kind: "createSession"; request: CreateSessionRequest }
   | { kind: "closeSession"; sessionId: string; request: CloseSessionRequest }
   | { kind: "operation"; requestId: string }
-  | { kind: "layoutGet"; workspaceId: string; afterRevision?: string }
-  | { kind: "layoutPut"; workspaceId: string; baseRevision: string; tabs: unknown };
+  | { kind: "layoutGet"; workspaceId: string; worktreeKey?: string; afterRevision?: string }
+  | { kind: "layoutPut"; workspaceId: string; worktreeKey?: string; baseRevision: string; tabs: unknown };
 export interface PairedHostOperationRequest extends PairedHostContext { operation: PairedHostOperation }
 export type PairedHostInvoke = (command: "paired_host_operation", args: { request: PairedHostOperationRequest }) => Promise<unknown>;
 export class PairedOperationError extends Error {
@@ -137,6 +137,9 @@ export function createPairedDaemonProjectAdapter(
     if ("workspaceId" in operation && operation.workspaceId !== undefined) remoteId(operation.workspaceId);
     if (operation.kind === "layoutGet" && operation.afterRevision !== undefined) decodeU64(operation.afterRevision);
     if (operation.kind === "layoutPut") decodeU64(operation.baseRevision);
+    // The host accepts `main`, `wt:<slug>` or `ext:<hex>`; a raw path must never be sent as a key.
+    if ((operation.kind === "layoutGet" || operation.kind === "layoutPut") && operation.worktreeKey !== undefined
+      && !isValidSharedWorktreeKey(operation.worktreeKey)) return invalid("INVALID_REQUEST");
     if ("request" in operation) {
       const kinds = { registerProject: "registerRequest", unregisterProject: "unregisterRequest", createWorktree: "createWorktreeRequest", deleteWorktree: "deleteWorktreeRequest", createSession: "createSessionRequest", closeSession: "closeSessionRequest" };
       json(kinds[operation.kind], operation.request);
@@ -201,12 +204,12 @@ export function createPairedDaemonProjectAdapter(
       return parsed;
     }),
     /** One workspace's shared layout document; `afterRevision` parks until it is newer. */
-    layoutGet: (workspaceId: string, afterRevision?: string) =>
-      execute({ kind: "layoutGet", workspaceId, ...(afterRevision === undefined ? {} : { afterRevision }) },
+    layoutGet: (workspaceId: string, afterRevision?: string, worktreeKey?: string) =>
+      execute({ kind: "layoutGet", workspaceId, ...(worktreeKey === undefined ? {} : { worktreeKey }), ...(afterRevision === undefined ? {} : { afterRevision }) },
         (value, kind) => layoutDocument(value, kind)),
     /** Publishes against `baseRevision`; a stale base answers the current document as a conflict. */
-    layoutPut: (workspaceId: string, baseRevision: string, tabs: unknown) =>
-      execute({ kind: "layoutPut", workspaceId, baseRevision, tabs },
+    layoutPut: (workspaceId: string, baseRevision: string, tabs: unknown, worktreeKey?: string) =>
+      execute({ kind: "layoutPut", workspaceId, ...(worktreeKey === undefined ? {} : { worktreeKey }), baseRevision, tabs },
         (value, kind) => layoutDocument(value, kind)),
   };
 }

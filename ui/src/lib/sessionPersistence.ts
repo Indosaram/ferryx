@@ -43,6 +43,7 @@ import {
   type PersistedWorkspaceSession,
   type PersistedWorktree,
   type TabGroup,
+  type TabPaneLayout,
   type SessionProcessState,
   type TerminalLifecycle,
   type TerminalSession,
@@ -144,101 +145,40 @@ export function serializeWorkspaceState(
   function serializeLayout(layoutState: LayoutState, layoutWorktreePath?: string | null): PersistedLayout {
     const normalizedLayout = normalizeLayout(layoutState);
     const persistedTabs: PersistedTab[] = [];
-    for (const tab of normalizedLayout.tabs) {
-      if (tab.kind === "browser") {
-        if (!restoreBrowserTabs || isPrivateBrowserProfileId(tab.profileId)) continue;
-        const worktreePath = tab.worktreePath || layoutWorktreePath || undefined;
-        const scrollPosition: BrowserScrollPosition | undefined =
-          readScrollPosition(tab) ?? getBrowserScroll(tab.browserId, tab.url) ?? undefined;
-        persistedTabs.push({
-          id: tab.id,
-          kind: "browser",
-          label: tab.label,
-          worktreePath,
-          pinned: Boolean(tab.pinned),
-          browser: {
-            browserId: tab.browserId,
-            url: tab.url,
-            title: tab.title ?? null,
-            loading: tab.loading,
-            canGoBack: tab.canGoBack,
-            canGoForward: tab.canGoForward,
-            zoomFactor: tab.zoomFactor,
-            profileId: tab.profileId,
-            worktreePath,
-            worktreeLabel: tab.worktreeLabel,
-            scrollPosition,
-            scrollX: scrollPosition?.x,
-            scrollY: scrollPosition?.y,
-          },
-        });
-        continue;
-      }
 
-      if (tab.kind === "remoteDesktop") {
-        persistedTabs.push({
-          id: tab.id,
-          kind: "remoteDesktop",
-          label: tab.label,
-          pinned: Boolean(tab.pinned),
-          remoteDesktop: { hostId: tab.hostId },
-        });
-        continue;
-      }
-
-      if (tab.kind === "changes") {
-        persistedTabs.push({
-          id: tab.id,
-          kind: "changes",
-          label: tab.label,
-          pinned: Boolean(tab.pinned),
-          changes: { workspaceId: tab.workspaceId, worktreePath: tab.worktreePath, worktree: tab.worktree },
-        });
-        continue;
-      }
-
-      if (tab.kind === "file") {
-        persistedTabs.push({
-          id: tab.id,
-          kind: "file",
-          label: tab.label,
-          ...(tab.customLabel !== undefined ? { customTitle: tab.customLabel } : {}),
-          pinned: Boolean(tab.pinned),
-          file: {
-            path: tab.path,
-            ...(tab.remote ? { remote: tab.remote } : {}),
-            backendSessionId: tab.backendSessionId,
-            line: tab.line,
-            col: tab.col,
-            workspaceId: tab.workspaceId,
-            previewId: tab.previewId,
-          },
-        });
-        continue;
-      }
-
-      const tabLayout = normalizedLayout.layoutsByTabId[tab.id];
+    /**
+     * The persisted pane tree of one tab, with every private or non-restorable browser leaf
+     * pruned. Returns null when nothing is left to restore (e.g. a split that was only private
+     * browser panes).
+     */
+    function serializePaneTree(
+      tab: WorkspaceTab,
+      tabLayout: TabPaneLayout | undefined,
+    ): {
+      root: PaneNode;
+      sessionIdsByLeafId: Record<string, string>;
+      contentsByLeafId: Record<string, PaneContent>;
+      activeLeafId: string | null;
+      expandedLeafId: string | null;
+    } | null {
+      const fallbackPrimarySessionId = isTerminalTab(tab) ? tab.sessionId : "";
       let effectiveRoot: PaneNode | null = tabLayout?.root ?? createLeafNode(`leaf-persisted:${tab.id}`);
-      let effectiveContents = tabLayout?.contentsByLeafId;
+      const effectiveContents = tabLayout?.contentsByLeafId;
 
       if (tabLayout && effectiveContents) {
         for (const [leafId, content] of Object.entries(effectiveContents)) {
-          if (content.kind === "browser") {
-            const rawBrowser = content.browser ?? content;
-            if (!restoreBrowserTabs || isPrivateBrowserProfileId(rawBrowser.profileId)) {
-              const nextRoot = removeLeaf(effectiveRoot, leafId);
-              if (!nextRoot) {
-                effectiveRoot = null;
-                break;
-              }
-              effectiveRoot = nextRoot;
-            }
+          if (content.kind !== "browser") continue;
+          const rawBrowser = content.browser ?? content;
+          if (!restoreBrowserTabs || isPrivateBrowserProfileId(rawBrowser.profileId)) {
+            const nextRoot = removeLeaf(effectiveRoot, leafId);
+            if (!nextRoot) return null;
+            effectiveRoot = nextRoot;
           }
         }
-        if (!effectiveRoot) continue;
       }
 
       const leafIds = collectLeafIds(effectiveRoot);
+      if (leafIds.length === 0) return null;
       const contentsByLeafId: Record<string, PaneContent> = {};
       const sessionIdsByLeafId: Record<string, string> = {};
 
@@ -278,7 +218,7 @@ export function serializeWorkspaceState(
             sessionIdsByLeafId[leafId] = content.sessionId;
           }
         } else {
-          const sessId = tabLayout?.sessionIdsByLeafId?.[leafId] ?? tab.sessionId;
+          const sessId = tabLayout?.sessionIdsByLeafId?.[leafId] ?? fallbackPrimarySessionId;
           contentsByLeafId[leafId] = createTerminalPaneContent(sessId);
           sessionIdsByLeafId[leafId] = sessId;
         }
@@ -293,6 +233,109 @@ export function serializeWorkspaceState(
           ? tabLayout.expandedLeafId
           : null;
 
+      return { root: effectiveRoot, sessionIdsByLeafId, contentsByLeafId, activeLeafId, expandedLeafId };
+    }
+
+    /**
+     * A non-terminal tab keeps its own typed record, and its split pane tree rides along in the
+     * legacy pane fields: a browser tab split with a terminal pane must come back as the same
+     * mixed split, not as a lone browser.
+     */
+    function serializeMixedPaneFields(tab: WorkspaceTab): Partial<PersistedTab> {
+      const tabLayout = normalizedLayout.layoutsByTabId[tab.id];
+      if (!tabLayout || tabLayout.root.type !== "split") return {};
+      const pane = serializePaneTree(tab, tabLayout);
+      if (!pane) return {};
+      return {
+        paneTree: pane.root,
+        sessionIdsByLeafId: pane.sessionIdsByLeafId,
+        contentsByLeafId: pane.contentsByLeafId,
+        activeLeafId: pane.activeLeafId,
+        expandedLeafId: pane.expandedLeafId,
+      };
+    }
+
+    for (const tab of normalizedLayout.tabs) {
+      if (tab.kind === "browser") {
+        if (!restoreBrowserTabs || isPrivateBrowserProfileId(tab.profileId)) continue;
+        const worktreePath = tab.worktreePath || layoutWorktreePath || undefined;
+        const scrollPosition: BrowserScrollPosition | undefined =
+          readScrollPosition(tab) ?? getBrowserScroll(tab.browserId, tab.url) ?? undefined;
+        persistedTabs.push({
+          id: tab.id,
+          kind: "browser",
+          label: tab.label,
+          worktreePath,
+          pinned: Boolean(tab.pinned),
+          browser: {
+            browserId: tab.browserId,
+            url: tab.url,
+            title: tab.title ?? null,
+            loading: tab.loading,
+            canGoBack: tab.canGoBack,
+            canGoForward: tab.canGoForward,
+            zoomFactor: tab.zoomFactor,
+            profileId: tab.profileId,
+            worktreePath,
+            worktreeLabel: tab.worktreeLabel,
+            scrollPosition,
+            scrollX: scrollPosition?.x,
+            scrollY: scrollPosition?.y,
+          },
+          ...serializeMixedPaneFields(tab),
+        });
+        continue;
+      }
+
+      if (tab.kind === "remoteDesktop") {
+        persistedTabs.push({
+          id: tab.id,
+          kind: "remoteDesktop",
+          label: tab.label,
+          pinned: Boolean(tab.pinned),
+          remoteDesktop: { hostId: tab.hostId },
+          ...serializeMixedPaneFields(tab),
+        });
+        continue;
+      }
+
+      if (tab.kind === "changes") {
+        persistedTabs.push({
+          id: tab.id,
+          kind: "changes",
+          label: tab.label,
+          pinned: Boolean(tab.pinned),
+          changes: { workspaceId: tab.workspaceId, worktreePath: tab.worktreePath, worktree: tab.worktree },
+          ...serializeMixedPaneFields(tab),
+        });
+        continue;
+      }
+
+      if (tab.kind === "file") {
+        persistedTabs.push({
+          id: tab.id,
+          kind: "file",
+          label: tab.label,
+          ...(tab.customLabel !== undefined ? { customTitle: tab.customLabel } : {}),
+          pinned: Boolean(tab.pinned),
+          file: {
+            path: tab.path,
+            ...(tab.remote ? { remote: tab.remote } : {}),
+            backendSessionId: tab.backendSessionId,
+            line: tab.line,
+            col: tab.col,
+            workspaceId: tab.workspaceId,
+            previewId: tab.previewId,
+          },
+          ...serializeMixedPaneFields(tab),
+        });
+        continue;
+      }
+
+      const tabLayout = normalizedLayout.layoutsByTabId[tab.id];
+      const pane = serializePaneTree(tab, tabLayout);
+      if (!pane) continue;
+
       persistedTabs.push({
         id: tab.id,
         kind: "terminal",
@@ -301,11 +344,11 @@ export function serializeWorkspaceState(
         ...(tab.customLabel ? { customTitle: tab.customLabel } : {}),
         terminal: {
           primarySessionId: tab.sessionId,
-          paneTree: effectiveRoot,
-          sessionIdsByLeafId,
-          contentsByLeafId,
-          activeLeafId,
-          expandedLeafId,
+          paneTree: pane.root,
+          sessionIdsByLeafId: pane.sessionIdsByLeafId,
+          contentsByLeafId: pane.contentsByLeafId,
+          activeLeafId: pane.activeLeafId,
+          expandedLeafId: pane.expandedLeafId,
         },
       });
     }
@@ -348,14 +391,17 @@ export function serializeWorkspaceState(
   const referencedSessionIds = new Set<string>();
   for (const layout of allPersistedLayouts) {
     for (const tab of layout.tabs) {
-      if (tab.kind === "browser") continue;
+      // Mixed tabs keep a terminal pane in the legacy pane fields, so the session reference walk
+      // is the same for every kind and no restored PTY is dropped from the snapshot.
       const terminal = tab.terminal;
       if (terminal?.primarySessionId) referencedSessionIds.add(terminal.primarySessionId);
-      for (const sessionId of Object.values(terminal?.sessionIdsByLeafId ?? {})) {
+      const paneSessions = terminal?.sessionIdsByLeafId ?? tab.sessionIdsByLeafId;
+      for (const sessionId of Object.values(paneSessions ?? {})) {
         if (sessionId) referencedSessionIds.add(sessionId);
       }
-      if (terminal?.contentsByLeafId) {
-        for (const content of Object.values(terminal.contentsByLeafId)) {
+      const paneContents = terminal?.contentsByLeafId ?? tab.contentsByLeafId;
+      if (paneContents) {
+        for (const content of Object.values(paneContents)) {
           if (content && content.kind === "terminal" && content.sessionId) {
             referencedSessionIds.add(content.sessionId);
           }
@@ -987,112 +1033,23 @@ export function deserializeWorkspaceState(
     }
 
     const layoutsByTabId: LayoutState["layoutsByTabId"] = {};
-    for (const persistedTab of persistedLayout.tabs || []) {
-      if (persistedTab.kind === "browser" || persistedTab.browser) {
-        if (!restoreBrowser) continue;
-        const browser = persistedTab.browser;
-        const rawProfileId = browser?.profileId;
-        if (isPrivateBrowserProfileId(rawProfileId)) continue;
-        const url = browser?.url ?? "about:blank";
-        if (!isNavigableBrowserUrl(url)) continue;
 
-        const tabExplicitWorktree = browser?.worktreePath ?? persistedTab.worktreePath ?? undefined;
-        if (tabExplicitWorktree && knownWorktreePaths.size > 0 && !knownWorktreePaths.has(tabExplicitWorktree)) continue;
-        if (tabExplicitWorktree && tabExplicitWorktree !== (targetWorktreePath || undefined)) continue;
-        const tabWorktreePath = tabExplicitWorktree ?? (targetWorktreePath || undefined);
+    const hasPersistedPaneTree = (persistedTab: PersistedTab): boolean =>
+      Boolean(persistedTab.paneTree ?? persistedTab.contentsByLeafId ?? persistedTab.sessionIdsByLeafId);
 
-        const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
-        const leafId = `leaf-browser:${persistedTab.id}`;
-        const scrollPosition: BrowserScrollPosition = readScrollPosition(browser)
-          ?? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
-          ?? { x: 0, y: 0 };
-
-        const browserState: BrowserPaneState = {
-          browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
-          url,
-          title: browser?.title ?? persistedTab.label,
-          canGoBack: browser?.canGoBack ?? false,
-          canGoForward: browser?.canGoForward ?? false,
-          zoomFactor: browser?.zoomFactor,
-          loading: browser?.loading ?? false,
-          profileId,
-          worktreePath: tabWorktreePath,
-          worktreeLabel: browser?.worktreeLabel,
-          scrollPosition,
-          scrollX: scrollPosition.x,
-          scrollY: scrollPosition.y,
-        };
-        layoutsByTabId[persistedTab.id] = {
-          root: createLeafNode(leafId),
-          activeLeafId: leafId,
-          expandedLeafId: null,
-          sessionIdsByLeafId: { [leafId]: "" },
-          contentsByLeafId: { [leafId]: createBrowserPaneContent(browserState) },
-        };
-        continue;
-      }
-
-      if (persistedTab.kind === "remoteDesktop" || persistedTab.remoteDesktop) {
-        const hostId = persistedTab.remoteDesktop?.hostId;
-        if (!hostId) continue;
-        const leafId = `leaf-remote-desktop:${persistedTab.id}`;
-        layoutsByTabId[persistedTab.id] = {
-          root: createLeafNode(leafId),
-          activeLeafId: leafId,
-          expandedLeafId: null,
-          sessionIdsByLeafId: { [leafId]: "" },
-          contentsByLeafId: { [leafId]: createRemoteDesktopPaneContent(hostId) },
-        };
-        continue;
-      }
-
-      if (persistedTab.kind === "changes" || persistedTab.changes) {
-        const changes = persistedTab.changes;
-        if (!changes?.worktreePath || changes.worktree === undefined) continue;
-        if (knownWorktreePaths.size > 0 && !knownWorktreePaths.has(changes.worktreePath)) continue;
-        const leafId = `leaf-changes:${persistedTab.id}`;
-        layoutsByTabId[persistedTab.id] = {
-          root: createLeafNode(leafId),
-          activeLeafId: leafId,
-          expandedLeafId: null,
-          sessionIdsByLeafId: { [leafId]: "" },
-          contentsByLeafId: { [leafId]: createChangesPaneContent(changes) },
-        };
-        continue;
-      }
-
-      if (persistedTab.kind === "file" || persistedTab.file) {
-        const file = persistedTab.file;
-        if (!file?.path) continue;
-        const leafId = `leaf-file:${persistedTab.id}`;
-        layoutsByTabId[persistedTab.id] = {
-          root: createLeafNode(leafId),
-          activeLeafId: leafId,
-          expandedLeafId: null,
-          sessionIdsByLeafId: { [leafId]: "" },
-          contentsByLeafId: {
-            [leafId]: {
-              kind: "file",
-              path: file.path,
-              ...(file.remote ? { remote: file.remote } : {}),
-              ...(typeof persistedTab.customTitle === "string" && persistedTab.customTitle.trim()
-                ? { customLabel: persistedTab.customTitle.trim().slice(0, 200) }
-                : {}),
-              backendSessionId: file.backendSessionId,
-              line: file.line,
-              col: file.col,
-              workspaceId: file.workspaceId,
-              previewId: file.previewId || persistedTab.id,
-            },
-          },
-        };
-        continue;
-      }
-
+    /**
+     * Rebuilds one tab's pane tree from its persisted record, dropping browser leaves that are
+     * private, non-navigable, or owned by another/stale worktree. `null` means every leaf was
+     * pruned, so the tab keeps no layout at all.
+     */
+    function restorePaneTreeLayout(
+      persistedTab: PersistedTab,
+      fallbackPrimarySessionId: string,
+    ): TabPaneLayout | null {
       const terminal = persistedTab.terminal;
-      const legacyTabLayout = persistedLayout.layoutsByTabId?.[persistedTab.id];
+      const legacyTabLayout = persistedLayout?.layoutsByTabId?.[persistedTab.id];
       const paneTree = terminal?.paneTree ?? persistedTab.paneTree ?? legacyTabLayout?.root;
-      const primarySessionId = terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
+      const primarySessionId = terminal?.primarySessionId ?? persistedTab.sessionId ?? fallbackPrimarySessionId;
       let root: PaneNode | null = paneTree ?? createLeafNode(`leaf-restored:${persistedTab.id}`);
       const persistedContents = terminal?.contentsByLeafId ?? persistedTab.contentsByLeafId;
       const persistedMapping =
@@ -1122,7 +1079,7 @@ export function deserializeWorkspaceState(
             }
           }
         }
-        if (!root) continue;
+        if (!root) return null;
       }
 
       const leafIds = collectLeafIds(root);
@@ -1196,7 +1153,7 @@ export function deserializeWorkspaceState(
         terminal?.activeLeafId ?? persistedTab.activeLeafId ?? legacyTabLayout?.activeLeafId ?? null;
       const requestedExpandedLeafId =
         terminal?.expandedLeafId ?? persistedTab.expandedLeafId ?? legacyTabLayout?.expandedLeafId ?? null;
-      layoutsByTabId[persistedTab.id] = {
+      return {
         root,
         activeLeafId: requestedActiveLeafId && leafIds.includes(requestedActiveLeafId) ? requestedActiveLeafId : leafIds[0] ?? null,
         expandedLeafId:
@@ -1204,6 +1161,116 @@ export function deserializeWorkspaceState(
         sessionIdsByLeafId,
         contentsByLeafId,
       };
+    }
+
+    for (const persistedTab of persistedLayout.tabs || []) {
+      if (persistedTab.kind === "browser" || persistedTab.browser) {
+        if (!restoreBrowser) continue;
+        const browser = persistedTab.browser;
+        const rawProfileId = browser?.profileId;
+        if (isPrivateBrowserProfileId(rawProfileId)) continue;
+        const url = browser?.url ?? "about:blank";
+        if (!isNavigableBrowserUrl(url)) continue;
+
+        const tabExplicitWorktree = browser?.worktreePath ?? persistedTab.worktreePath ?? undefined;
+        if (tabExplicitWorktree && knownWorktreePaths.size > 0 && !knownWorktreePaths.has(tabExplicitWorktree)) continue;
+        if (tabExplicitWorktree && tabExplicitWorktree !== (targetWorktreePath || undefined)) continue;
+        const tabWorktreePath = tabExplicitWorktree ?? (targetWorktreePath || undefined);
+
+        const profileId = rawProfileId && knownProfiles.has(rawProfileId) ? rawProfileId : fallbackProfileId;
+        const leafId = `leaf-browser:${persistedTab.id}`;
+        const scrollPosition: BrowserScrollPosition = readScrollPosition(browser)
+          ?? getBrowserScroll(browser?.browserId ?? persistedTab.sessionId ?? "", url)
+          ?? { x: 0, y: 0 };
+
+        const browserState: BrowserPaneState = {
+          browserId: browser?.browserId ?? persistedTab.sessionId ?? `restored-browser:${persistedTab.id}`,
+          url,
+          title: browser?.title ?? persistedTab.label,
+          canGoBack: browser?.canGoBack ?? false,
+          canGoForward: browser?.canGoForward ?? false,
+          zoomFactor: browser?.zoomFactor,
+          loading: browser?.loading ?? false,
+          profileId,
+          worktreePath: tabWorktreePath,
+          worktreeLabel: browser?.worktreeLabel,
+          scrollPosition,
+          scrollX: scrollPosition.x,
+          scrollY: scrollPosition.y,
+        };
+        const mixedPaneLayout = hasPersistedPaneTree(persistedTab) ? restorePaneTreeLayout(persistedTab, "") : null;
+        layoutsByTabId[persistedTab.id] = mixedPaneLayout ?? {
+          root: createLeafNode(leafId),
+          activeLeafId: leafId,
+          expandedLeafId: null,
+          sessionIdsByLeafId: { [leafId]: "" },
+          contentsByLeafId: { [leafId]: createBrowserPaneContent(browserState) },
+        };
+        continue;
+      }
+
+      if (persistedTab.kind === "remoteDesktop" || persistedTab.remoteDesktop) {
+        const hostId = persistedTab.remoteDesktop?.hostId;
+        if (!hostId) continue;
+        const leafId = `leaf-remote-desktop:${persistedTab.id}`;
+        layoutsByTabId[persistedTab.id] =
+          (hasPersistedPaneTree(persistedTab) ? restorePaneTreeLayout(persistedTab, "") : null) ?? {
+            root: createLeafNode(leafId),
+            activeLeafId: leafId,
+            expandedLeafId: null,
+            sessionIdsByLeafId: { [leafId]: "" },
+            contentsByLeafId: { [leafId]: createRemoteDesktopPaneContent(hostId) },
+          };
+        continue;
+      }
+
+      if (persistedTab.kind === "changes" || persistedTab.changes) {
+        const changes = persistedTab.changes;
+        if (!changes?.worktreePath || changes.worktree === undefined) continue;
+        if (knownWorktreePaths.size > 0 && !knownWorktreePaths.has(changes.worktreePath)) continue;
+        const leafId = `leaf-changes:${persistedTab.id}`;
+        layoutsByTabId[persistedTab.id] =
+          (hasPersistedPaneTree(persistedTab) ? restorePaneTreeLayout(persistedTab, "") : null) ?? {
+            root: createLeafNode(leafId),
+            activeLeafId: leafId,
+            expandedLeafId: null,
+            sessionIdsByLeafId: { [leafId]: "" },
+            contentsByLeafId: { [leafId]: createChangesPaneContent(changes) },
+          };
+        continue;
+      }
+
+      if (persistedTab.kind === "file" || persistedTab.file) {
+        const file = persistedTab.file;
+        if (!file?.path) continue;
+        const leafId = `leaf-file:${persistedTab.id}`;
+        layoutsByTabId[persistedTab.id] =
+          (hasPersistedPaneTree(persistedTab) ? restorePaneTreeLayout(persistedTab, "") : null) ?? {
+            root: createLeafNode(leafId),
+            activeLeafId: leafId,
+            expandedLeafId: null,
+            sessionIdsByLeafId: { [leafId]: "" },
+            contentsByLeafId: {
+              [leafId]: {
+                kind: "file",
+                path: file.path,
+                ...(file.remote ? { remote: file.remote } : {}),
+                ...(typeof persistedTab.customTitle === "string" && persistedTab.customTitle.trim()
+                  ? { customLabel: persistedTab.customTitle.trim().slice(0, 200) }
+                  : {}),
+                backendSessionId: file.backendSessionId,
+                line: file.line,
+                col: file.col,
+                workspaceId: file.workspaceId,
+                previewId: file.previewId || persistedTab.id,
+              },
+            },
+          };
+        continue;
+      }
+
+      const layouts = restorePaneTreeLayout(persistedTab, "");
+      if (layouts) layoutsByTabId[persistedTab.id] = layouts;
     }
 
     const tabGroups: Record<string, TabGroup> | undefined = persistedLayout.tabGroups?.length
@@ -1247,9 +1314,10 @@ export function deserializeWorkspaceState(
   const referencedSessionIds = new Set<string>();
   for (const layout of allLayouts) {
     for (const tab of layout.tabs) {
-      if (!isTerminalTab(tab)) continue;
       const tabLayout = layout.layoutsByTabId[tab.id];
-      if (tab.sessionId) referencedSessionIds.add(tab.sessionId);
+      // A terminal pane inside a browser/file/changes tab is a real restored PTY and must be
+      // referenced, or restore would drop the session the mixed split just rebuilt.
+      if (isTerminalTab(tab) && tab.sessionId) referencedSessionIds.add(tab.sessionId);
       for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
         if (sessionId) referencedSessionIds.add(sessionId);
       }
