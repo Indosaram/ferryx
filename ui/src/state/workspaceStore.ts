@@ -22,6 +22,7 @@ import { onAgentSpawned, type AgentSpawnedEvent } from "../lib/agentSpawned";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
+import { planWorktreeSessionAdoption } from "./orphanAdoption";
 import { withTimeout } from "../lib/withTimeout";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "../lib/remoteProject";
 import { createStandbyBackendSessionId, isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON } from "../lib/sessionLifecycle";
@@ -71,6 +72,7 @@ import type {
   RemoteDesktopTab,
   SessionRecoveryState,
   TerminalSession,
+  TerminalSessionSummary,
   TerminalTab,
   WorkspaceTab,
   Worktree,
@@ -748,6 +750,9 @@ export type WorkspaceServices = {
   /** Optional batch spawn for restore/recovery; falls back to per-session spawns when absent. */
   spawnTerminalsBatch?: (spawns: Array<Parameters<WorkspaceServices["spawnTerminal"]>[0]>) => Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>;
   getTerminalCwd: (sessionId: string) => Promise<string | null>;
+  /** Optional daemon inventory; lets a click re-attach a session that already runs in a worktree
+   *  and lets a worktree refresh keep sessions whose worktree is gone. Absent means "unknown". */
+  listTerminalSessions?: () => Promise<TerminalSessionSummary[]>;
   closeTerminal: (sessionId: string) => Promise<void>;
   waitForTerminalExit: (sessionId: string, timeoutMs: number) => Promise<void>;
   splitOperation?: (request: import("../lib/types").SplitOperationRequest) => Promise<import("../lib/types").SplitOperationResponse>;
@@ -794,7 +799,13 @@ import { getWorkspaceRestoreStatus } from "./workspaceRestore";
 
 export type WorkspaceAction =
   | { type: "LOCAL_RECOVERY_ATTEMPT"; sessionId: string; key: string; token: number }
-  | { type: "SET_WORKTREES"; worktrees: Worktree[] }
+  | {
+      type: "SET_WORKTREES";
+      worktrees: Worktree[];
+      /** Backend sessions the daemon still runs; their sessions and tabs survive even when the
+       *  worktree they point at is no longer listed (a removed worktree keeps its PTY alive). */
+      retainedSessionIds?: readonly string[];
+    }
   | { type: "RESTORE_WORKSPACE"; state: WorkspaceState }
   | { type: "SELECT_WORKTREE"; path: string }
   | { type: "ADD_TAB_WITH_SESSION"; tab: WorkspaceTab; session?: TerminalSession; targetWorktreePath?: string; activate?: boolean; view?: PaneView; leafId?: string }
@@ -963,7 +974,7 @@ type UseWorkspaceStoreOptions = {
 
 // Optional tauri IPC additions (M8/M9) resolved lazily so test doubles that mock
 // "../lib/tauri" without them keep working; production always has both.
-function optionalTauriFn(name: "spawnTerminalDetailed" | "spawnTerminalsBatch" | "onSupervisorPanelEvent"): unknown {
+function optionalTauriFn(name: "spawnTerminalDetailed" | "spawnTerminalsBatch" | "listTerminalSessions" | "onSupervisorPanelEvent"): unknown {
   try {
     return (tauriIpc as Record<string, unknown>)[name];
   } catch {
@@ -981,6 +992,9 @@ const defaultServices: WorkspaceServices = {
     return optionalTauriFn("spawnTerminalsBatch") as WorkspaceServices["spawnTerminalsBatch"];
   },
   getTerminalCwd,
+  get listTerminalSessions() {
+    return optionalTauriFn("listTerminalSessions") as WorkspaceServices["listTerminalSessions"];
+  },
   closeTerminal,
   waitForTerminalExit,
   get splitOperation() {
@@ -1638,22 +1652,41 @@ export function useWorkspaceStore({
    * background terminal tab. The pane attaches by backendSessionId through the normal native
    * attach path; nothing is spawned or closed. Returns null when the workspace changed meanwhile,
    * leaving the backend session untouched.
+   *
+   * The session entry that already points at this backend id is reused. A layout change (parking a
+   * worktree, replacing the active layout) drops the tab while the entry survives, and minting a
+   * second frontend session for the same PTY would leave two entries owning one daemon session,
+   * with the pane's activity and exit routed to whichever one the tab happened to hold.
    */
   const adoptBackendSession = useCallback(
     async (worktree: Worktree, backend: PreSpawnedBackend, label?: string, options?: { activate?: boolean }) => {
-      const binding = await createSpawnedTab(worktree, label, backend);
+      await services.ensureTerminalEvents();
+      const survivor = Object.values(stateRef.current.sessions).find(
+        (session) =>
+          session.backendSessionId === backend.sessionId &&
+          // Reusing an entry whose worktree is gone would put the tab nowhere, and the
+          // `SET_WORKTREES` dispatch below would prune the very entry being reused.
+          stateRef.current.worktrees.some(
+            (candidate) => canonicalWorktreeKey(candidate.path) === canonicalWorktreeKey(sessionWorktreePath(session)),
+          ),
+      );
+      const binding = survivor
+        ? { tab: { id: createId("tab"), label: label ?? nextTabLabel(worktree), sessionId: survivor.id } satisfies TerminalTab }
+        : await createSpawnedTab(worktree, label, backend);
       if (mountedWorkspaceIdRef.current !== workspaceId) return null;
-      if (!stateRef.current.worktrees.some((candidate) => candidate.path === worktree.path)) {
+      // The surviving entry remembers the project its PTY was opened in; the tab follows it there so
+      // the pane cannot claim to belong to a worktree the process never ran in.
+      const tabWorktreePath = (survivor ? sessionWorktreePath(survivor) : "") || worktree.path;
+      if (!survivor && !stateRef.current.worktrees.some((candidate) => candidate.path === tabWorktreePath)) {
         dispatch({ type: "SET_WORKTREES", worktrees: [...stateRef.current.worktrees, worktree] });
       }
       const activate = options?.activate === true;
-      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: worktree.path, activate });
-      if (activate) dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: tabWorktreePath, activate });
+      if (activate) dispatch({ type: "SELECT_WORKTREE", path: tabWorktreePath });
       return binding.tab.id;
     },
-    [createSpawnedTab, dispatch, workspaceId],
+    [createSpawnedTab, dispatch, services, workspaceId],
   );
-
   // A pane agent control spawned as a child of a pane in this window opens beside its parent,
   // attached to the live backend session. Nothing is spawned or closed here.
   const adoptBackendSessionForSpawnRef = useRef(adoptBackendSession);
@@ -1945,6 +1978,43 @@ export function useWorkspaceStore({
       const isRestoring = restoreStatus === "loading";
       const effectiveAllowCreate = allowCreate && !isRestoring;
       const snapshot = stateRef.current;
+      // A click on a worktree whose shell is still running must re-attach that session instead of
+      // spawning a second shell in the same directory. Remote and paired workspaces have no local
+      // daemon inventory to adopt from, so they keep spawning as before; a failed listing is
+      // treated as "unknown" and also spawns, which is the previous behaviour.
+      const tryAdoptRunningSession = async (): Promise<string | null> => {
+        if (isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)) return null;
+        if (typeof services.listTerminalSessions !== "function") return null;
+        let live: TerminalSessionSummary[];
+        try {
+          live = await services.listTerminalSessions();
+        } catch (error: unknown) {
+          switchDebug("worktree.ensure.adopt-list-failed", {
+            workspaceId,
+            worktreePath: worktree.path,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        }
+        const candidate = planWorktreeSessionAdoption(worktree.path, stateRef.current, live);
+        if (!candidate) return null;
+        switchDebug("worktree.ensure.adopt", {
+          workspaceId,
+          worktreePath: worktree.path,
+          backendSessionId: candidate.backend.sessionId,
+        });
+        try {
+          return await adoptBackendSession(candidate.worktree, candidate.backend, undefined, { activate: true });
+        } catch (error: unknown) {
+          switchDebug("worktree.ensure.adopt-failed", {
+            workspaceId,
+            worktreePath: worktree.path,
+            backendSessionId: candidate.backend.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        }
+      };
       switchDebug("worktree.ensure.start", {
         workspaceId,
         requestedPath: worktree.path,
@@ -1997,6 +2067,8 @@ export function useWorkspaceStore({
           workspaceId,
           worktreePath: worktree.path,
         });
+        const adoptedActive = await tryAdoptRunningSession();
+        if (adoptedActive !== null) return adoptedActive;
         return openTab(worktree);
       }
 
@@ -2067,9 +2139,11 @@ export function useWorkspaceStore({
         workspaceId,
         worktreePath: worktree.path,
       });
+      const adoptedNew = await tryAdoptRunningSession();
+      if (adoptedNew !== null) return adoptedNew;
       return openTab(worktree);
     },
-    [dispatch, openTab, workspaceId],
+    [adoptBackendSession, dispatch, openTab, services, workspaceId],
   );
 
   // A click and a refresh can ensure the same worktree before the first spawn lands its tab;
@@ -2525,11 +2599,35 @@ export function useWorkspaceStore({
           }
         }
       }
-      dispatch({ type: "SET_WORKTREES", worktrees });
+      // A session the daemon still runs keeps its tab even when the worktree listing no longer
+      // names its directory; otherwise a transient or partial listing silently kills live PTYs.
+      // When the inventory cannot be read, pruning is skipped rather than guessed.
+      let retainedSessionIds: string[] | undefined;
+      const localInventory =
+        !isRemoteWorkspaceId(workspaceId) && !isPairedWorkspaceId(workspaceId)
+          ? services.listTerminalSessions
+          : undefined;
+      if (staleSessions.length > 0 && typeof localInventory === "function") {
+        try {
+          const live = await localInventory();
+          retainedSessionIds = live
+            .filter((summary) => summary.running !== false)
+            .map((summary) => summary.sessionId);
+        } catch (error: unknown) {
+          switchDebug("worktree.sync.list-failed", {
+            workspaceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      dispatch({ type: "SET_WORKTREES", worktrees, retainedSessionIds });
       // Removing a worktree drops its parked layout, file tabs included.
       releaseOrphanPreviews(stateRef.current);
+      const retained = new Set(retainedSessionIds ?? []);
       await Promise.allSettled([
-        ...staleSessions.map((session) => closeBackendSession(session, services)),
+        ...staleSessions
+          .filter((session) => !retained.has(session.backendSessionId ?? session.id))
+          .map((session) => closeBackendSession(session, services)),
         ...[...browserIds]
           .filter((browserId) => !isBrowserIdReferenced(stateRef.current, browserId))
           .map((browserId) => {
@@ -3914,8 +4012,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
     case "SET_WORKTREES": {
       const validWorktreePaths = new Set(action.worktrees.map((worktree) => canonicalWorktreeKey(worktree.path)));
+      const retainedSessionIds = new Set(action.retainedSessionIds ?? []);
+      const isRetained = (session: TerminalSession | undefined): boolean =>
+        Boolean(session && retainedSessionIds.has(session.backendSessionId ?? session.id));
       const sessions = Object.fromEntries(
-        Object.entries(state.sessions).filter(([, session]) => validWorktreePaths.has(canonicalWorktreeKey(sessionWorktreePath(session)))),
+        Object.entries(state.sessions).filter(
+          ([, session]) =>
+            validWorktreePaths.has(canonicalWorktreeKey(sessionWorktreePath(session))) || isRetained(session),
+        ),
       );
       const activityBySessionId = Object.fromEntries(
         Object.entries(state.activityBySessionId ?? {}).filter(([sessionId]) => Boolean(sessions[sessionId])),
@@ -3929,7 +4033,12 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
       const worktreeLayouts: Record<string, LayoutState> = {};
       for (const [path, parkedLayout] of Object.entries(state.worktreeLayouts ?? {})) {
-        if (!validWorktreePaths.has(canonicalWorktreeKey(path))) continue;
+        // A parked layout normally disappears with its worktree, but a tab whose PTY is still
+        // running must not be destroyed: keep the layout so the session stays reachable.
+        const keepsRetainedTab = [...parkedLayout.tabs].some((tab) =>
+          [...getTabSessionIdsForLayout(parkedLayout, tab.id)].some((sessionId) => isRetained(sessions[sessionId])),
+        );
+        if (!validWorktreePaths.has(canonicalWorktreeKey(path)) && !keepsRetainedTab) continue;
         let cleanedLayout = parkedLayout;
         for (const tab of parkedLayout.tabs) {
           const hasRetainedSession = [...getTabSessionIdsForLayout(parkedLayout, tab.id)].some((sessionId) => Boolean(sessions[sessionId]));
@@ -3941,10 +4050,19 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
       let activeWorktreePath = state.activeWorktreePath;
       if (!activeWorktreePath || !validWorktreePaths.has(canonicalWorktreeKey(activeWorktreePath))) {
-        activeWorktreePath = action.worktrees[0]?.path ?? null;
-        const fallback = activeWorktreePath ? findWorktreeLayoutEntry(worktreeLayouts, activeWorktreePath) : undefined;
-        layout = fallback?.[1] ?? createLayoutState();
-        if (fallback) delete worktreeLayouts[fallback[0]];
+        // The active row left the listing while its PTYs kept running, so its tabs are still on
+        // screen. Moving the active row somewhere else while leaving those tabs visible desyncs the
+        // two, and the next click then parks them under a worktree that does not own them - which
+        // is how a live pane becomes unreachable. The listing wins only when nothing live is shown.
+        const keepsVisibleLiveTab = [...layout.tabs].some((tab) =>
+          [...getTabSessionIdsForLayout(layout, tab.id)].some((sessionId) => isRetained(sessions[sessionId])),
+        );
+        if (!keepsVisibleLiveTab) {
+          activeWorktreePath = action.worktrees[0]?.path ?? null;
+          const fallback = activeWorktreePath ? findWorktreeLayoutEntry(worktreeLayouts, activeWorktreePath) : undefined;
+          layout = fallback?.[1] ?? createLayoutState();
+          if (fallback) delete worktreeLayouts[fallback[0]];
+        }
       }
       const allTabs = [...layout.tabs, ...Object.values(worktreeLayouts).flatMap((l) => l.tabs)];
       const unreadTabIds = Object.fromEntries(
@@ -4009,16 +4127,29 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "SELECT_WORKTREE": {
       const selectedWorktree = state.worktrees.find((worktree) => canonicalWorktreeKey(worktree.path) === canonicalWorktreeKey(action.path));
       if (!selectedWorktree) return state;
-      if (state.activeWorktreePath && canonicalWorktreeKey(selectedWorktree.path) === canonicalWorktreeKey(state.activeWorktreePath)) {
-        return state.layout.activeTabId
-          ? workspaceReducer(state, { type: "ACTIVATE_TAB", tabId: state.layout.activeTabId })
-          : state;
+      // The layout on screen belongs to the active worktree, or - when the listing dropped that row
+      // while its PTYs kept running - to whichever worktree its tabs actually point at. Both are the
+      // same worktree as far as this switch is concerned, and neither may be replaced by an empty
+      // layout: clicking the worktree whose panes are already on screen must keep them.
+      const ownerPath =
+        state.activeWorktreePath ??
+        state.layout.tabs
+          .map((tab) => getTabWorktreePath(state, tab.id))
+          .find((path): path is string => Boolean(path)) ??
+        null;
+      if (ownerPath && canonicalWorktreeKey(selectedWorktree.path) === canonicalWorktreeKey(ownerPath)) {
+        const selected = state.activeWorktreePath ? state : { ...state, activeWorktreePath: selectedWorktree.path };
+        return selected.layout.activeTabId
+          ? workspaceReducer(selected, { type: "ACTIVATE_TAB", tabId: selected.layout.activeTabId })
+          : selected;
       }
 
+      // The outgoing layout is parked, never dropped: selecting the previous worktree again brings
+      // its tabs back, and the target starts from its own parked layout when it has one.
       const nextWorktreeLayouts = { ...(state.worktreeLayouts ?? {}) };
-      if (state.activeWorktreePath) {
-        const previous = findWorktreeLayoutEntry(nextWorktreeLayouts, state.activeWorktreePath);
-        nextWorktreeLayouts[previous?.[0] ?? state.activeWorktreePath] = state.layout;
+      if (ownerPath) {
+        const previous = findWorktreeLayoutEntry(nextWorktreeLayouts, ownerPath);
+        nextWorktreeLayouts[previous?.[0] ?? ownerPath] = state.layout;
       }
       const nextEntry = findWorktreeLayoutEntry(nextWorktreeLayouts, selectedWorktree.path);
       const nextLayout = nextEntry?.[1] ?? createLayoutState();

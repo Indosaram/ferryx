@@ -3263,6 +3263,11 @@ function WorkspaceApp({
     };
   }, [handleRemoteSelectionRequested]);
 
+  // A click that names a session with no pane here is not a dead end: the tab can be closed while
+  // its PTY keeps running in the daemon. The queue lives further down (next to the adoption drain),
+  // so it is reached through a ref; the drain reports it when the daemon no longer runs it.
+  const requeueUnnavigableSessionRef = useRef<(target: NotificationTarget) => void>(() => {});
+
   const handleNotificationTarget = useCallback(
     (target: NotificationTarget) => {
       if (!target || !target.workspaceId || !target.sessionId) return;
@@ -3270,9 +3275,13 @@ function WorkspaceApp({
       // An unregistered/removed project is stale: never navigate or fall back to another pane.
       if (!project) return;
       if (activeProjectRef.current.workspaceId === target.workspaceId) {
-        // A closed session with no layout leaf is stale: reject without spawning. The reducer
-        // no-ops on the same check, but guarding here avoids a needless dispatch.
-        if (!hasNavigableSession(stateRef.current, target.sessionId)) return;
+        // No pane here shows the session. If the daemon still runs it, the tab was closed while
+        // the PTY kept running: re-attach it through the adoption queue instead of doing nothing.
+        // Only a session the daemon no longer has is reported as gone.
+        if (!hasNavigableSession(stateRef.current, target.sessionId)) {
+          requeueUnnavigableSessionRef.current(target);
+          return;
+        }
         dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId: target.sessionId });
         return;
       }
@@ -3280,7 +3289,10 @@ function WorkspaceApp({
       // closed session must not yank the user into another project. Match how the workspace will
       // mount (HMR first, then the persisted snapshot).
       const cached = getHmrWorkspaceState(target.workspaceId) ?? getWorkspaceSnapshot(target.workspaceId);
-      if (!cached || !hasNavigableSession(cached, target.sessionId)) return;
+      if (!cached || !hasNavigableSession(cached, target.sessionId)) {
+        requeueUnnavigableSessionRef.current(target);
+        return;
+      }
       handleSelectProject(project);
       setPendingNotificationTarget(target);
     },
@@ -4200,10 +4212,50 @@ function WorkspaceApp({
   // then re-attaches by backendSessionId as a tab; nothing is spawned or closed.
   // `origin: "supervisor"` marks a Supervisor panel row's request: nothing was moved between windows.
   const [pendingAdoptions, setPendingAdoptions] = useState<
-    Array<WindowSessionsAdoptPayload & { attempts: number; origin?: "supervisor" }>
+    Array<WindowSessionsAdoptPayload & { attempts: number; origin?: "supervisor" | "reopen" }>
   >([]);
   const adoptionBusyRef = useRef(false);
   const [adoptionTick, bumpAdoptionTick] = useState(0);
+  requeueUnnavigableSessionRef.current = (target: NotificationTarget) => {
+    const project = projectsRef.current.find((candidate) => candidate.workspaceId === target.workspaceId);
+    if (!project) return;
+    if (project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon") {
+      toast.info("Open a project on this computer to show this session");
+      return;
+    }
+    const known =
+      target.workspaceId === activeProjectRef.current.workspaceId
+        ? stateRef.current
+        : getHmrWorkspaceState(target.workspaceId) ?? getWorkspaceSnapshot(target.workspaceId);
+    if (!known || known.worktrees.length === 0) {
+      toast.info("Open a project to show this session");
+      return;
+    }
+    // A notification names a session by its frontend id, while the daemon lists sessions by their
+    // backend id. Queueing the frontend id made every requeue miss the inventory and report a
+    // still-running session as exited, so resolve it through the session this workspace recorded.
+    // An id the workspace no longer knows is passed through unchanged: it may already be a backend
+    // id (a notification persisted by an older build), and the inventory is the only judge then.
+    const recorded = known.sessions[target.sessionId];
+    const backendSessionId = recorded ? recorded.backendSessionId : target.sessionId;
+    if (!backendSessionId) {
+      toast.info("That session has already exited.");
+      return;
+    }
+    setPendingAdoptions((queue) => [
+      ...queue,
+      {
+        backendSessionIds: [backendSessionId],
+        activate: true,
+        workspaceId: target.workspaceId,
+        attemptGenerations: {},
+        attempts: 0,
+        origin: "reopen",
+      },
+    ]);
+    // The adoption runs asynchronously over the daemon; without this the click looks like a no-op.
+    toast.info("Opening this session…");
+  };
   useEffect(() => {
     if (!isNativeRuntime) return;
     let disposed = false;
@@ -4265,7 +4317,9 @@ function WorkspaceApp({
         toast.warning(
           head.origin === "supervisor"
             ? "That session is no longer running."
-            : "A terminal moved to this window is no longer running.",
+            : head.origin === "reopen"
+              ? "That session has already exited."
+              : "A terminal moved to this window is no longer running.",
         );
       }
       // The workspace changed while adopting: the backend already made this window the owner, so
