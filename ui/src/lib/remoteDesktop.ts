@@ -9,6 +9,22 @@ import type { StructuredIpcError } from "./types";
 
 export const RD_FRAME_KIND_VIDEO = 0x01;
 export const RD_FRAME_KIND_STATUS = 0x02;
+export const RD_FRAME_KIND_CURSOR = 0x03;
+/**
+ * Native presentation notification. The canonical wire format is EXACTLY 9 bytes, little endian,
+ * with no JSON and no image payload:
+ *
+ * ```text
+ * byte 0        kind = 0x04
+ * bytes 1..4    u32 LE width
+ * bytes 5..8    u32 LE height
+ * ```
+ *
+ * It reuses the `RD_FRAME_KIND_VIDEO` header convention so the host emits the same u32 pair.
+ * Wave 3 Todo 7 must write exactly these 9 bytes; anything shorter is rejected by
+ * `parseRdFrameMessage`, and trailing bytes are ignored.
+ */
+export const RD_FRAME_KIND_NATIVE_PRESENTED = 0x04;
 /** kind(1) + width(4) + height(4) + frameId(8). */
 export const RD_VIDEO_HEADER_BYTES = 17;
 
@@ -28,10 +44,78 @@ export type RdStatusFrame = {
   reason: string | null;
 };
 
-export type RdFrameMessage = RdVideoFrame | RdStatusFrame;
+export type RdCursorFrame = {
+  kind: "cursor";
+  x: number;
+  y: number;
+  cursorType: number;
+  visible: boolean;
+  shapeId: number | null;
+  rgbaBase64: string | null;
+  width: number | null;
+  height: number | null;
+  hotspotX: number | null;
+  hotspotY: number | null;
+};
+
+export type RdNativePresentedFrame = { kind: "nativePresented"; width: number; height: number };
+
+export type RdFrameMessage = RdVideoFrame | RdStatusFrame | RdCursorFrame | RdNativePresentedFrame;
+
+export type RdPlayoutMode = "immediate" | "latest_wins" | "adaptive";
+export type RdScaleMode = "fit" | "native100" | "scale75" | "scale50";
+export type RdLatencyStats = { frames: number; p50Us: number; p95Us: number; p99Us: number; maxUs: number };
+export type RdSessionStats = {
+  rdSessionId: string;
+  targetFps: number;
+  presentFps: number;
+  droppedFrames: number;
+  codec: string;
+  hwAccel: string;
+  presentBackend: string;
+  transportMode: string;
+  playoutMode: string;
+  frameWidth: number;
+  frameHeight: number;
+  scalePermille: number;
+  audioActive: boolean;
+  audioUnderruns: number;
+  audioDrops: number;
+  decodeUs: RdLatencyStats | null;
+  presentUs: RdLatencyStats | null;
+  totalClientUs: RdLatencyStats | null;
+  udpReceiveBps: number | null;
+  packetLossRatio: number | null;
+  abrTargetBitrate: number | null;
+  hostEncodeUs: RdLatencyStats | null;
+  networkUs: RdLatencyStats | null;
+  captureToPresentUs: RdLatencyStats | null;
+  inputToDrawSubmitUs: RdLatencyStats | null;
+  audioVideoSourceOffsetUs: number | null;
+};
+export type RdDisplayRefreshInfo = { refreshHz: number; millihertz: number; monitorName: string | null; source: string };
+export type RdDisplayRefreshChange = { windowLabel: string; refreshHz: number; millihertz: number };
+export type RdConnectOptions = {
+  playoutMode?: RdPlayoutMode;
+  scaleMode?: RdScaleMode;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  audioMuted?: boolean;
+  audioVolume?: number;
+};
+export type RdStreamOptionsUpdate = {
+  playoutMode?: RdPlayoutMode;
+  scaleMode?: RdScaleMode;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  codec?: "auto" | "hevc" | "h264";
+};
+export type RdLogicalBounds = { x: number; y: number; width: number; height: number; scaleFactor: number };
+export type RdSurfaceAttachResponse = { backend: "wgpu" | "canvas2d"; reason: string | null };
 
 export type RdInputEvent =
   | { kind: "mouseMove"; x: number; y: number }
+  | { kind: "relativeMove"; dx: number; dy: number }
   | { kind: "mouseButton"; button: 0 | 1 | 2; down: boolean }
   | { kind: "wheel"; dx: number; dy: number }
   | { kind: "key"; code: string; down: boolean };
@@ -88,6 +172,44 @@ export function parseRdFrameMessage(frame: ArrayBuffer | Uint8Array | number[]):
     const state = CONNECTION_STATES.find((candidate) => candidate === record.state);
     if (!state) throw new Error(`unknown remote desktop state: ${String(record.state)}`);
     return { kind: "status", state, reason: typeof record.reason === "string" ? record.reason : null };
+  }
+  if (kind === RD_FRAME_KIND_CURSOR) {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
+    if (!parsed || typeof parsed !== "object") throw new Error("remote desktop cursor frame is not an object");
+    const record = parsed as Record<string, unknown>;
+    const x = record.x;
+    const y = record.y;
+    const cursorType = record.cursorType;
+    const visible = record.visible;
+    if (typeof x !== "number" || !Number.isFinite(x)
+      || typeof y !== "number" || !Number.isFinite(y)
+      || typeof cursorType !== "number" || typeof visible !== "boolean") {
+      throw new Error("remote desktop cursor frame has invalid fields");
+    }
+    const shapeId = record.shapeId;
+    const rgbaBase64 = record.rgbaBase64;
+    const width = record.width;
+    const height = record.height;
+    const hotspotX = record.hotspotX;
+    const hotspotY = record.hotspotY;
+    return {
+      kind: "cursor",
+      x,
+      y,
+      cursorType,
+      visible,
+      shapeId: typeof shapeId === "number" ? shapeId : null,
+      rgbaBase64: typeof rgbaBase64 === "string" ? rgbaBase64 : null,
+      width: typeof width === "number" ? width : null,
+      height: typeof height === "number" ? height : null,
+      hotspotX: typeof hotspotX === "number" ? hotspotX : null,
+      hotspotY: typeof hotspotY === "number" ? hotspotY : null,
+    };
+  }
+  if (kind === RD_FRAME_KIND_NATIVE_PRESENTED) {
+    if (bytes.byteLength < 9) throw new Error(`remote desktop native-presented frame is too short: ${bytes.byteLength}`);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return { kind: "nativePresented", width: view.getUint32(1, true), height: view.getUint32(5, true) };
   }
   throw new Error(`unknown remote desktop frame kind: ${String(kind)}`);
 }
@@ -176,6 +298,7 @@ export async function rdConnect(
   hostId: string,
   onFrame: RdFrameHandler,
   onFrameError?: (error: unknown) => void,
+  options?: RdConnectOptions,
 ): Promise<{ rdSessionId: string }> {
   const frames = new Channel<ArrayBuffer | Uint8Array | number[]>((payload) => {
     let message: RdFrameMessage;
@@ -187,7 +310,44 @@ export async function rdConnect(
     }
     onFrame(message);
   });
-  return rdInvoke<{ rdSessionId: string }>("cmd_rd_connect", { hostId, frames });
+  return rdInvoke<{ rdSessionId: string }>("cmd_rd_connect", { hostId, frames, ...(options !== undefined ? { options } : {}) });
+}
+
+export function rdStats(rdSessionId: string): Promise<RdSessionStats> {
+  return rdInvoke<RdSessionStats>("cmd_rd_stats", { rdSessionId });
+}
+
+export function rdDisplayRefresh(): Promise<RdDisplayRefreshInfo> {
+  return rdInvoke<RdDisplayRefreshInfo>("cmd_rd_display_refresh");
+}
+
+export async function onRdDisplayRefreshChanged(handler: (change: RdDisplayRefreshChange) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<RdDisplayRefreshChange>("rd-display-refresh-changed", (event) => handler(event.payload));
+}
+
+export function rdSetOptions(rdSessionId: string, options: RdStreamOptionsUpdate): Promise<void> {
+  return rdInvoke<void>("cmd_rd_set_options", { rdSessionId, options });
+}
+
+export function rdSetAudio(rdSessionId: string, muted: boolean, volume: number): Promise<void> {
+  return rdInvoke<void>("cmd_rd_set_audio", { rdSessionId, muted, volume });
+}
+
+export function rdClipboardSend(rdSessionId: string, text: string): Promise<void> {
+  return rdInvoke<void>("cmd_rd_clipboard_send", { rdSessionId, text });
+}
+
+export function rdSurfaceAttach(rdSessionId: string, bounds: RdLogicalBounds): Promise<RdSurfaceAttachResponse> {
+  return rdInvoke<RdSurfaceAttachResponse>("cmd_rd_surface_attach", { rdSessionId, bounds });
+}
+
+export function rdSurfaceUpdateBounds(rdSessionId: string, bounds: RdLogicalBounds, visible: boolean): Promise<void> {
+  return rdInvoke<void>("cmd_rd_surface_update_bounds", { rdSessionId, bounds, visible });
+}
+
+export function rdSurfaceDetach(rdSessionId: string): Promise<void> {
+  return rdInvoke<void>("cmd_rd_surface_detach", { rdSessionId });
 }
 
 export function rdInput(rdSessionId: string, events: RdInputEvent[]): Promise<void> {
@@ -240,7 +400,8 @@ export function rdErrorMessage(error: StructuredIpcError): string {
 
 /**
  * Serializes input batches: at most one `cmd_rd_input` is in flight; events queued meanwhile go
- * out together, with consecutive mouse moves collapsed to the newest one.
+ * out together. Consecutive absolute mouse moves keep the newest position; relative moves
+ * sum their deltas so coalescing preserves total camera motion.
  */
 export class RdInputSender {
   private queue: RdInputEvent[] = [];
@@ -265,6 +426,8 @@ export class RdInputSender {
     const last = this.queue[this.queue.length - 1];
     if (event.kind === "mouseMove" && last?.kind === "mouseMove") {
       this.queue[this.queue.length - 1] = event;
+    } else if (event.kind === "relativeMove" && last?.kind === "relativeMove") {
+      this.queue[this.queue.length - 1] = { kind: "relativeMove", dx: last.dx + event.dx, dy: last.dy + event.dy };
     } else {
       this.queue.push(event);
     }

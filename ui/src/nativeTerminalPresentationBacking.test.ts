@@ -14,6 +14,26 @@ afterEach(() => {
 });
 
 describe("native terminal backing ownership", () => {
+  it("paints a cold native RD pane without covering an adjacent presented RD pane", () => {
+    document.documentElement.classList.add("platform-macos");
+    const style = document.createElement("style");
+    style.textContent = nativeRules;
+    const cold = document.createElement("div");
+    cold.setAttribute("data-testid", "remote-desktop-pane");
+    cold.setAttribute("data-rd-native", "true");
+    cold.setAttribute("data-rd-presented", "false");
+    const live = cold.cloneNode();
+    if (!(live instanceof HTMLElement)) throw new Error("Expected an element");
+    live.setAttribute("data-rd-presented", "true");
+    document.body.append(style, cold, live);
+
+    expect(getComputedStyle(cold).backgroundColor).toBe("var(--terminal)");
+    expect(getComputedStyle(live).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+
+    cold.setAttribute("data-rd-presented", "true");
+    expect(getComputedStyle(cold).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  });
+
   it("paints an unpresented pane without covering an adjacent live native pane", () => {
     document.documentElement.classList.add("platform-macos");
     const style = document.createElement("style");

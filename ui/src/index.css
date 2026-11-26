@@ -439,12 +439,33 @@ html.platform-macos [data-dnd-type="group-body"]:has([data-testid="native-termin
 html.platform-macos [data-testid="pane-split"]:has([data-testid="native-terminal-pane"]),
 html.platform-macos [data-testid="pane-leaf"]:has([data-testid="native-terminal-pane"]),
 html.platform-macos [data-testid="terminal-pane-surface"]:has([data-testid="native-terminal-pane"]),
-html.platform-macos [data-testid="native-terminal-pane"] {
+html.platform-macos [data-testid="native-terminal-pane"],
+html.platform-macos:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos body:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos #root:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos #root > div:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos div:has(> main [data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos main:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="terminal-layout"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="tab-group-split"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="tab-group-panel"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="tab-group-body"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-tab-group-body-id]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-dnd-type="group-body"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="pane-split"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="pane-leaf"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="terminal-pane-surface"]:has([data-testid="remote-desktop-pane"][data-rd-native="true"]),
+html.platform-macos [data-testid="remote-desktop-pane"][data-rd-native="true"] {
   background-color: transparent !important;
   background: transparent !important;
 }
 
 html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-presented="false"] {
+  background: var(--terminal) !important;
+  background-color: var(--terminal) !important;
+}
+
+html.platform-macos [data-testid="remote-desktop-pane"][data-rd-native="true"][data-rd-presented="false"] {
   background: var(--terminal) !important;
   background-color: var(--terminal) !important;
 }
