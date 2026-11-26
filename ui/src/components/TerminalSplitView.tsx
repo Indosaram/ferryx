@@ -1651,47 +1651,55 @@ const PaneLeafView = React.memo(function PaneLeafView({
       </div>
 
       {browserMenu ? (
+        // The menu is drawn over this leaf's native browser surface. `role="dialog"` is what
+        // nativeTerminalVisibility treats as input-owning, so the host yields (hides) the native
+        // surface underneath on Windows/Linux while the menu is open; force-yield keeps that true
+        // even if an ancestor is later marked hidden.
         <div
           data-testid="pane-browser-menu"
-          role="menu"
+          role="dialog"
+          aria-label="Browser pane actions"
+          data-native-terminal-force-yield="true"
           className="absolute z-40 min-w-[200px] rounded-md border border-border bg-popover py-1 text-[11px] text-popover-foreground shadow-md"
           style={{ left: browserMenu.x, top: Math.max(browserMenu.y, 24) }}
           onPointerDown={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
-          <button
-            type="button"
-            role="menuitem"
-            className="flex w-full items-center px-2 py-1 text-left hover:bg-accent/60"
-            onClick={() => {
-              setBrowserMenu(null);
-              onOpenBrowserFullscreen?.(browserMenu.browserId);
-            }}
-          >
-            Open in Browser fullscreen
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="flex w-full items-center px-2 py-1 text-left hover:bg-accent/60"
-            onClick={() => {
-              setBrowserMenu(null);
-              onDetachBrowserPane?.(browserMenu.browserId, tab.id, leafId);
-            }}
-          >
-            Detach from split
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="flex w-full items-center px-2 py-1 text-left text-destructive hover:bg-accent/60"
-            onClick={() => {
-              setBrowserMenu(null);
-              onCloseBrowserSession?.(browserMenu.browserId);
-            }}
-          >
-            Close browser session
-          </button>
+          <div role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center px-2 py-1 text-left hover:bg-accent/60"
+              onClick={() => {
+                setBrowserMenu(null);
+                onOpenBrowserFullscreen?.(browserMenu.browserId);
+              }}
+            >
+              Open in Browser fullscreen
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center px-2 py-1 text-left hover:bg-accent/60"
+              onClick={() => {
+                setBrowserMenu(null);
+                onDetachBrowserPane?.(browserMenu.browserId, tab.id, leafId);
+              }}
+            >
+              Detach from split
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center px-2 py-1 text-left text-destructive hover:bg-accent/60"
+              onClick={() => {
+                setBrowserMenu(null);
+                onCloseBrowserSession?.(browserMenu.browserId);
+              }}
+            >
+              Close browser session
+            </button>
+          </div>
         </div>
       ) : null}
 

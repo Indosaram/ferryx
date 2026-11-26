@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import type { LayoutState, TerminalSession, TerminalTab } from "../lib/types";
 
 const browserMocks = vi.hoisted(() => ({
@@ -79,15 +80,23 @@ function renderSplit(overrides: Partial<Parameters<typeof TerminalSplitView>[0]>
   const onDetachBrowserPane = vi.fn();
   const onClosePane = vi.fn();
   render(
-    <TerminalSplitView
-      layout={terminalWithBrowserLeaf()}
-      sessions={{ "session-a": session("session-a") }}
-      onDetachBrowserPane={onDetachBrowserPane}
-      onClosePane={onClosePane}
-      {...overrides}
-    />,
+    <>
+      <TerminalSplitView
+        layout={terminalWithBrowserLeaf()}
+        sessions={{ "session-a": session("session-a") }}
+        onDetachBrowserPane={onDetachBrowserPane}
+        onClosePane={onClosePane}
+        {...overrides}
+      />
+      <NativeSurfaceProbe />
+    </>,
   );
   return { onDetachBrowserPane, onClosePane };
+}
+
+/** Reads the real hook the native browser surface uses to decide whether it may stay painted. */
+function NativeSurfaceProbe() {
+  return <span data-testid="native-surface-probe">{String(useNativeTerminalVisibility())}</span>;
 }
 
 describe("browser split detach-by-default", () => {
@@ -144,6 +153,22 @@ describe("browser split detach-by-default", () => {
     expect(onCloseBrowserSession).toHaveBeenCalledWith(BROWSER_ID);
     // The destructive path never routes through the detach callback by accident.
     expect(browserMocks.closeBrowser).not.toHaveBeenCalled();
+  });
+
+  it("yields the native browser surface while the context menu is open", async () => {
+    renderSplit();
+    expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("true");
+
+    fireEvent.contextMenu(await screen.findByTestId("pane-browser-detach"));
+    await screen.findByTestId("pane-browser-menu");
+
+    // The real hook the native browser surface reads must treat the menu as an input-owning
+    // overlay, so the page underneath yields instead of painting over it on Windows/Linux.
+    await waitFor(() => expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("false"));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("pane-browser-menu")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("true"));
   });
 
   it("keeps the terminal leaf's close control a real split close", async () => {
