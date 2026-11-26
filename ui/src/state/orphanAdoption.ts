@@ -1,4 +1,4 @@
-import type { TerminalSessionSummary, Worktree } from "../lib/types";
+import { isTerminalTab, type TerminalSessionSummary, type Worktree } from "../lib/types";
 import type { PreSpawnedBackend, WorkspaceState } from "./workspaceStore";
 
 export type OrphanAdoptionPlanEntry = { backend: PreSpawnedBackend; worktree: Worktree };
@@ -25,11 +25,7 @@ export function planOrphanAdoption(
   attemptGenerations: Readonly<Record<string, number>> = {},
 ): OrphanAdoptionPlan {
   const plan: OrphanAdoptionPlan = { adopt: [], alreadyAttached: [], missing: [] };
-  const attached = new Set(
-    Object.values(state.sessions)
-      .map((session) => session.backendSessionId)
-      .filter((id): id is string => typeof id === "string" && id.length > 0),
-  );
+  const attached = attachedBackendSessionIds(state);
   const live = new Map(liveSessions.map((summary) => [summary.sessionId, summary]));
   const activeWorktree = state.worktrees.find((worktree) => worktree.path === state.activeWorktreePath) ?? state.worktrees[0];
   for (const sessionId of new Set(sessionIds)) {
@@ -58,4 +54,76 @@ export function planOrphanAdoption(
     });
   }
   return plan;
+}
+
+/**
+ * Backend sessions some pane of this window actually shows.
+ *
+ * A `sessions` entry alone does not mean a pane shows the session: closing or parking a layout
+ * drops the tab while the entry (and its PTY) survives, which is exactly the state a click has to
+ * recover from. Counting those entries as attached made the recovery queue treat the session as
+ * already on screen and return without doing anything.
+ */
+function attachedBackendSessionIds(state: WorkspaceState): Set<string> {
+  const shown = new Set<string>();
+  const layouts = [state.layout, ...Object.values(state.worktreeLayouts ?? {})];
+  for (const layout of layouts) {
+    for (const tab of layout?.tabs ?? []) {
+      if (!isTerminalTab(tab)) continue;
+      const sessionId = tab.sessionId;
+      const backendSessionId = sessionId ? state.sessions[sessionId]?.backendSessionId : undefined;
+      if (backendSessionId) shown.add(backendSessionId);
+      for (const leafSessionId of Object.values(layout.layoutsByTabId?.[tab.id]?.sessionIdsByLeafId ?? {})) {
+        const leafBackendId = leafSessionId ? state.sessions[leafSessionId]?.backendSessionId : undefined;
+        if (leafBackendId) shown.add(leafBackendId);
+      }
+    }
+  }
+  return shown;
+}
+
+/**
+ * Path comparison key. Mirrors `canonicalWorktreeKey` in `workspaceStore.ts`; kept local because a
+ * value import of the store would drag its whole runtime (IPC, React, reducers) into every unit
+ * test that only needs this planning rule.
+ */
+function canonicalPath(path: string | null | undefined): string {
+  if (!path) return "";
+  if (/^\\\\\?\\/.test(path) || /^[a-zA-Z]:[\\/]/.test(path)) {
+    const stripped = path.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+    return stripped.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  }
+  return path.replace(/\/+$/, "");
+}
+
+/**
+ * Decides whether clicking a worktree should re-attach a session that is already running there
+ * instead of spawning a second shell in the same directory. A candidate must be live, must not be
+ * shown by any pane of this window already, and must belong to this exact worktree; nothing here
+ * spawns or closes a backend session. Returns null when the caller should spawn as before.
+ */
+export function planWorktreeSessionAdoption(
+  worktreePath: string,
+  state: WorkspaceState,
+  liveSessions: readonly TerminalSessionSummary[],
+): OrphanAdoptionPlanEntry | null {
+  const key = canonicalPath(worktreePath);
+  if (!key) return null;
+  const worktree = state.worktrees.find((candidate) => canonicalPath(candidate.path) === key);
+  if (!worktree) return null;
+  const attached = attachedBackendSessionIds(state);
+  for (const summary of liveSessions) {
+    if (summary.running === false) continue;
+    if (attached.has(summary.sessionId)) continue;
+    if (canonicalPath(summary.worktreePath) !== key) continue;
+    return {
+      worktree,
+      backend: {
+        sessionId: summary.sessionId,
+        daemonEpoch: summary.daemonEpoch ?? null,
+        incarnation: summary.incarnation ?? null,
+      },
+    };
+  }
+  return null;
 }

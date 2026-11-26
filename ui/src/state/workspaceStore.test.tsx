@@ -102,6 +102,8 @@ function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean 
       return sessionId;
     }),
     getTerminalCwd: vi.fn(async () => "/repo/main/packages/api"),
+    // No orphan sessions by default: a click spawns as before unless a test seeds a live one.
+    listTerminalSessions: vi.fn(async () => []),
     closeTerminal: vi.fn(async (sessionId) => {
       const deferred = getExit(sessionId);
       if (autoConfirmExit) queueMicrotask(() => confirmExit(sessionId));
@@ -1569,6 +1571,106 @@ describe("worktree tab and session isolation", () => {
 
     expect(result.current.state.activeWorktreePath).toBe(newWorktree.path);
     expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([newTabId]);
+  });
+
+  it("re-attaches a session the daemon still runs in the clicked worktree instead of spawning a second shell", async () => {
+    const { services } = createServices();
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([
+      { sessionId: "backend-orphan", worktreePath: featureWorktree.path, daemonEpoch: "9", incarnation: "life-9", running: true },
+    ]);
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    let tabId: string | null = null;
+    await act(async () => {
+      tabId = await result.current.ensureTabForWorktree(featureWorktree);
+    });
+
+    expect(tabId).toBeTruthy();
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(services.splitCreate).not.toHaveBeenCalled();
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+    const adopted = Object.values(result.current.state.sessions).find(
+      (session) => session.backendSessionId === "backend-orphan",
+    );
+    expect(adopted).toBeDefined();
+    expect(adopted?.incarnation).toBe("life-9");
+    expect(adopted?.daemonEpoch).toBe("9");
+    expect(result.current.state.layout.tabs.map((tab) => tab.id)).toEqual([tabId]);
+  });
+
+  it("spawns as before when no live session of the clicked worktree exists", async () => {
+    const { services } = createServices();
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([
+      { sessionId: "backend-other", worktreePath: worktree.path, running: true },
+    ]);
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    await act(async () => {
+      await result.current.ensureTabForWorktree(featureWorktree);
+    });
+
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
+    expect(Object.values(result.current.state.sessions).map((session) => session.backendSessionId)).toEqual([
+      "backend-1",
+    ]);
+  });
+
+  it("keeps a running session's tab when its worktree disappears from the listing", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+    await act(async () => {
+      await result.current.openTab(worktree);
+      await result.current.openTab(featureWorktree);
+    });
+    const featureBackend = Object.values(result.current.state.sessions).find(
+      (session) => session.cwd === featureWorktree.path,
+    )?.backendSessionId;
+    expect(featureBackend).toBeTruthy();
+
+    // The daemon still runs the feature shell even though the listing no longer names it.
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([
+      { sessionId: featureBackend!, worktreePath: featureWorktree.path, running: true },
+    ]);
+    await act(async () => {
+      await result.current.syncWorktrees([worktree]);
+    });
+
+    expect(result.current.state.worktrees.map((entry) => entry.path)).toEqual([worktree.path]);
+    expect(
+      Object.values(result.current.state.sessions).some((session) => session.backendSessionId === featureBackend),
+    ).toBe(true);
+    expect(services.closeTerminal).not.toHaveBeenCalledWith(featureBackend);
+    expect(services.closeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("still prunes a session the daemon no longer runs when its worktree disappears", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+    await act(async () => {
+      await result.current.openTab(worktree);
+      await result.current.openTab(featureWorktree);
+    });
+    const featureBackend = Object.values(result.current.state.sessions).find(
+      (session) => session.cwd === featureWorktree.path,
+    )?.backendSessionId;
+
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([]);
+    await act(async () => {
+      await result.current.syncWorktrees([worktree]);
+    });
+
+    expect(
+      Object.values(result.current.state.sessions).some((session) => session.backendSessionId === featureBackend),
+    ).toBe(false);
+    expect(services.closeTerminal).toHaveBeenCalledWith(featureBackend);
   });
 
   it("maintains independent tabs and sessions per worktree when switching between worktrees", async () => {
