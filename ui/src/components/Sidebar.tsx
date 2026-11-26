@@ -94,6 +94,7 @@ type SidebarProps = {
   statuses?: Record<string, DirtyState | undefined>;
   unreadWorktreePaths?: Record<string, boolean>;
   activityByWorktreePath?: Record<string, ActivitySummary | undefined>;
+  activityByWorktreeKey?: Record<string, ActivitySummary | undefined>;
   /**
    * The server-owned section order (`workspaceId -> lifecycle keys`). A workspace it names is
    * ordered by the server and never by `localStorage` again, so a drag survives a restart.
@@ -165,6 +166,7 @@ export function Sidebar({
   statuses = {},
   unreadWorktreePaths,
   activityByWorktreePath,
+  activityByWorktreeKey,
   laneOrder,
   onRefreshLaneOrder,
   laneLifecycles,
@@ -390,12 +392,13 @@ export function Sidebar({
   const { snapshot: supervisorSnapshot, now: supervisorNow } = useSupervisor();
   const live = useMemo(() => sidebarLiveState(model, {
     activityByWorktreePath,
+    activityByWorktreeKey,
     // The same reduced signals the publisher sends to the remote (its activity overrides the raw map).
-    ...sidebarSessionSignals(model, { activityByWorktreePath, unreadWorktreePaths, agentStateByPath: agentStatesByPath(agentsByPath) }),
+    ...sidebarSessionSignals(model, { activityByWorktreePath, activityByWorktreeKey, unreadWorktreePaths, agentStateByPath: agentStatesByPath(agentsByPath) }),
     activeWorkspaceId: activeProjectId,
     activePath,
     isSupervisorTyping: (path) => supervisorTypingIn(supervisorSnapshot, supervisorNow, path),
-  }, filterQuery), [activePath, activeProjectId, activityByWorktreePath, agentsByPath, filterQuery, model, supervisorNow, supervisorSnapshot, unreadWorktreePaths]);
+  }, filterQuery), [activePath, activeProjectId, activityByWorktreeKey, activityByWorktreePath, agentsByPath, filterQuery, model, supervisorNow, supervisorSnapshot, unreadWorktreePaths]);
   const canCreateWorktree = (project: RegisteredProject) => project.gitRoot !== null && project.target?.kind !== "ssh";
 
   const projectChrome = (node: SidebarProjectNode) => {

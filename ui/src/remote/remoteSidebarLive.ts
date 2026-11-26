@@ -3,7 +3,7 @@
 // included, and those are used as-is so both apps draw from identical inputs. Only a snapshot
 // without published activity (the inventory fallback, or a desktop older than that field) has its
 // activity rebuilt from the session inventory, matched to model rows by workspace id and slug.
-import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sidebarModel";
+import { worktreeActivityKey, type SidebarLiveSignals, type SidebarModel } from "../components/sidebar/sidebarModel";
 import { supervisorTypingIn } from "../components/sidebar/sidebarSupervisor";
 import type { SupervisorSnapshot } from "../lib/supervisorModel";
 import { summarizeActivities, type ActivitySummary, type TerminalActivity } from "../lib/activity";
@@ -42,7 +42,9 @@ export function remoteSidebarSignals(
   attentionBySessionId: AttentionBySessionId = {},
 ): SidebarLiveSignals {
   const published = model.signals?.activityByWorktreePath;
+  const publishedByKey = model.signals?.activityByWorktreeKey;
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
+  const activityByWorktreeKey: Record<string, ActivitySummary> = { ...(publishedByKey ?? {}) };
   let activeWorkspaceId: string | undefined;
   let activePath: string | undefined;
   for (const project of model.projects) {
@@ -51,7 +53,9 @@ export function remoteSidebarSignals(
         activeWorkspaceId = node.workspaceId;
         activePath = node.path;
       }
-      if (published) continue;
+      const key = worktreeActivityKey(node.workspaceId, node.path);
+      const pairedMissingPublished = node.workspaceId.startsWith("daemon:") && publishedByKey?.[key] === undefined;
+      if (published && !pairedMissingPublished) continue;
       const activities: TerminalActivity[] = (inventory?.entries ?? []).flatMap((entry) =>
         entry.activityState && entry.workspaceId === node.workspaceId && entry.worktreeSlug === node.worktreeSlug
           ? [{
@@ -63,7 +67,11 @@ export function remoteSidebarSignals(
               ...(attentionBySessionId[entry.sessionId] ? { attention: attentionBySessionId[entry.sessionId] } : {}),
             }]
           : []);
-      if (activities.length > 0) activityByWorktreePath[node.path] = summarizeActivities(activities);
+      if (activities.length > 0) {
+        const summary = summarizeActivities(activities);
+        activityByWorktreeKey[key] = summary;
+        if (!published) activityByWorktreePath[node.path] = summary;
+      }
     }
   }
   return {
@@ -73,6 +81,7 @@ export function remoteSidebarSignals(
     // The desktop's activity, bell marks and bare agent states, published with the snapshot; its
     // activity replaces the inventory reconstruction above whenever it is present.
     ...(model.signals ?? {}),
+    ...(Object.keys(activityByWorktreeKey).length > 0 ? { activityByWorktreeKey } : {}),
     ...(supervisor ? { isSupervisorTyping: (path: string) => supervisorTypingIn(supervisor.snapshot, supervisor.now, path) } : {}),
   };
 }

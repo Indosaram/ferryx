@@ -1657,10 +1657,11 @@ impl RemoteGatewayState {
         let visible: Vec<(&String, bool)> = session_refs
             .iter()
             .map(|session_ref| {
-                let backend = SessionRef::parse(session_ref)
-                    .map(|parsed| parsed.backend_session_id().to_string())
-                    .unwrap_or_else(|_| session_ref.clone());
-                (session_ref, self.session_is_machine_owned(&backend))
+                let machine_owned = match SessionRef::parse(session_ref) {
+                    Ok(parsed) => self.session_ref_is_machine_owned(&parsed),
+                    Err(_) => self.session_is_machine_owned(session_ref),
+                };
+                (session_ref, machine_owned)
             })
             .collect();
         let mut targets = Vec::new();
@@ -1767,6 +1768,20 @@ impl RemoteGatewayState {
             .or_else(|| details.and_then(|details| details.worktree_label))
             .filter(|label| !label.trim().is_empty());
         (agent, worktree)
+    }
+
+    /// Whether `session_ref` belongs to the machine-scope view: local sessions are checked against
+    /// this daemon's machine journal, while paired-host relay refs (`https://.../host/<id>:<sid>`)
+    /// belong to a remote paired machine and are always machine-scoped (never desktop-mirrored).
+    fn session_ref_is_machine_owned(
+        &self,
+        session_ref: &ferryx_hub::supervisor::panel_contract::SessionRef,
+    ) -> bool {
+        let host = session_ref.host_id();
+        if host.contains("://") {
+            return true;
+        }
+        self.session_is_machine_owned(session_ref.backend_session_id())
     }
 
     /// Whether the machine journal owns `session_id` (a machine session, not a mirrored one).

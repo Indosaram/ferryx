@@ -35,8 +35,9 @@ import { canCaptureAuthoritativeProviderSession, continuationOutcomeUnknown, con
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
-import { getDaemonAttention, subscribeDaemonAttention } from "../lib/attentionFeed";
+import { getDaemonAttention, listDaemonAttentions, subscribeDaemonAttention } from "../lib/attentionFeed";
 import { groupOf } from "../lib/attentionGroup";
+import { worktreeActivityKey } from "../components/sidebar/sidebarModel";
 import type { AttentionGroup } from "../lib/supervisorPanel/contract";
 import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
@@ -3306,6 +3307,17 @@ export function useWorkspaceStore({
     // signal for the snapshot cache, which useMemo cannot observe directly.
     [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadTabIds, renderedState.unreadWorktreePaths, renderedState.workspaceId, workspaceId, parkedActivityVersion, attentionBySessionId],
   );
+  // Workspace-scoped worktree activity (`<workspaceId>\0<path>`) prevents path collisions across
+  // local, SSH, and paired machines and lets paired (`daemon:`) rows light up with their own state.
+  const worktreeActivityByKey = useMemo(
+    () => ({
+      ...selectScopedWorktreeActivitySummariesAcrossWorkspaces(renderedState.workspaceId ?? workspaceId, attentionBySessionId),
+      ...selectScopedWorktreeActivitySummaries(renderedState, attentionBySessionId, renderedState.workspaceId ?? workspaceId),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
+    // signal for the snapshot cache, which useMemo cannot observe directly.
+    [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadTabIds, renderedState.unreadWorktreePaths, renderedState.workspaceId, workspaceId, parkedActivityVersion, attentionBySessionId],
+  );
   const activityNotificationTargets = useMemo(
     () => selectActivityNotificationTargets(renderedState),
     [renderedState.layout, renderedState.worktreeLayouts, renderedState.worktrees, renderedState.activityBySessionId, renderedState.sessions],
@@ -3323,6 +3335,7 @@ export function useWorkspaceStore({
     agents,
     tabActivity,
     worktreeActivity,
+    worktreeActivityByKey,
     attentionBySessionId,
     unreadBadgeCount,
     activityNotificationTargets,
@@ -3720,11 +3733,41 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
   return merged;
 }
 
+/** Workspace-scoped activity summaries keyed by `worktreeActivityKey(workspaceId, path)`. */
+export function selectScopedWorktreeActivitySummaries(
+  state: WorkspaceState,
+  attentionBySessionId: AttentionBySessionId = {},
+  fallbackWorkspaceId?: string,
+): Record<string, ActivitySummary> {
+  const ownerId = state.workspaceId ?? fallbackWorkspaceId;
+  if (!ownerId) return {};
+  const byPath = selectWorktreeActivitySummaries(state, attentionBySessionId);
+  const scoped: Record<string, ActivitySummary> = {};
+  for (const [path, summary] of Object.entries(byPath)) {
+    scoped[worktreeActivityKey(ownerId, path)] = summary;
+  }
+  return scoped;
+}
+
+/** Workspace-scoped activity summaries for every parked workspace snapshot (no path collisions). */
+export function selectScopedWorktreeActivitySummariesAcrossWorkspaces(
+  mountedWorkspaceId: string,
+  attentionBySessionId: AttentionBySessionId = {},
+): Record<string, ActivitySummary> {
+  const merged: Record<string, ActivitySummary> = {};
+  for (const [workspaceId, snapshot] of listWorkspaceSnapshots()) {
+    if (workspaceId === mountedWorkspaceId) continue;
+    Object.assign(merged, selectScopedWorktreeActivitySummaries(snapshot, attentionBySessionId, workspaceId));
+  }
+  return merged;
+}
+
 /**
  * Global Dock badge count: each workspace contributes the larger of (sessions whose attention
  * group is `needsYou` or `unread`, the daemon's group when it reports one, else `groupOf`'s
- * mapping of the pane's own state) and (bell-only unread tabs), summed across the live workspace
- * and every parked workspace snapshot, so an agent finishing anywhere still lights the badge.
+ * mapping of the pane's own state) and (bell-only unread tabs), summed across the live workspace,
+ * every parked workspace snapshot, and any daemon-judged sessions (unopened projects or paired
+ * hosts) not yet present in any loaded workspace snapshot.
  */
 export function selectGlobalUnreadBadgeCount(
   currentState?: WorkspaceState,
@@ -3732,10 +3775,13 @@ export function selectGlobalUnreadBadgeCount(
 ): number {
   if (!currentState) return 0;
 
+  const seenBackendIds = new Set<string>();
   const countAttention = (state: WorkspaceState): number => {
     const sessionIds = new Set([...Object.keys(state.activityBySessionId ?? {}), ...Object.keys(state.sessions ?? {})]);
     let count = 0;
     for (const sessionId of sessionIds) {
+      const backendId = state.sessions?.[sessionId]?.backendSessionId;
+      if (backendId) seenBackendIds.add(backendId);
       const group = sessionAttentionGroup(state, sessionId);
       if (group === "needsYou" || group === "unread") count += 1;
     }
@@ -3751,6 +3797,10 @@ export function selectGlobalUnreadBadgeCount(
   for (const [workspaceId, snapshot] of listWorkspaceSnapshots()) {
     if (workspaceId === targetWsId) continue;
     count += badgeFor(snapshot);
+  }
+  for (const [backendId, attention] of listDaemonAttentions()) {
+    if (seenBackendIds.has(backendId)) continue;
+    if (attention.group === "needsYou" || attention.group === "unread") count += 1;
   }
   return count;
 }

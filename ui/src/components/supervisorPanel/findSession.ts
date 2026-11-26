@@ -1,3 +1,4 @@
+import { backendSessionIdOf } from '../../lib/attentionGroup';
 import type { WorkspaceState } from '../../state/workspaceStore';
 
 /** The daemon session id a `local:<backendSessionId>` ref names on this computer, else null. */
@@ -12,8 +13,7 @@ export function findSessionByBackendId(
   sessionRef: string,
   states: Iterable<readonly [string, WorkspaceState]>,
 ): { workspaceId: string; sessionId: string } | null {
-  const separator = sessionRef.indexOf(':');
-  const backendId = separator < 0 ? sessionRef : sessionRef.slice(separator + 1);
+  const backendId = backendSessionIdOf(sessionRef);
   if (!backendId) return null;
   for (const [workspaceId, state] of states) {
     for (const session of Object.values(state.sessions)) {

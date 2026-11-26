@@ -236,14 +236,18 @@ async fn relay_panel_session(
         crate::hub_runtime::local_fleet_session(&state, &session_id),
     );
     let Ok(Some(session)) = read.await else { return };
+    let payload = serde_json::json!({
+        "type": "panel.session",
+        "sessionRef": session.session_ref,
+        "session": session,
+    });
     let _ = desktop.send(DaemonRemoteEvent {
         event: SUPERVISOR_PANEL_EVENT.to_string(),
-        payload: serde_json::json!({
-            "type": "panel.session",
-            "sessionRef": session.session_ref,
-            "session": session,
-        }),
+        payload: payload.clone(),
     });
+    // Notify the push decision gate when a local pane leaves `needsYou` (e.g., acknowledged or
+    // answered on the desktop) so any batched phone push for this session is cancelled.
+    let _ = state.handle_panel_frame(&payload).await;
 }
 
 /// The desktop event name the UI's `onSupervisorPanelEvent` listens for.
@@ -8113,6 +8117,7 @@ impl DaemonServer {
                 Ok(DaemonRequest::ResetAgentState { session_id }) => {
                     if self.session_router.is_local_session(&session_id) || self.agent_states.current(&session_id).is_some() {
                         self.agent_states.release_manual(&session_id);
+                        self.remote_state.agent_events.acknowledge(&session_id);
                         DaemonResponse::ResetAgentStateOk
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         let peer_call = tokio::time::timeout(
@@ -8123,17 +8128,20 @@ impl DaemonServer {
                         match peer_call {
                             Ok(Ok(())) => {
                                 self.agent_states.release_manual(&session_id);
+                                self.remote_state.agent_events.acknowledge(&session_id);
                                 DaemonResponse::ResetAgentStateOk
                             }
                             Ok(Err(message)) => daemon_error(message),
                             Err(_) => {
                                 tracing::warn!(session_id, "peer reset_agent_state timed out; releasing locally");
                                 self.agent_states.release_manual(&session_id);
+                                self.remote_state.agent_events.acknowledge(&session_id);
                                 DaemonResponse::ResetAgentStateOk
                             }
                         }
                     } else {
                         self.agent_states.release_manual(&session_id);
+                        self.remote_state.agent_events.acknowledge(&session_id);
                         DaemonResponse::ResetAgentStateOk
                     }
                 }

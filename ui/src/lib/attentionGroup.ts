@@ -51,9 +51,23 @@ export function activityStateOfGroup(group: AttentionGroup): "working" | "waitin
   }
 }
 
-/** The backend session id a `<hostId>:<backendSessionId>` ref names. */
+/**
+ * The backend session id a `<hostId>:<backendSessionId>` ref names.
+ * Relay host ids (`https://relay.ferryx.dev/host/<machine>:<backendId>`) contain scheme/port
+ * colons, so split after `/host/` before taking the trailing backend session id.
+ */
 export function backendSessionIdOf(sessionRef: string): string {
-  return sessionRef.slice(sessionRef.indexOf(":") + 1);
+  const first = sessionRef.indexOf(":");
+  if (first < 0) return sessionRef;
+  let at = first;
+  if (sessionRef.startsWith("://", first)) {
+    const marker = sessionRef.indexOf("/host/", first + 3);
+    if (marker >= 0) {
+      const colon = sessionRef.indexOf(":", marker + "/host/".length);
+      if (colon >= 0) at = colon;
+    }
+  }
+  return sessionRef.slice(at + 1);
 }
 
 /** The judged sessions of a panel snapshot, keyed by backend session id. */

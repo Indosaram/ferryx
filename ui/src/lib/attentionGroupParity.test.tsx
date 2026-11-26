@@ -235,4 +235,16 @@ describe("groupOf for older peers", () => {
     expect(groupOf({ state: "unknown" })).toBe("seen");
     expect(groupOf({ attention: { group: "working" }, state: "blocked" })).toBe("working");
   });
+
+  it("extracts backend session ids from relay paired-host sessionRefs for attention and navigation", async () => {
+    const { backendSessionIdOf } = await import("./attentionGroup");
+    const { findSessionByBackendId } = await import("../components/supervisorPanel/findSession");
+    const relayRef = "https://relay.ferryx.dev/host/peer-machine-1:backend-a";
+    expect(backendSessionIdOf(relayRef)).toBe("backend-a");
+    expect(backendSessionIdOf("local:backend-b")).toBe("backend-b");
+
+    const mapped = attentionBySessionIdOf([{ ...fleetSession(FIXTURES[0], "needsYou"), sessionRef: relayRef, hostId: "https://relay.ferryx.dev/host/peer-machine-1" }]);
+    expect(mapped["backend-a"]).toEqual({ group: "needsYou" });
+    expect(findSessionByBackendId(relayRef, [["w", workspace()]])).toEqual({ workspaceId: "w", sessionId: "a" });
+  });
 });
