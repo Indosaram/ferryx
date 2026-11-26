@@ -307,6 +307,10 @@ fn remote_desktop_session_streams_frames_end_to_end() {
     assert!(stats.present_fps > 0.0, "viewer records presentation cadence");
     assert!(stats.decode_us.is_some(), "viewer records decode latency");
     assert!(stats.present_us.is_some(), "viewer records presentation latency");
+    println!(
+        "RD_LIVE_STATS_JSON={}",
+        serde_json::to_string(&stats).expect("serialize live stats")
+    );
     let codec = session
         .stream_state()
         .ok()
