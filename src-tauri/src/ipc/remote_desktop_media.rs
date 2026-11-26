@@ -2,14 +2,11 @@
 //!
 //! Clipboard calls perform OS I/O (bounded subprocesses on Linux). Call them
 //! from a std worker thread or a blocking task, never a Tokio reactor thread.
-#![cfg(feature = "remote-desktop")]
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use ferryx_rd_app::{
-    ClipboardDecision, ClipboardError, ClipboardSynchronizer, PlatformClipboard,
-};
+use ferryx_rd_app::{ClipboardDecision, ClipboardSynchronizer, PlatformClipboard};
 #[cfg(any(test, target_os = "windows", target_os = "linux"))]
-use ferryx_rd_app::ClipboardSnapshot;
+use ferryx_rd_app::{ClipboardError, ClipboardSnapshot};
 use ferryx_rd_render::{AudioError, AudioQueue, CpalAudioOutput};
 use serde::{Deserialize, Serialize};
 
@@ -181,7 +178,7 @@ impl Default for RdClipboardBridge {
 impl RdClipboardBridge {
     /// Blocking: construct and use on a clipboard worker, not a Tokio reactor.
     pub fn new() -> Self {
-        Self::with_clipboard(platform::Clipboard::default())
+        Self::with_clipboard(platform::new())
     }
 
     pub fn with_clipboard(clipboard: impl PlatformClipboard) -> Self {
@@ -238,6 +235,10 @@ impl RdClipboardBridge {
 #[cfg(target_os = "macos")]
 mod platform {
     pub use ferryx_rd_app::platform::SystemClipboard as Clipboard;
+
+    pub(super) fn new() -> Clipboard {
+        Clipboard
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -259,6 +260,10 @@ mod platform {
 
     #[derive(Default)]
     pub struct Clipboard;
+
+    pub(super) fn new() -> Clipboard {
+        Clipboard
+    }
 
     struct OpenGuard;
 
@@ -367,6 +372,10 @@ mod platform {
     #[derive(Default)]
     pub struct Clipboard {
         observed: Mutex<(u64, Option<String>)>,
+    }
+
+    pub(super) fn new() -> Clipboard {
+        Clipboard { observed: Mutex::new((0, None)) }
     }
 
     #[derive(Clone, Copy)]
