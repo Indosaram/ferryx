@@ -1,5 +1,7 @@
 use super::workspace_service::DaemonWorkspaceService;
-use crate::remote::machine_protocol::{SharedLayout, SharedTab};
+use crate::remote::machine_protocol::{
+    validate_shared_file_rel_path, validate_shared_pane_kind, SharedLayout, SharedPane, SharedTab,
+};
 #[path = "retained_recovery.rs"]
 mod retained_recovery;
 use crate::daemon::agent_state::AgentStateHub;
@@ -61,6 +63,96 @@ const LOCAL_SPAWN_GATE_BUDGET: Duration = Duration::from_secs(10);
 
 /// One layout long-poll parks at most this long before it answers with the stored document.
 pub(crate) const LAYOUT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(25);
+pub(crate) const MAX_SHARED_LAYOUT_TABS: usize = 128;
+pub(crate) const MAX_SHARED_PANE_DEPTH: usize = 16;
+pub(crate) const MAX_SHARED_PANE_LEAVES: usize = 32;
+pub(crate) const MAX_LAYOUT_BUCKETS: usize = 256;
+
+/// One document's identity: the workspace, scoped to a worktree when the publisher named one.
+/// `None` is the workspace-level document legacy `layoutSyncV1` clients publish and read.
+pub(super) type LayoutKey = (String, Option<String>);
+
+pub(crate) fn validate_layout_workspace_id(id: &str) -> bool {
+    !id.is_empty()
+        && id == id.trim()
+        && id.len() <= 128
+        && !id.contains("..")
+        && !id.chars().any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+}
+
+pub(crate) fn validate_layout_tabs(tabs: &[SharedTab]) -> bool {
+    if tabs.len() > MAX_SHARED_LAYOUT_TABS {
+        return false;
+    }
+    let mut tab_ids = std::collections::HashSet::new();
+    for tab in tabs {
+        if tab.id.trim().is_empty() || !tab_ids.insert(tab.id.as_str()) {
+            return false;
+        }
+        let mut leaf_ids = std::collections::HashSet::new();
+        let mut pending = Vec::new();
+        if let Some(tree) = &tab.pane_tree {
+            pending.push((tree, 1));
+        }
+        while let Some((pane, depth)) = pending.pop() {
+            if depth > MAX_SHARED_PANE_DEPTH {
+                return false;
+            }
+            match pane {
+                SharedPane::Leaf {
+                    leaf_id,
+                    pane_kind,
+                    file_rel_path,
+                    ..
+                } => {
+                    if leaf_id.trim().is_empty()
+                        || !leaf_ids.insert(leaf_id.as_str())
+                        || leaf_ids.len() > MAX_SHARED_PANE_LEAVES
+                    {
+                        return false;
+                    }
+                    // Additive leaf metadata is optional, but a value that is present must be
+                    // one the contract can carry, or a paired reader would reject the document.
+                    if pane_kind
+                        .as_deref()
+                        .is_some_and(|kind| !validate_shared_pane_kind(kind))
+                    {
+                        return false;
+                    }
+                    if file_rel_path
+                        .as_deref()
+                        .is_some_and(|path| !validate_shared_file_rel_path(path))
+                    {
+                        return false;
+                    }
+                }
+                SharedPane::Split { first, second, .. } => {
+                    pending.push((first.as_ref(), depth + 1));
+                    pending.push((second.as_ref(), depth + 1));
+                }
+            }
+        }
+    }
+    true
+}
+
+// The counter lives outside the map so forgetting/evicting buckets cannot rewind recency.
+static LAYOUT_ACCESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn layout_key(workspace_id: &str, worktree_key: Option<&str>) -> LayoutKey {
+    (workspace_id.to_owned(), worktree_key.map(str::to_owned))
+}
+
+pub(super) struct LayoutBucket {
+    layout: SharedLayout,
+    last_access: u64,
+}
+
+impl LayoutBucket {
+    fn touch(&mut self) {
+        self.last_access = LAYOUT_ACCESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// Whether a remote (SSH) transport state still names a live target.
 ///
@@ -601,10 +693,13 @@ pub struct DaemonSessionService {
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
     pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
     pub(super) size_drivers: Arc<Mutex<HashMap<String, SizeDriver>>>,
-    /// Layout documents per workspace. Nothing is written to disk: the desktop republishes on
-    /// start, so a fresh daemon serves every workspace at revision 0 again.
-    pub(super) layouts: Arc<Mutex<HashMap<String, crate::remote::machine_protocol::SharedLayout>>>,
-    /// Ticked by every accepted layout write; layout long-polls park on it.
+    /// Layout documents per workspace and worktree. Nothing is written to disk: the desktop
+    /// republishes on start, so a fresh daemon serves every bucket at revision 0 again. LRU
+    /// eviction keeps at most MAX_LAYOUT_BUCKETS documents; an evicted bucket also restarts at
+    /// revision 0.
+    pub(super) layouts: Arc<Mutex<HashMap<LayoutKey, LayoutBucket>>>,
+    /// Ticked by every accepted layout write (including eviction); layout long-polls park on this
+    /// shared channel, so no per-bucket notifier survives an evicted/forgotten document.
     pub(super) layout_generation: tokio::sync::watch::Sender<u64>,
     pub(super) agent_states: Arc<AgentStateHub>,
     /// Installed once the gateway's observer exists. Sessions spawned before that are caught by
@@ -621,37 +716,83 @@ impl DaemonSessionService {
     }
 
     /// The workspace's layout document; revision 0 with no tabs before the first publish.
+    #[cfg(test)]
     pub(crate) fn layout(&self, workspace_id: &str) -> SharedLayout {
-        self.layouts
-            .lock()
-            .get(workspace_id)
-            .cloned()
-            .unwrap_or_else(|| SharedLayout::empty(workspace_id))
+        self.layout_for(workspace_id, None)
     }
 
-    /// Stores `tabs` as revision `base_revision + 1`. A caller whose base is stale receives the
-    /// stored document instead, so it can rebase without a second read.
+    /// The document of one worktree bucket; `None` is the workspace-level document.
+    pub(crate) fn layout_for(
+        &self,
+        workspace_id: &str,
+        worktree_key: Option<&str>,
+    ) -> SharedLayout {
+        let key = layout_key(workspace_id, worktree_key);
+        let mut layouts = self.layouts.lock();
+        match layouts.get_mut(&key) {
+            Some(bucket) => {
+                bucket.touch();
+                bucket.layout.clone()
+            }
+            None => SharedLayout::empty_for(workspace_id, worktree_key),
+        }
+    }
+
+    /// Stores `tabs` as revision `base_revision + 1` of the workspace-level document. A caller
+    /// whose base is stale receives the stored document instead, so it can rebase without a
+    /// second read.
+    #[cfg(test)]
     pub(crate) fn put_layout(
         &self,
         workspace_id: &str,
         base_revision: u64,
         tabs: Vec<SharedTab>,
     ) -> Result<SharedLayout, SharedLayout> {
+        self.put_layout_for(workspace_id, None, base_revision, tabs)
+    }
+
+    /// The same compare-and-set on one worktree bucket. Buckets are independent: a write to
+    /// `wt:feature-a` never advances the revision `main` reads.
+    pub(crate) fn put_layout_for(
+        &self,
+        workspace_id: &str,
+        worktree_key: Option<&str>,
+        base_revision: u64,
+        tabs: Vec<SharedTab>,
+    ) -> Result<SharedLayout, SharedLayout> {
+        let key = layout_key(workspace_id, worktree_key);
         let next = {
             let mut layouts = self.layouts.lock();
-            let current = layouts
-                .get(workspace_id)
-                .cloned()
-                .unwrap_or_else(|| SharedLayout::empty(workspace_id));
+            let current = match layouts.get_mut(&key) {
+                Some(bucket) => {
+                    bucket.touch();
+                    bucket.layout.clone()
+                }
+                None => SharedLayout::empty_for(workspace_id, worktree_key),
+            };
             if current.revision != base_revision {
                 return Err(current);
             }
             let next = SharedLayout {
                 workspace_id: workspace_id.to_owned(),
+                worktree_key: worktree_key.map(str::to_owned),
                 revision: current.revision.saturating_add(1),
                 tabs,
             };
-            layouts.insert(workspace_id.to_owned(), next.clone());
+            if !layouts.contains_key(&key) && layouts.len() >= MAX_LAYOUT_BUCKETS {
+                let oldest = layouts
+                    .iter()
+                    .min_by_key(|(_, bucket)| bucket.last_access)
+                    .map(|(key, _)| key.clone())
+                    .expect("a full layout store has an eviction candidate");
+                layouts.remove(&oldest);
+            }
+            let mut bucket = LayoutBucket {
+                layout: next.clone(),
+                last_access: 0,
+            };
+            bucket.touch();
+            layouts.insert(key, bucket);
             next
         };
         self.bump_layout_generation();
@@ -660,9 +801,22 @@ impl DaemonSessionService {
 
     /// Answers at once when the stored revision is already past `after_revision`, else parks
     /// until a write lands or `timeout` elapses and answers with whatever is stored.
+    #[cfg(test)]
     pub(crate) async fn wait_layout(
         &self,
         workspace_id: &str,
+        after_revision: u64,
+        timeout: Duration,
+    ) -> SharedLayout {
+        self.wait_layout_for(workspace_id, None, after_revision, timeout)
+            .await
+    }
+
+    /// The same long-poll on one worktree bucket.
+    pub(crate) async fn wait_layout_for(
+        &self,
+        workspace_id: &str,
+        worktree_key: Option<&str>,
         after_revision: u64,
         timeout: Duration,
     ) -> SharedLayout {
@@ -671,7 +825,7 @@ impl DaemonSessionService {
         let mut generation = self.layout_generation.subscribe();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let current = self.layout(workspace_id);
+            let current = self.layout_for(workspace_id, worktree_key);
             // Any other revision answers at once, a lower one included: layouts live in daemon
             // memory only, so a restart or handover starts again at 0 and a poll waiting for
             // "newer than N" would otherwise park forever.
@@ -686,9 +840,15 @@ impl DaemonSessionService {
         }
     }
 
-    /// Forgets a workspace's document when that workspace is unregistered.
+    /// Forgets every document of a workspace, all worktree buckets included, when that workspace
+    /// is unregistered. Waiters parked on any of them wake and read revision 0 again.
     pub(super) fn forget_layout(&self, workspace_id: &str) {
-        if self.layouts.lock().remove(workspace_id).is_some() {
+        let mut layouts = self.layouts.lock();
+        let before = layouts.len();
+        layouts.retain(|key, _| key.0 != workspace_id);
+        let removed = before != layouts.len();
+        drop(layouts);
+        if removed {
             self.bump_layout_generation();
         }
     }

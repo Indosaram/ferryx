@@ -7878,30 +7878,37 @@ impl DaemonServer {
                 // service directly; the layout store is in-memory only.
                 Ok(DaemonRequest::LayoutGet {
                     workspace_id,
+                    worktree_key,
                     after_revision,
                 }) => match after_revision {
                     Some(after) => DaemonResponse::LayoutOk {
                         layout: self
                             .session_service
-                            .wait_layout(
+                            .wait_layout_for(
                                 &workspace_id,
+                                worktree_key.as_deref(),
                                 after,
                                 super::session_service::LAYOUT_LONG_POLL_TIMEOUT,
                             )
                             .await,
                     },
                     None => DaemonResponse::LayoutOk {
-                        layout: self.session_service.layout(&workspace_id),
+                        layout: self
+                            .session_service
+                            .layout_for(&workspace_id, worktree_key.as_deref()),
                     },
                 },
                 Ok(DaemonRequest::LayoutPut {
                     workspace_id,
+                    worktree_key,
                     base_revision,
                     tabs,
-                }) => match self
-                    .session_service
-                    .put_layout(&workspace_id, base_revision, tabs)
-                {
+                }) => match self.session_service.put_layout_for(
+                    &workspace_id,
+                    worktree_key.as_deref(),
+                    base_revision,
+                    tabs,
+                ) {
                     Ok(layout) => DaemonResponse::LayoutOk { layout },
                     Err(layout) => DaemonResponse::LayoutConflict { layout },
                 },
