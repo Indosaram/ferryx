@@ -7459,7 +7459,7 @@ impl InputDispatch {
         let worker_queue = queue.clone();
         let (ack_tx, acks) = mpsc::channel();
         let worker_ack_tx = ack_tx.clone();
-        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), SessionError>>(1);
         let completed = thread::Builder::new()
             .name("maho-input-synthetic".into())
             .spawn(move || {

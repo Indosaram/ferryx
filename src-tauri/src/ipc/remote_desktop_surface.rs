@@ -441,7 +441,7 @@ impl RdNativeSurface {
             pass.draw(0..3, 0..1);
         }
         self.gpu.queue.submit(Some(encoder.finish()));
-        output.present();
+        self.gpu.queue.present(output);
         if !self.revealed {
             self.target
                 .as_ref()
