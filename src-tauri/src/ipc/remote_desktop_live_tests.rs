@@ -57,6 +57,8 @@ struct VideoFrame {
 
 enum Message {
     Video(VideoFrame),
+    Cursor,
+    NativePresented,
     Status { state: String, reason: Option<String> },
 }
 
@@ -80,6 +82,18 @@ fn parse_message(bytes: &[u8]) -> Message {
                 state: body["state"].as_str().expect("status state").to_owned(),
                 reason: body["reason"].as_str().map(str::to_owned),
             }
+        }
+        Some(&wire::FRAME_KIND_CURSOR) => {
+            let _: crate::ipc::remote_desktop_media::RdCursorPayload =
+                serde_json::from_slice(&bytes[1..]).expect("cursor message is JSON");
+            Message::Cursor
+        }
+        Some(&wire::FRAME_KIND_NATIVE_PRESENTED) => {
+            assert_eq!(bytes.len(), 9, "native presentation carries width and height");
+            let width = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+            let height = u32::from_le_bytes(bytes[5..9].try_into().unwrap());
+            assert!(width > 0 && height > 0, "empty native frame size");
+            Message::NativePresented
         }
         other => panic!("unknown frame channel message kind {other:?}"),
     }
@@ -233,10 +247,18 @@ fn remote_desktop_session_streams_frames_end_to_end() {
         stop: Arc::clone(&stop),
         on_exit: Box::new(|| {}),
     };
+    let shared = viewer::ViewerShared::new(
+        "rd-live-e2e",
+        crate::ipc::display_refresh::DEFAULT_REFRESH_HZ,
+        ferryx_rd_app::frame_queue::PlayoutMode::Immediate,
+    );
+    let viewer_shared = shared.clone();
     let window_started = Instant::now();
     let viewer_thread = std::thread::Builder::new()
         .name("rd-live-e2e-viewer".to_owned())
-        .spawn(move || viewer::run(viewer_config))
+        .spawn(move || {
+            viewer::run_with(viewer_config, viewer_shared, viewer::ViewerOptions::default())
+        })
         .expect("viewer thread");
 
     // 4. Frames, input and host bookkeeping.
@@ -253,6 +275,7 @@ fn remote_desktop_session_streams_frames_end_to_end() {
             )
         });
         match parse_message(&bytes) {
+            Message::Cursor | Message::NativePresented => {}
             Message::Status { state, reason } => match state.as_str() {
                 "connected" => connected = true,
                 "ended" => panic!("session ended early: {reason:?}"),
@@ -280,6 +303,10 @@ fn remote_desktop_session_streams_frames_end_to_end() {
             .all(|pair| pair[0].frame_id < pair[1].frame_id),
         "frame ids increase"
     );
+    let stats = shared.telemetry.lock().snapshot(None, Instant::now());
+    assert!(stats.present_fps > 0.0, "viewer records presentation cadence");
+    assert!(stats.decode_us.is_some(), "viewer records decode latency");
+    assert!(stats.present_us.is_some(), "viewer records presentation latency");
     let codec = session
         .stream_state()
         .ok()

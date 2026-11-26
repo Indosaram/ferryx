@@ -1647,7 +1647,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let builder = builder
         .on_window_event(|window, event| {
             match event {
-                tauri::WindowEvent::Destroyed => handle_window_destroyed(window),
+                tauri::WindowEvent::Destroyed => {
+                    crate::ipc::display_refresh::global_refresh_hub().remove_window(window.label());
+                    handle_window_destroyed(window)
+                }
                 tauri::WindowEvent::Focused(true)
                     if window_registry::is_app_window_label(window.label()) =>
                 {
@@ -1671,6 +1674,15 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                     crate::ipc::window::note_window_close_requested(window);
                 }
                 _ => {}
+            }
+            // A move, resize or scale change may land the window on another monitor.
+            if matches!(
+                event,
+                tauri::WindowEvent::Moved(_)
+                    | tauri::WindowEvent::Resized(_)
+                    | tauri::WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                requery_display_refresh(window);
             }
             // Chromium panes on macOS are separate windows that must follow their app window.
             #[cfg(all(feature = "desktop", target_os = "macos"))]
@@ -1761,6 +1773,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             if !qa_window && app.get_webview_window(window_registry::PRIMARY_WINDOW_LABEL).is_none() {
                 build_isolated_main_window(app)?;
             }
+            // Seeds every window's refresh rate and follows stationary monitor mode switches.
+            crate::ipc::display_refresh::install_platform_refresh_observer(app.handle());
             // Bridge-kind changes happen outside any webview callback (Windows upgrades from
             // the async CDP leak probe), so the manager publishes them as browser_state_changed.
             crate::ipc::browser::install_browser_state_emitter(
@@ -2339,11 +2353,27 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 | "cmd_rd_host_state"
                 | "cmd_rd_host_set"
                 | "cmd_rd_host_respond"
+                | "cmd_rd_stats"
+                | "cmd_rd_display_refresh"
+                | "cmd_rd_set_options"
+                | "cmd_rd_set_audio"
+                | "cmd_rd_clipboard_send"
+                | "cmd_rd_surface_attach"
+                | "cmd_rd_surface_update_bounds"
+                | "cmd_rd_surface_detach"
         ) {
             let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
                 crate::ipc::remote_desktop::commands::cmd_rd_connect,
                 crate::ipc::remote_desktop::commands::cmd_rd_input,
                 crate::ipc::remote_desktop::commands::cmd_rd_disconnect,
+                crate::ipc::remote_desktop::commands::cmd_rd_stats,
+                crate::ipc::remote_desktop::commands::cmd_rd_display_refresh,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_options,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_audio,
+                crate::ipc::remote_desktop::commands::cmd_rd_clipboard_send,
+                crate::ipc::remote_desktop::commands::cmd_rd_surface_attach,
+                crate::ipc::remote_desktop::commands::cmd_rd_surface_update_bounds,
+                crate::ipc::remote_desktop::commands::cmd_rd_surface_detach,
                 crate::ipc::remote_desktop_host::cmd_rd_host_state,
                 crate::ipc::remote_desktop_host::cmd_rd_host_set,
                 crate::ipc::remote_desktop_host::cmd_rd_host_respond,
@@ -3210,6 +3240,25 @@ mod tests {
         server_task2.abort();
         relay_task.abort();
     }
+}
+
+/// Re-queries the window's refresh rate off the event loop (the macOS/GTK query hops
+/// back onto the main thread) and announces a genuine rate transition to that window.
+#[cfg(feature = "desktop")]
+fn requery_display_refresh<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    let Some(webview) = window.app_handle().get_webview_window(window.label()) else {
+        return;
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let info = crate::ipc::display_refresh::query_window_refresh_rate(&webview);
+        if let Some(change) =
+            crate::ipc::display_refresh::global_refresh_hub().observe(webview.label(), info)
+        {
+            if let Err(error) = webview.emit("rd-display-refresh-changed", change) {
+                tracing::debug!(%error, "display refresh event failed");
+            }
+        }
+    });
 }
 
 #[cfg(feature = "desktop")]
