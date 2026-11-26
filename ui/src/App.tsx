@@ -102,6 +102,7 @@ import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
 import { buildSetupProgress } from "./lib/setupProgress";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
+import { forwardCapturedRemoteDesktopShortcut } from "./lib/remoteDesktop";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
@@ -4428,6 +4429,7 @@ function WorkspaceApp({
     let cancelled = false;
     void onCloseTabMenu(() => {
       if (activeRemoteHostRef.current) return;
+      if (forwardCapturedRemoteDesktopShortcut("cmdW")) return;
       handleCloseActiveSurface();
     }).then((dispose) => {
       if (cancelled) dispose();
