@@ -18,6 +18,7 @@ import {
   worktreeLabel,
   worktreeRowHost,
 } from "./sidebarLabels";
+import { deduplicateSidebarProjects } from "./sidebarDedup";
 import { applyWorktreeOrder, groupWorktreesByProject, worktreeSortableId, type SidebarRowsInput } from "./sidebarRows";
 import {
   pairedSlotStatus,
@@ -161,7 +162,7 @@ function projectNode(group: ProjectGroup, rows: readonly Worktree[], input: Side
   const paired = target?.kind === "pairedDaemon"
     ? {
         staleSummary: rows.find((row) => row.stale || row.freshness?.stale)?.hostSummary,
-        ...pairedSlotStatus(target.hostId, input.remoteState, input.reachability(target.hostId)),
+        ...pairedSlotStatus(target.hostId, input.remoteState, input.reachability(target.hostId), input.route?.(target.hostId)),
       }
     : null;
   const standalone = isStandaloneRemoteGroup(group);
@@ -220,8 +221,9 @@ function applyLaneOrder(
 
 /** The sidebar as the desktop renders it: groups, order, labels, rows and static states. */
 export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
-  const groups = groupProjects(input.projects);
-  const rowsByProject = applyWorktreeOrder(groupWorktreesByProject(input), input.worktreeOrder);
+  const dedupedProjects = deduplicateSidebarProjects(input.projects, input.hosts, input.remoteState);
+  const groups = groupProjects(dedupedProjects);
+  const rowsByProject = applyWorktreeOrder(groupWorktreesByProject({ ...input, projects: dedupedProjects }), input.worktreeOrder);
   const projects = groups.map((group) => {
     const workspaceId = group.primaryProject.workspaceId;
     const rows = rowsByProject.get(workspaceId) ?? [];

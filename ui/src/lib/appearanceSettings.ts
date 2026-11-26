@@ -1,10 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { isDesktopShell } from "./clientRuntime";
 import { APPEARANCE_SETTINGS_STORAGE_KEY } from "./storageKeys";
 import { parseThemeColor, parseThemeDocument, type ThemeDocumentV1, type ThemeValidationError } from "./themeDocument";
 import { scopeCustomCss, type CustomCssError } from "./customThemeCss";
+import { applyAppThemeCss, clearAppThemeCss } from "./themeCss";
+import {
+  getCuratedTheme,
+  resolveDocumentRoles,
+  themeColorsToTerminalPalette,
+  themeDefinitionToDocument,
+  type TerminalThemePalette,
+  type ThemeAppearance,
+  type ThemeHalves,
+} from "./themePalettes";
 
 export type AppearanceTheme = "charcoal" | "dark" | "light" | "system";
 export type AppearanceAccent = "default" | "blue" | "emerald" | "purple" | "amber" | "rose";
@@ -18,6 +28,13 @@ export type AppearanceSettingsState = {
   activeCustomThemeId: string | null;
   customCss: string;
   renderMath: boolean;
+  themeHalves?: ThemeHalves;
+};
+
+export type PublishedEnvironmentTheme = {
+  doc: ThemeDocumentV1;
+  hasBackground: boolean;
+  backgroundRevision?: string;
 };
 
 export type InvalidAppearanceTheme = { raw: unknown; errors: ThemeValidationError[] };
@@ -41,6 +58,64 @@ export const APPEARANCE_SETTINGS_EVENT = "ferryx:appearance-settings";
 const THEMES = new Set<AppearanceTheme>(["charcoal", "dark", "light", "system"]);
 const ACCENTS = new Set<AppearanceAccent>(["default", "blue", "emerald", "purple", "amber", "rose"]);
 const DENSITIES = new Set<AppearanceDensity>(["compact", "comfortable"]);
+const ALPHA_COMPANION_TOKENS = new Set([
+  "--border",
+  "--input",
+  "--sidebar-border",
+  "--worktree-sidebar-border",
+]);
+
+let publishedEnvironmentThemes: PublishedEnvironmentTheme[] = [];
+const environmentThemeListeners = new Set<() => void>();
+
+export function getPublishedEnvironmentThemes(): ReadonlyArray<PublishedEnvironmentTheme> {
+  return publishedEnvironmentThemes;
+}
+
+export function setPublishedEnvironmentThemes(themes: ReadonlyArray<PublishedEnvironmentTheme>): void {
+  publishedEnvironmentThemes = [...themes];
+  for (const listener of environmentThemeListeners) listener();
+}
+
+export function subscribePublishedEnvironmentThemes(listener: () => void): () => void {
+  environmentThemeListeners.add(listener);
+  return () => environmentThemeListeners.delete(listener);
+}
+
+export function usePublishedEnvironmentThemes(): ReadonlyArray<PublishedEnvironmentTheme> {
+  return useSyncExternalStore(
+    subscribePublishedEnvironmentThemes,
+    getPublishedEnvironmentThemes,
+    getPublishedEnvironmentThemes,
+  );
+}
+
+let draftPreviewDoc: ThemeDocumentV1 | null = null;
+let draftPreviewAppearance: ThemeAppearance | null = null;
+const draftPreviewListeners = new Set<() => void>();
+
+export function getThemeDraftPreview(): { doc: ThemeDocumentV1; appearance: ThemeAppearance } | null {
+  return draftPreviewDoc ? { doc: draftPreviewDoc, appearance: draftPreviewAppearance ?? draftPreviewDoc.base } : null;
+}
+
+export function setThemeDraftPreview(doc: ThemeDocumentV1 | null, appearance?: ThemeAppearance): void {
+  draftPreviewDoc = doc;
+  draftPreviewAppearance = doc ? (appearance ?? doc.base) : null;
+  for (const listener of draftPreviewListeners) listener();
+  if (typeof document !== "undefined") {
+    applyAppearanceSettings(loadAppearanceSettings());
+  }
+}
+
+export function clearThemeDraftPreview(): void {
+  if (!draftPreviewDoc) return;
+  setThemeDraftPreview(null);
+}
+
+export function subscribeThemeDraftPreview(listener: () => void): () => void {
+  draftPreviewListeners.add(listener);
+  return () => draftPreviewListeners.delete(listener);
+}
 
 function browserStorage(): Storage | null {
   if (typeof window === "undefined") return null;
@@ -49,6 +124,23 @@ function browserStorage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+function normalizeThemeHalves(raw: unknown): ThemeHalves | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  const light = typeof source.light === "string" && source.light.trim() ? source.light.trim() : undefined;
+  const dark = typeof source.dark === "string" && source.dark.trim() ? source.dark.trim() : undefined;
+  if (!light && !dark) return undefined;
+  return { ...(light ? { light } : {}), ...(dark ? { dark } : {}) };
+}
+
+function isResolvableThemeId(id: string, customIds: ReadonlySet<string>): boolean {
+  return (
+    customIds.has(id) ||
+    getCuratedTheme(id) !== null ||
+    publishedEnvironmentThemes.some((item) => item.doc.id === id)
+  );
 }
 
 function normalizeAppearanceSettings(value: unknown): AppearanceSettingsLoadResult {
@@ -66,7 +158,6 @@ function normalizeAppearanceSettings(value: unknown): AppearanceSettingsLoadResu
     else if (ids.has(result.doc.id)) invalidThemes.push({ raw, errors: [{ path: "id", message: "Theme ids must be unique." }] });
     else { ids.add(result.doc.id); customThemes.push(result.doc); }
   }
-  // Saved rejection rows survive unrelated settings writes, including malformed JSON evidence.
   for (const row of Array.isArray(source.invalidThemes) ? source.invalidThemes : []) {
     if (row && typeof row === "object" && Array.isArray(row.errors) && row.errors.length > 0
       && row.errors.every((error: unknown) => error && typeof error === "object"
@@ -74,6 +165,11 @@ function normalizeAppearanceSettings(value: unknown): AppearanceSettingsLoadResu
       invalidThemes.push({ raw: row.raw, errors: row.errors });
     } else invalidThemes.push({ raw: row, errors: [{ path: "invalidThemes", message: "Malformed saved theme diagnostic." }] });
   }
+  const themeHalves = normalizeThemeHalves(source.themeHalves);
+  const activeId =
+    typeof source.activeCustomThemeId === "string" && isResolvableThemeId(source.activeCustomThemeId, ids)
+      ? source.activeCustomThemeId
+      : null;
   return { settings: {
     theme: typeof source.theme === "string" && THEMES.has(source.theme as AppearanceTheme)
       ? (source.theme as AppearanceTheme)
@@ -85,19 +181,17 @@ function normalizeAppearanceSettings(value: unknown): AppearanceSettingsLoadResu
       ? (source.density as AppearanceDensity)
       : DEFAULT_APPEARANCE_SETTINGS.density,
     customThemes,
-    activeCustomThemeId: typeof source.activeCustomThemeId === "string" && ids.has(source.activeCustomThemeId)
-      ? source.activeCustomThemeId : null,
+    activeCustomThemeId: activeId,
     customCss: typeof source.customCss === "string" ? source.customCss : "",
     renderMath: typeof source.renderMath === "boolean" ? source.renderMath : true,
+    ...(themeHalves ? { themeHalves } : {}),
   }, invalidThemes };
 }
 
-/** Backward-compatible settings-only view of the canonical appearance record. */
 export function loadAppearanceSettings(storage: Storage | null = browserStorage()): AppearanceSettingsState {
   return loadAppearanceSettingsState(storage).settings;
 }
 
-/** Reads the canonical appearance record without mutating or discarding rejected input. */
 export function loadAppearanceSettingsState(storage: Storage | null = browserStorage()): AppearanceSettingsLoadResult {
   const defaults = () => normalizeAppearanceSettings({});
   if (!storage) return defaults();
@@ -125,7 +219,11 @@ export function saveAppearanceSettings(
   storage: Storage | null = browserStorage(),
 ): AppearanceSettingsState {
   const loaded = loadAppearanceSettingsState(storage);
-  const normalized = normalizeAppearanceSettings({ ...loaded.settings, ...patch, invalidThemes: loaded.invalidThemes });
+  const merged = { ...loaded.settings, ...patch, invalidThemes: loaded.invalidThemes };
+  if ("themeHalves" in patch && patch.themeHalves === undefined) {
+    delete merged.themeHalves;
+  }
+  const normalized = normalizeAppearanceSettings(merged);
   const next = normalized.settings;
   try {
     storage?.setItem(APPEARANCE_SETTINGS_STORAGE_KEY, JSON.stringify({ ...next, invalidThemes: normalized.invalidThemes }));
@@ -153,14 +251,15 @@ export function resetAppearanceSettings(storage: Storage | null = browserStorage
 
 const LIGHT_QUERY = "(prefers-color-scheme: light)";
 
-/** The last OS theme the desktop window reported; null until a theme event arrives. */
 let nativeOsTheme: "light" | "dark" | null = null;
 
 export function _resetNativeOsThemeForTest() {
   nativeOsTheme = null;
+  draftPreviewDoc = null;
+  draftPreviewAppearance = null;
+  publishedEnvironmentThemes = [];
 }
 
-/** True when the OS asks for light: the native window theme event wins, else prefers-color-scheme. */
 export function prefersLightColorScheme(): boolean {
   if (nativeOsTheme) return nativeOsTheme === "light";
   return typeof window !== "undefined"
@@ -173,16 +272,10 @@ function hasDesktopShell(): boolean {
     && isDesktopShell(Boolean((window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__));
 }
 
-/**
- * Calls `onChange` whenever the OS color scheme flips: the `prefers-color-scheme` media query,
- * plus the native window theme event in the desktop shell (some WebViews do not update the media
- * query when the OS appearance changes). Returns the unsubscribe function.
- */
 export function subscribeSystemColorScheme(onChange: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   const media = typeof window.matchMedia === "function" ? window.matchMedia(LIGHT_QUERY) : null;
   const handleMedia = () => {
-    // A media change after a native event is newer information than that event.
     nativeOsTheme = null;
     onChange();
   };
@@ -193,7 +286,6 @@ export function subscribeSystemColorScheme(onChange: () => void): () => void {
   if (hasDesktopShell()) {
     try {
       const win = getCurrentWindow();
-      // Window shims without theme events (older shells, partial mocks) keep the media query only.
       if (typeof win?.onThemeChanged === "function") void win
         .onThemeChanged((event) => {
           if (event.payload !== "light" && event.payload !== "dark") return;
@@ -225,11 +317,83 @@ function resolvedTheme(theme: AppearanceTheme): Exclude<AppearanceTheme, "system
   return prefersLightColorScheme() ? "light" : "dark";
 }
 
-/** Maps the app theme preference onto the light/dark side the native terminal theme follows. */
 export function resolveTerminalAppearance(theme: AppearanceTheme, prefersLight: boolean): "light" | "dark" {
   if (theme === "light") return "light";
   if (theme === "system") return prefersLight ? "light" : "dark";
   return "dark";
+}
+
+export function resolveThemeDocumentById(
+  id: string | null | undefined,
+  customThemes: ReadonlyArray<ThemeDocumentV1>,
+): ThemeDocumentV1 | null {
+  if (!id) return null;
+  const saved = customThemes.find((doc) => doc.id === id);
+  if (saved) return saved;
+  const published = publishedEnvironmentThemes.find((item) => item.doc.id === id);
+  if (published) return published.doc;
+  const curated = getCuratedTheme(id);
+  if (curated) return themeDefinitionToDocument(curated);
+  return null;
+}
+
+export function resolveActiveThemeChoice(settings: AppearanceSettingsState): {
+  doc: ThemeDocumentV1 | null;
+  appearance: ThemeAppearance;
+  effectiveTheme: Exclude<AppearanceTheme, "system">;
+} {
+  if (draftPreviewDoc) {
+    const appearance = draftPreviewAppearance ?? draftPreviewDoc.base;
+    return { doc: draftPreviewDoc, appearance, effectiveTheme: appearance };
+  }
+  const baseResolved = resolvedTheme(settings.theme);
+  const targetAppearance: ThemeAppearance = baseResolved === "light" ? "light" : "dark";
+
+  if (settings.themeHalves) {
+    const halfId = settings.themeHalves[targetAppearance];
+    if (halfId) {
+      if (halfId === "charcoal" || halfId === "dark" || halfId === "light") {
+        return { doc: null, appearance: halfId === "light" ? "light" : "dark", effectiveTheme: halfId };
+      }
+      const halfDoc = resolveThemeDocumentById(halfId, settings.customThemes);
+      if (halfDoc) {
+        const hasTarget = halfDoc.base === targetAppearance || Boolean(halfDoc.variants?.[targetAppearance]);
+        const finalAppearance = hasTarget ? targetAppearance : halfDoc.base;
+        return { doc: halfDoc, appearance: finalAppearance, effectiveTheme: finalAppearance };
+      }
+    }
+  }
+
+  const activeDoc = resolveThemeDocumentById(settings.activeCustomThemeId, settings.customThemes);
+  if (activeDoc) {
+    const hasTargetVariant =
+      activeDoc.base !== targetAppearance && Boolean(activeDoc.variants?.[targetAppearance]);
+    const effectiveAppearance =
+      settings.theme === "system" && hasTargetVariant
+        ? targetAppearance
+        : activeDoc.base;
+    return { doc: activeDoc, appearance: effectiveAppearance, effectiveTheme: effectiveAppearance };
+  }
+
+  return { doc: null, appearance: targetAppearance, effectiveTheme: baseResolved };
+}
+
+export function resolveActiveTerminalPalette(settings: AppearanceSettingsState): TerminalThemePalette | null {
+  const { doc, appearance } = resolveActiveThemeChoice(settings);
+  if (!doc) return null;
+  const activeTokens =
+    appearance !== doc.base && doc.variants?.[appearance]
+      ? doc.variants[appearance]!
+      : doc.tokens;
+  const activeRoles =
+    appearance !== doc.base && doc.variantRoles?.[appearance]
+      ? doc.variantRoles[appearance]
+      : doc.roles;
+  if (!activeRoles?.terminalBackground && !activeTokens["--terminal"]) {
+    return null;
+  }
+  const roles = resolveDocumentRoles(doc, appearance);
+  return themeColorsToTerminalPalette(roles);
 }
 
 type AppliedCustomAppearance = {
@@ -241,6 +405,7 @@ type AppliedCustomAppearance = {
 const appliedCustomAppearance = new WeakMap<HTMLElement, AppliedCustomAppearance>();
 
 function clearCustomAppearance(root: HTMLElement) {
+  clearAppThemeCss(root.ownerDocument);
   const previous = appliedCustomAppearance.get(root);
   if (!previous) return;
   previous.observer?.disconnect();
@@ -254,10 +419,6 @@ function clearCustomAppearance(root: HTMLElement) {
   appliedCustomAppearance.delete(root);
 }
 
-/** Stable opt-in hook for chat, including chat mounted after the appearance runtime starts.
- * Only the real workspace is marked; settings/recovery controls remain outside this subtree.
- * Preview owners can opt in directly with data-chat-scope.
- */
 function markChatScopes(root: HTMLElement, applied: AppliedCustomAppearance) {
   const mark = () => {
     for (const node of root.querySelectorAll<HTMLElement>('[data-testid="mobile-chat-workspace"]')) {
@@ -275,49 +436,109 @@ function markChatScopes(root: HTMLElement, applied: AppliedCustomAppearance) {
   }
 }
 
+export function applyThemeBackgroundUrl(
+  url: string | null,
+  root: HTMLElement | null = typeof document !== "undefined" ? document.documentElement : null,
+): void {
+  if (!root) return;
+  if (!url) {
+    root.style.removeProperty("--theme-background-image");
+  } else {
+    root.style.setProperty("--theme-background-image", `url("${url.replace(/"/g, '\\"')}")`);
+  }
+}
+
 export function applyAppearanceSettings(
   settings: AppearanceSettingsState,
   root: HTMLElement | null = typeof document !== "undefined" ? document.documentElement : null,
 ) {
   if (!root) return;
-  // Revalidate at the DOM boundary too: direct callers are not necessarily storage readers.
-  const candidate = settings.customThemes.find((doc) => doc.id === settings.activeCustomThemeId);
+  const choice = resolveActiveThemeChoice(settings);
+  const candidate = choice.doc;
   const parsed = candidate ? parseThemeDocument(candidate) : null;
   let activeTheme = parsed?.ok ? parsed.doc : null;
   const errors: CustomCssError[] = parsed && !parsed.ok ? parsed.errors : [];
   const scopeId = activeTheme?.id ?? "custom-css";
-  const themeCss = scopeCustomCss(activeTheme?.css ?? "", scopeId);
+
+  const isAppScopedCss = activeTheme?.cssScope === "app";
+  const themeCss = !isAppScopedCss
+    ? scopeCustomCss(activeTheme?.css ?? "", scopeId)
+    : ({ ok: true as const, css: "" });
   if (!themeCss.ok) {
     errors.push(...themeCss.errors.map((error) => ({ ...error, path: `theme.css.${error.path}` })));
-    activeTheme = null; // A rejected theme stylesheet refuses the whole theme, not selected rules.
+    activeTheme = null;
   }
   const customCss = scopeCustomCss(settings.customCss, scopeId);
   if (!customCss.ok) errors.push(...customCss.errors.map((error) => ({ ...error, path: `customCss.${error.path}` })));
 
   clearCustomAppearance(root);
-  const theme = activeTheme?.base ?? resolvedTheme(settings.theme);
+  const fallbackTheme = choice.doc ? resolvedTheme(settings.theme) : choice.effectiveTheme;
+  const activeAppearance: ThemeAppearance | null = activeTheme
+    ? (choice.appearance !== activeTheme.base && activeTheme.variants?.[choice.appearance]
+        ? choice.appearance
+        : activeTheme.base)
+    : null;
+  const theme = activeAppearance ?? fallbackTheme;
   root.dataset.theme = theme;
   root.dataset.themePreference = settings.theme;
   root.dataset.accent = settings.accentColor;
   root.dataset.density = settings.density;
   root.style.colorScheme = theme === "light" ? "light" : "dark";
+  root.classList.toggle("dark", theme !== "light");
 
-  const cssSources = [activeTheme && themeCss.ok ? themeCss.css : "", customCss.ok ? customCss.css : ""];
+  const activeTokens: Record<string, string> =
+    activeTheme && activeAppearance
+      ? (activeAppearance !== activeTheme.base && activeTheme.variants?.[activeAppearance]
+          ? activeTheme.variants[activeAppearance]!
+          : activeTheme.tokens)
+      : {};
+
+  const cssSources = [
+    activeTheme && !isAppScopedCss && themeCss.ok ? themeCss.css : "",
+    customCss.ok ? customCss.css : "",
+  ];
+  const hasAppCss = Boolean(activeTheme && isAppScopedCss && activeTheme.css);
+
   if (activeTheme || cssSources.some(Boolean)) {
     const applied: AppliedCustomAppearance = { originalProperties: new Map(), styles: [], markedScopes: new Set() };
     appliedCustomAppearance.set(root, applied);
     root.dataset.customTheme = scopeId;
-    // Built-in palette/accent values stay in CSS; inline colour overrides are the sole token layer.
-    for (const [token, value] of Object.entries(activeTheme?.tokens ?? {})) {
-      const color = parseThemeColor(value)!; // parseThemeDocument validated every token atomically.
-      for (const [name, resolved] of [[token, value], [`${token}-rgb`, color.slice(0, 3).join(" ")]]) {
-        applied.originalProperties.set(name, { value: root.style.getPropertyValue(name), priority: root.style.getPropertyPriority(name) });
+    const remoteRootDecls: string[] = [];
+
+    for (const [token, value] of Object.entries(activeTokens)) {
+      const color = parseThemeColor(value);
+      if (!color) continue;
+      const pairs: Array<[string, string]> = [
+        [token, value],
+        [`${token}-rgb`, color.slice(0, 3).join(" ")],
+      ];
+      if (ALPHA_COMPANION_TOKENS.has(token)) {
+        pairs.push([`${token}-alpha`, String(Number(color[3].toFixed(4)))]);
+      }
+      for (const [name, resolved] of pairs) {
+        applied.originalProperties.set(name, {
+          value: root.style.getPropertyValue(name),
+          priority: root.style.getPropertyPriority(name),
+        });
         root.style.setProperty(name, resolved);
+        remoteRootDecls.push(`${name}: ${resolved};`);
       }
     }
+
+    if (remoteRootDecls.length > 0) {
+      const mirrorStyle = root.ownerDocument.createElement("style");
+      mirrorStyle.dataset.customThemeRemoteMirror = scopeId;
+      mirrorStyle.textContent = `:root[data-custom-theme="${scopeId}"] .remote-app-root { ${remoteRootDecls.join(" ")} }`;
+      (root.ownerDocument.head ?? root).appendChild(mirrorStyle);
+      applied.styles.push(mirrorStyle);
+    }
+
+    if (hasAppCss && activeTheme?.css) {
+      applyAppThemeCss(activeTheme.css, root.ownerDocument);
+    }
+
     if (cssSources.some(Boolean)) {
       markChatScopes(root, applied);
-      // The palette and tokens are already installed. Append sources in their cascade order.
       for (const css of cssSources) {
         if (!css) continue;
         const style = root.ownerDocument.createElement("style");
@@ -342,9 +563,11 @@ export function useAppearanceSettings() {
     };
     window.addEventListener(APPEARANCE_SETTINGS_EVENT, sync);
     window.addEventListener("storage", storage);
+    const unsubEnv = subscribePublishedEnvironmentThemes(sync);
     return () => {
       window.removeEventListener(APPEARANCE_SETTINGS_EVENT, sync);
       window.removeEventListener("storage", storage);
+      unsubEnv();
     };
   }, []);
 
@@ -355,6 +578,7 @@ export function useAppearanceSettings() {
   }, []);
 
   const resetSettings = useCallback(() => {
+    clearThemeDraftPreview();
     const next = resetAppearanceSettings();
     setLoaded({ ...loadAppearanceSettingsState(), settings: next });
     return next;
@@ -365,17 +589,17 @@ export function useAppearanceSettings() {
 
 export function useApplyAppearanceSettings() {
   const { settings } = useAppearanceSettings();
+  const envThemes = usePublishedEnvironmentThemes();
 
   useEffect(() => {
     applyAppearanceSettings(settings);
     if (settings.theme !== "system") return;
     return subscribeSystemColorScheme(() => applyAppearanceSettings(settings));
-  }, [settings]);
+  }, [settings, envThemes]);
 
   return settings;
 }
 
-/** What the theme preference resolves to right now; follows OS flips while it is "system". */
 export function useResolvedTheme(theme: AppearanceTheme): Exclude<AppearanceTheme, "system"> {
   const [resolved, setResolved] = useState(() => resolvedTheme(theme));
 

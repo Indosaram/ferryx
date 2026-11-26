@@ -301,6 +301,7 @@ fn valid_socket_target(target: &str) -> bool {
                 })
         })
         || target == super::dag_api::DAG_SOCKET_TARGET
+        || target == super::cloud_socket::SOCKET_FORWARD_TARGET
 }
 
 /// Mints a single-use ticket for one WebSocket upgrade.
@@ -5040,6 +5041,9 @@ fn gateway_capability_names(
         if catalog_ok {
             capabilities.push(super::dag_api::DAG_STREAM_CAPABILITY);
         }
+        // The forwarded RPC socket needs nothing but the machine Control scope this branch
+        // already requires: it is the plainest route in the set, not the heaviest.
+        capabilities.push(super::cloud_socket::SOCKET_FORWARD_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
@@ -5050,6 +5054,7 @@ fn gateway_capability_names(
         if supervisor {
             capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
             capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
+            capabilities.push(supervisor_api::SUPERVISOR_LANE_LIFECYCLE_CAPABILITY);
         }
     } else if control && terminal_ready {
         capabilities.extend(reference_chat_control_capabilities());
@@ -9829,6 +9834,11 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(super::repo_discovery::repositories),
         )
         .route("/api/v1/resources", get(super::resources_api::read))
+        .route("/api/v1/themes", get(super::theme_api::list_themes))
+        .route(
+            "/api/v1/themes/{themeId}/background",
+            get(super::theme_api::get_theme_background),
+        )
         .route("/api/v1/pair/exchange", post(pair_exchange))
         .route(
             "/api/v1/sessions",
@@ -10060,6 +10070,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             )),
         )
         .route(
+            "/api/v1/supervisor/lane-lifecycle",
+            post(supervisor_api::http_lane_lifecycle).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
             "/api/v1/workspace/projects",
             get(super::workspace_api::list_scoped)
                 .post(register_project_boundary)
@@ -10154,6 +10170,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/workspace/dag",
             get(super::dag_api::ws_dag_handler),
+        )
+        .route(
+            "/api/v1/cloud/socket",
+            get(super::cloud_socket::ws_socket_forward_handler),
         )
         .route("/api/v1/push/test", post(push_test))
         .route("/api/v1/push/session-mute", post(push_session_mute))

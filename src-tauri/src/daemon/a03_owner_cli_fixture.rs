@@ -336,6 +336,9 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             if server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok()) {
                 capabilities.push(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
             }
+            // The forwarded RPC socket needs only the machine Control scope this branch already
+            // requires, so every machine-control host advertises it.
+            capabilities.push(crate::remote::cloud_socket::SOCKET_FORWARD_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
@@ -346,6 +349,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
+                capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_LANE_LIFECYCLE_CAPABILITY);
             }
             serde_json::json!(capabilities)
         } else if machine_terminal_ready {

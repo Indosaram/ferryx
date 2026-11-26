@@ -1,0 +1,40 @@
+{
+  "computedAt": "2026-11-18T03:10:46.852858Z",
+  "logicalBytes": 38654705664,
+  "storedBytes": 10618803557,
+  "exclusiveBytes": 0,
+  "machines": 1,
+  "snapshots": 0,
+  "images": 0,
+  "limits": {
+    "maxMachines": 1,
+    "machineSpec": {
+      "vcpus": 4,
+      "memMiB": 8192,
+      "persistentDiskGiB": 20
+    },
+    "maxSnapshots": 5,
+    "maxStoredGiB": 200,
+    "maxImages": 5,
+    "liveSnapshots": true,
+    "vault": {
+      "maxItems": 100,
+      "maxBytes": 262144
+    }
+  },
+  "storage": {
+    "machines": [
+      {
+        "id": "m_agqyb2s35jvh2e3brqywyknz6e",
+        "name": "bong-i-1",
+        "state": "running",
+        "sizeBytes": 21474836480,
+        "diskBytes": 10618803557,
+        "snapshots": 0,
+        "snapshotBytes": 0
+      }
+    ],
+    "deletedMachineSnapshots": 0,
+    "deletedMachineSnapshotBytes": 0
+  }
+}

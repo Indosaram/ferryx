@@ -640,6 +640,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 "referencePayloadV1",
                 "referenceComposerControlV1",
                 "dagStreamingV1",
+                "socket_forward_v1",
                 "agentControlV1",
                 "agentControlRemoteV1",
                 "agentControlEpochCursorV1",

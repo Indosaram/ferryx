@@ -420,9 +420,17 @@ pub fn bridge_command(
     env: &super::runtime::RemoteEnvironment,
     location: &super::helper_setup::HelperLocation,
 ) -> String {
+    bridge_command_with_mode(env, location, "--stdio")
+}
+
+fn bridge_command_with_mode(
+    env: &super::runtime::RemoteEnvironment,
+    location: &super::helper_setup::HelperLocation,
+    mode: &str,
+) -> String {
     match env.platform {
         super::runtime::RemotePlatform::Posix => format!(
-            "exec {} bridge --stdio --root {}",
+            "exec {} bridge {mode} --root {}",
             quote_posix(&location.executable),
             quote_posix(&location.root),
         ),
@@ -434,7 +442,7 @@ pub fn bridge_command(
                 _ => super::runtime::powershell_data(&location.root),
             };
             format!(
-                "& {} bridge --stdio --root {}",
+                "& {} bridge {mode} --root {}",
                 super::runtime::powershell_data(&location.executable),
                 root_arg,
             )
@@ -471,11 +479,19 @@ pub fn windows_bridge_command(
     env: &super::runtime::RemoteEnvironment,
     location: &super::helper_setup::HelperLocation,
 ) -> Result<String, IpcError> {
+    windows_bridge_command_with_mode(env, location, "--stdio")
+}
+
+fn windows_bridge_command_with_mode(
+    env: &super::runtime::RemoteEnvironment,
+    location: &super::helper_setup::HelperLocation,
+    mode: &str,
+) -> Result<String, IpcError> {
     super::runtime::RemotePlatform::Windows.validate_path(&location.executable)?;
     super::runtime::RemotePlatform::Windows.validate_path(&location.root)?;
     // Start the binary without PowerShell's native-command pipeline: bridge frames
     // must inherit the SSH channel's raw stdio, not be decoded as shell text.
-    let arguments = format!("bridge --stdio --root {}", quote_windows_cmd_arg(&location.root));
+    let arguments = format!("bridge {mode} --root {}", quote_windows_cmd_arg(&location.root));
     let script = format!(
         "$psi = New-Object System.Diagnostics.ProcessStartInfo; \
          $psi.FileName = {}; $psi.Arguments = {}; $psi.UseShellExecute = $false; \
@@ -484,6 +500,24 @@ pub fn windows_bridge_command(
         super::runtime::powershell_data(&arguments),
     );
     Ok(env.executor.command(&script))
+}
+
+/// The shared per-host transport: `bridge --mux` instead of one `bridge --stdio` per connection.
+pub fn mux_plan(
+    host: &SshHost,
+    env: &super::runtime::RemoteEnvironment,
+    location: &super::helper_setup::HelperLocation,
+) -> Result<ShellCommandPlan, IpcError> {
+    match env.platform {
+        super::runtime::RemotePlatform::Posix => {
+            let command = bridge_command_with_mode(env, location, "--mux");
+            ssh_plan(host, env.executor.command(&command), false)
+        }
+        super::runtime::RemotePlatform::Windows => {
+            let command = windows_bridge_command_with_mode(env, location, "--mux")?;
+            ssh_plan(host, command, false)
+        }
+    }
 }
 
 pub fn bridge_plan(

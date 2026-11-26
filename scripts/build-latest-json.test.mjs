@@ -140,9 +140,9 @@ function createSyntheticReleaseFixture({
   writeFileSync(join(macDir, "Ferryx.app.tar.gz.sig"), macUpdaterSig);
 
   const macDmgBuf = Buffer.from("mac-dmg-installer-content-67890");
-  writeFileSync(join(macDir, "Ferryx_2026.908.1_universal.dmg"), macDmgBuf);
+  writeFileSync(join(macDir, "Ferryx_2026.908.1_aarch64.dmg"), macDmgBuf);
   const macCliBuf = Buffer.from("mac-cli-universal-content");
-  writeFileSync(join(macDir, "ferryx-cli-darwin-universal"), macCliBuf);
+  writeFileSync(join(macDir, "ferryx-cli-darwin-arm64"), macCliBuf);
 
   const macReceipt = {
     schemaVersion: 1,
@@ -170,9 +170,9 @@ function createSyntheticReleaseFixture({
         targets: ["darwin-aarch64"],
       },
       {
-        kind: "cli-darwin-universal",
-        name: "ferryx-cli-darwin-universal",
-        relPath: "darwin/ferryx-cli-darwin-universal",
+        kind: "cli-darwin-arm64",
+        name: "ferryx-cli-darwin-arm64",
+        relPath: "darwin/ferryx-cli-darwin-arm64",
         bytes: macCliBuf.length,
         sha256: sha256(macCliBuf),
         signatureRelPath: null,
@@ -180,8 +180,8 @@ function createSyntheticReleaseFixture({
       },
       {
         kind: "dmg",
-        name: "Ferryx_2026.908.1_universal.dmg",
-        relPath: "darwin/Ferryx_2026.908.1_universal.dmg",
+        name: "Ferryx_2026.908.1_aarch64.dmg",
+        relPath: "darwin/Ferryx_2026.908.1_aarch64.dmg",
         bytes: macDmgBuf.length,
         sha256: sha256(macDmgBuf),
         signatureRelPath: null,
@@ -373,19 +373,19 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
     ]);
 
     // Check deterministic stable aliases
-    assert.equal(existsSync(join(outDir, "Ferryx_universal.dmg")), true);
+    assert.equal(existsSync(join(outDir, "Ferryx_aarch64.dmg")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_amd64.AppImage")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_amd64.AppImage.sig")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_amd64.deb")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_x64.msix")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64")), true);
-    assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-universal")), true);
-    for (const name of ["ferryx-rd-client-linux-amd64", "ferryx-rd-client-darwin-universal", "ferryx-rd-client-windows-amd64.zip"]) {
+    assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-arm64")), true);
+    for (const name of ["ferryx-rd-client-linux-amd64", "ferryx-rd-client-darwin-arm64", "ferryx-rd-client-windows-amd64.zip"]) {
       assert.ok(existsSync(join(outDir, name)), name);
     }
 
     // Original artifacts present
-    assert.equal(existsSync(join(outDir, "Ferryx_2026.908.1_universal.dmg")), true);
+    assert.equal(existsSync(join(outDir, "Ferryx_2026.908.1_aarch64.dmg")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_2026.908.1_amd64.AppImage")), true);
 
     // Checksum closure: all files in outDir except SHA256SUMS.txt must be listed

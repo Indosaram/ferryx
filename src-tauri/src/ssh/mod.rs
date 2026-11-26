@@ -9,12 +9,15 @@ pub mod helper_runtime;
 pub mod helper_setup;
 pub mod manual;
 pub mod master;
+pub mod mux_client;
 pub mod operations;
 pub mod password;
 pub mod projects;
 pub mod remote_hooks;
 pub mod resources;
 pub mod runtime;
+#[cfg(unix)]
+pub mod socket_forward;
 pub mod state_bridge;
 #[cfg(unix)]
 pub mod transport_unix;

@@ -45,4 +45,4 @@ What Ferryx offers instead is a workspace with no cloud in it: agents that survi
 
 ## Where to get Ferryx
 
-Current builds are on the [GitHub releases page](https://github.com/Indosaram/ferryx/releases/latest): a macOS universal DMG, an x64 Windows installer, and AppImage and .deb packages for Linux.
+Current builds are on the [GitHub releases page](https://github.com/Indosaram/ferryx/releases/latest): a macOS arm64 DMG, an x64 Windows installer, and AppImage and .deb packages for Linux.

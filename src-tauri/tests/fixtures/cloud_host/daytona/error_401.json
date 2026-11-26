@@ -1,0 +1,7 @@
+{
+  "path": "/api/sandbox",
+  "timestamp": "2026-11-21T18:23:44.517Z",
+  "statusCode": 401,
+  "error": "Unauthorized",
+  "message": "Invalid credentials"
+}

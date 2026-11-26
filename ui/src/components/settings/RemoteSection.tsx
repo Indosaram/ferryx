@@ -31,7 +31,9 @@ import { AccountSignIn } from "./AccountSignIn";
 import { AddMachineModal, type AddMachineMethod } from "./AddMachineModal";
 import { AccountBar } from "./remote/AccountBar";
 import { AdvancedSection } from "./remote/AdvancedSection";
+import { CloudProvidersSection } from "./remote/CloudProvidersSection";
 import { DiscoveredList } from "./remote/DiscoveredList";
+import { deleteCloudMachine } from "../../lib/cloudHost";
 import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent } from "./remote/MachineDrawer";
 import { MachineList } from "./remote/MachineList";
 import { MachineApprovalCard } from "./remote/MachineApprovalCard";
@@ -118,6 +120,8 @@ export function RemoteSection({
 
   const [accountMachines, setAccountMachines] = useState<AccountMachineView[]>([]);
   const [accountMachinesLoading, setAccountMachinesLoading] = useState(false);
+  const [cloudRefreshSignal, setCloudRefreshSignal] = useState(0);
+  const [deletingCloudName, setDeletingCloudName] = useState<string | null>(null);
   // Monotonic id of the newest account-machine list request. A response is applied only while
   // it is still the newest, so a sign-out or origin switch mid-request cannot repopulate the list.
   const machinesRequestRef = useRef(0);
@@ -406,8 +410,23 @@ export function RemoteSection({
   const handleRefreshAll = () => {
     if (isTauri()) void inventory.refresh();
     resetSshHostsCache();
+    setCloudRefreshSignal((n) => n + 1);
     if (accountToken) {
       void refreshAccountMachines(accountToken, accountOrigin);
+    }
+  };
+
+  const handleDeleteCloudMachine = async (name: string) => {
+    if (deletingCloudName) return;
+    setDeletingCloudName(name);
+    setActionError(null);
+    try {
+      await deleteCloudMachine(name);
+      setCloudRefreshSignal((n) => n + 1);
+    } catch (failure) {
+      setActionError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setDeletingCloudName(null);
     }
   };
 
@@ -625,6 +644,9 @@ export function RemoteSection({
         onSearchChange={setSearchQuery}
         onAddMachine={() => openAddMachine()}
         onRefresh={handleRefreshAll}
+        cloudRefreshSignal={cloudRefreshSignal}
+        onDeleteCloudMachine={handleDeleteCloudMachine}
+        deletingCloudName={deletingCloudName}
       >
         {filteredItems.map((item) => {
           const key = `${item.kind}:${item.id}`;
@@ -672,6 +694,8 @@ export function RemoteSection({
           );
         })}
       </MachineList>
+
+      <CloudProvidersSection />
 
       <DiscoveredList
         hosts={discovered}

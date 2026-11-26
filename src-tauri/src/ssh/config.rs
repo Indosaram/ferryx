@@ -105,12 +105,19 @@ fn parse_ssh_config_internal(
             }
             "hostname" => {
                 if let Some(host) = current.as_mut() {
-                    host.hostname = Some(value.to_string());
+                    // Same rule as `User` below: a padded or blank `HostName` must never reach the
+                    // command line with its whitespace intact, or ssh resolves the wrong name.
+                    let hostname = value.trim();
+                    host.hostname = (!hostname.is_empty()).then(|| hostname.to_string());
                 }
             }
             "user" => {
                 if let Some(host) = current.as_mut() {
-                    host.username = Some(value.to_string());
+                    // A blank `User` line used to become `Some("")`, which then rendered as
+                    // `@hostname` on the ssh command line and failed authentication for a host
+                    // that was otherwise perfectly reachable. Whitespace is not a user name.
+                    let user = value.trim();
+                    host.username = (!user.is_empty()).then(|| user.to_string());
                 }
             }
             "port" => {

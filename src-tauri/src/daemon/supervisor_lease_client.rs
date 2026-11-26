@@ -794,12 +794,15 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
         while let Some(action) = queue.pop_front() {
             // Auto-promotion: a standby asks at its cadence with its newest checkpoint and the
             // relay (single writer) grants a free lease only against the recorded checkpoint;
-            // a machine whose owner stopped the hub does not take part.
+            // a machine whose owner stopped the hub never auto-acquires, but still queries the
+            // relay so it learns who currently holds the lease (for observation and lifecycle
+            // forwarding).
             if matches!(action, Action::SendAcquire { .. })
                 && !explicit
                 && matches!(self.state.role(), Role::Standby { .. })
                 && self.checkpoints.hub_stopped()
             {
+                queue.push_front(Action::SendQuery);
                 continue;
             }
             if matches!(action, Action::SendAcquire { force: false })
@@ -834,6 +837,7 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
                     match self.transport.call(query).await {
                         Ok(ack) => {
                             self.state.note_lease_peers(&ack);
+                            self.checkpoints.note_query(&ack, &self.state.inner.machine_id);
                             let ack = LeaseAck::from_wire(&ack);
                             queue.extend(self.state.handle(Event::QueryAck { ack }));
                         }
@@ -2238,12 +2242,51 @@ mod tests {
         );
 
         checkpoints.set_hub_stopped(true);
-        let sent = relay.sent.lock().len();
+        let acquires = relay.acquires();
+        let queries = relay.queries();
         tokio::time::sleep(Duration::from_secs(lease::RENEW_SECS * 4)).await;
-        assert_eq!(relay.sent.lock().len(), sent, "a stopped machine does not take part");
+        assert_eq!(relay.acquires(), acquires, "a stopped machine does not auto-promote");
+        assert!(relay.queries() > queries, "a stopped standby still queries the relay to follow the holder");
         // The person's own request still goes out.
         handle.acquire(false).await;
-        assert_eq!(relay.sent.lock().len(), sent + 1);
+        assert_eq!(relay.acquires(), acquires + 1);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_standby_queries_the_relay_to_learn_the_holder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lease_file = dir.path().join(LEASE_FILE);
+        write_persisted(
+            &lease_file,
+            &PersistedLease {
+                last_role: LastRole::Standby,
+                last_fence: 1,
+                account_machine_count: Some(2),
+                holder_machine_id: None,
+                lease_capable: true,
+            },
+        )
+        .expect("seed persisted standby lease");
+        let relay = FakeRelay::new(Some(true));
+        *relay.query.lock() = Some((SupervisorLeaseOutcome::Refused, None));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let cfg = config(clock, Some("acct"), Some(lease_file));
+        cfg.checkpoints.set_hub_stopped(true);
+        let (handle, task) = spawn_supervisor_lease_client(cfg, Arc::clone(&relay), Arc::clone(&hub)).await;
+        let role = wait_role(&handle, |r| matches!(r, Role::Standby { holder_machine_id: Some(_), .. })).await;
+        assert_eq!(
+            role,
+            Role::Standby {
+                holder_machine_id: Some("mach-b".into()),
+                holder_label: Some("Laptop B".into()),
+                fence: Some(7),
+            }
+        );
+        assert_eq!(relay.acquires(), 0, "a stopped standby learns the holder via query, never acquire");
+        assert!(relay.queries() >= 1);
+        assert!(hub.events.lock().is_empty(), "hub stays stopped");
         task.abort();
     }
 

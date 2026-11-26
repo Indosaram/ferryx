@@ -423,6 +423,56 @@ export async function setTerminalAppearance(
   return invokeCommand<TerminalPreferences>("cmd_terminal_set_appearance", { appearance });
 }
 
+export type TerminalThemePaletteOverride = {
+  background?: string | null;
+  foreground?: string | null;
+  cursor?: string | null;
+  selectionBackground?: string | null;
+};
+
+export async function setTerminalThemePalette(
+  palette: TerminalThemePaletteOverride | null,
+): Promise<TerminalPreferences | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<TerminalPreferences>("cmd_terminal_set_theme_palette", { palette });
+}
+
+export type EnvironmentThemeEntryWire = {
+  id: string;
+  name: string;
+  appearance: "light" | "dark";
+  hasCss: boolean;
+  hasBackground: boolean;
+  backgroundRevision?: string;
+  document: unknown;
+};
+
+export type EnvironmentThemesSnapshotWire = {
+  themesDir: string;
+  defaultThemeId?: string | null;
+  defaultAppearance?: "light" | "dark" | "system" | null;
+  revision: number;
+  themes: EnvironmentThemeEntryWire[];
+};
+
+export type ThemeBackgroundDataWire = {
+  dataUrl: string;
+  mimeType: string;
+  revision: string;
+};
+
+export async function listEnvironmentThemes(): Promise<EnvironmentThemesSnapshotWire | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<EnvironmentThemesSnapshotWire>("cmd_theme_list_environment");
+}
+
+export async function readEnvironmentThemeBackground(
+  themeId: string,
+): Promise<ThemeBackgroundDataWire | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<ThemeBackgroundDataWire>("cmd_theme_read_background", { themeId });
+}
+
 export async function listWorktrees(workspaceId: string) {
   if (!isTauri()) {
     if (getRemoteAuthToken()) {

@@ -30,7 +30,7 @@
 
 | 平台 | 软件包 | |
 | :--- | :--- | :--- |
-| **macOS** | 通用 DMG（Apple Silicon 和 Intel） | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
+| **macOS** | arm64 DMG（Apple Silicon） | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_aarch64.dmg) |
 | **Windows** | Microsoft Store（首选）/ 安装程序（备选） | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) / [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | 便携式 AppImage（x64） | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu 软件包（x64） | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
@@ -38,7 +38,7 @@
 
 macOS、Windows 和 Linux 的下载链接会指向最新版本。进行本地发行版组装时，会将无头版 `ferryx-cli` 放在 Linux AppImage 和 `.deb` 旁边（文件名为
 `ferryx-cli-linux-amd64`）；如果存在通用 macOS CLI，也会将其作为
-`ferryx-cli-darwin-universal` 一同放置。因此，上面的一行安装命令在发行版包含当前构建产物时会解析到该产物，否则会安全失败。Linux arm64 没有预构建的 `ferryx-cli`；安装程序会以退出码 2 结束并提示从源码构建。安装程序会根据发行版的 `SHA256SUMS.txt` 校验下载的 `ferryx-cli`，不匹配时拒绝安装。其他下载请使用与二进制文件一同发布的校验和验证：
+`ferryx-cli-darwin-arm64` 一同放置。因此，上面的一行安装命令在发行版包含当前构建产物时会解析到该产物，否则会安全失败。Linux arm64 没有预构建的 `ferryx-cli`；安装程序会以退出码 2 结束并提示从源码构建。安装程序会根据发行版的 `SHA256SUMS.txt` 校验下载的 `ferryx-cli`，不匹配时拒绝安装。其他下载请使用与二进制文件一同发布的校验和验证：
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -244,7 +244,7 @@ hub 通过 [mhc](https://github.com/Indosaram/mhc) 运行 Slack、定时任务�
 bun scripts/fetch-mhc.mjs
 ```
 
-该命令是幂等的：已存在且校验通过的下载会被跳过。`--target <triple>` 可为其他平台获取，`--target universal-apple-darwin` 会获取两个 macOS 架构。发布构建会自动运行它：`cargo tauri build` 在 `beforeBuildCommand` 中调用。开发构建不需要它；此时 hub 依次使用设置了的 `FERRYX_HUB_MHC_BIN`、运行中可执行文件旁内置的 mhc，最后是 PATH 中的 `mhc`。
+该命令是幂等的：已存在且校验通过的下载会被跳过。`--target <triple>` 可为其他平台获取，macOS 发布仅使用 `--target aarch64-apple-darwin`。发布构建会自动运行它：`cargo tauri build` 在 `beforeBuildCommand` 中调用。开发构建不需要它；此时 hub 依次使用设置了的 `FERRYX_HUB_MHC_BIN`、运行中可执行文件旁内置的 mhc，最后是 PATH 中的 `mhc`。
 
 ### 运行桌面应用
 

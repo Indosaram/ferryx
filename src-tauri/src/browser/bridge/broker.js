@@ -151,6 +151,12 @@
       }
     } else if (intent.op === 'selfClose') {
       post({ v: 1, kind: 'popupSelfClose' });
+    } else if (intent.op === 'media') {
+      // A Now Playing report. The host re-validates and clamps every field: the report's text is
+      // page-controlled, so this envelope only ever carries display data.
+      const report = intent.report;
+      if (!report || typeof report !== 'object') return;
+      post({ v: 1, kind: 'media', report });
     }
   }, true);
   Object.defineProperty(globalThis, '__ferryxWorld', { value: api, writable: false, configurable: false });

@@ -1,0 +1,37 @@
+{
+  "metadata": {
+    "name": "fx-blaxel-1",
+    "displayName": "fx-blaxel-1",
+    "labels": {
+      "launcher": "ferryx"
+    },
+    "url": "https://sbx-fx-blaxel-1-main.us-pdx-1.bl.run",
+    "workspace": "main",
+    "createdAt": "2026-11-21T09:30:00Z",
+    "updatedAt": "2026-11-21T09:41:12Z",
+    "createdBy": "api-key"
+  },
+  "spec": {
+    "runtime": {
+      "image": "blaxel/base-image:latest",
+      "memory": 4096
+    },
+    "lifecycle": {
+      "expirationPolicies": [
+        {
+          "type": "ttl-max-age",
+          "value": "3600s",
+          "action": "delete"
+        }
+      ],
+      "terminatedRetention": "5m"
+    }
+  },
+  "state": "STANDBY",
+  "status": "TERMINATED",
+  "lastUsedAt": "2026-11-21T09:41:12Z",
+  "expiresIn": 0,
+  "nodeGeneration": "mk3.1",
+  "events": [],
+  "errors": []
+}

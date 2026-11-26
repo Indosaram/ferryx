@@ -24,6 +24,8 @@ export interface HostEndpoint {
   /** The machine's attach public key; with enrollmentEpoch, relay traffic can be end-to-end encrypted. */
   attachPublicKey?: string;
   enrollmentEpoch?: string;
+  sshHostId?: string | null;
+  publishedOrigins?: { kind: string; origin: string; observedAt: number }[];
 }
 
 export interface PairedRemoteHost {

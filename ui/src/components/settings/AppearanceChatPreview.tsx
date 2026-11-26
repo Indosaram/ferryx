@@ -11,7 +11,7 @@ export function AppearanceChatPreview() {
     {/* These are the production components, not a second workspace or token resolver.
         Keep the scope on the sample only: theme recovery controls stay outside it. */}
     <div data-chat-scope="" data-testid="appearance-chat-preview"
-      className="rounded-xl border border-chat-border bg-chat-background p-3 text-chat-foreground">
+      className="rounded-xl border border-chat-border bg-chat-screen p-3 text-chat-foreground">
       <style>{`
         [data-testid="appearance-chat-preview"], [data-testid="appearance-chat-preview"] * {
           animation: none !important;

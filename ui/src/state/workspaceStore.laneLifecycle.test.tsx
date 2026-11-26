@@ -81,7 +81,37 @@ describe("project-root lifecycle persistence", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { result, unmount } = renderHook(() => useWorkspaceStore({ workspaceId: "ferryx", initialWorktrees: [root], services }));
     await act(async () => { await result.current.refreshLaneLifecycles(); });
-    expect(errorToast).toHaveBeenCalled();
+    expect(errorToast).toHaveBeenCalledTimes(1);
+    // Repeated reads while still failing do not spam duplicate toasts.
+    await act(async () => { await result.current.refreshLaneLifecycles(); });
+    expect(errorToast).toHaveBeenCalledTimes(1);
+    // Once a read succeeds, a subsequent failure notifies again.
+    api.read = vi.fn(async () => ({ sections: [], revision: 0 }));
+    await act(async () => { await result.current.refreshLaneLifecycles(); });
+    api.read = vi.fn(async () => { throw new Error("transient failure"); });
+    await act(async () => { await result.current.refreshLaneLifecycles(); });
+    expect(errorToast).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it("keeps local sidebar order quietly on SUPERVISOR_STANDBY and SUPERVISOR_UNAVAILABLE", async () => {
+    const api = transport();
+    api.read = vi.fn(async () => {
+      throw { code: "SUPERVISOR_STANDBY", message: "another machine runs the supervisor" };
+    });
+    setLaneLifecycleTransport(api);
+    const errorToast = vi.spyOn(toast, "error");
+    const { result, unmount } = renderHook(() => useWorkspaceStore({ workspaceId: "ferryx", initialWorktrees: [root], services }));
+    await act(async () => { await result.current.refreshLaneLifecycles(); });
+    expect(api.read).toHaveBeenCalled();
+    expect(errorToast).not.toHaveBeenCalled();
+
+    api.read = vi.fn(async () => {
+      throw { code: "SUPERVISOR_UNAVAILABLE", message: "the supervisor hub is not open" };
+    });
+    await act(async () => { await result.current.refreshLaneLifecycles(); });
+    expect(api.read).toHaveBeenCalled();
+    expect(errorToast).not.toHaveBeenCalled();
     unmount();
   });
 });

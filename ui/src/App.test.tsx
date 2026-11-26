@@ -1137,22 +1137,21 @@ describe("App project workspace flow", () => {
     expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 
-  it.each(["working", "waiting"] as const)("confirms closing a single-pane tab with a %s agent as a tab close", async (state) => {
+  it.each(["working", "waiting"] as const)("closes a single-pane tab with a %s agent without confirmation when confirmCloseTab is disabled", async (state) => {
     workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
     await act(async () => { render(<App />); });
-    fireEvent.click(screen.getByRole("button", { name: "Close fixture pane" }));
-    const dialog = screen.getByRole("dialog");
-    expect(workspace.closePane).not.toHaveBeenCalled();
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Close fixture pane" }));
+    });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(workspace.closePane).not.toHaveBeenCalled();
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    act(() => { native.closeMenuHandler?.(); });
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close tab/i }));
     expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
     expect(workspace.closeTab).not.toHaveBeenCalled();
+
+    workspace.closePane.mockClear();
+    await act(async () => { native.closeMenuHandler?.(); });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 
   it.each(["working", "waiting"] as const)("closes a single pane in a split view with a %s agent without confirmation", async (state) => {
@@ -1175,18 +1174,12 @@ describe("App project workspace flow", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it.each(["working", "waiting"] as const)("confirms tab close for a %s agent even with confirmCloseTab disabled", async (state) => {
+  it.each(["working", "waiting"] as const)("closes a single-pane tab via tab close without confirmation even for a %s agent when confirmCloseTab is disabled", async (state) => {
     localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false }));
     workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
     await act(async () => { render(<App />); });
     fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
-    const dialog = screen.getByRole("dialog");
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(workspace.closeTab).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close tab/i }));
     expect(workspace.closeTab).toHaveBeenCalledExactlyOnceWith("tab-1");
     expect(workspace.closePane).not.toHaveBeenCalled();
   });
@@ -1705,6 +1698,53 @@ describe("App project workspace flow", () => {
     const deleteDialog = await screen.findByTestId("worktree-delete-dialog");
     expect(deleteDialog).toHaveAttribute("data-workspace-id", "project-2");
     expect(deleteDialog).toHaveAttribute("data-worktree-path", worktreeProj2.path);
+  });
+
+  it("detaches worktree browser splits only after deletion is confirmed, never when the dialog is cancelled", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    const project = { workspaceId: "project-del", repoRoot: "/repos/project-del" };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([project]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, project.workspaceId);
+    native.registerProject.mockResolvedValue(project);
+
+    const worktree: Worktree = {
+      path: "/repos/project-del/.orca-worktrees/project-del/feature-del",
+      head: "abc123",
+      branch: "refs/heads/orca/project-del/feature-del",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    workspace.storeState = { ...workspace.storeState, worktrees: [worktree] };
+
+    const { browserStore } = await import("./state/browserStore");
+    const detachSpy = vi.spyOn(browserStore, "detachAllForWorkspace");
+
+    try {
+      render(<App />);
+      expect(await screen.findByText("Active project project-del")).toBeInTheDocument();
+
+      // Opening the dialog must not detach anything: cancelling has to leave splits intact.
+      fireEvent.click(screen.getByRole("button", { name: `Delete worktree ${worktree.path}` }));
+      expect(await screen.findByTestId("worktree-delete-dialog")).toBeInTheDocument();
+      expect(detachSpy).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Cancel delete" }));
+      await waitFor(() => expect(screen.queryByTestId("worktree-delete-dialog")).toBeNull());
+      expect(detachSpy).not.toHaveBeenCalled();
+
+      // Confirming is the only path that drops this worktree's split references.
+      fireEvent.click(screen.getByRole("button", { name: `Delete worktree ${worktree.path}` }));
+      expect(await screen.findByTestId("worktree-delete-dialog")).toBeInTheDocument();
+      expect(detachSpy).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+      await waitFor(() => expect(detachSpy).toHaveBeenCalled());
+      expect(detachSpy).toHaveBeenCalledWith("project-del");
+    } finally {
+      detachSpy.mockRestore();
+    }
   });
 
   it("migrates legacy rorca/orca storage keys to ferryx namespace on startup (F10)", async () => {
@@ -2675,13 +2715,14 @@ describe("App project workspace flow", () => {
     expect(screen.getByTestId("mock-sidebar")).toHaveAttribute("data-open", "true");
     expect(screen.getByRole("button", { name: "Hide sidebar" })).toBeInTheDocument();
 
-    // Toggle off via Cmd+B shortcut
+    // Toggle off via Cmd+B shortcut; the Activity Bar rail stays put.
     fireEvent.keyDown(window, { key: "b", metaKey: true });
     expect(screen.queryByTestId("mock-sidebar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("desktop-activity-bar")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
     expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
 
-    // Toggle on via Show sidebar button in header
+    // Toggle on from the rail's own drawer toggle
     fireEvent.click(screen.getByRole("button", { name: "Show sidebar" }));
     expect(screen.getByTestId("mock-sidebar")).toBeInTheDocument();
     expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("true");

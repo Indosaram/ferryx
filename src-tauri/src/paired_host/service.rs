@@ -701,6 +701,7 @@ impl PairedHostService {
             .await?;
         // Synchronously drop the forgotten credential's direct worker and route.
         stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id_clone, expected.0);
+        super::relay_mux::evict_host(&host_id_clone);
         self.drop_reachability(&host_id_clone);
         self.authority_changed(&host_id_clone);
         if let Some(sink) = &self.event_sink {
@@ -757,6 +758,7 @@ impl PairedHostService {
             self.authority_changed(&host_id);
             // Only the revoked (captured) generation is stopped; a newer worker survives.
             stop_direct(&GLOBAL_DIRECT_ROUTES, &host_id, generation.0);
+            super::relay_mux::evict_generation(&host_id, generation.0);
             let generation = view.generation.0.to_string();
             if let Some(sink) = &self.event_sink {
                 sink(InventoryChangeEvent {

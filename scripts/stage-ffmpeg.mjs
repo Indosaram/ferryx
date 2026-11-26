@@ -5,8 +5,7 @@
  *
  * Source: on every OS a prefix made by scripts/build-ffmpeg-lgpl.sh from the tarball pinned in
  * src-tauri/resources/ffmpeg/pin.json. Its build-receipt.txt must name that tarball and an
- * LGPL-only configuration without OpenH264. macOS universal takes one prefix per slice and
- * lipo's them. Windows takes the DLLs from bin/ and the headers + MSVC import libraries as sdk/.
+ * LGPL-only configuration without OpenH264. macOS stages a single arm64 prefix. Windows takes the DLLs from bin/ and the headers + MSVC import libraries as sdk/.
  *
  * Layout of payload/<triple>:
  *   runtime/                   the libraries the app loads (dylib / .so.N / .dll)
@@ -19,7 +18,7 @@
  * payload and fails closed on any mismatch.
  *
  * Usage:
- *   bun scripts/stage-ffmpeg.mjs --target <triple|universal-apple-darwin> [--prefix [<triple>=]<dir>]...
+ *   bun scripts/stage-ffmpeg.mjs --target <triple> [--prefix [<triple>=]<dir>]...
  *   bun scripts/stage-ffmpeg.mjs --target <triple> --check
  *   --prune   remove other triples from the payload dir
  */
@@ -46,7 +45,6 @@ export const TAURI_DIR = join(REPO_ROOT, "src-tauri");
 export const FFMPEG_RESOURCE_DIR = join(TAURI_DIR, "resources", "ffmpeg");
 export const PIN_PATH = join(FFMPEG_RESOURCE_DIR, "pin.json");
 export const DEFAULT_DEST = join(FFMPEG_RESOURCE_DIR, "payload");
-export const UNIVERSAL_DARWIN = "universal-apple-darwin";
 export const OVERLAY_NAME = "tauri.ffmpeg.conf.json";
 export const MANIFEST_NAME = "stage.json";
 /** Install-relative dir of the Linux libraries; build.rs bakes `$ORIGIN/../lib/Ferryx/ffmpeg`. */
@@ -66,8 +64,6 @@ const FORBIDDEN_FLAGS = Object.freeze([
 ]);
 const SUPPORTED = Object.freeze([
   "aarch64-apple-darwin",
-  "x86_64-apple-darwin",
-  UNIVERSAL_DARWIN,
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
   "x86_64-pc-windows-msvc",
@@ -236,7 +232,7 @@ function copyWindowsSdk(prefix, sdkDir) {
 
 /** Stages a target from build-ffmpeg-lgpl.sh prefixes. */
 export function stageFromPrefixes({ triple, prefixes, out, pin, exec = defaultExec }) {
-  const slices = triple === UNIVERSAL_DARWIN ? ["aarch64-apple-darwin", "x86_64-apple-darwin"] : [triple];
+  const slices = [triple];
   const receipts = [];
   const runtimeDir = join(out, "runtime");
   const legalDir = join(out, "legal");
@@ -258,12 +254,6 @@ export function stageFromPrefixes({ triple, prefixes, out, pin, exec = defaultEx
     if (osOf(slice) === "windows") copyWindowsSdk(prefix, join(out, "sdk"));
   }
   let names = sliceDirs[0].names;
-  if (sliceDirs.length > 1) {
-    const [arm, x86] = sliceDirs;
-    if (arm.names.join() !== x86.names.join()) throw new Error(`universal slices differ: ${arm.names} vs ${x86.names}`);
-    for (const name of names) exec("lipo", ["-create", join(arm.dir, name), join(x86.dir, name), "-output", join(runtimeDir, name)]);
-    for (const slice of sliceDirs) rmSync(slice.dir, { recursive: true, force: true });
-  }
   if (osOf(triple) === "darwin") fixDarwinInstallNames(runtimeDir, names, exec);
   for (const required of ["COPYING.LGPLv2.1", "LICENSE.md"]) {
     if (!existsSync(join(legalDir, required))) throw new Error(`prefix lacks share/ferryx-legal/${required}; rebuild with the current scripts/build-ffmpeg-lgpl.sh`);

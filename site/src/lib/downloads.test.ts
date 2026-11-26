@@ -23,9 +23,9 @@ const VERIFIED_LATEST_RELEASE_ASSETS: readonly string[] = [
   'Ferryx_amd64.AppImage',
   'Ferryx_amd64.AppImage.sig',
   'Ferryx_amd64.deb',
-  'Ferryx_universal.app.tar.gz',
-  'Ferryx_universal.app.tar.gz.sig',
-  'Ferryx_universal.dmg',
+  'Ferryx_aarch64.app.tar.gz',
+  'Ferryx_aarch64.app.tar.gz.sig',
+  'Ferryx_aarch64.dmg',
   'Ferryx_x64-setup.exe',
   'Ferryx_x64-setup.exe.sig',
   'Ferryx_x64.msix',
@@ -76,14 +76,14 @@ describe('Cross-Platform Download Configuration', () => {
     }
   });
 
-  test('macOS offers the universal DMG', () => {
+  test('macOS offers the arm64 DMG', () => {
     const macos = PLATFORMS.macos;
     expect(macos.id).toBe('macos');
     expect(macos.name).toBe('macOS');
-    expect(macos.defaultAsset.id).toBe('macos-universal');
-    expect(macos.defaultAsset.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_universal.dmg`);
+    expect(macos.defaultAsset.id).toBe('macos-arm64');
+    expect(macos.defaultAsset.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_aarch64.dmg`);
     expect(macos.defaultAsset.fileType).toBe('.dmg');
-    expect(macos.assets.map((a) => a.id)).toEqual(['macos-universal']);
+    expect(macos.assets.map((a) => a.id)).toEqual(['macos-arm64']);
   });
 
   test('Windows offers the Microsoft Store first and the x64 installer second, never the raw MSIX', () => {

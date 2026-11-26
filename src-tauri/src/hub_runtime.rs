@@ -3952,8 +3952,10 @@ pub async fn supervisor_memory(
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorReadV1`.
 pub const SUPERVISOR_READ_CAPABILITY: &str = "supervisorReadV1";
 
-/// Lifecycle storage belongs to the hub owned by this daemon, just like the supervisor view.
-pub async fn lane_lifecycle(
+/// Lifecycle storage on this daemon's own hub only (never forwards). Used by remote
+/// endpoints (`POST /api/v1/supervisor/lane-lifecycle`, `GET /api/v1/workspace/sidebar`) so a
+/// forwarded request never loops back out of a standby.
+pub async fn lane_lifecycle_local(
     operation: &str,
     body: Value,
 ) -> Result<(u16, Value), ferryx_hub::supervisor::request::RequestFailure> {
@@ -3967,6 +3969,72 @@ pub async fn lane_lifecycle(
         ));
     };
     Ok(ferryx_hub::lanes::lifecycle_api::desktop_request(hub.pool.clone(), operation, body).await)
+}
+
+async fn forward_lane_lifecycle_with(
+    link: &holder_link::HolderLink,
+    holder: &holder_link::Holder,
+    hosts: &dyn holder_link::PairedHosts,
+    account: &dyn holder_link::AccountGrants,
+    operation: &str,
+    body: Value,
+) -> Result<(u16, Value), ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    let envelope = link
+        .forward(
+            holder,
+            hosts,
+            account,
+            crate::paired_host::client::Operation::LaneLifecycle {
+                operation: operation.to_owned(),
+                body,
+            },
+        )
+        .await?;
+    let Some(status) = envelope
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|s| u16::try_from(s).ok())
+    else {
+        return Err(RequestFailure::new(
+            "SUPERVISOR_UNAVAILABLE",
+            "invalid lane lifecycle response from supervisor holder",
+        ));
+    };
+    let Some(value) = envelope.get("value").cloned() else {
+        return Err(RequestFailure::new(
+            "SUPERVISOR_UNAVAILABLE",
+            "invalid lane lifecycle response from supervisor holder",
+        ));
+    };
+    Ok((status, value))
+}
+
+/// Lifecycle storage belongs to the hub holding the supervisor lease. On standby this forwards
+/// over the paired-host channel to the holder (never touching a stale local database); when no
+/// holder is paired or reachable, it returns `SUPERVISOR_STANDBY` or `SUPERVISOR_UNAVAILABLE`.
+pub async fn lane_lifecycle(
+    operation: &str,
+    body: Value,
+) -> Result<(u16, Value), ferryx_hub::supervisor::request::RequestFailure> {
+    if let Some(holder) = current_holder() {
+        let Some(hosts) = crate::supervisor_move::installed_hosts() else {
+            return Err(ferryx_hub::holder::standby_failure(
+                holder.machine_id.as_deref(),
+                holder.label.as_deref(),
+            ));
+        };
+        return forward_lane_lifecycle_with(
+            &holder_link::LINK,
+            &holder,
+            &holder_link::ServicePairedHosts(hosts),
+            &holder_link::AccountService,
+            operation,
+            body,
+        )
+        .await;
+    }
+    lane_lifecycle_local(operation, body).await
 }
 
 /// The desktop's read of the unified supervisor besides the snapshot: the same conversation
@@ -7739,6 +7807,96 @@ mod tests {
         let model = ferryx_hub::lanes::lifecycle::model(&pool, "2026-11-15T00:00:00Z")
             .await.expect("read lifecycle rows");
         assert!(model.sections.is_empty(), "the published stale database was not written");
+    }
+
+    #[tokio::test]
+    async fn a_standby_forwards_lane_lifecycle_to_the_paired_holder_and_preserves_domain_status() {
+        struct LifecycleForwardHosts {
+            host: crate::paired_host::inventory::HostView,
+            reply: parking_lot::Mutex<Value>,
+            seen: parking_lot::Mutex<Vec<(String, Value)>>,
+        }
+        #[async_trait]
+        impl holder_link::PairedHosts for LifecycleForwardHosts {
+            async fn list(&self) -> Result<Vec<crate::paired_host::inventory::HostView>, String> {
+                Ok(vec![self.host.clone()])
+            }
+            async fn redeem(
+                &self,
+                _request: crate::paired_host::service::RedeemGrantRequest,
+            ) -> Result<crate::paired_host::inventory::HostView, String> {
+                Ok(self.host.clone())
+            }
+            async fn send(
+                &self,
+                _host: &crate::paired_host::inventory::HostView,
+                operation: crate::paired_host::client::Operation,
+            ) -> Result<Value, crate::paired_host::client::ClientError> {
+                match operation {
+                    crate::paired_host::client::Operation::LaneLifecycle { operation, body } => {
+                        self.seen.lock().push((operation, body));
+                        Ok(self.reply.lock().clone())
+                    }
+                    _ => Err(crate::paired_host::client::ClientError::local("UNEXPECTED_OP")),
+                }
+            }
+        }
+        struct UnusedAccount;
+        #[async_trait]
+        impl holder_link::AccountGrants for UnusedAccount {
+            async fn grant_on(
+                &self,
+                _holder_machine_id: &str,
+            ) -> Result<crate::paired_host::service::RedeemGrantRequest, String> {
+                Err("should not redeem when already paired".into())
+            }
+        }
+
+        let link = holder_link::HolderLink::new();
+        let holder = holder_link::Holder {
+            machine_id: Some("mach-b".into()),
+            label: Some("Laptop B".into()),
+        };
+        let hosts = LifecycleForwardHosts {
+            host: paired_host("mach-b"),
+            reply: parking_lot::Mutex::new(json!({
+                "status": 200,
+                "value": { "sections": [], "revision": 3 },
+            })),
+            seen: parking_lot::Mutex::new(Vec::new()),
+        };
+        let (status, value) = forward_lane_lifecycle_with(
+            &link,
+            &holder,
+            &hosts,
+            &UnusedAccount,
+            "identities",
+            json!([{ "worktreeKey": "p:ferryx/code/ferryx", "workspaceId": "ferryx", "path": "/code/ferryx" }]),
+        )
+        .await
+        .expect("forwarded read succeeds");
+        assert_eq!(status, 200);
+        assert_eq!(value, json!({ "sections": [], "revision": 3 }));
+
+        *hosts.reply.lock() = json!({
+            "status": 409,
+            "value": { "stale": true, "error": "the row moved on" },
+        });
+        let (status, conflict) = forward_lane_lifecycle_with(
+            &link,
+            &holder,
+            &hosts,
+            &UnusedAccount,
+            "apply",
+            json!({ "worktreeKey": "p:ferryx/code/ferryx", "action": "pin", "pinned": true }),
+        )
+        .await
+        .expect("domain conflict envelope preserved");
+        assert_eq!(status, 409);
+        assert_eq!(conflict["stale"], true);
+        assert_eq!(hosts.seen.lock().len(), 2);
+        assert_eq!(hosts.seen.lock()[0].0, "identities");
+        assert_eq!(hosts.seen.lock()[1].0, "apply");
     }
 
     /// control.sock `report` on a standby is refused with SUPERVISOR_STANDBY naming the holder

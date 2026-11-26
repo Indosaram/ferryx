@@ -18,6 +18,7 @@ pub mod agent_transcript;
 pub mod browser;
 pub mod cli;
 pub mod clipboard_image;
+pub mod cloud_host;
 pub mod daemon;
 pub mod hub_runtime;
 pub mod supervisor_checkpoint;
@@ -48,6 +49,7 @@ pub mod session;
 mod shortcut_dispatch;
 pub mod ssh;
 pub mod terminal;
+pub mod theme;
 pub mod util;
 #[cfg(feature = "desktop")]
 pub mod window_registry;
@@ -1769,6 +1771,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle(),
                 Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
             );
+            // Chromium engine tabs have no page-world push channel, so their Now Playing state
+            // is polled through the same page-script path.
+            crate::browser::media::install_engine_media_poller(
+                app.handle().clone(),
+                Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
+            );
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
             if let Some(profile) = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow_mut().take()) {
                 let window_config = app
@@ -1974,6 +1982,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::paired_host::cmd_retry_paired_session,
+        crate::cloud_host::cli::cmd_cloud_host_list,
+        crate::cloud_host::cli::cmd_cloud_host_providers,
+        crate::cloud_host::cli::cmd_cloud_host_set_secret,
+        crate::cloud_host::cli::cmd_cloud_host_delete,
         crate::ipc::remote_desktop::cmd_rd_supported,
         crate::ipc::file_preview::cmd_file_preview_open,
         crate::ipc::file_preview::cmd_file_preview_open_child,
@@ -2021,6 +2033,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_preferences,
         cmd_terminal_apply_overrides,
         cmd_terminal_set_appearance,
+        cmd_terminal_set_theme_palette,
+        cmd_theme_list_environment,
+        cmd_theme_set_environment,
+        cmd_theme_clear_environment,
+        cmd_theme_read_background,
         cmd_native_terminal_attach,
         cmd_native_terminal_attach_viewer,
         cmd_native_terminal_detach,
@@ -2220,6 +2237,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_get_state,
         cmd_browser_find,
         cmd_browser_clear_find,
+        cmd_browser_media_control,
         cmd_browser_download,
         cmd_browser_download_with_cookies,
         cmd_browser_download_list,
@@ -2325,6 +2343,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             invoke.message.command(),
             "cmd_rd_connect"
                 | "cmd_rd_input"
+                | "cmd_rd_special_key"
+                | "cmd_rd_set_stream_options"
+                | "cmd_rd_send_clipboard"
+                | "cmd_rd_set_audio_muted"
+                | "cmd_rd_request_keyframe"
                 | "cmd_rd_disconnect"
                 | "cmd_rd_host_state"
                 | "cmd_rd_host_set"
@@ -2333,6 +2356,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
                 crate::ipc::remote_desktop::commands::cmd_rd_connect,
                 crate::ipc::remote_desktop::commands::cmd_rd_input,
+                crate::ipc::remote_desktop::commands::cmd_rd_special_key,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_stream_options,
+                crate::ipc::remote_desktop::commands::cmd_rd_send_clipboard,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_audio_muted,
+                crate::ipc::remote_desktop::commands::cmd_rd_request_keyframe,
                 crate::ipc::remote_desktop::commands::cmd_rd_disconnect,
                 crate::ipc::remote_desktop_host::cmd_rd_host_state,
                 crate::ipc::remote_desktop_host::cmd_rd_host_set,

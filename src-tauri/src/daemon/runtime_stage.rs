@@ -185,9 +185,72 @@ pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, Ru
             tracing::info!(source = %source_exe.display(), "No bundled mhc next to the daemon source; hub turns use mhc on PATH");
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        let keeper = std::env::current_exe()
+            .ok()
+            .and_then(|exe| keeper_payload_near(&exe))
+            .or_else(|| keeper_payload_near(source_exe));
+        match keeper {
+            Some(keeper) => {
+                if let Err(error) = ensure_keeper_payload(&generation, &keeper) {
+                    tracing::warn!(%error, generation = %staged.key, "Could not stage the PTY keeper payload; supervised daemon restart stays off");
+                }
+            }
+            None => {
+                tracing::warn!(source = %source_exe.display(), "No PTY keeper payload next to the daemon source; supervised daemon restart stays off");
+            }
+        }
+    }
     #[cfg(feature = "remote-desktop")]
     stage_ffmpeg(&generation, source_exe, &staged.key);
     Ok(staged)
+}
+
+/// Dir inside a generation holding a copy of the app's PTY keeper payload
+/// (`Contents/Resources/keeper`: `ferryx-ptykeeper` and `keeper.json`). The staged daemon runs
+/// from the helper bundle, which has no Resources of its own, so without this copy it finds no
+/// keeper and supervised restart stays off.
+pub const KEEPER_PAYLOAD_DIR: &str = "keeper";
+
+/// The keeper payload for a GUI or helper executable: the app's `Contents/Resources/keeper`
+/// (from `Contents/MacOS` or from the helper's `Contents/Helpers/Ferryx Daemon.app/Contents/MacOS`)
+/// or a staged generation's `<key>/keeper`.
+pub fn keeper_payload_near(executable: &Path) -> Option<PathBuf> {
+    let exe_dir = executable.parent()?;
+    [
+        exe_dir.join("../Resources").join(KEEPER_PAYLOAD_DIR),
+        exe_dir.join("../../../../Resources").join(KEEPER_PAYLOAD_DIR),
+        exe_dir.join("../../..").join(KEEPER_PAYLOAD_DIR),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("ferryx-ptykeeper").is_file())
+}
+
+/// Copies the keeper payload into the generation once; an existing copy is never replaced.
+pub fn ensure_keeper_payload(generation: &Path, payload: &Path) -> Result<(), RuntimeStageError> {
+    let destination = generation.join(KEEPER_PAYLOAD_DIR);
+    if destination.join("ferryx-ptykeeper").is_file() {
+        return Ok(());
+    }
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let tmp = generation.join(format!(
+        "{KEEPER_PAYLOAD_DIR}{TMP_MARKER}{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = copy_tree(payload, &tmp)
+        .and_then(|()| sync_dir(&tmp).map_err(io_error(format!("sync {}", tmp.display()))))
+        .and_then(|()| match fs::rename(&tmp, &destination) {
+            Ok(()) => sync_dir(generation).map_err(io_error(format!("sync {}", generation.display()))),
+            // Another stager won the rename.
+            Err(_) if destination.join("ferryx-ptykeeper").is_file() => Ok(()),
+            Err(error) => Err(io_error(format!("rename {} to {}", tmp.display(), destination.display()))(error)),
+        });
+    if tmp.exists() {
+        remove_tmp_dir(&tmp);
+    }
+    result
 }
 
 /// Dir inside a macOS/Linux generation holding the FFmpeg shared libraries a `remote-desktop`

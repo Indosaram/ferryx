@@ -14,7 +14,7 @@ to Cloudflare Workers (see [site migration](../SITE_DOMAIN_MIGRATION.md)).
 
 | Host | Role | Required output |
 | --- | --- | --- |
-| `macbook` | Local coordinator, universal macOS builder, signing/notarization host, assembler, verifier, publisher | signed/notarized universal updater archive, universal DMG, and universal CLI |
+| `macbook` | Local coordinator, universal macOS builder, signing/notarization host, assembler, verifier, publisher | signed/notarized arm64 updater archive, universal DMG, and universal CLI |
 | `omaki` | SSH Linux x86_64 builder | raw AppImage updater payload, DEB, and x86_64 CLI (signed by coordinator where applicable) |
 | `maho-win` | SSH Windows x64 builder | unsigned Store-ingestion MSIX; NSIS updater installer (-setup.exe, signed by coordinator) when migration is selected |
 
@@ -203,7 +203,7 @@ from `stage.json`. No release payload contains OpenH264 on any OS.
 
 | Host | FFmpeg source | Where it lands | Load path |
 | --- | --- | --- | --- |
-| `macbook` | `scripts/build-ffmpeg-lgpl.sh` per slice (`FERRYX_FFMPEG_ARCH=arm64` / `x86_64`), lipo'd to universal; cached under `<root>/ffmpeg-cache/lgpl-<script sha>-<arch>`; the payload's `sdk/` (arm64 headers + universal dylibs) is `FFMPEG_DIR` for both slices | `Ferryx.app/Contents/Frameworks/*.dylib` (`bundle.macOS.frameworks` overlay), legal files in `Contents/Resources/ffmpeg-legal/` | install names `@rpath/...`; `src-tauri/build.rs` adds `@executable_path/../Frameworks` (and the daemon-helper equivalents) when `CARGO_FEATURE_REMOTE_DESKTOP` is set |
+| `macbook` | `scripts/build-ffmpeg-lgpl.sh` for arm64 only (`FERRYX_FFMPEG_ARCH=arm64`); cached under `<root>/ffmpeg-cache/lgpl-<script sha>-<arch>`; the payload's `sdk/` (arm64 headers + arm64 dylibs) is `FFMPEG_DIR` for the arm64 slice | `Ferryx.app/Contents/Frameworks/*.dylib` (`bundle.macOS.frameworks` overlay), legal files in `Contents/Resources/ffmpeg-legal/` | install names `@rpath/...`; `src-tauri/build.rs` adds `@executable_path/../Frameworks` (and the daemon-helper equivalents) when `CARGO_FEATURE_REMOTE_DESKTOP` is set |
 | `omaki` | `scripts/build-ffmpeg-lgpl.sh` with `FERRYX_FFMPEG_OPENH264=0`; cached under `<root>/ffmpeg-cache`; the prefix is `FFMPEG_DIR` | deb/AppImage `usr/lib/Ferryx/ffmpeg/*.so.N`, legal in `usr/lib/Ferryx/ffmpeg-legal/`; deb gains `libva2`, `libva-drm2` | `patchelf --set-rpath '$ORIGIN'` on each library; binary rpath `$ORIGIN/../lib/Ferryx/ffmpeg` |
 | `maho-win` | `scripts/build-ffmpeg-lgpl.sh` run by MSYS2 bash with `--toolchain=msvc` (NVENC, AMF, D3D11VA, Media Foundation `h264_mf`/`hevc_mf`; no OpenH264); cached under `<root>\ffmpeg-cache\lgpl-<script sha>-win64` | DLLs beside `ferryx.exe` in NSIS (resource overlay) and MSIX (`build-msix.ps1 -FfmpegPayloadDir`), legal in `ffmpeg-legal\`; headers + import libs in the payload's `sdk\` become `FFMPEG_DIR` for the link | Windows DLL search order (application dir) |
 
@@ -256,7 +256,7 @@ are keyed on the script's hash, so every host rebuilds.
 **Developer SDKs.** Dev, test and CI builds do not compile FFmpeg: `scripts/fetch-ffmpeg.mjs`
 downloads a prebuilt LGPL SDK (`pin.json` `sdk`) from a dedicated, non-latest prerelease of this
 repository (`ffmpeg-sdk-<version>-<n>`). Those archives are `build-ffmpeg-lgpl.sh` output
-(Linux without OpenH264, macOS lipo'd universal, Windows MSVC) plus `build-receipt.txt`, which the
+(Linux without OpenH264, macOS arm64, Windows MSVC) plus `build-receipt.txt`, which the
 fetch checks against the pinned source and the LGPL flag rules. When FFmpeg moves, build the
 three archives the same way, publish them under a new `ffmpeg-sdk-*` prerelease tag (never mark
 it latest), and update `sdk.tag` and every `sdk.assets[*].sha256` in `pin.json`.
@@ -326,14 +326,14 @@ and `publish` uploads them with every other file:
 | `provenance.json` | Tag, commit, `sourceDateEpoch`, Ghostty pin, the plan's toolchain constraints, and per host the recorded toolchain versions and the assets it built (name, kind, size, SHA-256) |
 | `SHA256SUMS` | SHA-256 of every other release asset, in `shasum -a 256 -c` format |
 | `SHA256SUMS.minisig` | minisign signature of `SHA256SUMS` by the updater key (`plugins.updater.pubkey` in `src-tauri/tauri.conf.json`) |
-| `ferryx.rb`, `ferryx-cli.rb` | Homebrew cask (`Ferryx_universal.dmg`) and linux x64 formula (`ferryx-cli-linux-amd64`), rendered by `scripts/release-packaging.mjs` from `SHA256SUMS.txt` with the tag's version and hashes |
+| `ferryx.rb`, `ferryx-cli.rb` | Homebrew cask (`Ferryx_aarch64.dmg`) and linux x64 formula (`ferryx-cli-linux-amd64`), rendered by `scripts/release-packaging.mjs` from `SHA256SUMS.txt` with the tag's version and hashes |
 
 Both SBOMs are generated from a clean `git archive` of `plan.json.commitSha`, never from the working
 checkout. Which host builds which asset:
 
 | Host | Assets |
 | --- | --- |
-| `macbook` | `Ferryx.app.tar.gz` (+`.sig`), `Ferryx_universal.app.tar.gz` (+`.sig`), `Ferryx_universal.dmg`, `ferryx-cli-darwin-universal` |
+| `macbook` | `Ferryx_aarch64.app.tar.gz` (+`.sig`), `Ferryx_aarch64.dmg`, `ferryx-cli-darwin-arm64` |
 | `omaki` | `Ferryx_amd64.AppImage` (+`.sig`), `Ferryx_amd64.deb`, `ferryx-cli-linux-amd64` |
 | `maho-win` | `Ferryx_x64.msix`, and `Ferryx_x64-setup.exe` (+`.sig`) when NSIS migration is selected |
 | `macbook` (coordinator) | `latest.json`, `SHA256SUMS.txt`, `ferryx.rb`, `ferryx-cli.rb`, the SBOMs, `provenance.json`, `SHA256SUMS`, `SHA256SUMS.minisig` |

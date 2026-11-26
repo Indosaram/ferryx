@@ -1,22 +1,70 @@
 import type { ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Plus, Server } from "lucide-react";
+import {
+  CLOUD_HOST_LIST_COMMAND,
+  listCloudMachines,
+  type CloudMachineSummary,
+} from "../../../lib/cloudHost";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
+import { CloudMachineRow } from "./MachineRow";
+
+export { CLOUD_HOST_LIST_COMMAND, type CloudMachineSummary };
+
+export function useCloudMachines(refreshSignal = 0): CloudMachineSummary[] {
+  const [machines, setMachines] = useState<CloudMachineSummary[]>([]);
+  const load = useCallback(async () => {
+    setMachines(await listCloudMachines());
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load, refreshSignal]);
+  return machines;
+}
 
 export interface MachineListProps {
   total: number;
   shown: number;
   searchQuery: string;
   actionError: string | null;
-  /** Whether an account session exists; only affects the copy, since pairing is automatic. */
   signedIn: boolean;
   onSearchChange: (value: string) => void;
   onAddMachine: () => void;
   onRefresh: () => void;
+  cloudMachines?: CloudMachineSummary[];
+  cloudRefreshSignal?: number;
+  onDeleteCloudMachine?: (name: string) => void | Promise<void>;
+  deletingCloudName?: string | null;
   children: ReactNode;
 }
 
-export function MachineList({ total, shown, searchQuery, actionError, signedIn, onSearchChange, onAddMachine, onRefresh, children }: MachineListProps) {
+export function MachineList({
+  total,
+  shown,
+  searchQuery,
+  actionError,
+  signedIn,
+  onSearchChange,
+  onAddMachine,
+  onRefresh,
+  cloudMachines,
+  cloudRefreshSignal = 0,
+  onDeleteCloudMachine,
+  deletingCloudName = null,
+  children,
+}: MachineListProps) {
+  const read = useCloudMachines(cloudRefreshSignal);
+  const rawClouds = cloudMachines ?? read;
+  const query = searchQuery.trim().toLowerCase();
+  const clouds = query
+    ? rawClouds.filter(
+        (m) =>
+          m.name.toLowerCase().includes(query) ||
+          m.provider.toLowerCase().includes(query) ||
+          m.sandboxId.toLowerCase().includes(query),
+      )
+    : rawClouds;
   return (
     <section aria-labelledby="remote-my-machines" className="space-y-3">
       <header className="flex flex-col gap-1 border-b border-border pb-2 sm:flex-row sm:items-end sm:justify-between">
@@ -48,7 +96,7 @@ export function MachineList({ total, shown, searchQuery, actionError, signedIn, 
           <span>{actionError}</span>
         </div>
       ) : null}
-      {shown === 0 ? (
+      {shown === 0 && clouds.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border p-8 text-center">
           <Server className="mb-2 size-8 text-muted-foreground/50" />
           <p className="text-[13px] font-medium text-foreground">{total === 0 ? "No remote machines configured" : "No matching machines found"}</p>
@@ -62,6 +110,18 @@ export function MachineList({ total, shown, searchQuery, actionError, signedIn, 
         </div>
       ) : (
         <div role="list" aria-label="Remote machines" className="space-y-2">
+          {clouds.map(machine => (
+            <CloudMachineRow
+              key={`cloud:${machine.name}`}
+              name={machine.name}
+              provider={machine.provider}
+              state={machine.state}
+              sandboxId={machine.sandboxId}
+              transport={machine.transport}
+              onDelete={onDeleteCloudMachine ? () => void onDeleteCloudMachine(machine.name) : undefined}
+              deleting={deletingCloudName === machine.name}
+            />
+          ))}
           {children}
         </div>
       )}

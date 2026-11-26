@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use futures_util::{Sink as _, Stream as _};
 
 use crate::remote::session_transport::{
-    establish_session, proxy_secure_to_gateway, SessionTransport,
+    establish_session, serve_secure_gateway, SessionTransport,
 };
 
 pub type AttachAuthorizer = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
@@ -51,9 +51,6 @@ async fn serve_direct_attach(
     let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
         .map(|record| record.enrollment_epoch)
         .unwrap_or_default();
-    let Ok(gateway) = tokio::net::TcpStream::connect(&deps.gateway_addr).await else {
-        return;
-    };
     let stream = AxumWebSocketStream::new(socket);
     let opened = establish_session(
         stream,
@@ -69,19 +66,28 @@ async fn serve_direct_attach(
     )
     .await;
     if let Ok(SessionTransport::Attached(secure)) = opened {
-        let _ = proxy_secure_to_gateway(secure, gateway).await;
+        let gateway_addr = deps.gateway_addr.clone();
+        let _ = serve_secure_gateway(secure, move || {
+            let gateway_addr = gateway_addr.clone();
+            async move {
+                let gateway = tokio::net::TcpStream::connect(&gateway_addr).await?;
+                gateway.set_nodelay(true)?;
+                Ok(gateway)
+            }
+        })
+        .await;
     }
 }
 
 /// Bridges axum's websocket into the byte-stream shape the shared attach handshake needs.
-struct AxumWebSocketStream {
+pub(crate) struct AxumWebSocketStream {
     socket: axum::extract::ws::WebSocket,
     read_buffer: Vec<u8>,
     eof: bool,
 }
 
 impl AxumWebSocketStream {
-    fn new(socket: axum::extract::ws::WebSocket) -> Self {
+    pub(crate) fn new(socket: axum::extract::ws::WebSocket) -> Self {
         Self {
             socket,
             read_buffer: Vec::new(),

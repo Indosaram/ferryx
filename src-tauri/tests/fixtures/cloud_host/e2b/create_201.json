@@ -1,0 +1,10 @@
+{
+  "templateID": "base",
+  "sandboxID": "ijbv0q9onfnyqm60c1doo",
+  "alias": "base",
+  "clientID": "d5a1f0c1",
+  "envdVersion": "0.2.9",
+  "envdAccessToken": "envd-token-for-fixture",
+  "trafficAccessToken": null,
+  "domain": "e2b.app"
+}

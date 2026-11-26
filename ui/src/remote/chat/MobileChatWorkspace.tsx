@@ -456,6 +456,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   return (
     <div
       data-testid="mobile-chat-workspace"
+      data-workspace-area="conversation"
       className={cn(
         "relative flex flex-col w-full h-full min-h-0 bg-chat-screen text-chat-foreground overflow-hidden",
         className
@@ -464,6 +465,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       {showHeader && (
       <header
         data-testid="mobile-chat-header"
+        data-chat-header=""
         className="flex items-center justify-between px-1 py-1 bg-chat-screen border-b border-chat-border shrink-0 z-10 select-none"
       >
         <div className="flex items-center gap-2 min-w-0">

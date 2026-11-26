@@ -16,7 +16,7 @@
  *
  * Usage:
  *   bun scripts/fetch-mhc.mjs                  host triple
- *   bun scripts/fetch-mhc.mjs --target <triple|universal-apple-darwin> [--target ...]
+ *   bun scripts/fetch-mhc.mjs --target <triple> [--target ...]
  *   bun scripts/fetch-mhc.mjs --from-env       TAURI_ENV_TARGET_TRIPLE (tauri before* hooks), else host
  *   --prune   remove other triples from payload (release builds ship exactly their targets)
  *   --check   verify the stamps/files only; never download
@@ -44,7 +44,6 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const MHC_RESOURCE_DIR = join(REPO_ROOT, "src-tauri", "resources", "mhc");
 export const PIN_PATH = join(MHC_RESOURCE_DIR, "pin.json");
 export const DEFAULT_DEST = join(MHC_RESOURCE_DIR, "payload");
-export const UNIVERSAL_DARWIN = "universal-apple-darwin";
 const STAMP = "fetch.json";
 
 export function readPin(path = PIN_PATH) {
@@ -62,11 +61,11 @@ export function hostTriple(platform = process.platform, arch = process.arch) {
   return `${cpu}-${os}`;
 }
 
-/** Expands `universal-apple-darwin` to both darwin triples and rejects triples without a pin. */
+/** Resolves target triples and rejects triples without a pin. */
 export function resolveTargets(requested, pin) {
   const triples = [];
   for (const target of requested) {
-    const expanded = target === UNIVERSAL_DARWIN ? ["aarch64-apple-darwin", "x86_64-apple-darwin"] : [target];
+    const expanded = [target];
     for (const triple of expanded) {
       if (!pin.mhc.assets[triple] || !pin.bun.assets[triple]) {
         throw new Error(`no pinned mhc/bun asset for target ${triple}`);

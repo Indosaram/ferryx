@@ -413,8 +413,8 @@ pub async fn ensure_started(
     let script = match env.platform {
         RemotePlatform::Posix => format!(
             "exe={}; root={}; host_id={}; \
-             if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
-             if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
+             if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n'; printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
+             if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n'; printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
              exec \"$exe\" start --root \"$root\" --host-id \"$host_id\"",
             direct::quote_posix(&location.executable),
             direct::quote_posix(&location.root),
@@ -422,7 +422,7 @@ pub async fn ensure_started(
         ),
         RemotePlatform::Windows => format!(
             "$exe = {}; $root = {}; $hostId = {}; \
-             if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
+             if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Out.WriteLine('FERRYX_ERR_HELPER_MISSING'); [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
              & $exe start --root $root --host-id $hostId 2>&1 | ForEach-Object {{ \
                  if ($_ -is [System.Management.Automation.ErrorRecord]) {{ [Console]::Error.WriteLine($_.ToString()) }} \
                  else {{ [Console]::Out.WriteLine($_.ToString()) }} \
@@ -443,13 +443,33 @@ pub async fn ensure_started(
         });
 
     match output {
-        Ok(stdout_bytes) => parse_ready_output(&stdout_bytes).map_err(|mut err| {
-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
-            details["operation"] = "helper_startup_readiness".into();
-            err
-        }),
+        Ok(stdout_bytes) => parse_ensure_started_output(&stdout_bytes, location),
         Err(err) => Err(map_ensure_started_error(err, location)),
     }
+}
+
+pub(crate) fn parse_ensure_started_output(
+    stdout_bytes: &[u8],
+    location: &HelperLocation,
+) -> Result<(), IpcError> {
+    // A server that reports every command as exit 0 turns a missing helper into an
+    // apparent success; the sentinel the script also prints on stdout still says so.
+    if let Some(sentinel) = stdout_sentinel(stdout_bytes) {
+        let exit_code = if sentinel == HELPER_MISSING_SENTINEL { 127 } else { 126 };
+        return Err(map_ensure_started_error(
+            IpcError::new(IpcErrorCode::IoError, sentinel).with_details(serde_json::json!({
+                "stage": "execution",
+                "exitCode": exit_code,
+                "stderr": sentinel,
+            })),
+            location,
+        ));
+    }
+    parse_ready_output(stdout_bytes).map_err(|mut err| {
+        let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+        details["operation"] = "helper_startup_readiness".into();
+        err
+    })
 }
 
 /// Pure classification of a probe outcome: no I/O, unit-testable.
@@ -464,12 +484,30 @@ pub(crate) fn classify_probe_result(result: Result<&[u8], &IpcError>) -> HelperP
             let text = std::str::from_utf8(stdout).unwrap_or("");
             if text.contains(PROBE_READY_MARKER) {
                 HelperProbeState::Installed
+            } else if stdout_sentinel(stdout).is_some() {
+                // Reported as exit 0 by a server that drops exit status: the sentinel decides.
+                HelperProbeState::Missing
             } else {
                 HelperProbeState::Unknown
             }
         }
         Err(err) => classify_probe_error(err),
     }
+}
+
+const HELPER_MISSING_SENTINEL: &str = "FERRYX_ERR_HELPER_MISSING";
+const HELPER_NOT_EXECUTABLE_SENTINEL: &str = "FERRYX_ERR_HELPER_NOT_EXECUTABLE";
+
+/// The missing/not-executable sentinel when the helper scripts printed one on stdout. They print
+/// it there as well as on stderr because some SSH servers report every command as exit 0.
+fn stdout_sentinel(stdout: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut lines = text.lines().map(str::trim);
+    lines.find_map(|line| match line {
+        HELPER_MISSING_SENTINEL => Some(HELPER_MISSING_SENTINEL),
+        HELPER_NOT_EXECUTABLE_SENTINEL => Some(HELPER_NOT_EXECUTABLE_SENTINEL),
+        _ => None,
+    })
 }
 
 fn classify_probe_error(err: &IpcError) -> HelperProbeState {
@@ -545,14 +583,14 @@ fn probe_ready_script(environment: &RemoteEnvironment, location: &HelperLocation
     match environment.platform {
         RemotePlatform::Posix => format!(
             "exe={}; \
-             if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
-             if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
+             if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n'; printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
+             if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n'; printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
              printf 'FERRYX_HELPER_READY\\n'",
             direct::quote_posix(&location.executable)
         ),
         RemotePlatform::Windows => format!(
             "$exe = {}; \
-             if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
+             if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Out.WriteLine('FERRYX_ERR_HELPER_MISSING'); [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
              [Console]::WriteLine('FERRYX_HELPER_READY')",
             runtime::powershell_data(&location.executable)
         ),

@@ -4,6 +4,12 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 /** Emitted by the backend whenever the pending approval list changes. */
 export const BROWSER_AGENT_APPROVALS_EVENT = "browser_agent_approvals_changed";
 
+/** Emitted when an agent hands a tab to the human with an optional reason. */
+export const BROWSER_AGENT_HELP_REQUESTED_EVENT = "browser-agent:help-requested";
+
+/** Payload of {@link BROWSER_AGENT_HELP_REQUESTED_EVENT}. */
+export type HandoffRequestPayload = { browserId: string; reason?: string | null };
+
 export type GrantScope = "read" | "interact" | "eval";
 
 /** One pending consent request (backend `PendingApproval`, kind flattened in). */
@@ -53,6 +59,18 @@ export function revokeBrowserAgent(controllerId: string, origin?: string): Promi
 
 export function setBrowserAgentSettings(settings: BrowserAgentSettings): Promise<void> {
   return invoke("cmd_browser_agent_set_settings", { settings });
+}
+
+/**
+ * Takes a tab back from agents (`reclaim: true`, the lease ends) or hands it back
+ * (`false`). Neither closes nor reloads the page.
+ */
+export function reclaimBrowserAgent(browserId: string, reclaim: boolean): Promise<void> {
+  return invoke("cmd_browser_agent_reclaim", { browserId, reclaim });
+}
+
+export function onBrowserAgentHelpRequest(listener: (request: HandoffRequestPayload) => void): Promise<UnlistenFn> {
+  return listen<HandoffRequestPayload>(BROWSER_AGENT_HELP_REQUESTED_EVENT, (event) => listener(event.payload));
 }
 
 export function onBrowserAgentApprovals(listener: (pending: BrowserAgentApproval[]) => void): Promise<UnlistenFn> {

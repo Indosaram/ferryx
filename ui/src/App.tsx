@@ -1,4 +1,3 @@
-import { Bot, PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
@@ -7,6 +6,7 @@ import { useDesktopContinuity } from "./lib/useDesktopContinuity";
 import { deriveContinuitySelection } from "./lib/continuitySelection";
 
 import { CommandPalette } from "./components/CommandPalette";
+import { DesktopActivityBar } from "./components/activity/DesktopActivityBar";
 import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
@@ -33,20 +33,44 @@ import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
-import { IconButton } from "./components/ui/IconButton";
+import { cn } from "./lib/cn";
+import {
+  loadActivityMode,
+  saveActivityMode,
+  type ActivityMode,
+} from "./lib/sidebarPersistence";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { cycleAppearanceTheme, openAppearanceSurface } from "./lib/appearanceCommands";
 import { useAppearanceSettings, useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, closeBrowser, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { startInboundUrlDelivery } from "./lib/inboundUrls";
 import { printBrowser, stepBrowserZoom } from "./lib/browserSystem";
+import { browserTabNavigation } from "./lib/browserTabNavigation";
 import { useBrowserLibrarySync } from "./lib/browserLibrarySync";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
+import {
+  adoptCliBrowserSession,
+  closeBrowserSessionFromSplit,
+  detachBrowserFromWorktreeSplit,
+  focusAdoptedBrowser,
+  handleWorktreeDeletedForBrowsers,
+  openBrowserInWorktreeSplit,
+  resolveBrowserTabSwitch,
+} from "./lib/worktreeBrowserBridge";
+import { browserStore } from "./state/browserStore";
+import {
+  BROWSER_MODE_SHORTCUT_EVENT,
+  MahoBrowserMiniPane,
+  useMahoBrowserRuntime,
+  useMahoBrowserShell,
+  type BrowserModeShortcutDetail,
+} from "./components/browser/maho/MahoBrowserShell";
+import { useBrowserAgentActivity } from "./components/browser/maho/MahoAgentControl";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
@@ -73,7 +97,7 @@ import { planOrphanAdoption } from "./state/orphanAdoption";
 import { movedEverySession, planTabMove } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
-import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
+import { isMacShortcutPlatform, resolvedShortcuts, routeBrowserModeShortcut, useShortcuts } from "./lib/shortcuts";
 import { useShortcutOverrides, useShortcutPreset } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
@@ -103,6 +127,10 @@ import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
 import { buildSetupProgress } from "./lib/setupProgress";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
 import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
+import { GlobalRemoteDesktopCanvas, liveRemoteDesktopSessionCount } from "./components/remoteDesktop/GlobalRemoteDesktopCanvas";
+import { RemoteDesktopActivitySidebar } from "./components/remoteDesktop/RemoteDesktopActivitySidebar";
+import { remoteDesktopStore } from "./state/remoteDesktopStore";
+import { forwardCapturedRemoteDesktopShortcut } from "./lib/remoteDesktop";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
@@ -1127,7 +1155,7 @@ function WorkspaceApp({
     recoveredFromHmr,
     agents,
     tabActivity,
-    worktreeActivity,
+    worktreeActivity = {},
     attentionBySessionId = NO_ATTENTION,
     unreadBadgeCount: unreadBadgeCountFromStore,
     activityNotificationTargets,
@@ -1141,7 +1169,6 @@ function WorkspaceApp({
     createBrowserTab,
     openFilePreviewTab,
     openChangesTab,
-    openRemoteDesktopTab,
     adoptBrowserSession,
     adoptBackendSession,
     releaseTabsForMove,
@@ -1382,6 +1409,9 @@ function WorkspaceApp({
   // Without this the host's history recorder never learns history is on: it starts disabled, so
   // no visit is ever written and the library stays empty (audit run 42341850075).
   useBrowserLibrarySync(isNativeRuntime, reportRuntimeError);
+  // The global browser store's startup migration + live sync, the auto-archive policy and the
+  // mini link opener are app-lifetime: they belong to the store, not to the mode on screen.
+  useMahoBrowserRuntime(isNativeRuntime);
 
   useEffect(() => {
     setSshTabOperation(null);
@@ -2608,16 +2638,24 @@ function WorkspaceApp({
   // does not schedule a save only reaches disk if some unrelated change saves later.
   const persistedSessionsKey = useMemo(() => sessionPersistenceKey(state.sessions), [state.sessions]);
 
+  // Tracks workspaces that had at least one open tab in this window so closing the last tab
+  // still persists the empty layout (preventing closed SSH/local tabs from resurrecting on
+  // restart) while un-restored initial empty renders remain blocked from clobbering disk.
+  const hadTabsByWorkspaceRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     const hasTabs =
       state.layout.tabs.length > 0 ||
       Object.values(state.worktreeLayouts ?? {}).some((l) => l.tabs.length > 0);
-    if (state.worktrees.length === 0 || !hasTabs) return;
+    const owner = state.workspaceId ?? activeProject.workspaceId;
+    if (hasTabs) {
+      hadTabsByWorkspaceRef.current.add(owner);
+    }
+    if (state.worktrees.length === 0 || (!hasTabs && !hadTabsByWorkspaceRef.current.has(owner))) return;
     // On the render that switches projects, `state` still holds the outgoing
     // project's data. Saving it under the incoming id would overwrite that
     // project's persisted session, so save it under its own owner instead of
     // discarding the newest state of the project being left.
-    const owner = state.workspaceId ?? activeProject.workspaceId;
     if (owner !== activeProject.workspaceId) {
       const outgoing = projectsRef.current.find((project) => project.workspaceId === owner);
       if (outgoing) void persistSession(owner, outgoing.repoRoot, state);
@@ -2685,6 +2723,29 @@ function WorkspaceApp({
     resumeStartup: SpawnTerminalRequest["startup"] | null;
   } | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
+  // The Activity Bar's mode: the rail is always visible, so this (not the drawer width) decides what
+  // the main area shows. Persisted per window under `ferryx.activity.mode`.
+  const [activityMode, setActivityMode] = useState<ActivityMode>(loadActivityMode);
+  // Each mode's drawer remembers its own width. The Browser and Remote Desktop drawers own their
+  // resize handles; these read the same keys so their width survives that work.
+
+  // The Remote Desktop canvas shows one host at a time; the drawer and its tabs both select it.
+  const [remoteDesktopHostId, setRemoteDesktopHostId] = useState<string | null>(null);
+  const remoteDesktopSessionCount = useSyncExternalStore(
+    remoteDesktopStore.subscribe,
+    () => liveRemoteDesktopSessionCount(remoteDesktopStore.getState()),
+    () => 0,
+  );
+  const selectActivityMode = useCallback((mode: ActivityMode) => {
+    setActivityMode(mode);
+    saveActivityMode(mode);
+    // A mode with a drawer is useless with the drawer collapsed, so selecting it reveals the
+    // drawer; `Cmd+B` still collapses it afterwards without touching the rail.
+    if (!isSidebarOpen) {
+      setIsSidebarOpen(true);
+      persistSidebarOpen(true);
+    }
+  }, [isSidebarOpen]);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
@@ -2692,6 +2753,14 @@ function WorkspaceApp({
   const [historyProject, setHistoryProject] = useState<RegisteredProject | null>(null);
   // The collapsed sidebar's badge counts the Supervisor panel's decisions for the owner.
   const supervisorDecisionCount = usePanelDecisionCount();
+  // The Worktrees rail mode's badge: agents that finished or are waiting for input in any lane.
+  const worktreeAgentAttention = useMemo(
+    () => Object.values(worktreeActivity).reduce(
+      (sum, summary) => sum + (summary ? summary.waitingCount + summary.doneCount : 0),
+      0,
+    ),
+    [worktreeActivity],
+  );
   useDesktopSidebarPublisher({
     // One desktop sidebar model per app (consumed by remote clients): the primary publishes it.
     enabled: isNativeRuntime && isPrimary,
@@ -3337,31 +3406,32 @@ function WorkspaceApp({
     [isNativeRuntime, isPrimary, ownsNotificationTarget],
   );
 
+  const refuseTerminalOpen = useCallback((reason: string, message: string) => {
+    switchDebug("terminal.open.refused", { workspaceId: activeProjectRef.current.workspaceId, reason });
+    toast.warning(message);
+  }, []);
+
   const handleAddTerminalTab = useCallback((shell?: string) => {
     // Every refusal below used to return silently, so a click on "New Terminal" could do nothing
     // with no trace. Say why, and record it so a release log shows which guard fired.
-    const refuse = (reason: string, message: string) => {
-      switchDebug("terminal.open.refused", { workspaceId: activeProjectRef.current.workspaceId, reason });
-      toast.warning(message);
-    };
     if (activeRemoteHostRef.current) {
-      refuse("remote-host-active", "Terminal was not opened because a remote host is active.");
+      refuseTerminalOpen("remote-host-active", "Terminal was not opened because a remote host is active.");
       return;
     }
     if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
-      refuse("paired-features-disabled", "Terminal was not opened: paired machine features are not enabled.");
+      refuseTerminalOpen("paired-features-disabled", "Terminal was not opened: paired machine features are not enabled.");
       return;
     }
     if (
       (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
       registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
     ) {
-      refuse("project-not-registered", "Terminal was not opened: this project is still connecting.");
+      refuseTerminalOpen("project-not-registered", "Terminal was not opened: this project is still connecting.");
       return;
     }
-    const activeWt = activeWorktreeRef.current;
+    const activeWt = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
     if (!activeWt) {
-      refuse("no-active-worktree", "Terminal was not opened: no worktree is selected.");
+      refuseTerminalOpen("no-active-worktree", "Terminal was not opened: no worktree is selected.");
       return;
     }
     runTabOperation(async () => {
@@ -3370,7 +3440,7 @@ function WorkspaceApp({
       if (tabId === null) toast.warning("Terminal was not opened because the workspace changed while it was starting. Try again.");
       return tabId;
     });
-  }, [openTab, runTabOperation]);
+  }, [openTab, refuseTerminalOpen, runTabOperation]);
 
   // Starts an agent in a new tab of the given worktree of the active project, which need not be
   // the active worktree (a freshly created one is not selected yet).
@@ -3380,11 +3450,19 @@ function WorkspaceApp({
       agent: { name: string; command: string; args: string },
       options: { view?: PaneView } = {},
     ) => {
-      if (activeRemoteHostRef.current) return;
+      if (activeRemoteHostRef.current) {
+        refuseTerminalOpen("remote-host-active", "Terminal was not opened because a remote host is active.");
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+        refuseTerminalOpen("paired-features-disabled", "Terminal was not opened: paired machine features are not enabled.");
+        return;
+      }
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
         registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
       ) {
+        refuseTerminalOpen("project-not-registered", "Terminal was not opened: this project is still connecting.");
         return;
       }
       try {
@@ -3431,6 +3509,7 @@ function WorkspaceApp({
         // openTab does not own a pre-spawned backend, so a discarded tab would orphan the PTY.
         if (tabId === null) {
           await closeTerminal(backendSessionId);
+          toast.warning("Terminal was not opened because the workspace changed while it was starting. Try again.");
           return;
         }
         if (typeCommand) {
@@ -3443,16 +3522,19 @@ function WorkspaceApp({
         reportRuntimeError(error);
       }
     },
-    [openTab, reportRuntimeError],
+    [openTab, refuseTerminalOpen, reportRuntimeError],
   );
 
   const handleLaunchAgent = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
       const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
-      if (!targetWorktree) return;
+      if (!targetWorktree) {
+        refuseTerminalOpen("no-active-worktree", "Terminal was not opened: no worktree is selected.");
+        return;
+      }
       await launchAgentInWorktree(targetWorktree, agent);
     },
-    [launchAgentInWorktree],
+    [launchAgentInWorktree, refuseTerminalOpen],
   );
 
   // Chat view reads the agent's local native history, so it is offered only for local projects.
@@ -3467,16 +3549,25 @@ function WorkspaceApp({
 
   const handleNewChat = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
-      if (!chatViewAvailableRef.current) return;
+      if (!chatViewAvailableRef.current) {
+        refuseTerminalOpen("chat-unavailable", "Chat view is only available for local projects.");
+        return;
+      }
       const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
-      if (!targetWorktree) return;
+      if (!targetWorktree) {
+        refuseTerminalOpen("no-active-worktree", "Terminal was not opened: no worktree is selected.");
+        return;
+      }
       await launchAgentInWorktree(targetWorktree, agent, { view: "chat" });
     },
-    [launchAgentInWorktree],
+    [launchAgentInWorktree, refuseTerminalOpen],
   );
 
   const handleNewChatShortcut = useCallback(() => {
-    if (!chatViewAvailableRef.current) return;
+    if (!chatViewAvailableRef.current) {
+      refuseTerminalOpen("chat-unavailable", "Chat view is only available for local projects.");
+      return;
+    }
     const agent = pickChatAgent(
       chatSupportedAgents(getLaunchableAgents(resolvedAgentsRef.current)),
       loadLastChatAgentId(),
@@ -3487,7 +3578,7 @@ function WorkspaceApp({
       return;
     }
     void handleNewChat(agent);
-  }, [handleNewChat]);
+  }, [handleNewChat, refuseTerminalOpen]);
 
   // Resolves a dialog's agent choice against the agents launchable right now.
   const launchAgentByIdInWorktree = useCallback(
@@ -3953,13 +4044,17 @@ function WorkspaceApp({
     setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
+  // Settings > Remote hands one machine to Remote Desktop mode: connect it in the keep-alive store
+  // and switch the shell there instead of opening a worktree tab that would unmount on switch.
   const handleOpenRemoteDesktop = useCallback((hostId: string, label: string) => {
     if (activeRemoteHostRef.current) return;
     setIsSettingsOpen(false);
     setSettingsInitialSection(undefined);
     setSettingsRemoteContext(undefined);
-    openRemoteDesktopTab(hostId, label);
-  }, [openRemoteDesktopTab]);
+    setRemoteDesktopHostId(hostId);
+    selectActivityMode("remoteDesktop");
+    void remoteDesktopStore.connect(hostId, label);
+  }, [selectActivityMode]);
   // Settings > Remote hands one machine to Add Project; the dialog routes pairedDaemon to its form.
   const handleOpenMachineProject = useCallback((target: MachineProjectTarget) => {
     if (activeRemoteHostRef.current) return;
@@ -4353,8 +4448,8 @@ function WorkspaceApp({
   }, []);
   // The Supervisor panel is the attention surface now; the old Inbox shortcut reveals the sidebar.
   const handleRevealSupervisor = useCallback(() => {
-    if (!isSidebarOpen) toggleSidebar();
-  }, [isSidebarOpen, toggleSidebar]);
+    selectActivityMode("supervisor");
+  }, [selectActivityMode]);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
   const handleDeleteWorktree = useCallback((worktree: Worktree) => {
@@ -4367,6 +4462,8 @@ function WorkspaceApp({
         return;
       }
     }
+    // Opening the confirmation must not detach anything: cancelling has to leave every split
+    // exactly as it was. The detach runs in the dialog's onDeleted, after deletion is confirmed.
     setDeleteTarget(worktree);
   }, []);
   const handleAddBrowserTab = useCallback(
@@ -4375,9 +4472,83 @@ function WorkspaceApp({
       const task = profileId
         ? createBrowserTab(targetUrl, undefined, { profileId })
         : createBrowserTab(targetUrl);
-      void task.catch(reportRuntimeError);
+      void task.then((tabId) => {
+        if (!tabId) return;
+        // Register the new worktree browser tab in the global store with its `worktreeTag`, so
+        // Maho/Browser mode can show it and deleting the worktree only detaches it.
+        const currentState = stateRef.current;
+        const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
+        if (!tab || tab.kind !== "browser") return;
+        const worktreePath = tab.worktreePath ?? currentState.activeWorktreePath;
+        const worktree = worktreePath
+          ? currentState.worktrees.find((candidate) => candidate.path === worktreePath)
+          : undefined;
+        const identity = worktree ? worktreeIdentity(worktree) : null;
+        const workspaceId = identity?.wsId ?? worktree?.workspaceId;
+        if (!worktreePath || !workspaceId) return;
+        const worktreeLabel = identity?.slug ?? tab.worktreeLabel;
+        // A standalone browser tab has no pane leaves: the attachment names the tab itself so
+        // `resolveBrowserTabSwitch` and `detachAllForWorkspace` can still find it.
+        openBrowserInWorktreeSplit({
+          browserId: tab.browserId,
+          url: tab.url,
+          title: tab.title ?? null,
+          workspaceId,
+          worktreePath,
+          ...(worktreeLabel ? { worktreeLabel } : {}),
+          tabId,
+          leafId: "root",
+        }, browserStore);
+      }).catch(reportRuntimeError);
     },
     [createBrowserTab, reportRuntimeError],
+  );
+
+  /**
+   * Split browser `×`: Detach by default. Two steps, and no backend close:
+   *  1. drop the split reference (the live tab stays in the global store), then
+   *  2. remove the leaf from the layout so the pane actually disappears.
+   * Step 2 dispatches the reducer action directly instead of calling `closePane`, because
+   * `closePane` tears the native webview down once the last layout reference is gone - exactly
+   * what detaching must not do.
+   */
+  const handleDetachBrowserPane = useCallback(
+    (browserId: string, tabId: string, leafId: string) => {
+      detachBrowserFromWorktreeSplit(browserId, browserStore);
+      const ownerTab = stateRef.current.layout.tabs.find((tab) => tab.id === tabId);
+      if (ownerTab && isTerminalTab(ownerTab)) {
+        // The browser pane lives inside a terminal-kind tab: drop just that leaf.
+        dispatchWorkspaceAction({ type: "CLOSE_PANE", tabId, leafId });
+      } else {
+        // A standalone browser tab cannot lose one leaf (the reducer refuses), so the tab itself
+        // goes; the session survives in browserStore for Browser mode.
+        dispatchWorkspaceAction({ type: "CLOSE_TAB", tabId });
+      }
+      toast.success("Browser tab detached", { description: "It stays open in Browser mode." });
+    },
+    [dispatchWorkspaceAction],
+  );
+
+  /** Context menu "Open in Browser fullscreen": the same browserId, no reload. */
+  const handleOpenBrowserFullscreen = useCallback(
+    (browserId: string) => {
+      const tab = browserStore.getState().tabs[browserId];
+      browserStore.touch(browserId);
+      if (tab) browserStore.setActiveSpace(tab.spaceId);
+      selectActivityMode("browser");
+    },
+    [selectActivityMode],
+  );
+
+  /** Context menu "Close browser session": the only split path that destroys the session. */
+  const handleCloseBrowserSession = useCallback(
+    (browserId: string) => {
+      closeBrowserSessionFromSplit(browserId, (id) => {
+        browserTabNavigation.forget(id);
+        void closeBrowser(id).catch(reportRuntimeError);
+      }, browserStore);
+    },
+    [reportRuntimeError],
   );
 
 
@@ -4403,19 +4574,26 @@ function WorkspaceApp({
 
   const handleSplitPane = useCallback(
     (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second"; startup?: SpawnTerminalRequest["startup"]; view?: PaneView; agentType?: string }) => {
-      if (activeRemoteHostRef.current) return;
-      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
+      if (activeRemoteHostRef.current) {
+        refuseTerminalOpen("remote-host-active", "Pane was not split because a remote host is active.");
+        return;
+      }
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) {
+        refuseTerminalOpen("paired-features-disabled", "Pane was not split: paired machine features are not enabled.");
+        return;
+      }
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
         registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
       ) {
+        refuseTerminalOpen("project-not-registered", "Pane was not split: this project is still connecting.");
         return;
       }
       const pending = splitPane(tabId, leafId, direction, options);
       if (options?.startup?.kind === "agentContinue") return pending;
       void pending.catch(reportRuntimeError);
     },
-    [reportRuntimeError, splitPane],
+    [refuseTerminalOpen, reportRuntimeError, splitPane],
   );
 
   const handleSplitChat = useCallback(
@@ -4451,6 +4629,7 @@ function WorkspaceApp({
     let cancelled = false;
     void onCloseTabMenu(() => {
       if (activeRemoteHostRef.current) return;
+      if (forwardCapturedRemoteDesktopShortcut("cmdW")) return;
       handleCloseActiveSurface();
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -4655,12 +4834,20 @@ function WorkspaceApp({
         void reportBrowserAdoption(payload.browser.browserId, false, "remote-host-active").catch(reportRuntimeError);
         return;
       }
+      // The store already holds a live tab for this session (a split pane or a Maho tab), so the
+      // session is on screen even when no worktree layout tab needs to be created for it.
       const adoptedTabId = adoptBrowserSession(payload.browser, payload.workspaceId ?? undefined);
       if (!adoptedTabId) {
         toast.warning("Browser tab was not shown: session could not be adopted.");
         void reportBrowserAdoption(payload.browser.browserId, false, "adopt-failed").catch(reportRuntimeError);
         return;
       }
+      // Also adopt into the global store: Browser mode shows the same session in every Activity
+      // mode, with no layout tab and no reload. Store-only work, so the CLI ack stays inside 3s.
+      adoptCliBrowserSession(payload.browser, payload.workspaceId ?? undefined, null, browserStore);
+      // Make the adopted session the active tab of its Space, so switching to Browser mode lands
+      // on the page the CLI/agent just opened.
+      focusAdoptedBrowser(payload.browser.browserId, browserStore);
       void reportBrowserAdoption(payload.browser.browserId, true).catch(reportRuntimeError);
     }).then((cleanup) => {
       if (disposed) cleanup();
@@ -4679,20 +4866,19 @@ function WorkspaceApp({
     let unlisten: (() => void) | undefined;
     void onBrowserTabSwitch((payload) => {
       const { browserId } = payload;
-      const owner = stateRef.current.layout.tabs.find((tab) =>
-        tab.kind === "browser"
-          ? tab.browserId === browserId
-          : Object.values(stateRef.current.layout.layoutsByTabId[tab.id]?.contentsByLeafId ?? {}).some(
-              (content) =>
-                content.kind === "browser" &&
-                (content.browser?.browserId ?? content.browserId) === browserId,
-            ),
-      );
-      if (!owner) {
-        toast.warning(`Browser tab for ${browserId} is not open in this window.`);
+      const resolved = resolveBrowserTabSwitch(browserId, browserStore, stateRef.current.layout);
+      if (resolved.target === "split") {
+        handleSelectTerminalTab(resolved.tabId);
+        if (resolved.leafId) handleContinuityFocusPane(resolved.tabId, resolved.leafId);
         return;
       }
-      handleSelectTerminalTab(owner.id);
+      if (resolved.target === "browser-mode") {
+        browserStore.touch(resolved.browserId);
+        browserStore.setActiveSpace(resolved.spaceId);
+        selectActivityMode("browser");
+        return;
+      }
+      toast.warning(`Browser tab for ${browserId} is not open in this window.`);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -4701,7 +4887,7 @@ function WorkspaceApp({
       disposed = true;
       unlisten?.();
     };
-  }, [handleSelectTerminalTab, reportRuntimeError]);
+  }, [handleContinuityFocusPane, handleSelectTerminalTab, reportRuntimeError, selectActivityMode]);
 
   // Terminal links and markdown editors route through routeHttpLink, which needs a live
   // opener to reach the built-in browser; without this registration every link silently
@@ -5020,6 +5206,36 @@ function WorkspaceApp({
     reportRuntimeError,
   ]);
 
+  /**
+   * Browser mode owns the tab chords a browser user expects. Registered before `useShortcuts`
+   * (capture phase, earlier listener) so it wins the keystroke, and it prevents the default so the
+   * app dispatcher skips the same chord. Worktrees mode is untouched: the router returns null and
+   * Ctrl+Tab stays `tab.next`, Cmd+Shift+I stays Supervisor.
+   *
+   * The router only decides *which* chord fired; the surfaces that act on it (the Maho drawer's
+   * Command Bar, the Ctrl+Tab card switcher, closing the Space's active tab) live in
+   * `MahoBrowserShell`, so the action travels as the shell's DOM event rather than being
+   * re-implemented here. One handler means the key path and any other emitter cannot drift.
+   */
+  useEffect(() => {
+    if (activeRemoteHost) return;
+    const isMac = isMacShortcutPlatform();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const action = routeBrowserModeShortcut(event, activityMode, isMac);
+      if (!action) return;
+      if (event.target instanceof Element && event.target.closest("[data-shortcut-recorder]")) return;
+      event.preventDefault();
+      window.dispatchEvent(new CustomEvent<BrowserModeShortcutDetail>(BROWSER_MODE_SHORTCUT_EVENT, {
+        detail: { action },
+      }));
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [
+    activeRemoteHost,
+    activityMode,
+  ]);
   const shortcutHandlers = useMemo(
     () => {
       if (activeRemoteHost) {
@@ -5092,6 +5308,10 @@ function WorkspaceApp({
         "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
         "zoom.out": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : handleZoomOut,
         "zoom.reset": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "reset") : handleZoomReset,
+        "activity.mode1": () => selectActivityMode("supervisor"),
+        "activity.mode2": () => selectActivityMode("worktrees"),
+        "activity.mode3": () => selectActivityMode("browser"),
+        "activity.mode4": () => selectActivityMode("remoteDesktop"),
       };
     },
     [
@@ -5130,6 +5350,7 @@ function WorkspaceApp({
       handleBrowserZoom,
       reportRuntimeError,
       toggleSidebar,
+      selectActivityMode,
     ],
   );
   const { overrides: shortcutOverrides } = useShortcutOverrides();
@@ -5206,6 +5427,21 @@ function WorkspaceApp({
     (state.workspaceId !== activeProject.workspaceId || state.layout.tabs.length === 0) &&
     (sshInitializing || activeRegistrationError);
 
+  // The worktree/terminal workspace stays mounted in every mode: unmounting it would tear down
+  // PTY attachments and native surfaces, which is exactly the reload this Activity Bar exists to
+  // avoid. Browser and Remote Desktop only hide it and draw their own canvas beside it.
+  const worktreeDrawerMode = activityMode === "supervisor" || activityMode === "worktrees" ? activityMode : null;
+  const workspaceSurfaceVisible = worktreeDrawerMode !== null;
+  // Browser mode's whole surface lives in one hook: the Maho drawer, the canvas, the Command Bar
+  // and the Ctrl+Tab switcher. Splitting it this way keeps the always-mounted worktree surface
+  // exactly where it was while still giving every Browser surface one owner of its state.
+  const browserActivity = useBrowserAgentActivity();
+  const mahoBrowser = useMahoBrowserShell({
+    active: activityMode === "browser",
+    drawerOpen: isSidebarOpen,
+    activity: browserActivity,
+    onRevealBrowser: handleOpenBrowserFullscreen,
+  });
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
@@ -5232,9 +5468,28 @@ function WorkspaceApp({
       />
       <TerminalLinkActions />
       <TerminalFileLinkActions />
-      {isSidebarOpen ? (
+      <DesktopActivityBar
+        mode={activityMode}
+        onModeChange={selectActivityMode}
+        supervisorBadgeTestId="collapsed-attention-badge"
+        supervisorBadge={supervisorDecisionCount > 0 ? supervisorDecisionCount : null}
+        worktreesBadge={worktreeAgentAttention > 0 ? worktreeAgentAttention : null}
+        remoteDesktopBadge={remoteDesktopSessionCount > 0 ? remoteDesktopSessionCount : null}
+        browserBadge={browserActivity.badgeCount > 0 ? browserActivity.badgeCount : null}
+        sidebarOpen={isSidebarOpen}
+        onToggleSidebar={toggleSidebar}
+        onOpenResources={() => setIsResourcesOpen(true)}
+        onOpenSettings={handleOpenSettings}
+        isMac={isMacShortcutPlatform()}
+      />
+      {isSidebarOpen && worktreeDrawerMode ? (
         <Sidebar
           open={true}
+          widthMode={worktreeDrawerMode}
+          view={worktreeDrawerMode}
+          hideViewTabs
+          // The rail owns the traffic-light clearance.
+          isMac={false}
           projects={projects}
           activeProjectId={activeProject.workspaceId}
           registeredProjectId={registeredProjectId}
@@ -5278,37 +5533,20 @@ function WorkspaceApp({
           }
           onToggle={toggleSidebar}
         />
-      ) : (
-        <div className="relative w-0 shrink-0 overflow-visible">
-          <div className="titlebar-left-floating absolute top-0 left-0 z-20 flex h-titlebar shrink-0 items-center border-b border-r border-border bg-card px-2">
-            {isMacShortcutPlatform() ? (
-              <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" />
-            ) : null}
-            <IconButton data-shortcut="sidebar.left.toggle" label="Show sidebar" className="no-drag" size="sm" onClick={toggleSidebar}>
-              <PanelLeft className="size-3.5" />
-            </IconButton>
-            <IconButton
-              data-shortcut="notifications.toggle"
-              label={supervisorDecisionCount > 0 ? `Open supervisor (${supervisorDecisionCount})` : "Open supervisor"}
-              className="no-drag relative"
-              size="sm"
-              onClick={handleRevealSupervisor}
-            >
-              <Bot className="size-3.5" />
-              {supervisorDecisionCount > 0 ? (
-                <span
-                  data-testid="collapsed-attention-badge"
-                  className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
-                >
-                  {supervisorDecisionCount > 9 ? "9+" : supervisorDecisionCount}
-                </span>
-              ) : null}
-            </IconButton>
-          </div>
-        </div>
-      )}
+      ) : null}
+      {mahoBrowser.drawer}
+      {isSidebarOpen && activityMode === "remoteDesktop" ? (
+        <RemoteDesktopActivitySidebar activeHostId={remoteDesktopHostId} onSelectHost={setRemoteDesktopHostId} />
+      ) : null}
 
-      <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
+      <main
+        data-testid="workspace-surface"
+        hidden={!workspaceSurfaceVisible}
+        className={cn(
+          "h-full min-w-0 flex-1 flex-col overflow-hidden bg-background",
+          workspaceSurfaceVisible ? "flex" : "hidden",
+        )}
+      >
         <InsecureTransportBanner />
         <RemoteBrowserSharingIndicator
           isSharing={remoteBrowserSharingActive}
@@ -5410,6 +5648,9 @@ function WorkspaceApp({
             onDuplicateBrowserTab={handleDuplicateBrowserTab}
             onSplitPane={handleSplitPane}
             onClosePane={handleClosePane}
+            onDetachBrowserPane={handleDetachBrowserPane}
+            onOpenBrowserFullscreen={handleOpenBrowserFullscreen}
+            onCloseBrowserSession={handleCloseBrowserSession}
             onSetRatio={setPaneRatio}
             onSetGroupRatio={setTabGroupRatio}
             onEqualizePaneRun={equalizePaneRun}
@@ -5429,7 +5670,7 @@ function WorkspaceApp({
             onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
               markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
             }}
-            leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
+            leadingSpacer={0}
           />
         ) : (
           <div className="flex h-full flex-1 items-center justify-center bg-background text-xs text-muted-foreground">
@@ -5437,6 +5678,20 @@ function WorkspaceApp({
           </div>
         )}
       </main>
+      {/* The Transient Mini Pane's slot outside Browser mode: Shift+click on a terminal link peeks
+          beside the terminal, in the same right split a worktree browser pane uses. Browser mode
+          renders the mini inside its own canvas overlay instead, so one `browserId` is only ever
+          on one surface. */}
+      <MahoBrowserMiniPane visible={workspaceSurfaceVisible} />
+
+      {mahoBrowser.canvas}
+      {/* Mounted in every mode: switching to a worktree or the browser only hides the canvas, so a
+          live remote desktop session never disconnects (GAP-7). */}
+      <GlobalRemoteDesktopCanvas
+        active={activityMode === "remoteDesktop"}
+        activeHostId={remoteDesktopHostId}
+        onSelectHost={setRemoteDesktopHostId}
+      />
 
       {isCommandPaletteOpen && !activeRemoteHost ? (
         <CommandPalette
@@ -5584,6 +5839,10 @@ function WorkspaceApp({
           worktree={deleteTarget}
           onClose={handleCloseDeleteTarget}
           onDeleted={() => {
+            // The deletion is confirmed and done: only now drop this worktree's split references.
+            // The browser tabs themselves stay in the global store, so Browser mode keeps them.
+            const deletedWorkspaceId = deleteTarget ? worktreeIdentity(deleteTarget)?.wsId ?? deleteTarget.workspaceId : undefined;
+            if (deletedWorkspaceId) handleWorktreeDeletedForBrowsers(deletedWorkspaceId, browserStore);
             setWorktreeStatuses((current) => {
               const next = { ...current };
               delete next[deleteTarget.path];
@@ -5692,6 +5951,9 @@ function WorkspaceApp({
           }}
         />
       ) : null}
+      {/* Browser mode's overlay surfaces (Command Bar, Ctrl+Tab switcher). They render nothing
+          while closed, and their `role="dialog"` is what occludes the native page underneath. */}
+      {mahoBrowser.overlays}
     </div>
   );
 }

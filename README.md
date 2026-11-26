@@ -31,7 +31,7 @@ with a libghostty terminal core; no Electron. A lane supervisor is on `main` for
 
 | Platform | Package | |
 | :--- | :--- | :--- |
-| **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
+| **macOS** | arm64 DMG (Apple Silicon) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_aarch64.dmg) |
 | **Windows** | Microsoft Store (Primary) / Installer (Secondary) | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) / [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
@@ -40,7 +40,7 @@ with a libghostty terminal core; no Electron. A lane supervisor is on `main` for
 The macOS, Windows, and Linux links resolve against the latest release. Local release assembly
 stages the headless `ferryx-cli` beside the Linux AppImage and `.deb` (as
 `ferryx-cli-linux-amd64`) and, when the universal macOS CLI is present, as
-`ferryx-cli-darwin-universal`, so the one-line installer above resolves a current artifact when
+`ferryx-cli-darwin-arm64`, so the one-line installer above resolves a current artifact when
 the release publishes one and otherwise fails closed. No prebuilt `ferryx-cli` exists for Linux
 arm64; the installer exits with code 2 there and points to the source build. The installers
 check the downloaded `ferryx-cli` against the release's `SHA256SUMS` and refuse a mismatch.
@@ -279,8 +279,7 @@ bun scripts/fetch-mhc.mjs
 ```
 
 The command is idempotent: it skips a download that is already present and verified.
-`--target <triple>` fetches for another platform, and `--target universal-apple-darwin` fetches
-both macOS slices. Release builds run it automatically: `cargo tauri build` calls it from
+`--target <triple>` fetches for another platform; macOS releases use `--target aarch64-apple-darwin` only. Release builds run it automatically: `cargo tauri build` calls it from
 `beforeBuildCommand`. A dev build works without it. The hub then uses `FERRYX_HUB_MHC_BIN`
 when set, else an mhc bundled next to the running executable, else `mhc` from your PATH.
 

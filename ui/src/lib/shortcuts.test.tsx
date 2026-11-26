@@ -164,6 +164,10 @@ describe("shortcut registry", () => {
       "zoom.in",
       "zoom.out",
       "zoom.reset",
+      "activity.mode1",
+      "activity.mode2",
+      "activity.mode3",
+      "activity.mode4",
     ]);
 
     expect(shortcutLabel("tab.newTerminal", true)).toBe("⌘T");

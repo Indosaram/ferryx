@@ -34,6 +34,7 @@ export function useDagWatchLifecycle(input: Input): void {
     let unlisten: (() => void) | undefined;
     let unlistenStatus: (() => void) | undefined;
     const active = new Set<string>();
+    const keyRetryTimers = new Set<ReturnType<typeof setTimeout>>();
     const generations = new Map<string, number>();
     const pending = new Map<string, Map<string, DagRunUpdatedEvent>>();
     const observed = new Map<string, Set<string>>();
@@ -120,8 +121,11 @@ export function useDagWatchLifecycle(input: Input): void {
               : watchDagPairedProject(target.workspaceId, target.remotePath),
           })),
         ];
-        await Promise.all(requests.map(async ({ key, start }) => {
-          if (active.has(key)) return;
+        // A failed subscription is retried on its own, with backoff. Re-running the whole effect
+        // tore down every healthy remote watcher and restarted each backend loop at its 1 s
+        // floor, so one unreachable paired host kept the relay saturated with DAG attaches.
+        const subscribe = async ({ key, start }: (typeof requests)[number], attempt = 0): Promise<void> => {
+          if (disposed || active.has(key)) return;
           active.add(key);
           try {
             const result = await start();
@@ -146,9 +150,15 @@ export function useDagWatchLifecycle(input: Input): void {
           } catch (error) {
             active.delete(key);
             console.error("DAG subscription failed", key, error);
-            retry();
+            if (disposed) return;
+            const timer = setTimeout(() => {
+              keyRetryTimers.delete(timer);
+              void subscribe({ key, start }, attempt + 1);
+            }, Math.min(1500 * 2 ** attempt, 60_000));
+            keyRetryTimers.add(timer);
           }
-        }));
+        };
+        await Promise.all(requests.map((request) => subscribe(request)));
       } catch (error) {
         console.error("DAG listener registration failed", error);
         retry();
@@ -158,6 +168,8 @@ export function useDagWatchLifecycle(input: Input): void {
     return () => {
       disposed = true;
       clearTimeout(retryTimer);
+      for (const timer of keyRetryTimers) clearTimeout(timer);
+      keyRetryTimers.clear();
       if (typeof window !== "undefined") {
         window.removeEventListener(SSH_PROJECT_REGISTERED_EVENT, onSshProjectRegistered);
       }

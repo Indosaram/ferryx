@@ -1,0 +1,42 @@
+{
+  "items": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "organizationId": "00000000-0000-4000-8000-000000000002",
+      "name": "00000000-0000-4000-8000-000000000001",
+      "target": "us",
+      "runnerId": "00000000-0000-4000-8000-000000000003",
+      "sandboxClass": "container",
+      "state": "started",
+      "desiredState": "started",
+      "snapshot": "daytona-small",
+      "user": "daytona",
+      "errorReason": null,
+      "recoverable": false,
+      "public": false,
+      "networkBlockAll": false,
+      "cpu": 1,
+      "gpu": 0,
+      "spot": false,
+      "memory": 1,
+      "disk": 3,
+      "labels": {
+        "fx": "spike1"
+      },
+      "backupState": "None",
+      "autoStopInterval": 30,
+      "autoPauseInterval": 0,
+      "autoArchiveInterval": 10080,
+      "autoDeleteInterval": 60,
+      "autoDestroyAt": null,
+      "queueTimeout": null,
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "lastActivityAt": "2026-01-01T00:00:00.000Z",
+      "daemonVersion": "0.233.1",
+      "warmPoolId": null,
+      "toolboxProxyUrl": "https://proxy.app.daytona.io/toolbox"
+    }
+  ],
+  "nextCursor": null
+}

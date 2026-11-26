@@ -942,7 +942,7 @@ pub async fn list(state: State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> 
 pub async fn sidebar(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> Response {
     // The same owner permission as `panel.lanes`; other sidebar readers retain the old shape.
     let lifecycle = if super::server::agent_control_service::http_device(&state, &headers, true).is_ok() {
-        match crate::hub_runtime::lane_lifecycle("read", serde_json::Value::Null).await {
+        match crate::hub_runtime::lane_lifecycle_local("read", serde_json::Value::Null).await {
             Ok((200, model)) => Some(model),
             Ok((status, error)) => {
                 tracing::warn!(status, %error, "sidebar lifecycle read failed");

@@ -1,0 +1,1 @@
+instabox: error revoked_key: API key key_REVOKED was revoked; create an API key at https://dashboard.instabox.sh/dashboard/api-keys and send it as "Authorization: Bearer <key>" or "X-API-Key: <key>" [request req_REVOKED]

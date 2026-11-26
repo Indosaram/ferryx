@@ -117,6 +117,10 @@ pub enum Operation {
     DagStream {
         workspace_id: String,
     },
+    /// Capability probe for the forwarded RPC socket (`socket_forward_v1`). Like
+    /// [`Self::DagStream`] the stream itself is a socket, opened by
+    /// [`MachineClient::attach_socket_forward`], so the probe only reads the capability list.
+    SocketForward,
     /// Agent control on the paired host. Send/Answer/Stop are mutations and are not retried.
     /// `fence` marks a supervisor's input: it rides the send/answer/stop body and the host
     /// refuses it when stale (`STALE_SUPERVISOR_FENCE`). A person's control carries none.
@@ -139,6 +143,12 @@ pub enum Operation {
     /// report) for the holder that supervises them (`POST supervisor/observe`).
     SupervisorObserve {
         observation: serde_json::Value,
+    },
+    /// A standby desktop's lane-lifecycle operation forwarded to the supervisor lease holder
+    /// (`POST supervisor/lane-lifecycle`).
+    LaneLifecycle {
+        operation: String,
+        body: serde_json::Value,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -452,6 +462,7 @@ impl Operation {
                 | Self::CloseSession { .. }
                 | Self::SupervisorRequest { .. }
                 | Self::SupervisorObserve { .. }
+                | Self::LaneLifecycle { .. }
         )
     }
 
@@ -497,6 +508,12 @@ impl Operation {
                 path = "supervisor/observe";
                 r.capability =
                     Some(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
+            }
+            Self::LaneLifecycle { .. } => {
+                path = "supervisor/lane-lifecycle";
+                r.capability = Some(
+                    crate::remote::server::supervisor_api::SUPERVISOR_LANE_LIFECYCLE_CAPABILITY,
+                );
             }
             Self::Directories {
                 path: p,
@@ -632,6 +649,10 @@ impl Operation {
             Self::DagStream { .. } => {
                 path = "capabilities";
                 r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
+            }
+            Self::SocketForward => {
+                path = "capabilities";
+                r.capability = Some(crate::remote::cloud_socket::SOCKET_FORWARD_CAPABILITY);
             }
             Self::SupervisorFence { .. } => {
                 path = "supervisor/fence";
@@ -842,6 +863,16 @@ impl Operation {
                     serde_json::to_vec(body).map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
+            Self::LaneLifecycle { operation, body } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "operation": operation,
+                        "body": body,
+                    }))
+                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
             Self::AgentControl { op, fence } if op.is_input_mutation() => {
                 r.method = Method::POST;
                 // The request id stays off `route.request_id` so the workspace journal is not
@@ -876,6 +907,11 @@ impl Operation {
                     | Self::FileWrite { .. }
                     | Self::FileList { .. }
                     | Self::FileMkdir { .. }
+            )
+            || matches!(
+                self,
+                Self::LaneLifecycle { operation, .. }
+                    if matches!(operation.as_str(), "read" | "identities")
             );
         if r.segments
             .iter()
@@ -1112,11 +1148,34 @@ async fn record_outcome(
     }
 }
 
+/// A live authenticated socket-forward stream. Holding the lease keeps the stream bound to the
+/// generation that authorized it: a forget or re-pair cancels it.
+pub struct PairedSocketForward {
+    pub socket: super::secure_http::PairedSocket,
+    pub lease: CredentialLease,
+}
+
 /// A live authenticated DAG stream. Holding the lease keeps the stream bound to the
 /// generation that authorized it: a forget or re-pair cancels it.
 pub struct PairedDagStream {
     pub socket: super::secure_http::PairedSocket,
     pub lease: CredentialLease,
+}
+
+/// Transport route taken by a remote desktop socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDesktopRoute {
+    Direct,
+    Relay,
+}
+
+impl RemoteDesktopRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+        }
+    }
 }
 
 /// Gateway socket target of the remote desktop byte bridge.
@@ -1176,16 +1235,14 @@ impl MachineClient {
         Ok(bytes)
     }
 
-    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
-    /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
-    /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
-    /// direct attempt sends only the Authorization header.
-    pub async fn remote_desktop_stream(
+    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host and
+    /// reports whether the connection went over a direct peer link or the relay tunnel.
+    pub async fn remote_desktop_stream_with_route(
         &self,
         service: &PairedHostService,
         host_id: String,
         generation: Epoch,
-    ) -> Result<super::secure_http::PairedSocket> {
+    ) -> Result<(super::secure_http::PairedSocket, RemoteDesktopRoute)> {
         let (host, lease) = service.capture_operation(host_id, generation).await?;
         if host.grant_scope != GrantScope::Machine {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
@@ -1210,25 +1267,43 @@ impl MachineClient {
             },
             None => None,
         };
-        let socket = match direct {
-            Some(socket) => socket,
+        let (socket, route) = match direct {
+            Some(socket) => (socket, RemoteDesktopRoute::Direct),
             None => {
                 let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
                     .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-                self.open_relay_socket(
-                    &host,
-                    &lease,
-                    &relay,
-                    &segments,
-                    &[],
-                    REMOTE_DESKTOP_STREAM_TARGET,
-                    REMOTE_DESKTOP_MAX_FRAME_BYTES,
-                )
-                .await?
+                let socket = self
+                    .open_relay_socket(
+                        &host,
+                        &lease,
+                        &relay,
+                        &segments,
+                        &[],
+                        REMOTE_DESKTOP_STREAM_TARGET,
+                        REMOTE_DESKTOP_MAX_FRAME_BYTES,
+                    )
+                    .await?;
+                (socket, RemoteDesktopRoute::Relay)
             }
         };
         service
             .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok((socket, route))
+    }
+
+    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
+    /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
+    /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
+    /// direct attempt sends only the Authorization header.
+    pub async fn remote_desktop_stream(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<super::secure_http::PairedSocket> {
+        let (socket, _) = self
+            .remote_desktop_stream_with_route(service, host_id, generation)
             .await?;
         Ok(socket)
     }
@@ -1290,6 +1365,7 @@ fn gateway_path(segments: &[String], query: &[(String, String)]) -> Result<Strin
     })
 }
 
+#[derive(Clone)]
 pub struct MachineClient {
     http: reqwest::Client,
 }
@@ -1376,6 +1452,54 @@ impl MachineClient {
             direct_epoch,
             remote_pid,
         })
+    }
+
+    /// Opens an authenticated stream to the paired host's own RPC socket.
+    ///
+    /// Same shape as [`Self::attach_dag`], for the same reason: the capability probe runs
+    /// through the executor every other machine operation uses, so a host whose `machineId`
+    /// does not match the inventory record, or whose grant is not machine/control, is refused
+    /// before a socket exists. The route has no query and no client-supplied path: the host
+    /// resolves `$HOME/.ferryx-cloud/rpc.sock` itself, so there is nothing here to validate
+    /// beyond the identity the probe already proved.
+    ///
+    /// The stream rides the same end-to-end encrypted relay session as any other paired
+    /// request (`SecureTarget` with the default `Http` lifetime), so the relay carries
+    /// ciphertext and needs no change.
+    pub async fn attach_socket_forward(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<PairedSocketForward> {
+        self.execute_with_capability(
+            service,
+            OperationRequest {
+                host_id: host_id.clone(),
+                generation,
+                operation: Operation::SocketForward,
+            },
+            Some(crate::remote::cloud_socket::SOCKET_FORWARD_CAPABILITY),
+        )
+        .await?;
+
+        let (host, lease) = service.capture_operation(host_id, generation).await?;
+        let (socket, _) = self
+            .open_socket(
+                &host,
+                &lease,
+                &["api", "v1", "cloud", "socket"].map(str::to_owned),
+                &[],
+                crate::remote::cloud_socket::SOCKET_FORWARD_TARGET,
+                crate::remote::attach_crypto::MAX_ATTACH_FRAME,
+            )
+            .await?;
+        // Re-verify the generation: a forget or re-pair during the upgrade must not leave a
+        // live stream authorized by a retired credential.
+        service
+            .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok(PairedSocketForward { socket, lease })
     }
 
     /// Opens an authenticated DAG stream on the paired host.
@@ -1496,6 +1620,8 @@ impl MachineClient {
             generation: lease.generation().0,
             relay_origin: &relay_origin,
             machine_id: &host.machine_id,
+            display_label: &host.display_label,
+            ssh_host_id: host.ssh_host_id.as_deref(),
             attach,
             bearer: &bearer,
             published_origins: &host.published_origins,
@@ -1744,6 +1870,8 @@ impl MachineClient {
             generation: lease.generation().0,
             relay_origin: &relay_origin,
             machine_id: &host.machine_id,
+            display_label: &host.display_label,
+            ssh_host_id: host.ssh_host_id.as_deref(),
             attach,
             bearer: &bearer,
             published_origins: &host.published_origins,
@@ -2411,10 +2539,13 @@ fn map_result(
         // The capability probe returns this host's advertised capabilities; the stream
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),
+        Operation::SocketForward => OperationResult::Capabilities(decode(bytes)?),
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::SupervisorFence { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::Resources => OperationResult::Resources(decode(bytes)?),
-        Operation::SupervisorRequest { .. } | Operation::SupervisorObserve { .. } => {
+        Operation::SupervisorRequest { .. }
+        | Operation::SupervisorObserve { .. }
+        | Operation::LaneLifecycle { .. } => {
             OperationResult::Supervisor(decode(bytes)?)
         }
     })
@@ -2520,6 +2651,8 @@ pub async fn supervisor_secure_request(
         generation: lease.generation().0,
         relay_origin: &relay_origin,
         machine_id: &host.machine_id,
+        display_label: &host.display_label,
+        ssh_host_id: host.ssh_host_id.as_deref(),
         attach,
         bearer: &bearer,
         published_origins: &host.published_origins,

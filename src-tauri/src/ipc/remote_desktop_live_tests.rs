@@ -58,6 +58,9 @@ struct VideoFrame {
 enum Message {
     Video(VideoFrame),
     Status { state: String, reason: Option<String> },
+    Meta,
+    Audio,
+    Clipboard,
 }
 
 fn parse_message(bytes: &[u8]) -> Message {
@@ -80,6 +83,20 @@ fn parse_message(bytes: &[u8]) -> Message {
                 state: body["state"].as_str().expect("status state").to_owned(),
                 reason: body["reason"].as_str().map(str::to_owned),
             }
+        }
+        Some(&wire::FRAME_KIND_META) => {
+            let _: wire::RdSessionMeta =
+                serde_json::from_slice(&bytes[1..]).expect("meta message is JSON");
+            Message::Meta
+        }
+        Some(&wire::FRAME_KIND_AUDIO) => {
+            assert!(bytes.len() >= 7, "audio message carries header");
+            Message::Audio
+        }
+        Some(&wire::FRAME_KIND_CLIPBOARD) => {
+            let _: serde_json::Value =
+                serde_json::from_slice(&bytes[1..]).expect("clipboard message is JSON");
+            Message::Clipboard
         }
         other => panic!("unknown frame channel message kind {other:?}"),
     }
@@ -207,6 +224,7 @@ fn remote_desktop_session_streams_frames_end_to_end() {
             service: PairedHostService::open(client_dir.clone()),
             host_id: "rd-live-e2e".to_owned(),
             generation: crate::scoped_contracts::Epoch(0),
+            on_route: None,
         },
         bridge_stopped,
     ));
@@ -224,12 +242,13 @@ fn remote_desktop_session_streams_frames_end_to_end() {
         Ok(())
     });
     let stop = Arc::new(AtomicBool::new(false));
+    let runtime = Arc::new(viewer::ViewerRuntime::new("direct", channel));
     let viewer_config = viewer::ViewerConfig {
         session: session.clone(),
         pairing,
         loopback_tcp,
         loopback_udp,
-        frames: channel,
+        runtime,
         stop: Arc::clone(&stop),
         on_exit: Box::new(|| {}),
     };
@@ -258,6 +277,7 @@ fn remote_desktop_session_streams_frames_end_to_end() {
                 "ended" => panic!("session ended early: {reason:?}"),
                 _ => {}
             },
+            Message::Meta | Message::Audio | Message::Clipboard => {}
             Message::Video(frame) => {
                 assert!(connected, "video before the connected status");
                 assert!(frame.width > 0 && frame.height > 0, "empty frame size");

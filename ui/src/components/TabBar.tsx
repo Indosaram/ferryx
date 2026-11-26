@@ -262,6 +262,7 @@ export function TabBar({
     items: NativeMenuEntry[],
     position: { x: number; y: number },
     actions: Record<string, () => void>,
+    onError?: () => void,
   ) => {
     menuUnlistenRef.current?.();
     const controller = new AbortController();
@@ -271,7 +272,10 @@ export function TabBar({
       menuUnlistenRef.current = null;
       actions[id]?.();
     }, controller.signal)
-      .catch((error: unknown) => console.warn("Could not open native tab menu", error));
+      .catch((error: unknown) => {
+        console.warn("Could not open native tab menu", error);
+        onError?.();
+      });
   };
 
   const handleNewTabClick = () => {
@@ -385,7 +389,8 @@ export function TabBar({
         actions[`agent:${agent.name}`] = () => onLaunchAgent(agent);
       }
     }
-    openMenu("cmd_native_new_tab_menu", items, position, actions);
+    // Fall back to opening a terminal directly if the native popup menu cannot open, so `+` never fails silently.
+    openMenu("cmd_native_new_tab_menu", items, position, actions, () => onAdd());
   };
 
   const handleStartRename = useCallback((tab: WorkspaceTab) => {

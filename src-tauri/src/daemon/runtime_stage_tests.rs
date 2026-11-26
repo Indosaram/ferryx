@@ -623,3 +623,82 @@ fn ffmpeg_libraries_land_in_the_generation_layout() {
     ensure_ffmpeg(&windows_generation, &[dll], "windows").unwrap();
     assert!(windows_generation.join("avcodec-62.dll").is_file());
 }
+
+fn write_keeper_payload(dir: &Path, bytes: &[u8]) {
+    let keeper = dir.join("ferryx-ptykeeper");
+    write_exe(&keeper, bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&keeper, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(dir.join("keeper.json"), b"{}").unwrap();
+}
+
+#[test]
+fn keeper_payload_is_found_next_to_the_app_the_helper_and_a_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("Ferryx.app/Contents");
+    write_keeper_payload(&app.join("Resources/keeper"), b"keeper");
+    write_exe(&app.join("MacOS/ferryx"), b"gui");
+    write_exe(&app.join("Helpers/Ferryx Daemon.app/Contents/MacOS/ferryx"), b"helper");
+    // The GUI executable and the packaged daemon helper both resolve the app's payload.
+    assert_eq!(
+        keeper_payload_near(&app.join("MacOS/ferryx")).map(|dir| fs::canonicalize(dir).unwrap()),
+        Some(fs::canonicalize(app.join("Resources/keeper")).unwrap())
+    );
+    let helper = app.join("Helpers/Ferryx Daemon.app/Contents/MacOS/ferryx");
+    assert_eq!(
+        keeper_payload_near(&helper).map(|dir| fs::canonicalize(dir).unwrap()),
+        Some(fs::canonicalize(app.join("Resources/keeper")).unwrap())
+    );
+    // A staged generation's helper resolves the generation's own copy.
+    let generation = temp.path().join("runtime/1.0.0-00000001");
+    write_keeper_payload(&generation.join(KEEPER_PAYLOAD_DIR), b"staged");
+    let staged = generation.join("Ferryx Daemon.app/Contents/MacOS/ferryx");
+    write_exe(&staged, b"staged helper");
+    assert_eq!(
+        keeper_payload_near(&staged).map(|dir| fs::canonicalize(dir).unwrap()),
+        Some(fs::canonicalize(generation.join(KEEPER_PAYLOAD_DIR)).unwrap())
+    );
+    // A binary with no payload anywhere near it has none.
+    assert_eq!(keeper_payload_near(&temp.path().join("bare/ferryx")), None);
+}
+
+#[test]
+fn keeper_payload_is_copied_into_a_generation_and_never_overwritten() {
+    let temp = tempfile::tempdir().unwrap();
+    let payload = temp.path().join("app/keeper");
+    write_keeper_payload(&payload, b"keeper v1");
+    // A generation staged before the keeper was copied (the 2026.1124.1 layout).
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+
+    ensure_keeper_payload(&generation, &payload).unwrap();
+
+    let staged = generation.join(KEEPER_PAYLOAD_DIR);
+    assert_eq!(fs::read(staged.join("ferryx-ptykeeper")).unwrap(), b"keeper v1");
+    assert!(staged.join("keeper.json").is_file());
+    let mut names = dir_names(&generation);
+    names.retain(|name| name.contains(TMP_MARKER));
+    assert!(names.is_empty(), "leftover temp dirs: {names:?}");
+    // A later app's payload never replaces the generation's copy.
+    write_keeper_payload(&payload, b"keeper v2");
+    ensure_keeper_payload(&generation, &payload).unwrap();
+    assert_eq!(fs::read(staged.join("ferryx-ptykeeper")).unwrap(), b"keeper v1");
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_keeper_stays_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let payload = temp.path().join("app/keeper");
+    write_keeper_payload(&payload, b"keeper");
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+    ensure_keeper_payload(&generation, &payload).unwrap();
+    let mode = fs::metadata(generation.join(KEEPER_PAYLOAD_DIR).join("ferryx-ptykeeper"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_ne!(mode & 0o111, 0, "staged keeper lost its execute bits: {mode:o}");
+}

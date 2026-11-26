@@ -79,17 +79,29 @@ const context = (state: WorkspaceState, overrides: Partial<Parameters<typeof ass
 });
 
 describe("assessClose", () => {
-  it("requires confirmation for a tab whose shell session is still live", () => {
+  it("closes a single-pane tab with a live shell without confirmation by default", () => {
     const tab = terminalTab("tab-1", "term-1");
     const state = stateWith([tab], [session({ id: "term-1", lifecycle: "running" })], {
       layoutsByTabId: { "tab-1": leafLayout("term-1") },
     });
 
+    expect(assessClose(context(state), { kind: "tab", tabId: "tab-1" }).decision).toBe("close");
+    expect(assessClose(context(state), { kind: "pane", tabId: "tab-1", leafId: "leaf-1" }).decision).toBe("close");
+  });
+
+  it("requires confirmation when closing a whole split tab whose shell sessions are live", () => {
+    const tab = terminalTab("tab-1", "term-1");
+    const state = stateWith(
+      [tab],
+      [session({ id: "term-1", lifecycle: "running" }), session({ id: "term-2", lifecycle: "running" })],
+      { layoutsByTabId: { "tab-1": splitLayout("term-1", "term-2") } },
+    );
+
     const result = assessClose(context(state), { kind: "tab", tabId: "tab-1" });
 
     expect(result.decision).toBe("confirm");
     if (result.decision !== "confirm") throw new Error("expected confirmation");
-    expect(result.liveSessions.map((entry) => entry.id)).toEqual(["term-1"]);
+    expect(result.liveSessions.map((entry) => entry.id)).toEqual(["term-1", "term-2"]);
     expect(result.runningAgentCount).toBe(0);
     expect(result.label).toBe("label:tab-1");
     expect(result.tabCount).toBe(1);
@@ -126,14 +138,34 @@ describe("assessClose", () => {
     expect(result.liveSessions).toEqual([]);
   });
 
-  it("still confirms for a running agent whose session has no live backend id", () => {
+  it("closes a single-pane tab with a running agent without confirmation when confirmAlways is disabled", () => {
+    const tab = terminalTab("tab-1", "term-1");
+    const state = stateWith([tab], [session({ id: "term-1" })], {
+      layoutsByTabId: { "tab-1": leafLayout("term-1") },
+    });
+
+    expect(
+      assessClose(context(state, { runningSessionIds: new Set(["term-1"]) }), { kind: "tab", tabId: "tab-1" }).decision,
+    ).toBe("close");
+    expect(
+      assessClose(
+        context(state, { runningSessionIds: new Set(["term-1"]) }),
+        { kind: "pane", tabId: "tab-1", leafId: "leaf-1" },
+      ).decision,
+    ).toBe("close");
+  });
+
+  it("still confirms closing a whole split tab for a running agent whose session has no live backend id", () => {
     // A session record can lose its backend id (or never carry one in older state) while the
-    // activity map still says the agent is working. Closing must not go silent for that.
+    // activity map still says the agent is working. Closing a multi-pane tab must not go silent.
     const tab = terminalTab("tab-1", "term-1");
     const state = stateWith(
       [tab],
-      [{ cwd: "/repo", workspaceId: "ws-1", worktree: null, backendSessionId: null, lifecycle: "working", id: "term-1" } as TerminalSession],
-      { layoutsByTabId: { "tab-1": leafLayout("term-1") } },
+      [
+        { cwd: "/repo", workspaceId: "ws-1", worktree: null, backendSessionId: null, lifecycle: "working", id: "term-1" } as TerminalSession,
+        session({ id: "term-2", lifecycle: "exited" }),
+      ],
+      { layoutsByTabId: { "tab-1": splitLayout("term-1", "term-2") } },
     );
 
     const result = assessClose(
@@ -147,14 +179,14 @@ describe("assessClose", () => {
     expect(result.liveSessions).toEqual([]);
   });
 
-  it("counts running agents from the activity map", () => {
+  it("counts running agents from the activity map when confirmation is required", () => {
     const tab = terminalTab("tab-1", "term-1");
     const state = stateWith([tab], [session({ id: "term-1" })], {
       layoutsByTabId: { "tab-1": leafLayout("term-1") },
     });
 
     const result = assessClose(
-      context(state, { runningSessionIds: new Set(["term-1"]) }),
+      context(state, { confirmAlways: true, runningSessionIds: new Set(["term-1"]) }),
       { kind: "tab", tabId: "tab-1" },
     );
 

@@ -929,6 +929,24 @@ pub fn load_terminal_preferences_for(appearance: TerminalAppearance) -> Terminal
     defaults_for(TerminalPreferencesStatus::Absent, candidates.into_iter().next(), appearance)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalThemePaletteOverride {
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub foreground: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub selection_background: Option<String>,
+}
+
+fn is_valid_hex_color(value: &str) -> bool {
+    let hex = value.strip_prefix('#').unwrap_or("");
+    matches!(hex.len(), 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Local, user-set terminal preferences that take precedence over the Ghostty import.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TerminalPreferenceOverrides {
@@ -944,6 +962,7 @@ struct PreferenceCache {
     imported: Arc<TerminalPreferences>,
     overrides: TerminalPreferenceOverrides,
     appearance: TerminalAppearance,
+    theme_palette: Option<TerminalThemePaletteOverride>,
     effective: Arc<TerminalPreferences>,
 }
 
@@ -991,17 +1010,47 @@ pub fn apply_terminal_preference_overrides(
     effective
 }
 
+fn apply_theme_palette_override(
+    effective: &mut TerminalPreferences,
+    palette: Option<&TerminalThemePaletteOverride>,
+) {
+    let Some(palette) = palette else {
+        return;
+    };
+    if let Some(bg) = palette.background.as_deref().map(str::trim).filter(|v| is_valid_hex_color(v)) {
+        effective.theme.background = bg.to_string();
+        effective.theme.cursor_accent = bg.to_string();
+    }
+    if let Some(fg) = palette.foreground.as_deref().map(str::trim).filter(|v| is_valid_hex_color(v)) {
+        effective.theme.foreground = fg.to_string();
+    }
+    if let Some(cursor) = palette.cursor.as_deref().map(str::trim).filter(|v| is_valid_hex_color(v)) {
+        effective.theme.cursor = cursor.to_string();
+    }
+    if let Some(sel) = palette
+        .selection_background
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| is_valid_hex_color(v))
+    {
+        effective.theme.selection_background = sel.to_string();
+    }
+}
+
 fn rebuild_cache(
     imported: Arc<TerminalPreferences>,
     overrides: TerminalPreferenceOverrides,
     appearance: TerminalAppearance,
+    theme_palette: Option<TerminalThemePaletteOverride>,
 ) -> PreferenceCache {
-    let effective = Arc::new(apply_terminal_preference_overrides(&imported, &overrides));
+    let mut effective = apply_terminal_preference_overrides(&imported, &overrides);
+    apply_theme_palette_override(&mut effective, theme_palette.as_ref());
     PreferenceCache {
         imported,
         overrides,
         appearance,
-        effective,
+        theme_palette,
+        effective: Arc::new(effective),
     }
 }
 
@@ -1022,6 +1071,7 @@ pub fn cached_terminal_preferences() -> Arc<TerminalPreferences> {
             Arc::new(load_terminal_preferences()),
             TerminalPreferenceOverrides::default(),
             TerminalAppearance::default(),
+            None,
         )
     });
     Arc::clone(&cache.effective)
@@ -1035,6 +1085,7 @@ pub fn cached_imported_terminal_preferences() -> Arc<TerminalPreferences> {
             Arc::new(load_terminal_preferences()),
             TerminalPreferenceOverrides::default(),
             TerminalAppearance::default(),
+            None,
         )
     });
     Arc::clone(&cache.imported)
@@ -1047,11 +1098,17 @@ pub fn reload_terminal_preferences() -> Arc<TerminalPreferences> {
     let appearance = terminal_appearance();
     let imported = Arc::new(load_terminal_preferences_for(appearance));
     let mut guard = cache_guard();
-    let (overrides, appearance) = guard
+    let (overrides, appearance, theme_palette) = guard
         .as_ref()
-        .map(|cache| (cache.overrides.clone(), cache.appearance))
-        .unwrap_or((TerminalPreferenceOverrides::default(), appearance));
-    let cache = guard.insert(rebuild_cache(imported, overrides, appearance));
+        .map(|cache| {
+            (
+                cache.overrides.clone(),
+                cache.appearance,
+                cache.theme_palette.clone(),
+            )
+        })
+        .unwrap_or((TerminalPreferenceOverrides::default(), appearance, None));
+    let cache = guard.insert(rebuild_cache(imported, overrides, appearance, theme_palette));
     Arc::clone(&cache.imported)
 }
 
@@ -1060,15 +1117,39 @@ pub fn set_terminal_preference_overrides(
     overrides: TerminalPreferenceOverrides,
 ) -> Arc<TerminalPreferences> {
     let mut guard = cache_guard();
-    let (imported, appearance) = match guard.take() {
-        Some(cache) => (cache.imported, cache.appearance),
+    let (imported, appearance, theme_palette) = match guard.take() {
+        Some(cache) => (cache.imported, cache.appearance, cache.theme_palette),
         None => (
             Arc::new(load_terminal_preferences()),
             TerminalAppearance::default(),
+            None,
         ),
     };
-    let cache = guard.insert(rebuild_cache(imported, overrides, appearance));
+    let cache = guard.insert(rebuild_cache(imported, overrides, appearance, theme_palette));
     Arc::clone(&cache.effective)
+}
+
+pub fn set_terminal_theme_palette_override(
+    theme_palette: Option<TerminalThemePaletteOverride>,
+) -> bool {
+    let mut guard = cache_guard();
+    if let Some(cache) = guard.as_ref() {
+        if cache.theme_palette == theme_palette {
+            return false;
+        }
+    } else if theme_palette.is_none() {
+        return false;
+    }
+    let (imported, overrides, appearance) = match guard.take() {
+        Some(cache) => (cache.imported, cache.overrides, cache.appearance),
+        None => (
+            Arc::new(load_terminal_preferences()),
+            TerminalPreferenceOverrides::default(),
+            TerminalAppearance::default(),
+        ),
+    };
+    *guard = Some(rebuild_cache(imported, overrides, appearance, theme_palette));
+    true
 }
 
 /// Appearance the cached terminal theme currently resolves for (Dark until one is pushed).
@@ -1097,11 +1178,11 @@ pub fn set_terminal_appearance(appearance: TerminalAppearance) -> bool {
     if current == appearance {
         return false;
     }
-    let overrides = guard
+    let (overrides, theme_palette) = guard
         .as_ref()
-        .map(|cache| cache.overrides.clone())
-        .unwrap_or_default();
-    *guard = Some(rebuild_cache(imported, overrides, appearance));
+        .map(|cache| (cache.overrides.clone(), cache.theme_palette.clone()))
+        .unwrap_or((TerminalPreferenceOverrides::default(), None));
+    *guard = Some(rebuild_cache(imported, overrides, appearance, theme_palette));
     true
 }
 

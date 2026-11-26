@@ -49,7 +49,7 @@ jobs:
       - name: Build Tauri Bundle
         env:
           TAURI_SIGNING_PRIVATE_KEY: \${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: bunx @tauri-apps/cli build --target universal-apple-darwin
+        run: bunx @tauri-apps/cli build --target aarch64-apple-darwin
       - name: Verify updater layout
         run: node scripts/assert-updater-archive-layout.mjs test.tar.gz
   build-msix:

@@ -8,12 +8,14 @@
 //! dialled over that loopback origin; the same encrypted handshake runs on either socket, and an
 //! unavailable direct route simply loses the race to the relay.
 use super::{
-    attach::{attach_relay_session_with_candidates, RelayAttachedStream},
+    attach::RelayAttachedStream,
     client::ClientError,
     inventory::{HostAttach, PublishedOrigin},
     path_select::{AttachPath, CandidatePath},
+    relay_mux::{self, MuxKey, OpenChannelOutcome},
 };
 use crate::remote::attach_crypto::MAX_ATTACH_FRAME;
+use crate::remote::relay_mux::RelayMuxStream;
 use crate::remote::relay_server::SessionKind;
 use std::{
     collections::{HashMap, HashSet},
@@ -47,6 +49,7 @@ const MAX_ALLOCATION_BODY: usize = 64 * 1024;
 pub enum PairedStream {
     Net(TcpStream),
     Tunnel(DuplexStream),
+    Mux(RelayMuxStream),
 }
 /// Every paired-host WebSocket, whichever path carries it.
 pub type PairedSocket = WebSocketStream<MaybeTlsStream<PairedStream>>;
@@ -60,6 +63,7 @@ impl AsyncRead for PairedStream {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Tunnel(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Mux(stream) => Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -72,18 +76,21 @@ impl AsyncWrite for PairedStream {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Tunnel(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Mux(stream) => Pin::new(stream).poll_write(cx, buf),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_flush(cx),
             Self::Tunnel(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Mux(stream) => Pin::new(stream).poll_flush(cx),
         }
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Self::Net(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tunnel(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Mux(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
@@ -441,15 +448,13 @@ fn attach_candidates(
     candidates
 }
 
-/// What a fresh opaque session is opened with: the machine's attach keys, and the lifetime class
-/// the relay applies to the session.
 struct StreamTarget<'a> {
     attach: &'a HostAttach,
     kind: SessionKind,
+    display_label: &'a str,
+    ssh_host_id: Option<&'a str>,
 }
 
-/// Allocates an opaque session with `allocation_bearer` (device token, or an account
-/// session while redeeming a grant) and completes the attach handshake.
 async fn establish_stream(
     http: &reqwest::Client,
     host_id: Option<&str>,
@@ -459,51 +464,197 @@ async fn establish_stream(
     target: StreamTarget<'_>,
     published_origins: &[PublishedOrigin],
 ) -> Result<RelayAttachedStream, ClientError> {
-    let StreamTarget { attach, kind } = target;
+    establish_stream_with_path(
+        http,
+        host_id,
+        relay_origin,
+        allocation_bearer,
+        machine_id,
+        target,
+        published_origins,
+    )
+    .await
+    .map(|(stream, _)| stream)
+}
+
+async fn establish_stream_with_path(
+    http: &reqwest::Client,
+    host_id: Option<&str>,
+    relay_origin: &str,
+    allocation_bearer: &str,
+    machine_id: &str,
+    target: StreamTarget<'_>,
+    published_origins: &[PublishedOrigin],
+) -> Result<(RelayAttachedStream, AttachPath), ClientError> {
+    let StreamTarget {
+        attach,
+        kind,
+        display_label,
+        ssh_host_id,
+    } = target;
     let relay_origin = crate::remote::relay_client::live_relay_url(relay_origin).into_owned();
     let dir = client_attach_dir()?;
     tokio::time::timeout(ESTABLISH_TIMEOUT, async {
-        let session_id =
-            allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id, kind).await?;
-        let candidates = attach_candidates(
+        let mut candidates = attach_candidates(
             host_id,
             &relay_origin,
             machine_id,
             allocation_bearer,
             published_origins,
         );
-        // Only a candidate set with a real alternative is raced. A relay-only set must keep the
-        // original single dial under the full establishment budget: the race deadline is three
-        // seconds, far shorter than a cold relay handshake, and the session it allocates cannot be
-        // re-dialled once the losing attempt is aborted.
-        let attached = if candidates.iter().any(|c| c.path != AttachPath::Relay) {
-            attach_relay_session_with_candidates(
+        if host_id.is_some() {
+            let ssh_candidates = super::ssh_forward::candidates_for_paired(
+                machine_id,
+                ssh_host_id,
+                display_label,
+                published_origins,
+                allocation_bearer,
+            )
+            .await;
+            if !ssh_candidates.is_empty() {
+                let insert_at = candidates
+                    .iter()
+                    .position(|c| c.path == AttachPath::Relay)
+                    .unwrap_or(candidates.len());
+                candidates.splice(insert_at..insert_at, ssh_candidates);
+            }
+        }
+        let has_non_relay = candidates.iter().any(|c| c.path != AttachPath::Relay);
+        if !has_non_relay {
+            let session_id =
+                allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id, kind)
+                    .await?;
+            let attached = super::attach::attach_relay_session(
                 &relay_origin,
                 &session_id,
                 machine_id,
                 &attach.machine_attach_public_key,
                 &attach.enrollment_epoch,
                 &dir,
-                &candidates,
             )
-            .await
-        } else {
-            super::attach::attach_relay_session(
-                &relay_origin,
-                &session_id,
-                machine_id,
-                &attach.machine_attach_public_key,
-                &attach.enrollment_epoch,
-                &dir,
-            )
-            .await
-        };
-        // The origin record only matters while a session is being dialled.
-        super::path_select::release_attach_origin(&session_id);
-        attached.map_err(|error| {
-            tracing::warn!("paired host e2e attach failed: {error}");
-            ClientError::local("HOST_UNAVAILABLE")
-        })
+            .await;
+            super::path_select::release_attach_origin(&session_id);
+            let stream = attached.map_err(|error| {
+                tracing::warn!("paired host e2e attach failed: {error}");
+                ClientError::local("HOST_UNAVAILABLE")
+            })?;
+            if let Some(host_id) = host_id {
+                super::direct_route::GLOBAL_DIRECT_ROUTES
+                    .record_active_transport(host_id, AttachPath::Relay);
+            }
+            return Ok((stream, AttachPath::Relay));
+        }
+
+        for candidate in &mut candidates {
+            if candidate.path == AttachPath::Relay {
+                candidate.probe_budget = Some(ESTABLISH_TIMEOUT);
+            }
+        }
+        let identity = Arc::new(
+            crate::remote::attach_client::load_or_generate_client_attach_identity(&dir)
+                .map_err(|_| ClientError::local("INTERNAL_ERROR"))?,
+        );
+        let relay_error: Arc<Mutex<Option<ClientError>>> = Arc::new(Mutex::new(None));
+        let http_clone = http.clone();
+        let bearer_arc = Arc::new(allocation_bearer.to_owned());
+        let machine_arc = Arc::new(machine_id.to_owned());
+        let pub_key_arc = Arc::new(attach.machine_attach_public_key.clone());
+        let epoch_arc = Arc::new(attach.enrollment_epoch.clone());
+        let relay_origin_arc = Arc::new(relay_origin.clone());
+        let relay_error_bg = Arc::clone(&relay_error);
+
+        let selected = super::path_select::select_and_reuse_channel(
+            &candidates,
+            super::path_select::PATH_PROBE_DEADLINE,
+            move |candidate| {
+                let identity = Arc::clone(&identity);
+                let http = http_clone.clone();
+                let bearer = Arc::clone(&bearer_arc);
+                let machine_id = Arc::clone(&machine_arc);
+                let pub_key = Arc::clone(&pub_key_arc);
+                let epoch = Arc::clone(&epoch_arc);
+                let relay_origin = Arc::clone(&relay_origin_arc);
+                let relay_error = Arc::clone(&relay_error_bg);
+                async move {
+                    if let Some(expected) = candidate.expected_machine_id.as_deref() {
+                        if expected != machine_id.as_str() {
+                            return Err(());
+                        }
+                    }
+                    let start = std::time::Instant::now();
+                    if candidate.path == AttachPath::Relay {
+                        let session_id = match allocate_e2e_session(
+                            &http,
+                            &relay_origin,
+                            &bearer,
+                            &machine_id,
+                            kind,
+                        )
+                        .await
+                        {
+                            Ok(id) => id,
+                            Err(err) => {
+                                *relay_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(err);
+                                return Err(());
+                            }
+                        };
+                        let ws_base = relay_origin
+                            .replacen("https://", "wss://", 1)
+                            .replacen("http://", "ws://", 1);
+                        let url = format!("{}/tunnel/opaque/{session_id}", ws_base.trim_end_matches('/'));
+                        let (ws, _) = tokio_tungstenite::connect_async(url)
+                            .await
+                            .map_err(|_| ())?;
+                        let attached = crate::remote::attach_client::attach_opaque_session(
+                            ws,
+                            &identity,
+                            &pub_key,
+                            &machine_id,
+                            &session_id,
+                            &epoch,
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                        return Ok((attached, start.elapsed()));
+                    }
+                    let ws_base = candidate
+                        .base_origin
+                        .replacen("https://", "wss://", 1)
+                        .replacen("http://", "ws://", 1);
+                    let url = format!("{}/api/v1/attach", ws_base.trim_end_matches('/'));
+                    let (ws, _) = tokio_tungstenite::connect_async(url)
+                        .await
+                        .map_err(|_| ())?;
+                    let attached = crate::remote::attach_client::attach_opaque_session(
+                        ws,
+                        &identity,
+                        &pub_key,
+                        &machine_id,
+                        super::attach::DIRECT_ATTACH_SESSION_ID,
+                        &epoch,
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                    Ok((attached, start.elapsed()))
+                }
+            },
+        )
+        .await;
+
+        if let Some(winner) = selected {
+            if winner.path == AttachPath::SshForward {
+                super::ssh_forward::record_verified_origin(&winner.base_origin, machine_id);
+            }
+            if let Some(host_id) = host_id {
+                super::direct_route::GLOBAL_DIRECT_ROUTES
+                    .record_active_transport(host_id, winner.path);
+            }
+            return Ok((winner.channel, winner.path));
+        }
+        if let Some(err) = relay_error.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            return Err(err);
+        }
+        Err(ClientError::local("HOST_UNAVAILABLE"))
     })
     .await
     .map_err(|_| ClientError::local("TIMEOUT"))?
@@ -525,7 +676,12 @@ impl SecureHttpSession {
             relay_origin,
             allocation_bearer,
             machine_id,
-            StreamTarget { attach, kind: SessionKind::Http },
+            StreamTarget {
+                attach,
+                kind: SessionKind::Http,
+                display_label: "",
+                ssh_host_id: None,
+            },
             published_origins,
         )
         .await
@@ -579,6 +735,8 @@ pub struct SecureTarget<'a> {
     pub generation: u64,
     pub relay_origin: &'a str,
     pub machine_id: &'a str,
+    pub display_label: &'a str,
+    pub ssh_host_id: Option<&'a str>,
     pub attach: &'a HostAttach,
     pub bearer: &'a str,
     /// Origins the host advertised for itself, raced before the relay is preferred. Empty
@@ -603,6 +761,66 @@ fn session_slot(host_id: &str, generation: u64) -> Slot {
     )
 }
 
+async fn open_mux_channel(
+    target: &SecureTarget<'_>,
+) -> Result<OpenChannelOutcome, ClientError> {
+    let key = MuxKey {
+        host_id: target.host_id.to_owned(),
+        generation: target.generation,
+    };
+    relay_mux::open_channel_with(key, || async {
+        let (secure, path) = establish_stream_with_path(
+            target.http,
+            Some(target.host_id),
+            target.relay_origin,
+            target.bearer,
+            target.machine_id,
+            StreamTarget {
+                attach: target.attach,
+                kind: SessionKind::Http,
+                display_label: target.display_label,
+                ssh_host_id: target.ssh_host_id,
+            },
+            target.published_origins,
+        )
+        .await
+        .map_err(Err)?;
+        let mux = relay_mux::handshake_stream(secure).await.map_err(Ok)?;
+        Ok((mux, path))
+    })
+    .await
+}
+
+async fn mux_http_request(
+    stream: &mut RelayMuxStream,
+    method: &str,
+    path_and_query: &str,
+    headers: &[(&str, String)],
+    body: Option<&[u8]>,
+    limit: usize,
+) -> Result<HttpResponse, (ClientError, bool)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let bytes =
+        encode_request(method, path_and_query, headers, body).map_err(|error| (error, false))?;
+    if stream.write_all(&bytes).await.is_err() {
+        return Err((ClientError::local("HOST_UNAVAILABLE"), false));
+    }
+    let _ = stream.shutdown().await;
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        if let Some((response, _consumed)) =
+            parse_response(&buf, limit).map_err(|error| (error, true))?
+        {
+            return Ok(response);
+        }
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return Err((ClientError::local("HOST_UNAVAILABLE"), true)),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
 /// Sends one request over the host's shared encrypted session, establishing it when
 /// absent. The session is taken out of its slot while in use, so a cancelled caller drops
 /// it instead of leaving half a response behind. A reused session that turns out broken is
@@ -616,6 +834,34 @@ pub async fn shared_request(
     limit: usize,
     idempotent: bool,
 ) -> Result<HttpResponse, ClientError> {
+    if let OpenChannelOutcome::Stream {
+        mut stream, reused, ..
+    } = open_mux_channel(target).await?
+    {
+        match mux_http_request(&mut stream, method, path_and_query, headers, body, limit).await {
+            Ok(response) => return Ok(response),
+            Err((error, reached))
+                if reused && error.code == "HOST_UNAVAILABLE" && (idempotent || !reached) =>
+            {
+                relay_mux::evict_generation(target.host_id, target.generation);
+                if let OpenChannelOutcome::Stream { mut stream, .. } =
+                    open_mux_channel(target).await?
+                {
+                    return mux_http_request(
+                        &mut stream,
+                        method,
+                        path_and_query,
+                        headers,
+                        body,
+                        limit,
+                    )
+                    .await
+                    .map_err(|(err, _)| err);
+                }
+            }
+            Err((error, _)) => return Err(error),
+        }
+    }
     let slot = session_slot(target.host_id, target.generation);
     let mut guard = slot.lock().await;
     let establish = || {
@@ -669,13 +915,86 @@ pub async fn open_secure_websocket(
     config: WebSocketConfig,
 ) -> Result<PairedSocket, ClientError> {
     let invalid = || ClientError::local("INVALID_REQUEST");
+    let build_request = || -> Result<tungstenite::handshake::client::Request, ClientError> {
+        let mut request = format!("ws://localhost{path_and_query}")
+            .into_client_request()
+            .map_err(|_| invalid())?;
+        let headers = request.headers_mut();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", target.bearer)
+                .parse()
+                .map_err(|_| invalid())?,
+        );
+        headers.insert(
+            CLIENT_BUILD_HEADER,
+            CLIENT_BUILD.parse().map_err(|_| invalid())?,
+        );
+        Ok(request)
+    };
+
+    if target.session_kind != SessionKind::RemoteDesktop {
+        if let OpenChannelOutcome::Stream { stream, reused, .. } = open_mux_channel(target).await? {
+            let request = build_request()?;
+            let first = tokio::time::timeout(
+                ESTABLISH_TIMEOUT,
+                tokio_tungstenite::client_async_with_config(
+                    request,
+                    MaybeTlsStream::Plain(PairedStream::Mux(stream)),
+                    Some(config),
+                ),
+            )
+            .await;
+            match first {
+                Ok(Ok((socket, _))) => return Ok(socket),
+                Ok(Err(tungstenite::Error::Http(response))) => {
+                    tracing::warn!(status = %response.status(), "paired host mux websocket upgrade rejected");
+                    return Err(ClientError::local("HOST_UNAVAILABLE"));
+                }
+                _ if reused => {
+                    relay_mux::evict_generation(target.host_id, target.generation);
+                    if let OpenChannelOutcome::Stream { stream, .. } =
+                        open_mux_channel(target).await?
+                    {
+                        let request = build_request()?;
+                        let (socket, _) = tokio::time::timeout(
+                            ESTABLISH_TIMEOUT,
+                            tokio_tungstenite::client_async_with_config(
+                                request,
+                                MaybeTlsStream::Plain(PairedStream::Mux(stream)),
+                                Some(config),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| ClientError::local("TIMEOUT"))?
+                        .map_err(|error| {
+                            tracing::warn!("paired host mux websocket upgrade failed: {error}");
+                            ClientError::local("HOST_UNAVAILABLE")
+                        })?;
+                        return Ok(socket);
+                    }
+                }
+                Err(_) => return Err(ClientError::local("TIMEOUT")),
+                Ok(Err(error)) => {
+                    tracing::warn!("paired host mux websocket upgrade failed: {error}");
+                    return Err(ClientError::local("HOST_UNAVAILABLE"));
+                }
+            }
+        }
+    }
+
     let secure = establish_stream(
         target.http,
         Some(target.host_id),
         target.relay_origin,
         target.bearer,
         target.machine_id,
-        StreamTarget { attach: target.attach, kind: target.session_kind },
+        StreamTarget {
+            attach: target.attach,
+            kind: target.session_kind,
+            display_label: target.display_label,
+            ssh_host_id: target.ssh_host_id,
+        },
         target.published_origins,
     )
     .await?;
@@ -684,17 +1003,7 @@ pub async fn open_secure_websocket(
         // Ends when either side closes; dropping the socket closes `local`.
         let _ = crate::remote::session_transport::proxy_secure_to_gateway(secure, gateway).await;
     });
-    let mut request = format!("ws://localhost{path_and_query}")
-        .into_client_request()
-        .map_err(|_| invalid())?;
-    let headers = request.headers_mut();
-    headers.insert(
-        "authorization",
-        format!("Bearer {}", target.bearer)
-            .parse()
-            .map_err(|_| invalid())?,
-    );
-    headers.insert(CLIENT_BUILD_HEADER, CLIENT_BUILD.parse().map_err(|_| invalid())?);
+    let request = build_request()?;
     let (socket, _) = tokio::time::timeout(
         ESTABLISH_TIMEOUT,
         tokio_tungstenite::client_async_with_config(

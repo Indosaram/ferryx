@@ -358,6 +358,28 @@ async fn a_view_only_machine_device_reads_but_cannot_observe_or_pause() {
 }
 
 #[tokio::test]
+async fn lane_lifecycle_route_requires_machine_control_and_reaches_local_hub() {
+    let gateway = Gateway::start().await;
+    let view = gateway.token(DevicePermission::View, DeviceAccessScope::Mirror);
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let outsider = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let control = gateway.authorized_machine_token();
+    let payload = serde_json::json!({ "operation": "read", "body": {} }).to_string();
+
+    for token in [&view, &mirror, &outsider] {
+        let (status, _, body) =
+            gateway.post_to("/api/v1/supervisor/lane-lifecycle", token, &payload).await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+    }
+    let (status, _, body) =
+        gateway.post_to("/api/v1/supervisor/lane-lifecycle", &control, &payload).await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    gateway.stop().await;
+}
+
+#[tokio::test]
 async fn the_capability_is_absent_while_the_hub_is_closed() {
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);

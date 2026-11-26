@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { remoteHostStore } from "./state/remoteHostStore";
 import type { WorkspaceState } from "./state/workspaceStore";
@@ -340,16 +340,8 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       native.closeMenuHandler?.();
     });
 
-    // Local close goes through the close guard, which now prompts because the tab holds a live
-    // backend session (the point of this test is remote suppression, not the guard decision).
-    const closeDialog = await screen.findByRole("dialog", { name: "Close tab" });
-    expect(workspace.closePane).not.toHaveBeenCalled();
-    // Fire the click in a synchronous act and assert through waitFor: the store command is
-    // dispatched before any await, and an async act here waits on the whole App's pending
-    // work loop (live PTY subscriptions included), which never drains under jsdom.
-    act(() => {
-      fireEvent.click(within(closeDialog).getByRole("button", { name: "Close tab" }));
-    });
+    // A single remaining pane closes directly without confirmation when confirmCloseTab is off.
+    expect(screen.queryByRole("dialog", { name: "Close tab" })).toBeNull();
     await waitFor(() => {
       expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
     });
@@ -380,7 +372,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       expect(screen.getByTestId("mock-remote-host-connection")).toBeInTheDocument();
     });
 
-    // The sidebar opens on the Supervisor panel; the project tree is one tab away.
+    // The Activity Bar selects the sidebar's view; the project tree is one rail button away.
     act(() => {
       screen.getByRole("tab", { name: "Worktrees" }).click();
     });
@@ -525,5 +517,32 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
     expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
     expect(workspace.openTab).not.toHaveBeenCalled();
     expect(workspace.activateTab).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the first worktree when activeWorktreePath is stale during New Terminal", async () => {
+    const previousPath = workspace.storeState.activeWorktreePath;
+    workspace.storeState.activeWorktreePath = "/stale-deleted-worktree";
+    try {
+      render(<App />);
+      await waitFor(() => {
+        expect(native.newTerminalMenuHandler).toBeTypeOf("function");
+      });
+      workspace.openTab.mockClear();
+
+      act(() => {
+        native.newTerminalMenuHandler?.();
+      });
+
+      await waitFor(() => {
+        expect(workspace.openTab).toHaveBeenCalledWith(
+          expect.objectContaining({ path: "/local" }),
+          undefined,
+          undefined,
+          undefined,
+        );
+      });
+    } finally {
+      workspace.storeState.activeWorktreePath = previousPath;
+    }
   });
 }, 30_000);

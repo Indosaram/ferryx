@@ -164,6 +164,59 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
   );
 }
 
+export interface CloudMachineRowProps {
+  /** The catalog name the operator used; the CLI's handle for this machine. */
+  name: string;
+  /** Registry key of the provider hosting it (`e2b`, `daytona`, ...). */
+  provider: string;
+  /** Normalized lifecycle state the catalog last recorded, e.g. `ready`. */
+  state: string;
+  sandboxId: string;
+  /** How agent traffic reaches it: `ssh` (forwarded socket) or `relay`. */
+  transport?: "ssh" | "relay";
+  onDelete?: () => void;
+  deleting?: boolean;
+}
+
+export function CloudMachineRow({ name, provider, state, sandboxId, transport, onDelete, deleting }: CloudMachineRowProps) {
+  const stateClass = state === "ready" ? "text-status-success" : state === "error" ? "text-status-warning" : "text-muted-foreground";
+  return (
+    <div
+      role="listitem"
+      data-machine-id={`cloud:${name}`}
+      data-cloud-provider={provider}
+      className="flex items-start justify-between gap-2 rounded-lg border border-border bg-card/50 p-3"
+    >
+      <div className="min-w-0 space-y-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="truncate text-[13px] font-medium text-foreground">{name}</span>
+          <Badge variant="outline" className="h-4 shrink-0 px-1.5 py-0 text-[11px]" data-testid="cloud-provider-badge">{`cloud:${provider}`}</Badge>
+          <span role="status" data-code={state} className={`text-[12px] font-medium ${stateClass}`}>
+            {state}
+          </span>
+          {transport ? (
+            <span className="shrink-0 rounded border border-border/70 bg-muted/40 px-1.5 text-[11px] text-muted-foreground">{transport}</span>
+          ) : null}
+        </div>
+        <p className="truncate text-[11px] text-muted-foreground">{sandboxId}</p>
+      </div>
+      {onDelete ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          aria-label={`Delete cloud box ${name}`}
+          disabled={deleting}
+          className="h-7 shrink-0 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+          onClick={onDelete}
+        >
+          {deleting ? "Deleting..." : "Delete"}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 export interface PairedMachineRowProps extends PairedStatusInput {
   selected: boolean;
   busy: boolean;

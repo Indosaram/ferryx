@@ -27,6 +27,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "join",
     "remote",
     "file",
+    "theme",
     "api",
 ];
 
@@ -517,6 +518,18 @@ pub const CATALOG: &[Command] = &[
         output: "json",
         subcommands: &[sub!("cp", &[arg!("src", "path"), arg!("dst", "path")], &[JSON])],
         exit_codes: DAEMON_JSON_EXIT_CODES,
+    },
+    Command {
+        name: "theme",
+        summary: "Publish, select, clear, or inspect environment themes",
+        output: "text or json (--json)",
+        subcommands: &[
+            sub!("show", &[], &[JSON]),
+            sub!("set", &[opt_arg!("target", "theme-id-or-file")], &[value!("--appearance"), JSON]),
+            sub!("clear", &[], &[JSON]),
+            sub!("guide", &[], &[]),
+        ],
+        exit_codes: &[("0", "ok"), ("1", "theme error"), ("2", "usage error")],
     },
     Command {
         name: "api",

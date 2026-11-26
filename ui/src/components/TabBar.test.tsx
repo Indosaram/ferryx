@@ -987,4 +987,32 @@ describe("TabBar", () => {
       expectNoWindowsShells();
     });
   });
+
+  it("falls back to opening a terminal tab when the native new-tab popup fails", async () => {
+    const { openNativePopupMenu } = await import("../lib/nativeMenu");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.mocked(openNativePopupMenu).mockRejectedValueOnce(new Error("native popup unavailable"));
+    const onAdd = vi.fn();
+    try {
+      render(
+        <TabBar
+          groupId="group-fallback"
+          tabs={[terminalTab("tab-1", "main")]}
+          activeTabId="tab-1"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={onAdd}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(onAdd).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });

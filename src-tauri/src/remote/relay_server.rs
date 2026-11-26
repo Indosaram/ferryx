@@ -3629,7 +3629,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // Supervisor lease daemon routes (plan tasks 5 and 8). `GET supervisor/checkpoint`
             // is deliberately absent: the checkpoint carries tokens and this proxied route
             // forwards plaintext bodies, so it travels only over the paired end-to-end channel.
-            | ("POST", ["supervisor", "observe" | "move" | "release-to" | "fence"])
+            | ("POST", ["supervisor", "observe" | "move" | "release-to" | "fence" | "lane-lifecycle"])
             | ("GET", ["attach"])
     )
 }
@@ -4837,6 +4837,7 @@ fn is_downloadable_artifact(artifact: &str) -> bool {
         "ferryx-cli"
             | "ferryx-cli-linux-amd64"
             | "ferryx-cli-linux-arm64"
+            | "ferryx-cli-darwin-arm64"
             | "ferryx-cli-darwin-universal"
             | "ferryx-cli-windows-amd64.exe"
     )
@@ -6549,7 +6550,7 @@ mod tests {
         assert!(!allowed_http_route(&Method::POST, "supervisor/prs"));
         assert!(allowed_http_route(&Method::GET, "supervisor/memory"));
         assert!(allowed_http_route(&Method::POST, "supervisor/memory"));
-        for route in ["observe", "move", "release-to", "fence"] {
+        for route in ["observe", "move", "release-to", "fence", "lane-lifecycle"] {
             assert!(
                 allowed_http_route(&Method::POST, &format!("supervisor/{route}")),
                 "POST supervisor/{route} is a lease daemon route"
@@ -6582,6 +6583,7 @@ mod tests {
             (Method::GET, "supervisor/checkpoint"),
             (Method::POST, "supervisor/checkpoint"),
             (Method::GET, "supervisor/observe"),
+            (Method::GET, "supervisor/lane-lifecycle"),
             (Method::GET, "supervisor/fence"),
             (Method::POST, "supervisor/lease"),
             (Method::POST, "supervisor/move/x"),

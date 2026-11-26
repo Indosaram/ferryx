@@ -5,7 +5,7 @@ import { extractPairedHostError } from "./pairedHostInventory";
 import { bootTrace } from "./tauri";
 
 // TS mirror of src-tauri/src/paired_host/route_view.rs. The direct route's address is never sent.
-export type HostRouteState = "relay" | "attempting" | "direct" | "disconnected";
+export type HostRouteState = "relay" | "attempting" | "direct" | "ssh" | "disconnected";
 export interface HostRoute { hostId: string; state: HostRouteState }
 export interface PairedHostRouteList { supported: boolean; entries: HostRoute[] }
 export interface PairedHostRouteView { supported: boolean; entry: HostRoute | null }
@@ -31,7 +31,7 @@ function validEntry(value: unknown): value is HostRoute {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   return typeof v.hostId === "string" && v.hostId.length > 0
-    && (v.state === "relay" || v.state === "attempting" || v.state === "direct" || v.state === "disconnected");
+    && (v.state === "relay" || v.state === "attempting" || v.state === "direct" || v.state === "ssh" || v.state === "disconnected");
 }
 
 function store(entry: HostRoute): void {
@@ -110,7 +110,11 @@ export function usePairedHostRoute(hostId: string): PairedHostRouteView {
 
 /** Chip text for a paired row: the live route when the daemon reports it, else the transport. */
 export function pairedPathLabel(transport: string, route: PairedHostRouteView): string {
-  if (route.supported) return route.entry?.state === "direct" ? "Direct" : "Relay";
+  if (route.supported) {
+    if (route.entry?.state === "direct") return "Direct";
+    if (route.entry?.state === "ssh") return "SSH";
+    return "Relay";
+  }
   return transport === "relay" ? "Relay" : transport;
 }
 

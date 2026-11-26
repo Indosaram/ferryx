@@ -1,0 +1,6 @@
+{
+  "code": "UNAUTHORIZED_ERROR",
+  "message": "Unauthorized request to /v1/vms",
+  "route": "/v1/vms",
+  "reason": "Invalid API key"
+}

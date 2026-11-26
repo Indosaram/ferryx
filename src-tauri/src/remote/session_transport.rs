@@ -42,6 +42,42 @@ where
     Ok(SessionTransport::Attached(secure))
 }
 
+pub async fn serve_secure_gateway<S, G, F, Fut>(
+    mut secure: SecureStream<S>,
+    connect_gateway: F,
+) -> Result<(), AttachError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    G: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = std::io::Result<G>> + Send + 'static,
+{
+    let first = match secure.recv_frame().await {
+        Ok(frame) => frame,
+        Err(AttachError::StreamClosed) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if first.as_slice() == crate::remote::relay_mux::RELAY_MUX_HELLO {
+        secure
+            .send_frame(crate::remote::relay_mux::RELAY_MUX_HELLO_OK)
+            .await?;
+        return crate::remote::relay_mux::serve_mux(
+            secure,
+            connect_gateway,
+            crate::remote::relay_mux::RELAY_MUX_IDLE_TIMEOUT,
+        )
+        .await;
+    }
+    let mut gateway = connect_gateway()
+        .await
+        .map_err(|_| AttachError::StreamClosed)?;
+    gateway
+        .write_all(&first)
+        .await
+        .map_err(|_| AttachError::StreamClosed)?;
+    proxy_secure_to_gateway(secure, gateway).await
+}
+
 /// Carries a completed attach session to the local gateway: frames arriving from the
 /// peer are written to `gateway`, and bytes read from `gateway` are sent back as frames.
 /// Nothing is interpreted on the way through, so the gateway only ever sees plaintext.

@@ -3,7 +3,7 @@
 // which supervised restart can run keeper-less.
 //
 // The keeper binary is built from its own workspace (`crates/ferryx-ptykeeper`, which declares an
-// empty `[workspace]` so it never joins the app's), lipo'd once, and placed inside the app bundle
+// empty `[workspace]` so it never joins the app's), staged as arm64, and placed inside the app bundle
 // at `Contents/Resources/keeper/`. It is copied in by the release scripts rather than declared in
 // `tauri.conf.json`'s `bundle.resources` on purpose: a missing resource path makes every
 // developer `tauri build` fail, which would force a keeper compile before any app could bundle.
@@ -131,7 +131,7 @@ export function keeperProtocol(sourceDir) {
 }
 
 /**
- * Builds the keeper for each target triple, lipo's the result into `destDir`, and writes
+ * Builds the keeper for the target triple, copies the result into `destDir`, and writes
  * `keeper.json`.
  *
  * Each triple is a separate `cargo build` of the keeper's own workspace. `--target-dir` points at
@@ -184,7 +184,7 @@ export function buildKeeperUniversal({
 /**
  * Places `slices` (one per architecture) at `destDir/ferryx-ptykeeper` and records `keeper.json`.
  *
- * One slice is a plain copy; several are `lipo`'d into the universal binary the app bundle ships.
+ * Exactly one slice is staged; multi-architecture payloads are rejected.
  * The digest is taken from the final file, not from a slice, so it describes the bytes that are
  * installed into `~/.ferryx/keeper/<version>/`.
  */
@@ -195,11 +195,10 @@ export function stageKeeper({ destDir, slices, version, crateVersion, protocol, 
   requireGenerationVersion(version);
   mkdirSync(destDir, { recursive: true });
   const binary = join(destDir, KEEPER_BINARY_NAME);
-  if (slices.length === 1) {
-    copyFileSync(slices[0], binary);
-  } else {
-    exec("lipo", ["-create", ...slices, "-output", binary], { stdio: "pipe" });
+  if (slices.length !== 1) {
+    throw new KeeperBundleError("KEEPER_MULTIPLE_SLICES", "expected exactly one keeper slice");
   }
+  copyFileSync(slices[0], binary);
   chmodSync(binary, 0o755);
   const bytes = readFileSync(binary);
   const manifest = {

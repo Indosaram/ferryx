@@ -94,6 +94,8 @@ pub mod system_resources;
 pub mod terminal;
 #[cfg(feature = "desktop")]
 pub mod terminal_grid;
+#[cfg(feature = "desktop")]
+pub mod theme;
 #[cfg(test)]
 pub mod pane_liveness_contract;
 #[cfg(feature = "desktop")]
@@ -163,6 +165,8 @@ pub use session::*;
 pub use terminal::*;
 #[cfg(feature = "desktop")]
 pub use terminal_grid::*;
+#[cfg(feature = "desktop")]
+pub use theme::*;
 pub use worktree::*;
 #[cfg(feature = "desktop")]
 pub use worktree_disk::*;

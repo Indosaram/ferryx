@@ -1,0 +1,9 @@
+Host cs.ghastly-troll-vqw6w44vr4gcprw5.main
+	User vscode
+	ProxyCommand /opt/homebrew/bin/gh cs ssh -c ghastly-troll-vqw6w44vr4gcprw5 --stdio -- -i /Users/indo/.ssh/codespaces.auto
+	UserKnownHostsFile=/dev/null
+	StrictHostKeyChecking no
+	LogLevel quiet
+	ControlMaster auto
+	IdentityFile /Users/indo/.ssh/codespaces.auto
+

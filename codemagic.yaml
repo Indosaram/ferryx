@@ -1,6 +1,12 @@
 # Manual-trigger only: the free 500 macOS M2 minutes are shared with noveling, so no
-# push-triggered job. Releases stay local per docs/releases/LOCAL_RELEASE_RUNBOOK.md;
-# this workflow only gates, it never signs or publishes.
+# push-triggered job runs here. Signing, notarization, and release publication stay local
+# per docs/releases/LOCAL_RELEASE_RUNBOOK.md:
+#   - `macos-gate` runs clippy + unit tests on real Apple Silicon macOS.
+#   - `macos-app` compiles an unsigned aarch64-apple-darwin Ferryx.app + keeper + FFmpeg
+#     payload + dSYM archive as downloadable Codemagic artifacts, ready for local signing
+#     and notarization with:
+#       bun scripts/build-notarized-local.mjs --finalize-only <Ferryx.app> --ffmpeg-payload <ffmpeg-payload>
+#       bun scripts/install-macos-app.mjs <Ferryx.app>
 workflows:
   macos-gate:
     name: macOS gate (clippy + test --lib)
@@ -98,3 +104,146 @@ workflows:
     artifacts:
       - clippy.log
       - test_lib.log
+
+  macos-app:
+    name: macOS arm64 App (unsigned for local finalize)
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      vars:
+        CARGO_INCREMENTAL: "0"
+        CARGO_TERM_COLOR: always
+        CARGO_PROFILE_RELEASE_STRIP: none
+        CARGO_PROFILE_RELEASE_DEBUG: "1"
+        FERRYX_FFMPEG_OPENH264: "0"
+        # Pinned by src-tauri/build_ghostty.rs; any other version fails the build.
+        ZIG_VERSION: "0.17.0"
+        TARGET_TRIPLE: aarch64-apple-darwin
+    cache:
+      cache_paths:
+        - $HOME/.cargo
+        - $HOME/.bun/install/cache
+    triggering:
+      events: []
+    scripts:
+      - name: Fetch git submodules
+        script: |
+          set -euo pipefail
+          git submodule update --init --recursive --depth 1
+          git submodule status | head -5
+
+      - name: Install toolchain
+        script: |
+          set -euo pipefail
+          curl -fsSL https://bun.sh/install | bash
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun --version
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+            --profile minimal --default-toolchain stable --target "$TARGET_TRIPLE"
+          . "$HOME/.cargo/env"
+          rustc --version
+          cargo --version
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VERSION}.tar.xz" \
+            | tar -xJ -C "$HOME"
+          ln -sf "$HOME/zig-aarch64-macos-${ZIG_VERSION}/zig" /usr/local/bin/zig 2>/dev/null \
+            || sudo ln -sf "$HOME/zig-aarch64-macos-${ZIG_VERSION}/zig" /usr/local/bin/zig
+          echo "ZIG=$HOME/zig-aarch64-macos-${ZIG_VERSION}/zig" >> "$CM_ENV"
+          echo "PATH=$HOME/zig-aarch64-macos-${ZIG_VERSION}:$HOME/.bun/bin:$HOME/.cargo/bin:$PATH" >> "$CM_ENV"
+          "$HOME/zig-aarch64-macos-${ZIG_VERSION}/zig" version
+
+      - name: Install JS deps, mhc, and LGPL FFmpeg 9 (arm64)
+        script: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun install --cwd ui --frozen-lockfile
+          bun scripts/fetch-mhc.mjs --target "$TARGET_TRIPLE" --prune
+          bun scripts/fetch-ffmpeg.mjs --target "$TARGET_TRIPLE"
+          bun scripts/stage-ffmpeg.mjs --target "$TARGET_TRIPLE" --prefix src-tauri/resources/ffmpeg/sdk --prune
+          bun scripts/stage-ffmpeg.mjs --target "$TARGET_TRIPLE" --check
+
+      - name: Build unsigned arm64 Ferryx.app
+        script: |
+          set -euo pipefail
+          ulimit -n 65536
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          unset APPLE_SIGNING_IDENTITY TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          cat > /tmp/fx-cm-unsigned-overlay.json <<'EOF'
+          {"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":null}}}
+          EOF
+          bun --bun ./node_modules/.bin/tauri build --target "$TARGET_TRIPLE" --bundles app -c /tmp/fx-cm-unsigned-overlay.json
+          rm -f /tmp/fx-cm-unsigned-overlay.json
+          APP="$CM_BUILD_DIR/src-tauri/target/$TARGET_TRIPLE/release/bundle/macos/Ferryx.app"
+          test -d "$APP"
+          echo "BUILT_VERSION=$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
+          ARCHS=$(lipo -archs "$APP/Contents/MacOS/ferryx")
+          echo "BUILT_ARCHS=$ARCHS"
+          test "$ARCHS" = "arm64"
+
+      - name: Install keeper, verify dSYM gate, and package artifacts
+        script: |
+          set -euo pipefail
+          bun -e '
+            import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+            import { join } from "node:path";
+            import { buildKeeperUniversal, installKeeperIntoApp, assertKeeperInApp, keeperExpectations } from "./scripts/lib/keeper-bundle.mjs";
+            import { writeKeeperRollbackManifest, assertKeeperRollbackManifest } from "./scripts/lib/keeper-rollback-manifest.mjs";
+            import { produceDsymFromSlices, strippedForShipping, assertDsymGate, isFile } from "./scripts/lib/release-dsym.mjs";
+
+            const src = process.cwd();
+            const triple = process.env.TARGET_TRIPLE || "aarch64-apple-darwin";
+            const targetDir = join(src, "src-tauri", "target");
+            const builtAppBundle = join(targetDir, triple, "release", "bundle", "macos", "Ferryx.app");
+            const builtAppBin = join(targetDir, triple, "release", "ferryx");
+            const appVersion = JSON.parse(readFileSync(join(src, "src-tauri", "tauri.conf.json"), "utf8")).version;
+
+            const outRoot = join(src, "dist-codemagic");
+            const stageDir = join(outRoot, "stage");
+            const appPath = join(stageDir, "Ferryx.app");
+            const ffmpegDst = join(stageDir, "ffmpeg-payload");
+            const keeperDir = join(outRoot, "keeper-arm");
+            const dsymDir = join(outRoot, "dsyms");
+
+            rmSync(outRoot, { recursive: true, force: true });
+            mkdirSync(ffmpegDst, { recursive: true });
+            mkdirSync(dsymDir, { recursive: true });
+            cpSync(builtAppBundle, appPath, { recursive: true, verbatimSymlinks: true });
+            cpSync(join(src, "src-tauri", "resources", "ffmpeg", "payload", triple), ffmpegDst, { recursive: true, verbatimSymlinks: true });
+
+            const env = { ...process.env, CARGO_PROFILE_RELEASE_STRIP: "none", CARGO_PROFILE_RELEASE_DEBUG: "1" };
+            buildKeeperUniversal({ sourceDir: src, targetDir, destDir: keeperDir, triples: [triple], appVersion, env });
+            const keeperResourceDir = installKeeperIntoApp({ appPath, stagedDir: keeperDir });
+            const keeper = assertKeeperInApp({ appPath, ...keeperExpectations({ sourceDir: src, appVersion }) });
+            writeKeeperRollbackManifest({ appPath, appVersion, sourceDir: src });
+            assertKeeperRollbackManifest({ appPath, appVersion, sourceDir: src });
+
+            const shippedBinary = join(appPath, "Contents", "MacOS", "ferryx");
+            const keeperBinary = join(keeperResourceDir, "ferryx-ptykeeper");
+            const keeperSlice = join(targetDir, triple, "release", "ferryx-ptykeeper");
+            produceDsymFromSlices({ slices: isFile(builtAppBin) ? [builtAppBin] : [shippedBinary], outPath: join(dsymDir, "ferryx.dSYM") });
+            produceDsymFromSlices({ slices: isFile(keeperSlice) ? [keeperSlice] : [keeperBinary], outPath: join(dsymDir, "ferryx-ptykeeper.dSYM") });
+            strippedForShipping(shippedBinary);
+            const appGate = assertDsymGate({ binaryPath: shippedBinary, dsymDir });
+            strippedForShipping(keeperBinary);
+            const keeperGate = assertDsymGate({ binaryPath: keeperBinary, dsymDir });
+
+            const meta = {
+              version: appVersion,
+              commit: process.env.CM_COMMIT || "",
+              branch: process.env.CM_BRANCH || "",
+              target: triple,
+              keeperVersion: keeper.manifest.version,
+              appUuids: appGate.binaryUuids,
+              keeperUuids: keeperGate.binaryUuids,
+              finalizeCommand: "bun scripts/build-notarized-local.mjs --finalize-only <stage>/Ferryx.app --ffmpeg-payload <stage>/ffmpeg-payload",
+            };
+            writeFileSync(join(outRoot, "build-meta.json"), JSON.stringify(meta, null, 2) + "\n");
+            console.log("CODEMAGIC_STAGE_OK", JSON.stringify(meta));
+          '
+          COPYFILE_DISABLE=1 tar --no-xattrs -czf dist-codemagic/ferryx-macos-arm64-unsigned.tar.gz -C dist-codemagic/stage .
+          COPYFILE_DISABLE=1 tar --no-xattrs -czf dist-codemagic/Ferryx-arm64.dSYM.tar.gz -C dist-codemagic/dsyms .
+          ls -lh dist-codemagic/ferryx-macos-arm64-unsigned.tar.gz dist-codemagic/Ferryx-arm64.dSYM.tar.gz dist-codemagic/build-meta.json
+
+    artifacts:
+      - dist-codemagic/ferryx-macos-arm64-unsigned.tar.gz
+      - dist-codemagic/Ferryx-arm64.dSYM.tar.gz
+      - dist-codemagic/build-meta.json

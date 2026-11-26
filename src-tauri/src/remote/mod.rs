@@ -12,6 +12,7 @@ pub mod browser_backend;
 pub mod browser_protocol;
 pub mod browser_security;
 pub mod browser_ws;
+pub mod cloud_socket;
 pub mod dag_api;
 pub mod direct_api;
 pub mod direct_lease;
@@ -26,6 +27,7 @@ pub mod protocol;
 pub mod push;
 pub mod reference_chat;
 pub mod relay_client;
+pub mod relay_mux;
 pub mod sealed_offer;
 pub mod security_settings;
 pub mod session_transport;
@@ -40,6 +42,7 @@ pub(crate) mod session_api;
 mod ssh;
 pub mod state;
 pub mod terminal_wire;
+pub(crate) mod theme_api;
 pub mod workspace_api;
 pub mod workspace_catalog;
 
@@ -115,6 +118,12 @@ pub(crate) mod machine_grant_admission_tests;
 #[cfg(test)]
 #[path = "machine_dag_paired_tests.rs"]
 mod machine_dag_paired_tests;
+
+// The relay socket-forward stream: proves bytes round-trip to the host's RPC socket over an
+// end-to-end encrypted relay session, and that the plaintext ticket path stays refused.
+#[cfg(all(test, unix))]
+#[path = "cloud_socket_forward_tests.rs"]
+mod cloud_socket_forward_tests;
 
 #[cfg(test)]
 mod browser_protocol_tests;

@@ -1,0 +1,13 @@
+{
+  "templateID": "base",
+  "sandboxID": "ijbv0q9onfnyqm60c1doo",
+  "clientID": "d5a1f0c1",
+  "startedAt": "2026-11-21T09:30:00.000000000Z",
+  "endAt": "2026-11-21T10:30:00.000000000Z",
+  "state": "paused",
+  "envdVersion": "0.2.9",
+  "cpuCount": 2,
+  "memoryMB": 1024,
+  "diskSizeMB": 5120,
+  "domain": "e2b.app"
+}

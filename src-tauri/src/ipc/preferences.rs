@@ -18,8 +18,8 @@ use crate::native_terminal::surface_host::{
 };
 use crate::terminal::{
     cached_terminal_preferences, reload_terminal_preferences, set_terminal_appearance,
-    set_terminal_preference_overrides, TerminalAppearance, TerminalPreferenceOverrides,
-    TerminalPreferences,
+    set_terminal_preference_overrides, set_terminal_theme_palette_override, TerminalAppearance,
+    TerminalPreferenceOverrides, TerminalPreferences, TerminalThemePaletteOverride,
 };
 
 /// Local terminal overrides from the settings UI, where `null` means "follow Ghostty".
@@ -252,6 +252,43 @@ pub async fn cmd_terminal_set_appearance(
     appearance: TerminalAppearance,
 ) -> Result<TerminalPreferences, IpcError> {
     push_terminal_appearance(appearance)
+        .await
+        .map(|(_, effective)| effective)
+}
+
+async fn push_terminal_theme_palette(
+    palette: Option<TerminalThemePaletteOverride>,
+) -> Result<(bool, TerminalPreferences), IpcError> {
+    run_blocking(move || {
+        let changed = set_terminal_theme_palette_override(palette);
+        Ok((changed, cached_terminal_preferences().as_ref().clone()))
+    })
+    .await
+}
+
+#[cfg(feature = "native-terminal")]
+#[tauri::command]
+pub async fn cmd_terminal_set_theme_palette<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    palette: Option<TerminalThemePaletteOverride>,
+) -> Result<TerminalPreferences, IpcError> {
+    let (changed, effective) = push_terminal_theme_palette(palette).await?;
+    if changed {
+        rerender_native_sessions(&app, daemon_client.inner(), state.inner()).await?;
+        #[cfg(target_os = "macos")]
+        refresh_window_background(&app)?;
+    }
+    Ok(effective)
+}
+
+#[cfg(not(feature = "native-terminal"))]
+#[tauri::command]
+pub async fn cmd_terminal_set_theme_palette(
+    palette: Option<TerminalThemePaletteOverride>,
+) -> Result<TerminalPreferences, IpcError> {
+    push_terminal_theme_palette(palette)
         .await
         .map(|(_, effective)| effective)
 }
