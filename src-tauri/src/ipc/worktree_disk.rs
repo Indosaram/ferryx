@@ -63,12 +63,23 @@ impl WorktreeDiskScans {
                 "Disk scan cancelled",
             ));
         }
-        scan.current.rows.retain(|row| row.worktree.path != path);
+        let mut removed = false;
+        scan.current.rows.retain(|row| {
+            let keep = row.worktree.path != path;
+            removed |= !keep;
+            keep
+        });
         if let Some(completed) = &mut scan.completed {
-            completed.rows.retain(|row| row.worktree.path != path);
+            completed.rows.retain(|row| {
+                let keep = row.worktree.path != path;
+                removed |= !keep;
+                keep
+            });
         }
         if was_running {
             Some(scan.current.clone())
+        } else if removed {
+            scan.completed.clone().or_else(|| Some(scan.current.clone()))
         } else {
             None
         }
@@ -279,4 +290,110 @@ pub async fn cmd_worktree_disk_scan_result(
 ) -> Result<Option<DiskScanSnapshot>, IpcError> {
     require_local(&workspace_id)?;
     Ok(scans.result(&workspace_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn row(path: &str) -> WorktreeDiskRow {
+        WorktreeDiskRow {
+            worktree: crate::worktree::Worktree {
+                path: path.into(),
+                head: "abc123".into(),
+                branch: None,
+                bare: false,
+                detached: true,
+                locked: None,
+                prunable: None,
+            },
+            size_bytes: Some(42),
+            last_commit_at: None,
+            is_dirty: Some(false),
+            dirty_files: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn completed_scan(scans: &WorktreeDiskScans) -> DiskScanSnapshot {
+        let (started, _) = scans.begin("ws", false);
+        scans
+            .finish("ws", &started.scan_id, Ok(vec![row("deleted"), row("kept")]))
+            .unwrap()
+    }
+
+    #[test]
+    fn remove_deleted_returns_updated_completed_snapshot_and_reuse_cache() {
+        let scans = WorktreeDiskScans::default();
+        let completed = completed_scan(&scans);
+        let updated = scans.remove_deleted("ws", Path::new("deleted")).unwrap();
+        assert_eq!(updated.status, DiskScanStatus::Completed);
+        assert_eq!(updated.scan_id, completed.scan_id);
+        assert_eq!(updated.rows.len(), 1);
+        assert_eq!(updated.rows[0].worktree.path, Path::new("kept"));
+        let current = scans.result("ws").unwrap();
+        assert_eq!(current.rows.len(), 1);
+        assert_eq!(current.rows[0].worktree.path, Path::new("kept"));
+        let (reused, worker) = scans.begin("ws", false);
+        assert!(worker.is_none());
+        assert_eq!(reused.rows.len(), 1);
+        assert_eq!(reused.rows[0].worktree.path, Path::new("kept"));
+        assert!(scans.remove_deleted("ws", Path::new("deleted")).is_none());
+    }
+
+    #[test]
+    fn remove_deleted_returns_none_for_nonmatching_completed_paths() {
+        let scans = WorktreeDiskScans::default();
+        completed_scan(&scans);
+        assert!(scans.remove_deleted("ws", Path::new("missing")).is_none());
+        assert!(scans.remove_deleted("unknown", Path::new("deleted")).is_none());
+        assert_eq!(scans.result("ws").unwrap().rows.len(), 2);
+        let (reused, worker) = scans.begin("ws", false);
+        assert!(worker.is_none());
+        assert_eq!(reused.rows.len(), 2);
+    }
+
+    #[test]
+    fn remove_deleted_cancels_running_scan_and_rejects_stale_completion() {
+        let scans = WorktreeDiskScans::default();
+        completed_scan(&scans);
+        let (running, worker) = scans.begin("ws", true);
+        let updated = scans.remove_deleted("ws", Path::new("deleted")).unwrap();
+        assert_eq!(updated.status, DiskScanStatus::Cancelled);
+        assert!(updated.progress.current_path.is_none());
+        assert_eq!(updated.error.unwrap().code, IpcErrorCode::ScanCancelled);
+        assert!(worker.unwrap().load(Ordering::Acquire));
+        assert!(scans.finish("ws", &running.scan_id, Ok(vec![row("deleted")])).is_none());
+        let (reused, worker) = scans.begin("ws", false);
+        assert!(worker.is_none());
+        assert_eq!(reused.status, DiskScanStatus::Completed);
+        assert_eq!(reused.rows.len(), 1);
+        assert_eq!(reused.rows[0].worktree.path, Path::new("kept"));
+    }
+
+    #[test]
+    fn remove_deleted_returns_completed_cache_after_failed_refresh() {
+        let scans = WorktreeDiskScans::default();
+        let completed = completed_scan(&scans);
+        let (refresh, _) = scans.begin("ws", true);
+        scans.finish("ws", &refresh.scan_id, Err(IpcError::internal("scan failed"))).unwrap();
+        let updated = scans.remove_deleted("ws", Path::new("deleted")).unwrap();
+        assert_eq!(updated.status, DiskScanStatus::Completed);
+        assert_eq!(updated.scan_id, completed.scan_id);
+        assert_eq!(updated.rows.len(), 1);
+        assert_eq!(updated.rows[0].worktree.path, Path::new("kept"));
+        assert_eq!(scans.result("ws").unwrap().status, DiskScanStatus::Failed);
+    }
+
+    #[test]
+    fn remove_deleted_returns_current_when_completed_cache_is_absent() {
+        let scans = WorktreeDiskScans::default();
+        completed_scan(&scans);
+        scans.0.lock().get_mut("ws").unwrap().completed = None;
+        let updated = scans.remove_deleted("ws", Path::new("deleted")).unwrap();
+        assert_eq!(updated.status, DiskScanStatus::Completed);
+        assert_eq!(updated.rows.len(), 1);
+        assert_eq!(updated.rows[0].worktree.path, Path::new("kept"));
+    }
 }

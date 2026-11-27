@@ -37,7 +37,9 @@ function isPairedProject(project: ParkedRemoteProject): boolean {
  */
 export function startParkedRemoteRecovery(options: ParkedRemoteRecoveryOptions): () => void {
   const sshStops = new Map<string, () => void>();
-  const pairedDisposers: Array<() => void> = [];
+  const pairedDisposers = new Map<string, Array<() => void>>();
+  const disposedWorkspaces = new Set<string>();
+  let stopped = false;
 
   for (const project of options.projects) {
     const { workspaceId } = project;
@@ -57,7 +59,10 @@ export function startParkedRemoteRecovery(options: ParkedRemoteRecoveryOptions):
       if (!session.backendSessionId || isStandbyBackendSessionId(session.backendSessionId)) continue;
       if (session.lifecycle === "exited") continue;
       if (session.remoteConnectionState !== "reconnecting" && session.remoteConnectionState !== "disconnected") continue;
-      pairedDisposers.push(options.refreshPaired(workspaceId, session.id, (ready) => {
+      const disposers = pairedDisposers.get(workspaceId) ?? [];
+      pairedDisposers.set(workspaceId, disposers);
+      disposers.push(options.refreshPaired(workspaceId, session.id, (ready) => {
+        if (stopped || disposedWorkspaces.has(workspaceId) || options.isMounted(workspaceId)) return;
         const current = options.getState(workspaceId);
         if (!current?.sessions[session.id]) return;
         options.dispatch(workspaceId, {
@@ -69,6 +74,12 @@ export function startParkedRemoteRecovery(options: ParkedRemoteRecoveryOptions):
   }
 
   const unsubscribe = options.subscribe(() => {
+    for (const [workspaceId, disposers] of pairedDisposers) {
+      if (!options.isMounted(workspaceId)) continue;
+      disposedWorkspaces.add(workspaceId);
+      pairedDisposers.delete(workspaceId);
+      for (const dispose of disposers) dispose();
+    }
     for (const [workspaceId, stop] of sshStops) {
       if (!options.isMounted(workspaceId)) continue;
       stop();
@@ -77,9 +88,13 @@ export function startParkedRemoteRecovery(options: ParkedRemoteRecoveryOptions):
   });
 
   return () => {
+    if (stopped) return;
+    stopped = true;
     unsubscribe();
-    for (const dispose of pairedDisposers) dispose();
-    pairedDisposers.length = 0;
+    for (const disposers of pairedDisposers.values()) {
+      for (const dispose of disposers) dispose();
+    }
+    pairedDisposers.clear();
     for (const stop of sshStops.values()) stop();
     sshStops.clear();
   };

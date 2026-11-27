@@ -252,9 +252,16 @@ export function filterSidebarModel(model: SidebarModel, query: string) {
   );
 }
 
+export function worktreeActivityKey(workspaceId: string, path: string): string {
+  return `${workspaceId}\0${path}`;
+}
+
 export type SidebarLiveSignals = {
   readonly activityByWorktreePath?: Readonly<Record<string, ActivitySummary | undefined>>;
+  /** Workspace-scoped activity keyed by `worktreeActivityKey(workspaceId, path)`. Prevents cross-machine path collisions and enables paired (`daemon:`) rows. */
+  readonly activityByWorktreeKey?: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths?: Readonly<Record<string, boolean>>;
+  readonly unreadWorktreeKeys?: Readonly<Record<string, boolean>>;
   readonly agentStateByPath?: Readonly<Record<string, AgentState | undefined>>;
   readonly activeWorkspaceId?: string;
   readonly activePath?: string;
@@ -275,9 +282,32 @@ export type SidebarLive = {
 
 const isPairedNode = (node: { readonly workspaceId?: string | undefined }) => Boolean(node.workspaceId?.startsWith("daemon:"));
 
+export function lookupWorktreeActivity(
+  node: { readonly path: string; readonly workspaceId?: string | undefined },
+  signals: Pick<SidebarLiveSignals, "activityByWorktreePath" | "activityByWorktreeKey">,
+): ActivitySummary | undefined {
+  if (node.workspaceId) {
+    const scoped = signals.activityByWorktreeKey?.[worktreeActivityKey(node.workspaceId, node.path)];
+    if (scoped !== undefined) return scoped;
+  }
+  return isPairedNode(node) ? undefined : signals.activityByWorktreePath?.[node.path];
+}
+
+export function lookupWorktreeUnread(
+  node: { readonly path: string; readonly workspaceId?: string | undefined },
+  signals: Pick<SidebarLiveSignals, "unreadWorktreePaths" | "unreadWorktreeKeys">,
+): boolean {
+  if (node.workspaceId) {
+    const scoped = signals.unreadWorktreeKeys?.[worktreeActivityKey(node.workspaceId, node.path)];
+    if (scoped !== undefined) return Boolean(scoped);
+  }
+  return !isPairedNode(node) && Boolean(signals.unreadWorktreePaths?.[node.path]);
+}
+
 /**
- * One worktree row's live state. Paired rows ignore local signals: path-only local terminal data
- * must never light up a machine row with the same absolute path.
+ * One worktree row's live state. Paired rows ignore path-only local signals (preventing a local
+ * terminal at the same absolute path from lighting up a paired machine row), while still reading
+ * their own workspace-scoped activity keyed by `worktreeActivityKey(workspaceId, path)`.
  */
 export function worktreeRowLive(
   node: { readonly path: string; readonly workspaceId?: string | undefined },
@@ -285,8 +315,8 @@ export function worktreeRowLive(
   signals: SidebarLiveSignals,
 ): SidebarRowLive {
   const paired = isPairedNode(node);
-  const summary = paired ? undefined : signals.activityByWorktreePath?.[node.path];
-  const unread = !paired && !active && Boolean(summary?.hasUnread || signals.unreadWorktreePaths?.[node.path]);
+  const summary = lookupWorktreeActivity(node, signals);
+  const unread = !active && Boolean(summary?.hasUnread || lookupWorktreeUnread(node, signals));
   const slot = worktreeRowSlot({ activitySummary: summary, unread, agentState: paired ? undefined : signals.agentStateByPath?.[node.path] });
   const typing = signals.isSupervisorTyping?.(node.path) ?? false;
   const outcome = (slot === "done" || slot === "unread") ? summary?.outcome : undefined;
@@ -312,11 +342,18 @@ export function sidebarLiveState(model: SidebarModel, signals: SidebarLiveSignal
   for (const { group: project, rows: visible } of filterSidebarModel(model, filterQuery)) {
     for (const node of visible) {
       const footerKey = `${node.workspaceId}:${node.path}`;
-      if (isPairedNode(node) || seen.has(footerKey)) continue;
+      if (seen.has(footerKey)) continue;
       seen.add(footerKey);
-      footerActivities.push(signals.activityByWorktreePath?.[node.path]);
+      const summary = lookupWorktreeActivity(node, signals);
+      if (summary !== undefined) footerActivities.push(summary);
     }
-    const activity = summarizeProjectActivity(visible, signals.activityByWorktreePath, signals.unreadWorktreePaths);
+    const activity = summarizeProjectActivity(
+      visible,
+      signals.activityByWorktreePath,
+      signals.unreadWorktreePaths,
+      signals.activityByWorktreeKey,
+      signals.unreadWorktreeKeys,
+    );
     const { status } = project;
     const statusSlot = status ? { status: { kind: status.kind, label: status.label }, title: status.title, connected: status.kind === "online" } : null;
     projects[project.groupId] = projectSlot({ status: statusSlot, activity, attentionState: projectAttentionState(activity) });

@@ -16,6 +16,7 @@ vi.mock("./tauri", () => hostBridge);
 
 import {
   NativeTerminalVisibilityProvider,
+  resetNativeTerminalVisibilityForTests,
   useNativeTerminalVisibility,
   useNativeTerminalVisibilityState,
 } from "./nativeTerminalVisibility";
@@ -30,10 +31,14 @@ import {
  */
 describe("useNativeTerminalVisibility", () => {
   beforeEach(() => {
+    resetNativeTerminalVisibilityForTests();
+    hostBridge.setNativeTerminalDomOverlayInput.mockClear();
     vi.mocked(isMacShortcutPlatform).mockReturnValue(false);
   });
 
   afterEach(() => {
+    cleanup();
+    resetNativeTerminalVisibilityForTests();
     document.body.innerHTML = "";
   });
 
@@ -372,6 +377,54 @@ describe("useNativeTerminalVisibility", () => {
   });
 
   describe("native host overlay ownership", () => {
+    it("shares one observer across five consumers and reports only ownership transitions", async () => {
+      const observeSpy = vi.spyOn(MutationObserver.prototype, "observe");
+      const disconnectSpy = vi.spyOn(MutationObserver.prototype, "disconnect");
+      const consumers = Array.from({ length: 5 }, () => renderHook(() => useNativeTerminalVisibilityState()));
+      try {
+        expect(observeSpy).toHaveBeenCalledTimes(1);
+        expect(hostBridge.setNativeTerminalDomOverlayInput.mock.calls).toEqual([[false]]);
+
+        // Separate deliveries, not one coalesced MutationObserver batch.
+        for (let index = 0; index < 10; index += 1) {
+          await act(async () => { document.body.append(document.createElement("span")); });
+        }
+        expect(hostBridge.setNativeTerminalDomOverlayInput.mock.calls).toEqual([[false]]);
+        for (const consumer of consumers) {
+          expect(consumer.result.current).toEqual({ visible: true, interactive: true });
+        }
+
+        const dialog = document.createElement("div");
+        dialog.setAttribute("role", "dialog");
+        await act(async () => { document.body.append(dialog); });
+        expect(hostBridge.setNativeTerminalDomOverlayInput.mock.calls).toEqual([[false], [true]]);
+        for (const consumer of consumers) {
+          expect(consumer.result.current).toEqual({ visible: false, interactive: false });
+        }
+
+        await act(async () => { dialog.remove(); });
+        expect(hostBridge.setNativeTerminalDomOverlayInput.mock.calls).toEqual([[false], [true], [false]]);
+        for (const consumer of consumers) {
+          expect(consumer.result.current).toEqual({ visible: true, interactive: true });
+        }
+
+        for (const consumer of consumers.slice(0, -1)) consumer.unmount();
+        expect(disconnectSpy).not.toHaveBeenCalled();
+        consumers[4].unmount();
+        expect(disconnectSpy).toHaveBeenCalledTimes(1);
+
+        const remounted = renderHook(() => useNativeTerminalVisibilityState());
+        expect(observeSpy).toHaveBeenCalledTimes(2);
+        expect(hostBridge.setNativeTerminalDomOverlayInput.mock.calls).toEqual([[false], [true], [false], [false]]);
+        remounted.unmount();
+        expect(disconnectSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        cleanup();
+        observeSpy.mockRestore();
+        disconnectSpy.mockRestore();
+      }
+    });
+
     it("reports overlay ownership transitions so the host releases the wheel", async () => {
       hostBridge.setNativeTerminalDomOverlayInput.mockClear();
       renderHook(() => useNativeTerminalVisibility());

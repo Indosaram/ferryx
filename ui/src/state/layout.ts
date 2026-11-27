@@ -40,7 +40,7 @@ import {
 import { equalizeSplitRun } from "./splitEqualization";
 
 export type LayoutAction =
-  | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean; view?: PaneView }
+  | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean; view?: PaneView; leafId?: string }
   | { type: "CLOSE_TAB"; tabId: string; replacementTab?: WorkspaceTab }
   | { type: "ACTIVATE_TAB"; tabId: string }
   | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null; path?: string; remote?: import("../lib/filePreviewTypes").RemotePreviewOrigin }
@@ -72,6 +72,8 @@ export type LayoutAction =
       direction: PaneDirection;
       position?: "first" | "second";
       ratio?: number;
+      /** Pre-minted by `dispatch` so both of its reductions name the new group identically. */
+      newGroupId?: string;
     }
   | {
       type: "DETACH_PANE_TO_TAB";
@@ -157,7 +159,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const tabs = exists ? state.tabs : [...state.tabs, action.tab];
       const layoutsByTabId = { ...state.layoutsByTabId };
       if (!layoutsByTabId[action.tab.id]) {
-        const leafId = createLayoutId("leaf");
+        const leafId = action.leafId ?? createLayoutId("leaf");
         const content = defaultContentForTab(action.tab, action.sessionId);
         const sessionId = content.kind === "terminal" ? content.sessionId : "";
         layoutsByTabId[action.tab.id] = {
@@ -204,16 +206,66 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
         };
       }
 
+      // The closing tab's own group decides the replacement. A multi-group layout must pick a
+      // neighbor inside that group; indexing flat `state.tabs` would jump to whatever tab happens
+      // to sit next in the flattened order, which may belong to an unrelated group.
+      const groups = { ...(state.tabGroups ?? {}) };
+      const closingGroup = findGroupContainingTab(groups, action.tabId);
+      const groupIndex = closingGroup ? closingGroup.tabIds.indexOf(action.tabId) : -1;
+      const remainingGroupTabs = closingGroup
+        ? closingGroup.tabIds.filter((tabId) => tabId !== action.tabId)
+        : [];
+      const groupNeighbor = remainingGroupTabs.length > 0
+        ? remainingGroupTabs[Math.min(groupIndex, remainingGroupTabs.length - 1)]
+        : null;
+      if (closingGroup) {
+        if (remainingGroupTabs.length === 0) {
+          delete groups[closingGroup.id];
+        } else {
+          groups[closingGroup.id] = {
+            ...closingGroup,
+            tabIds: remainingGroupTabs,
+            activeTabId: closingGroup.activeTabId === action.tabId && groupNeighbor
+              ? groupNeighbor
+              : closingGroup.activeTabId,
+          };
+        }
+      }
+
       let activeTabId = state.activeTabId;
+      let focusedGroupId = state.focusedGroupId ?? null;
       if (state.activeTabId === action.tabId) {
         const returnTabId = state.returnTabIdByTabId?.[action.tabId];
-        activeTabId = returnTabId && tabs.some((tab) => tab.id === returnTabId)
-          ? returnTabId
-          : tabs[Math.min(closingIndex, tabs.length - 1)]?.id ?? null;
+        if (returnTabId && tabs.some((tab) => tab.id === returnTabId)) {
+          activeTabId = returnTabId;
+          focusedGroupId = findGroupContainingTab(groups, returnTabId)?.id ?? focusedGroupId;
+        } else if (closingGroup && groupNeighbor) {
+          activeTabId = groupNeighbor;
+          focusedGroupId = closingGroup.id;
+        } else {
+          // The closing group is gone (its last tab closed), so focus moves to a surviving group.
+          // That group's own `activeTabId` wins: `closingIndex` indexes the flat pre-filter tab
+          // list, so using it here would land on an arbitrary neighbor of a different group.
+          const survivingGroup = Object.values(groups).find((group) => group.tabIds.length > 0);
+          const survivingActiveTabId = survivingGroup?.activeTabId;
+          const fallbackTabId = (survivingActiveTabId && tabs.some((tab) => tab.id === survivingActiveTabId)
+            ? survivingActiveTabId
+            : null) ?? tabs[Math.min(closingIndex, tabs.length - 1)]?.id ?? null;
+          activeTabId = fallbackTabId;
+          const fallbackGroup = fallbackTabId ? findGroupContainingTab(groups, fallbackTabId) : null;
+          if (fallbackGroup) focusedGroupId = fallbackGroup.id;
+        }
       }
-      const returnTabIdByTabId = { ...state.returnTabIdByTabId };
-      delete returnTabIdByTabId[action.tabId];
-      return normalizeLayoutInternal({ ...state, tabs, activeTabId, returnTabIdByTabId, layoutsByTabId }, true);
+
+      // A closed tab is never a valid return target, whether it was the key or the value.
+      const returnTabIdByTabId = Object.fromEntries(
+        Object.entries(state.returnTabIdByTabId ?? {})
+          .filter(([key, value]) => key !== action.tabId && value !== action.tabId),
+      );
+      return normalizeLayoutInternal(
+        { ...state, tabs, activeTabId, focusedGroupId, tabGroups: groups, returnTabIdByTabId, layoutsByTabId },
+        true,
+      );
     }
     case "ACTIVATE_TAB": {
       if (!state.tabs.some((tab) => tab.id === action.tabId)) return state;
@@ -462,7 +514,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
         };
       }
 
-      const newGroupId = createLayoutId("group");
+      const newGroupId = action.newGroupId ?? createLayoutId("group");
       groups[newGroupId] = { id: newGroupId, tabIds: [sourceTab.id], activeTabId: sourceTab.id };
       tabGroupLayout = splitTabGroupLeaf(
         tabGroupLayout,
@@ -488,23 +540,27 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const sourceTab = state.tabs.find((tab) => tab.id === action.sourceTabId);
       const sourceLayout = state.layoutsByTabId[action.sourceTabId];
       const sourceGroup = findGroupContainingTab(state.tabGroups ?? {}, action.sourceTabId);
-      if (
-        !sourceTab ||
-        sourceTab.kind === "browser" ||
-        sourceTab.kind === "file" ||
-        sourceTab.kind === "changes" ||
-        sourceTab.kind === "remoteDesktop" ||
-        !sourceLayout ||
-        !sourceGroup ||
-        state.tabs.some((tab) => tab.id === action.newTab.id)
-      ) {
+      if (!sourceTab || !sourceLayout || !sourceGroup || state.tabs.some((tab) => tab.id === action.newTab.id)) {
         return state;
       }
       const leafIds = collectLeafIds(sourceLayout.root);
       if (leafIds.length <= 1 || !leafIds.includes(action.leafId)) return state;
-      const movedSessionId = sourceLayout.sessionIdsByLeafId[action.leafId];
-      if (!movedSessionId || !isTerminalTab(action.newTab)) return state;
-      const movedContent = sourceLayout.contentsByLeafId?.[action.leafId] ?? createTerminalPaneContent(movedSessionId);
+      const movedSessionId = sourceLayout.sessionIdsByLeafId[action.leafId] ?? "";
+      const movedContent =
+        sourceLayout.contentsByLeafId?.[action.leafId] ??
+        (movedSessionId ? createTerminalPaneContent(movedSessionId) : undefined);
+      // Any pane can become its own tab: the detached leaf keeps its own type (a browser leaf
+      // becomes a browser tab, a file leaf a file tab, and so on). A `dag` pane has no tab type
+      // of its own, so it is refused rather than silently re-typed as a terminal.
+      const newTab = createTabForPaneContent(
+        action.newTab.id,
+        action.newTab.label,
+        movedContent,
+        movedSessionId,
+        { pinned: action.newTab.pinned },
+      );
+      if (!newTab) return state;
+      const newTabSessionId = isTerminalTab(newTab) ? movedSessionId : "";
 
       const nextRoot = removeLeaf(sourceLayout.root, action.leafId);
       if (!nextRoot) return state;
@@ -513,12 +569,18 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       delete nextSessionIdsByLeafId[action.leafId];
       const nextContentsByLeafId = { ...(sourceLayout.contentsByLeafId ?? {}) };
       delete nextContentsByLeafId[action.leafId];
-      const nextPrimarySessionId =
-        sourceTab.sessionId === movedSessionId
-          ? nextSessionIdsByLeafId[fallbackLeafId] ?? Object.values(nextSessionIdsByLeafId)[0] ?? sourceTab.sessionId
-          : sourceTab.sessionId;
-      const nextSourceTab = { ...sourceTab, sessionId: nextPrimarySessionId };
-      const newTab = { ...action.newTab, sessionId: movedSessionId };
+      const nextSourceLayout: TabPaneLayout = {
+        ...sourceLayout,
+        root: nextRoot,
+        activeLeafId: sourceLayout.activeLeafId === action.leafId ? fallbackLeafId : sourceLayout.activeLeafId,
+        expandedLeafId: sourceLayout.expandedLeafId === action.leafId ? null : sourceLayout.expandedLeafId,
+        sessionIdsByLeafId: nextSessionIdsByLeafId,
+        contentsByLeafId: nextContentsByLeafId,
+      };
+      // Re-type the remaining source tab instead of patching `sessionId` by hand: the detached
+      // leaf may have been its only terminal pane, in which case the tab has to follow the pane
+      // that survives rather than keep a primary session the tree no longer contains.
+      const nextSourceTab = reconcileTabWithPaneLayout(sourceTab, nextSourceLayout);
       const targetGroupId = action.targetGroupId ?? sourceGroup.id;
       const targetGroup = state.tabGroups?.[targetGroupId];
       if (!targetGroup) return state;
@@ -545,20 +607,13 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
           tabGroups: groups,
           layoutsByTabId: {
             ...state.layoutsByTabId,
-            [sourceTab.id]: {
-              ...sourceLayout,
-              root: nextRoot,
-              activeLeafId: sourceLayout.activeLeafId === action.leafId ? fallbackLeafId : sourceLayout.activeLeafId,
-              expandedLeafId: sourceLayout.expandedLeafId === action.leafId ? null : sourceLayout.expandedLeafId,
-              sessionIdsByLeafId: nextSessionIdsByLeafId,
-              contentsByLeafId: nextContentsByLeafId,
-            },
+            [sourceTab.id]: nextSourceLayout,
             [newTab.id]: {
               root: findLeaf(sourceLayout.root, action.leafId) ?? createLeafNode(action.leafId),
               activeLeafId: action.leafId,
               expandedLeafId: null,
-              sessionIdsByLeafId: { [action.leafId]: movedSessionId },
-              contentsByLeafId: { [action.leafId]: movedContent },
+              sessionIdsByLeafId: { [action.leafId]: newTabSessionId },
+              contentsByLeafId: { [action.leafId]: movedContent as PaneContent },
             },
           },
         },
@@ -589,23 +644,28 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       delete newSessionIds[action.leafId];
       const newContents = { ...(tabLayout.contentsByLeafId ?? {}) };
       delete newContents[action.leafId];
+      const nextTabLayout: TabPaneLayout = {
+        ...tabLayout,
+        root: newRoot,
+        activeLeafId:
+          tabLayout.activeLeafId === action.leafId
+            ? fallbackLeafId ?? findFirstLeafId(newRoot)
+            : tabLayout.activeLeafId,
+        expandedLeafId: tabLayout.expandedLeafId === action.leafId ? null : tabLayout.expandedLeafId,
+        sessionIdsByLeafId: newSessionIds,
+        contentsByLeafId: newContents,
+      };
+      // Closing a pane works on any tab kind, so the tab's own identity has to follow: a terminal
+      // tab that just lost its last terminal pane is re-typed to the surviving pane instead of
+      // keeping a primary session the tree no longer holds.
+      const tabs = state.tabs.map((tab) =>
+        tab.id === action.tabId ? reconcileTabWithPaneLayout(tab, nextTabLayout) : tab,
+      );
       return normalizeLayoutInternal(
         {
           ...state,
-          layoutsByTabId: {
-            ...state.layoutsByTabId,
-            [action.tabId]: {
-              ...tabLayout,
-              root: newRoot,
-              activeLeafId:
-                tabLayout.activeLeafId === action.leafId
-                  ? fallbackLeafId ?? findFirstLeafId(newRoot)
-                  : tabLayout.activeLeafId,
-              expandedLeafId: tabLayout.expandedLeafId === action.leafId ? null : tabLayout.expandedLeafId,
-              sessionIdsByLeafId: newSessionIds,
-              contentsByLeafId: newContents,
-            },
-          },
+          tabs,
+          layoutsByTabId: { ...state.layoutsByTabId, [action.tabId]: nextTabLayout },
         },
         true,
       );
@@ -875,11 +935,104 @@ export function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPan
  * names one pane only, so tab-level session actions (Suspend/Restart) must target this one.
  */
 export function focusedPaneSessionId(layout: LayoutState, tab: WorkspaceTab): string | null {
-  if (!isTerminalTab(tab)) return null;
   const paneLayout = getTabPaneLayout(layout, tab);
   const leafId = paneLayout.activeLeafId;
   const sessionId = leafId ? paneLayout.sessionIdsByLeafId[leafId] : undefined;
-  return sessionId || tab.sessionId;
+  if (sessionId) return sessionId;
+  // A terminal pane can live inside a browser/file/changes/remoteDesktop tab after a mixed split;
+  // those tabs have no primary session of their own, so only the focused leaf can name one.
+  return isTerminalTab(tab) ? tab.sessionId || null : null;
+}
+
+/**
+ * A tab's primary session only means something while a terminal pane backs it. Closing or
+ * detaching the last terminal leaf must never leave a terminal tab pointing at a session the
+ * pane tree no longer contains, so the tab is re-typed to whatever pane survives.
+ */
+export function reconcileTabWithPaneLayout(tab: WorkspaceTab, tabLayout: TabPaneLayout | undefined): WorkspaceTab {
+  if (!tabLayout) return tab;
+  const leafIds = collectLeafIds(tabLayout.root);
+  const terminalSessionIds = leafIds
+    .map((leafId) => tabLayout.sessionIdsByLeafId[leafId])
+    .filter((sessionId): sessionId is string => Boolean(sessionId));
+  if (!isTerminalTab(tab)) return tab;
+  if (terminalSessionIds.length > 0) {
+    if (terminalSessionIds.includes(tab.sessionId)) return tab;
+    const activeLeafId = tabLayout.activeLeafId ?? leafIds[0];
+    const activeSessionId = activeLeafId ? tabLayout.sessionIdsByLeafId[activeLeafId] : "";
+    const primarySessionId = activeSessionId || terminalSessionIds[0];
+    return primarySessionId === tab.sessionId ? tab : { ...tab, sessionId: primarySessionId };
+  }
+  const survivingLeafId = tabLayout.activeLeafId ?? leafIds[0];
+  return retypeTabForContent(tab, survivingLeafId ? tabLayout.contentsByLeafId?.[survivingLeafId] : undefined);
+}
+
+/**
+ * The tab a detached or surviving pane leaf becomes. `null` when the pane content has no tab
+ * type of its own (a `dag` run is pane-only), so callers refuse instead of inventing one.
+ */
+export function createTabForPaneContent(
+  id: string,
+  label: string,
+  content: PaneContent | undefined,
+  sessionId: string,
+  options?: { pinned?: boolean },
+): WorkspaceTab | null {
+  const base = { id, label, ...(options?.pinned ? { pinned: true } : {}) };
+  switch (content?.kind) {
+    case "terminal":
+      return { kind: "terminal", ...base, sessionId: content.sessionId || sessionId };
+    case "browser": {
+      const browser = content.browser ?? content;
+      return {
+        kind: "browser",
+        ...base,
+        browserId: browser.browserId ?? "",
+        url: browser.url ?? "about:blank",
+        ...(browser.title !== undefined ? { title: browser.title } : {}),
+        ...(browser.loading !== undefined ? { loading: browser.loading } : {}),
+        ...(browser.canGoBack !== undefined ? { canGoBack: browser.canGoBack } : {}),
+        ...(browser.canGoForward !== undefined ? { canGoForward: browser.canGoForward } : {}),
+        ...(browser.zoomFactor !== undefined ? { zoomFactor: browser.zoomFactor } : {}),
+        ...(browser.profileId !== undefined ? { profileId: browser.profileId } : {}),
+        ...(browser.worktreePath !== undefined ? { worktreePath: browser.worktreePath } : {}),
+        ...(browser.worktreeLabel !== undefined ? { worktreeLabel: browser.worktreeLabel } : {}),
+      };
+    }
+    case "file":
+      return {
+        kind: "file",
+        ...base,
+        path: content.path,
+        backendSessionId: content.backendSessionId,
+        line: content.line,
+        col: content.col,
+        workspaceId: content.workspaceId,
+        previewId: content.previewId,
+        ...(content.remote ? { remote: content.remote } : {}),
+        ...(content.customLabel !== undefined ? { customLabel: content.customLabel } : {}),
+      };
+    case "changes":
+      return {
+        kind: "changes",
+        ...base,
+        workspaceId: content.workspaceId,
+        worktreePath: content.worktreePath,
+        worktree: content.worktree,
+      };
+    case "remoteDesktop":
+      return { kind: "remoteDesktop", ...base, hostId: content.hostId, sessionId: "" };
+    default:
+      return null;
+  }
+}
+
+function retypeTabForContent(tab: WorkspaceTab, content: PaneContent | undefined): WorkspaceTab {
+  const retyped = createTabForPaneContent(tab.id, tab.label, content, "", { pinned: tab.pinned });
+  // A `dag` pane has no typed tab of its own: keep the tab shell rather than inventing one that
+  // no pane renders. Only a terminal shell has a primary session to drop; a browser/file/changes
+  // tab has no `sessionId` field at all.
+  return retyped ?? (isTerminalTab(tab) ? { ...tab, sessionId: "" } : tab);
 }
 
 function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutState {
@@ -975,7 +1128,11 @@ function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutStat
       }
     } else {
       paneLayoutsChanged = true;
-      const leafId = createLayoutId("leaf-default");
+      // Derived, never random: `dispatch` reduces the same action twice (its own pre-reduce and
+      // React's commit reduction), and both passes must name this tab's leaf identically. A tab
+      // owns its leaf ids alone, so the tab id is unique enough and `getTabPaneLayout`'s fallback
+      // already uses this exact shape.
+      const leafId = `leaf-default-${tab.id}`;
       const content = defaultContentForTab(tab);
       const defaultSessionId = content.kind === "terminal" ? content.sessionId : "";
       nextLayoutsByTabId[tab.id] = {
@@ -1074,6 +1231,13 @@ function isNormalizedLayoutState(state: LayoutState): boolean {
   }
   if (!state.tabGroups || !state.tabGroupLayout || !state.focusedGroupId || !state.tabGroups[state.focusedGroupId]) return false;
   const valid = new Set(state.tabs.map((tab) => tab.id));
+  // `normalizeLayout` collapses a duplicate id, so a state carrying one is not normalized.
+  if (valid.size !== state.tabs.length) return false;
+  // The active tab is always the focused group's own active tab; a mismatch would render a tab
+  // that is not in the focused group as selected.
+  if (state.activeTabId !== state.tabGroups[state.focusedGroupId].activeTabId) return false;
+  // Surplus keys would hand a stale pane layout to a tab id that no longer exists.
+  if (Object.keys(state.layoutsByTabId).length !== state.tabs.length) return false;
   const assigned = new Set<string>();
   for (const group of Object.values(state.tabGroups)) {
     if (group.tabIds.length === 0 || !containsTabGroup(state.tabGroupLayout, group.id)) return false;
@@ -1084,11 +1248,18 @@ function isNormalizedLayoutState(state: LayoutState): boolean {
     }
   }
   if (assigned.size !== valid.size) return false;
+  // Every leaf of the group split tree must name a live group, or the split view renders a hole.
+  if (!everyGroupLeafKnown(state.tabGroupLayout, state.tabGroups)) return false;
   return state.tabs.every((tab) => {
     const layout = state.layoutsByTabId[tab.id];
     if (!layout) return false;
     if (!layout.contentsByLeafId) return false;
     const leaves = collectLeafIds(layout.root);
+    const activeLeafId = layout.activeLeafId;
+    const expandedLeafId = layout.expandedLeafId;
+    // A focus or zoom that names a removed leaf leaves the tab rendering an invisible pane.
+    if (activeLeafId === null || !leaves.includes(activeLeafId)) return false;
+    if (expandedLeafId !== null && !leaves.includes(expandedLeafId)) return false;
     return leaves.every((leafId) => Object.prototype.hasOwnProperty.call(layout.contentsByLeafId, leafId));
   });
 }
@@ -1157,6 +1328,15 @@ function containsTabGroup(root: TabGroupLayoutNode | null, groupId: string): boo
   if (!root) return false;
   if (root.type === "group") return root.groupId === groupId;
   return containsTabGroup(root.first, groupId) || containsTabGroup(root.second, groupId);
+}
+
+function everyGroupLeafKnown(
+  root: TabGroupLayoutNode | null,
+  groups: Record<string, TabGroup>,
+): boolean {
+  if (!root) return false;
+  if (root.type === "group") return Boolean(groups[root.groupId]);
+  return everyGroupLeafKnown(root.first, groups) && everyGroupLeafKnown(root.second, groups);
 }
 
 function findFirstTabGroupId(root: TabGroupLayoutNode | null): string | null {

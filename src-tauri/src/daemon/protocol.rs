@@ -1282,16 +1282,21 @@ pub enum DaemonRequest {
         workspace_id: String,
     },
     /// Reads one workspace's layout document, parking until it is newer than `after_revision`
-    /// when that is set (long-poll).
+    /// when that is set (long-poll). `worktree_key` selects one worktree bucket of the workspace;
+    /// absent is the workspace-level document a legacy publisher writes.
     #[serde(rename_all = "camelCase")]
     LayoutGet {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_revision: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     LayoutPut {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_key: Option<String>,
         base_revision: u64,
         tabs: Vec<crate::remote::machine_protocol::SharedTab>,
     },

@@ -53,7 +53,7 @@ fn key(host: &SshHost) -> String {
 fn error(message: &str) -> IpcError {
     super::runtime::error(IpcErrorCode::IoError, "authentication", message)
 }
-pub fn set(host: &SshHost, password: Password) -> Result<(), IpcError> {
+fn validate_password(host: &SshHost, password: &Password) -> Result<(), IpcError> {
     super::direct::validate_host(host)?;
     if host.auth_method != SshAuthMethod::Password
         || password.0.is_empty()
@@ -62,6 +62,66 @@ pub fn set(host: &SshHost, password: Password) -> Result<(), IpcError> {
     {
         return Err(error("Enter a nonempty SSH password without line breaks"));
     }
+    Ok(())
+}
+
+/// Restores the exact prior endpoint credential, including its askpass capability.
+/// Callers serialize candidate probes and credential mutations for its lifetime.
+pub struct CandidateGuard {
+    endpoint: String,
+    token: String,
+    previous: Option<Credential>,
+}
+
+impl Drop for CandidateGuard {
+    fn drop(&mut self) {
+        // Restoration must also run during unwinding after a poisoned store lock.
+        let mut credentials = store().lock().unwrap_or_else(|error| error.into_inner());
+        // A concurrent `set` may have replaced this candidate with a newer saved credential;
+        // restoring the snapshot then would silently discard what the user just saved. An absent
+        // entry means nobody replaced anything - the failed probe's own generation was cleared -
+        // so the saved credential is still restored.
+        let replaced = credentials
+            .get(&self.endpoint)
+            .is_some_and(|current| current.token != self.token);
+        if replaced {
+            return;
+        }
+        match self.previous.take() {
+            Some(previous) => {
+                credentials.insert(self.endpoint.clone(), previous);
+            }
+            None => {
+                credentials.remove(&self.endpoint);
+            }
+        }
+    }
+}
+
+pub fn push_candidate(host: &SshHost, password: Password) -> Result<CandidateGuard, IpcError> {
+    validate_password(host, &password)?;
+    broker()?;
+    let endpoint = key(host);
+    let token = uuid::Uuid::new_v4().to_string();
+    let previous = store()
+        .lock()
+        .map_err(|_| IpcError::internal("SSH credential lock failed"))?
+        .insert(
+            endpoint.clone(),
+            Credential {
+                password,
+                token: token.clone(),
+            },
+        );
+    Ok(CandidateGuard {
+        endpoint,
+        token,
+        previous,
+    })
+}
+
+pub fn set(host: &SshHost, password: Password) -> Result<(), IpcError> {
+    validate_password(host, &password)?;
     store()
         .lock()
         .map_err(|_| IpcError::internal("SSH credential lock failed"))?

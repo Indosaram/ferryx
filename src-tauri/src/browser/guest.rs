@@ -103,12 +103,19 @@ const BRIDGE_NATIVE_OPEN_PLACEHOLDER: &str = "__FERRYX_BROWSER_BRIDGE_NATIVE_OPE
 const POPUP_SURFACE_PLACEHOLDER: &str = "__FERRYX_IS_POPUP_SURFACE__";
 const WINDOW_CLOSE_BODY_PLACEHOLDER: &str = "__FERRYX_WINDOW_CLOSE_BODY__";
 const NOTIFICATION_SHIM_PLACEHOLDER: &str = "__FERRYX_NOTIFICATION_SHIM__";
+const MEDIA_REPORTER_PLACEHOLDER: &str = "__FERRYX_MEDIA_REPORTER__";
 
 /// The page Notification shim, posting through this script's class (b) route.
 fn notification_shim_source() -> String {
     ferryx_browser_engine_protocol::notification_shim(
         "(message) => route('notify.ferryx.invalid', 'msg', message)",
     )
+}
+
+/// The media-session reporter, posting through the same intent channel as popup opens: the
+/// isolated-world broker forwards it, and class (a) validation happens host-side.
+fn media_reporter_source() -> String {
+    ferryx_browser_engine_protocol::media_reporter_script("postMedia")
 }
 
 /// Body of the `window.close` replacement in a popup tab, substituted for
@@ -219,6 +226,7 @@ pub fn browser_guest_bridge_script(nonce: &str, is_popup: bool) -> String {
             if cfg!(windows) { "true" } else { "false" },
         )
         .replace(NOTIFICATION_SHIM_PLACEHOLDER, &notification_shim_source())
+        .replace(MEDIA_REPORTER_PLACEHOLDER, &media_reporter_source())
 }
 
 const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
@@ -428,6 +436,12 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
     } catch (error) {
       reportBridgeFailure('could not post a ' + intent.op + ' intent', error);
     }
+  };
+  // Media-session reports go the same way as popup intents: page -> isolated-world broker ->
+  // host. `op: 'media'` carries only what the page's own mediaSession/HTML5 media already
+  // publishes, and the host re-validates and clamps every field.
+  const postMedia = (report) => {
+    postIntent({ op: 'media', report });
   };
   // The route must never be reachable from page script; it is kept in this closure.
 
@@ -649,6 +663,10 @@ __FERRYX_WINDOW_CLOSE_BODY__
 
   // Web Notification API, gated by the host per origin.
   __FERRYX_NOTIFICATION_SHIM__
+
+  // Now Playing: the page's own media-session metadata and its dominant <audio>/<video>, pushed
+  // at most twice a second and only on change. A page with no media sends nothing at all.
+  __FERRYX_MEDIA_REPORTER__
 })();
 "#;
 
@@ -1185,6 +1203,23 @@ mod tests {
         // A handle's close() asks the host with handleId, which owns the tab and links.
         assert!(script.contains("routeParams('popupclose.ferryx.invalid', { handle: handleId })"));
         assert!(script.contains("op: 'message'"));
+    }
+
+    #[test]
+    fn guest_bridge_installs_the_media_reporter_and_keeps_it_page_scoped() {
+        for is_popup in [false, true] {
+            let script = browser_guest_bridge_script(TEST_NONCE, is_popup);
+            assert!(!script.contains(MEDIA_REPORTER_PLACEHOLDER));
+            // The reporter reaches the host through the same intent channel as popup opens,
+            // never by navigating with the nonce.
+            assert!(script.contains("const postMedia = (report) => {"));
+            assert!(script.contains("postIntent({ op: 'media', report });"));
+            assert!(script.contains(")(postMedia);"));
+            assert!(script.contains("navigator.mediaSession"));
+            // It adds nothing to the class (b) URL routes and publishes no router.
+            assert!(!script.contains("media.ferryx.invalid"));
+            assert!(!script.contains("= postMedia;"));
+        }
     }
 
     #[test]

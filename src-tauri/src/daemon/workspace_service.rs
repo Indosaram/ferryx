@@ -485,7 +485,15 @@ impl DaemonWorkspaceService {
             WorkspaceRegistry::validate_workspace_id(workspace_id).map_err(|e| e.to_string())?;
         let mut state = self.catalog.lock();
         let mut candidate = state.as_ref().map_err(Clone::clone)?.clone();
-        if candidate.workspaces.remove(workspace_id).is_none() {
+        let mut removed = candidate.workspaces.remove(workspace_id).is_some();
+        if let Some(projects) = &mut candidate.desktop_local_projects {
+            let before = projects.len();
+            projects.retain(|project| project.workspace_id != workspace_id);
+            removed |= projects.len() != before;
+        }
+        removed |= candidate.ownership.remove(workspace_id).is_some();
+        removed |= candidate.worktree_observations.remove(workspace_id).is_some();
+        if !removed {
             return Ok(());
         }
         candidate.revision.0 = candidate
@@ -516,6 +524,88 @@ impl DaemonWorkspaceService {
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unregister_removes_desktop_membership_and_revokes_worktree_access() {
+        crate::ipc::run_blocking(|| {
+            for registered in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let project = root.path().join("project");
+                fs::create_dir(&project).unwrap();
+                let path = root.path().join("data/catalog");
+                let registry = WorkspaceRegistry::new();
+                let service = DaemonWorkspaceService::new(registry.clone(), path.clone());
+                if registered {
+                    service.register("ws", project.to_str().unwrap()).unwrap();
+                }
+                service.sync_desktop_local_projects(vec![workspace_catalog::DesktopLocalProject {
+                    workspace_id: "ws".into(),
+                    repo_root: project,
+                }]).unwrap();
+                service.observe_worktrees("ws", "digest".into(),
+                    std::time::Instant::now() + std::time::Duration::from_secs(5)).unwrap();
+                let manager = service.worktree_manager("ws", false).unwrap();
+                // Also verify registry cleanup for a desktop-only catalog member.
+                registry.publish("ws".into(), manager);
+                let revision = service.catalog().unwrap().revision.0;
+                let mut events = service.machine_events.subscribe();
+
+                service.unregister("ws").unwrap();
+
+                assert_eq!(service.worktree_manager("ws", false).err().as_deref(), Some("PROJECT_NOT_FOUND"));
+                assert!(!registry.contains("ws"));
+                let disk = workspace_catalog::load(&path).unwrap();
+                assert_eq!(disk.revision.0, revision + 1);
+                assert!(!disk.workspaces.contains_key("ws"));
+                assert_eq!(disk.desktop_local_projects, Some(vec![]));
+                assert!(!disk.ownership.contains_key("ws"));
+                assert!(!disk.worktree_observations.contains_key("ws"));
+                let event = events.try_recv().unwrap();
+                assert_eq!(event["type"], "projectRemoved");
+                assert_eq!(event["workspaceId"], "ws");
+                service.unregister("ws").unwrap();
+                assert_eq!(service.catalog().unwrap().revision.0, revision + 1);
+                assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+                let restarted = DaemonWorkspaceService::new(WorkspaceRegistry::new(), path);
+                assert_eq!(restarted.worktree_manager("ws", false).err().as_deref(), Some("PROJECT_NOT_FOUND"));
+                drop(restarted);
+                drop(service);
+                root.close().unwrap();
+            }
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unregister_persists_observation_only_and_ownership_only_removals() {
+        crate::ipc::run_blocking(|| {
+            for observation_only in [true, false] {
+                let root = tempfile::tempdir().unwrap();
+                let path = root.path().join("data/catalog");
+                let mut catalog = Catalog::default();
+                if observation_only {
+                    catalog.worktree_observations.insert("ws".into(), "digest".into());
+                } else {
+                    catalog.ownership.insert("ws".into(), workspace_catalog::Ownership::default());
+                }
+                workspace_catalog::persist(&path, &catalog).unwrap();
+                let service = DaemonWorkspaceService::new(WorkspaceRegistry::new(), path.clone());
+                let mut events = service.machine_events.subscribe();
+                service.unregister("ws").unwrap();
+                let disk = workspace_catalog::load(&path).unwrap();
+                assert_eq!(disk.revision.0, 1);
+                assert!(disk.worktree_observations.is_empty());
+                assert!(disk.ownership.is_empty());
+                assert_eq!(events.try_recv().unwrap()["type"], "projectRemoved");
+                service.unregister("ws").unwrap();
+                assert_eq!(service.catalog().unwrap().revision.0, 1);
+                assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+                drop(service);
+                root.close().unwrap();
+            }
+            Ok(())
+        }).await.unwrap();
+    }
     #[tokio::test]
     async fn r28_rust_one_unvalidatable_member_does_not_freeze_desktop_membership() {
         crate::ipc::run_blocking(|| {

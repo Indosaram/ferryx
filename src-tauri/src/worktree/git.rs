@@ -936,6 +936,9 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
         crate::util::no_window_command("git")
             .args(&arg_strs)
             .current_dir(&normalized_cwd)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(std::process::Stdio::null())
             .output()
             .map_err(WorktreeError::Io)?
     };
@@ -1179,6 +1182,109 @@ pub fn parse_status_porcelain(output: &str) -> DirtyState {
         DirtyState::clean()
     } else {
         DirtyState::dirty(files)
+    }
+}
+
+/// Parses `git status --porcelain=v1 -z -uall`, preserving paths verbatim.
+pub fn parse_status_porcelain_z(output: &str) -> DirtyState {
+    let mut files = Vec::new();
+    // Only NUL-terminated fields are complete; a trailing fragment is not an entry.
+    let mut fields = output.split_inclusive('\0');
+    while let Some(field) = fields.next() {
+        let Some(entry) = field.strip_suffix('\0') else {
+            break;
+        };
+        let bytes = entry.as_bytes();
+        let valid_status = |byte: u8| {
+            matches!(byte, b' ' | b'M' | b'A' | b'D' | b'R' | b'C' | b'U' | b'T' | b'?' | b'!')
+        };
+        if bytes.len() < 3
+            || !valid_status(bytes[0])
+            || !valid_status(bytes[1])
+            || bytes[2] != b' '
+        {
+            continue;
+        }
+        // In -z mode Git emits the destination first, then the original path.
+        if matches!(bytes[0], b'R' | b'C') || matches!(bytes[1], b'R' | b'C') {
+            match fields.next().and_then(|field| field.strip_suffix('\0')) {
+                Some(original) if !original.is_empty() => {}
+                _ => continue,
+            }
+        }
+        if bytes.len() == 3 || &entry[..2] == "  " || &entry[..2] == "!!" {
+            continue;
+        }
+        files.push(DirtyFile {
+            status_code: entry[..2].to_string(),
+            path: entry[3..].to_string(),
+        });
+    }
+    if files.is_empty() {
+        DirtyState::clean()
+    } else {
+        DirtyState::dirty(files)
+    }
+}
+
+#[cfg(test)]
+mod status_porcelain_z_tests {
+    use super::*;
+
+    #[test]
+    fn parse_status_porcelain_z_preserves_utf8_and_literal_paths() {
+        let paths = [
+            "\u{d55c}\u{ae00} \u{d30c}\u{c77c}.txt",
+            " leading and trailing .txt ",
+            "literal -> name.txt",
+            "quote\"back\\slash\nname.txt",
+        ];
+        let output: String = paths.iter().map(|path| format!("?? {path}\0")).collect();
+        let state = parse_status_porcelain_z(&output);
+        assert!(state.is_dirty);
+        assert_eq!(state.files.len(), paths.len());
+        for (file, path) in state.files.iter().zip(paths) {
+            assert_eq!(file.status_code, "??");
+            assert_eq!(file.path, path);
+        }
+        assert_eq!(parse_status_porcelain_z(""), DirtyState::clean());
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_consumes_rename_and_copy_sources() {
+        let state = parse_status_porcelain_z(
+            "R  new name.txt\0old name.txt\0 R working name.txt\0original.txt\0C  copy.txt\0source.txt\0 C other copy.txt\0other source.txt\0 M next.txt\0",
+        );
+        let files: Vec<_> = state.files.iter()
+            .map(|file| (file.status_code.as_str(), file.path.as_str()))
+            .collect();
+        assert_eq!(files, vec![
+            ("R ", "new name.txt"),
+            (" R", "working name.txt"),
+            ("C ", "copy.txt"),
+            (" C", "other copy.txt"),
+            (" M", "next.txt"),
+        ]);
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_skips_malformed_and_truncated_entries() {
+        for output in [
+            "", "\0", "M\0", " M\0", "?? \0", "?? missing terminator",
+            "R  destination\0", "R  destination\0truncated source",
+            "R  destination\0\0", "\u{d55c}\u{ae00}\0", "XX invalid\0",
+            " Mxinvalid\0", "  unchanged\0", "!! ignored\0",
+        ] {
+            assert_eq!(parse_status_porcelain_z(output), DirtyState::clean(), "{output:?}");
+        }
+        let state = parse_status_porcelain_z(
+            "M\0\u{d55c}\u{ae00}\0?? \0R  \0?? source-shaped-name\0?? kept.txt\0 M truncated",
+        );
+        assert_eq!(state.files, vec![DirtyFile {
+            status_code: "??".into(),
+            path: "kept.txt".into(),
+        }]);
+        assert!(state.is_dirty);
     }
 }
 

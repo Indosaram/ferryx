@@ -1002,6 +1002,7 @@ async fn ssh_remote_input_coalesces_queued_writes_into_bounded_transport_batches
 
 struct TestSink {
     published: parking_lot::Mutex<Vec<crate::daemon::agent_state::AgentState>>,
+    released: parking_lot::Mutex<Vec<String>>,
     notify: Arc<tokio::sync::Notify>,
     accept_updates: bool,
 }
@@ -1012,6 +1013,7 @@ impl TestSink {
         (
             Arc::new(Self {
                 published: parking_lot::Mutex::new(Vec::new()),
+                released: parking_lot::Mutex::new(Vec::new()),
                 notify: notify.clone(),
                 accept_updates: true,
             }),
@@ -1034,6 +1036,11 @@ impl AgentStateSink for TestSink {
         list.push(state);
         self.notify.notify_one();
         true
+    }
+
+    fn release(&self, session_id: &str) {
+        self.released.lock().push(session_id.to_string());
+        self.notify.notify_one();
     }
 }
 
@@ -1889,4 +1896,39 @@ async fn explicit_close_forgets_the_settled_observation() {
     // Closing a pane is deliberate: the id must not resurrect from the record.
     let _ = runtime.close("local-stable").await;
     assert!(runtime.settled_details("local-stable").is_none());
+}
+
+#[tokio::test]
+async fn ssh_agent_state_released_when_remote_target_expires() {
+    let (runtime, _, _dialer, tx, sink, notify) = agent_fixture(true);
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let working = AgentStateSnapshot {
+        revision: RemoteCursor(1),
+        state: "working".into(),
+        agent: Some("omo".into()),
+        provider_session: None,
+        detail: None,
+    };
+    tx.send(Ok(agent_output(1, Some(working)))).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sink.published.lock().is_empty() {
+            notify.notified().await;
+        }
+    })
+    .await
+    .expect("working snapshot published");
+
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sink.released.lock().is_empty() {
+            notify.notified().await;
+        }
+    })
+    .await
+    .expect("agent state released on terminal expiry");
+    assert_eq!(sink.released.lock().as_slice(), &["local-stable".to_string()]);
 }

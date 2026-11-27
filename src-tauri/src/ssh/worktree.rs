@@ -3,7 +3,8 @@ use super::runtime::{
 };
 use super::{direct, SshHost};
 use crate::ipc::{IpcError, IpcErrorCode};
-use crate::worktree::WorktreeIdentity;
+use crate::worktree::{BranchDeletionPreview, DirtyFile, DirtyState, WorktreeIdentity};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -409,6 +410,192 @@ pub fn worktree_remove_script(
     }
 }
 
+/// Status is base64 encoded before entering the NUL-delimited response frame.
+/// Four arguments mirror the other platform script builders in this module.
+pub fn worktree_delete_preview_script(
+    platform: RemotePlatform,
+    repo_root: &str,
+    path: &str,
+    marker: &str,
+) -> String {
+    match platform {
+        RemotePlatform::Posix => {
+            let root = direct::quote_posix(repo_root);
+            let path = direct::quote_posix(path);
+            r#"set -eu
+root=__ROOT__; wt=__PATH__
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+# -z disables Git path quoting, preserving spaces, quotes and Unicode.
+git -C "$root" worktree list --porcelain -z > "$tmp/list"
+# Paths accepted by validate_path contain no control characters.
+tr '\000' '\n' < "$tmp/list" > "$tmp/lines"
+branch=$(WT="$wt" awk 'BEGIN { RS="\n\n"; FS="\n" } $1 == "worktree " ENVIRON["WT"] { for(i=2;i<=NF;i++) if(index($i,"branch refs/heads/")==1) print substr($i,19); found=1 } END { if(!found) exit 1 }' "$tmp/lines") || { echo 'Worktree not found' >&2; exit 1; }
+if [ -z "$branch" ]; then printf '__MARKER__\000detached\000'; exit 0; fi
+ref="refs/heads/$branch"
+head=$(git -C "$root" rev-parse --verify --end-of-options "$ref^{commit}")
+missing=false
+: > "$tmp/status"
+if [ -e "$wt" ]; then git -C "$wt" status --porcelain=v1 -z > "$tmp/status"; else missing=true; fi
+merged=false
+if git -C "$root" merge-base --is-ancestor -- "$ref" HEAD; then merged=true; else rc=$?; [ "$rc" -eq 1 ] || exit "$rc"; fi
+upstream=''; counts=''
+# --end-of-options protects revisions; -- would instead begin path arguments.
+if upstream=$(git -C "$root" rev-parse --abbrev-ref --symbolic-full-name --verify --end-of-options "$branch@{upstream}" 2>/dev/null); then
+    counts=$(git -C "$root" rev-list --left-right --count --end-of-options "$upstream...$ref" --)
+else upstream=''; fi
+base64 < "$tmp/status" > "$tmp/encoded"
+status=$(tr -d '\r\n' < "$tmp/encoded")
+printf '__MARKER__\000ok\000%s\000%s\000%s\000%s\000%s\000%s\000%s\000' "$branch" "$head" "$missing" "$merged" "$upstream" "$counts" "$status"
+"#
+                .replace("__ROOT__", &root)
+                .replace("__PATH__", &path)
+                .replace("__MARKER__", marker)
+        }
+        RemotePlatform::Windows => {
+            let root = powershell_data(repo_root);
+            let path = powershell_data(path);
+            let body = r#"
+$root=__ROOT__; $wt=__PATH__
+$list=Invoke-FerryxGit @('-C',$root,'worktree','list','--porcelain','-z')
+if ($list.Code -ne 0) { throw $list.Error }
+$nul=[string][char]0; $wanted='worktree '+$wt.Replace('\','/').TrimEnd('/')
+$record=@($list.Output -split ($nul+$nul) | Where-Object { (($_ -split $nul)[0]).Replace('\','/').TrimEnd('/') -eq $wanted })
+if ($record.Count -ne 1) { throw 'Worktree not found' }
+$branch=@($record[0] -split $nul | Where-Object { $_.StartsWith('branch refs/heads/') })
+if ($branch.Count -eq 0) { [Console]::Write(('__MARKER__','detached','' -join [char]0)); return }
+$branch=$branch[0].Substring(18); $ref='refs/heads/'+$branch
+$head=Invoke-FerryxGit @('-C',$root,'rev-parse','--verify','--end-of-options',($ref+'^{commit}'))
+if ($head.Code -ne 0) { throw $head.Error }
+$missing=-not (Test-Path -LiteralPath $wt); $status=''
+if (-not $missing) {
+    $g=Invoke-FerryxGit @('-C',$wt,'status','--porcelain=v1','-z')
+    if ($g.Code -ne 0) { throw $g.Error }
+    $status=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($g.Output))
+}
+$merge=Invoke-FerryxGit @('-C',$root,'merge-base','--is-ancestor','--',$ref,'HEAD')
+if ($merge.Code -ne 0 -and $merge.Code -ne 1) { throw $merge.Error }
+$up=Invoke-FerryxGit @('-C',$root,'rev-parse','--abbrev-ref','--symbolic-full-name','--verify','--end-of-options',($branch+'@{upstream}'))
+$upstream=''; $counts=''
+if ($up.Code -eq 0) {
+    $upstream=$up.Output.Trim()
+    $g=Invoke-FerryxGit @('-C',$root,'rev-list','--left-right','--count','--end-of-options',($upstream+'...'+$ref),'--')
+    if ($g.Code -ne 0) { throw $g.Error }; $counts=$g.Output.Trim()
+}
+[Console]::Write(('__MARKER__','ok',$branch,$head.Output.Trim(),$missing.ToString().ToLowerInvariant(),($merge.Code -eq 0).ToString().ToLowerInvariant(),$upstream,$counts,$status,'' -join [char]0))
+"#;
+            format!(
+                "{POWERSHELL_GIT}\n{}",
+                body.replace("__ROOT__", &root)
+                    .replace("__PATH__", &path)
+                    .replace("__MARKER__", marker)
+            )
+        }
+    }
+}
+
+pub fn parse_delete_preview_output(
+    output: &[u8],
+    marker: &str,
+) -> Result<BranchDeletionPreview, IpcError> {
+    let invalid = || IpcError::new(IpcErrorCode::ParseError, "Malformed worktree delete preview");
+    if let Ok(fields) = parse_fields(output, marker, 1) {
+        if fields[0] == "detached" {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "Detached worktree has no branch",
+            ));
+        }
+    }
+    let fields = parse_fields(output, marker, 8)?;
+    if fields[0] != "ok" || fields[1].is_empty() || fields[2].is_empty() {
+        return Err(invalid());
+    }
+    let missing = fields[3].parse::<bool>().map_err(|_| invalid())?;
+    let merged = fields[4].parse::<bool>().map_err(|_| invalid())?;
+    let upstream = (!fields[5].is_empty()).then(|| fields[5].to_owned());
+    let (behind, ahead) = match upstream.as_ref() {
+        Some(_) => {
+            let counts = fields[6]
+                .split_whitespace()
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| invalid())?;
+            match counts.as_slice() {
+                [behind, ahead] => (Some(*behind), Some(*ahead)),
+                _ => return Err(invalid()),
+            }
+        }
+        None => {
+            if !fields[6].is_empty() {
+                return Err(invalid());
+            }
+            (None, None)
+        }
+    };
+    let status = STANDARD.decode(fields[7]).map_err(|_| invalid())?;
+    let mut records = status.split(|byte| *byte == 0);
+    let mut files = Vec::new();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            if records.next().is_some() {
+                return Err(invalid());
+            }
+            break;
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            return Err(invalid());
+        }
+        let status_code = std::str::from_utf8(&record[..2])
+            .map_err(|_| invalid())?
+            .to_owned();
+        let path = String::from_utf8_lossy(&record[3..]).into_owned();
+        if status_code.contains(['R', 'C'])
+            && records.next().is_none_or(|source| source.is_empty())
+        {
+            return Err(invalid());
+        }
+        files.push(DirtyFile { status_code, path });
+    }
+    if !status.is_empty() && status.last() != Some(&0) {
+        return Err(invalid());
+    }
+    if missing && !files.is_empty() {
+        return Err(invalid());
+    }
+    Ok(BranchDeletionPreview {
+        dirty_state: DirtyState::dirty(files),
+        missing,
+        branch: fields[1].into(),
+        head: fields[2].into(),
+        upstream,
+        merged,
+        ahead,
+        behind,
+    })
+}
+
+pub async fn preview_remote_delete(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    repo_root: &str,
+    path: &str,
+) -> Result<BranchDeletionPreview, IpcError> {
+    environment.platform.validate_path(repo_root)?;
+    environment.platform.validate_path(path)?;
+    validate_path_inside_root(environment.platform, repo_root, path)?;
+    let marker = format!("FERRYX_WT_PREVIEW_V1_{}", uuid::Uuid::new_v4().simple());
+    let script = worktree_delete_preview_script(environment.platform, repo_root, path, &marker);
+    let mut plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    let master = super::master::acquire(host).await.ok().flatten();
+    if let Some(lease) = master.as_ref() {
+        direct::use_master(&mut plan, lease.socket());
+    }
+    let output = direct::bounded_output_with_limit(&plan, Duration::from_secs(30), 8 * 1024 * 1024)
+        .await?;
+    parse_delete_preview_output(&output, &marker)
+}
+
 fn tag_error(mut err: IpcError, stage: &'static str) -> IpcError {
     match err.details.as_mut() {
         Some(details) => {
@@ -528,6 +715,199 @@ pub async fn remove_remote(
 mod tests {
     use super::*;
     use crate::worktree::manager::WorktreeManager;
+
+    #[cfg(unix)]
+    fn preview_fixture() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().to_str().unwrap().to_owned();
+        preview_git(&root, &["init", "--initial-branch=main"]);
+        preview_git(&root, &["config", "user.name", "Preview Test"]);
+        preview_git(&root, &["config", "user.email", "preview@example.test"]);
+        std::fs::write(dir.path().join("tracked"), "original").unwrap();
+        preview_git(&root, &["add", "tracked"]);
+        preview_git(&root, &["commit", "-m", "initial"]);
+        let path = format!("{root}/checkout with 'quotes' 日本語");
+        preview_git(&root, &["worktree", "add", "-b", "feature", &path]);
+        (dir, root, path)
+    }
+
+    #[cfg(unix)]
+    fn preview_git(root: &str, args: &[&str]) {
+        let output = std::process::Command::new("git").args(["-C", root]).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[cfg(unix)]
+    async fn execute_preview(root: &str, path: &str) -> Result<BranchDeletionPreview, IpcError> {
+        let marker = "FERRYX_PREVIEW_TEST";
+        let script = worktree_delete_preview_script(RemotePlatform::Posix, root, path, marker);
+        let plan = crate::terminal::shell::ShellCommandPlan { program: "/bin/sh".into(), args: vec!["-c".into(), script] };
+        let output = direct::bounded_output_with_limit(&plan, Duration::from_secs(10), 8 * 1024 * 1024).await?;
+        parse_delete_preview_output(&output, marker)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_is_clean_and_merged_when_branch_matches_head() {
+        // Given: a real linked checkout at repository HEAD.
+        let (_dir, root, path) = preview_fixture();
+        // When: executing the generated script through the real shell.
+        let preview = execute_preview(&root, &path).await.unwrap();
+        // Then: its checkout/ref state is reported without a fabricated upstream.
+        assert!(!preview.missing);
+        assert!(!preview.dirty_state.is_dirty);
+        assert!(preview.merged);
+        assert_eq!(preview.branch, "feature");
+        assert_eq!((preview.upstream, preview.ahead, preview.behind), (None, None, None));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_preserves_dirty_paths_when_status_has_renames_and_control_characters() {
+        // Given: a staged rename, modification and untracked special-character paths.
+        let (_dir, root, path) = preview_fixture();
+        let renamed = "renamed 'quoted' 日本語\nfile";
+        preview_git(&path, &["mv", "tracked", renamed]);
+        std::fs::write(std::path::Path::new(&path).join(renamed), "modified").unwrap();
+        let untracked = "untracked spaces \"quotes\" 日本語\nFERRYX_PREVIEW_TEST";
+        std::fs::write(std::path::Path::new(&path).join(untracked), "untracked").unwrap();
+        // When: inspecting the checkout via the generated script and frame parser.
+        let preview = execute_preview(&root, &path).await.unwrap();
+        // Then: paths survive NUL status framing, base64 and the outer marker unchanged.
+        assert!(preview.dirty_state.is_dirty);
+        assert_eq!(preview.dirty_state.files.len(), 2);
+        assert!(preview.dirty_state.files.iter().any(|file| file.path == renamed && file.status_code == "RM"));
+        assert!(preview.dirty_state.files.iter().any(|file| file.path == untracked && file.status_code == "??"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_reports_divergence_when_branch_and_upstream_have_unique_commits() {
+        // Given: unequal unique commit counts on each side of a local upstream.
+        let (_dir, root, path) = preview_fixture();
+        preview_git(&path, &["commit", "--allow-empty", "-m", "feature"]);
+        preview_git(&root, &["commit", "--allow-empty", "-m", "main"]);
+        preview_git(&root, &["commit", "--allow-empty", "-m", "main again"]);
+        preview_git(&root, &["branch", "--set-upstream-to=main", "feature"]);
+        // When: inspecting the branch against repository HEAD.
+        let preview = execute_preview(&root, &path).await.unwrap();
+        // Then: merge state and count direction match the local preview contract.
+        assert!(!preview.merged);
+        assert_eq!(preview.upstream.as_deref(), Some("main"));
+        assert_eq!((preview.behind, preview.ahead), (Some(2), Some(1)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_is_merged_when_repository_head_contains_branch() {
+        // Given: a feature commit merged into repository HEAD.
+        let (_dir, root, path) = preview_fixture();
+        preview_git(&path, &["commit", "--allow-empty", "-m", "feature"]);
+        preview_git(&root, &["merge", "--no-ff", "-m", "merge feature", "feature"]);
+        // When: inspecting the feature checkout.
+        let preview = execute_preview(&root, &path).await.unwrap();
+        // Then: the branch is merged into the repository, not merely its own checkout HEAD.
+        assert!(preview.merged);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_recovers_refs_when_checkout_is_missing() {
+        // Given: Git still knows a checkout whose directory has disappeared.
+        let (_dir, root, path) = preview_fixture();
+        preview_git(&path, &["commit", "--allow-empty", "-m", "feature"]);
+        let expected = std::process::Command::new("git").args(["-C", &root, "rev-parse", "refs/heads/feature"]).output().unwrap();
+        assert!(expected.status.success());
+        std::fs::remove_dir_all(&path).unwrap();
+        // When: inspecting it through repository metadata.
+        let preview = execute_preview(&root, &path).await.unwrap();
+        // Then: branch/head survive and missing checkout is not treated as merged.
+        assert!(preview.missing);
+        assert!(!preview.merged);
+        assert!(!preview.dirty_state.is_dirty);
+        assert_eq!(preview.branch, "feature");
+        assert_eq!(preview.head, String::from_utf8(expected.stdout).unwrap().trim());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_returns_structured_error_when_checkout_is_detached() {
+        // Given: a registered checkout without a branch ref.
+        let (_dir, root, path) = preview_fixture();
+        preview_git(&path, &["checkout", "--detach"]);
+        // When: requesting a deletion preview.
+        let error = execute_preview(&root, &path).await.unwrap_err();
+        // Then: no branch or merge state is fabricated.
+        assert_eq!(error.code, IpcErrorCode::InvalidArgument);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_fails_when_existing_checkout_cannot_run_git_status() {
+        // Given: a registered directory whose .git pointer is corrupt.
+        let (_dir, root, path) = preview_fixture();
+        std::fs::write(std::path::Path::new(&path).join(".git"), "gitdir: /does-not-exist").unwrap();
+        // When: status inspection fails.
+        let result = execute_preview(&root, &path).await;
+        // Then: the failure cannot be reported as a clean checkout.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn preview_parser_rejects_malformed_frames_and_status() {
+        // Given: malformed wire responses, including invalid counts and rename records.
+        for frame in [
+            b"wrong\0ok\0".as_slice(),
+            b"M\0ok\0feature\0abc\0false\0true\0\0\0!!!\0",
+            b"M\0ok\0feature\0abc\0false\0true\0main\0bad\0\0",
+        ] {
+            // When: parsing the untrusted frame.
+            let result = parse_delete_preview_output(frame, "M");
+            // Then: corruption never becomes a successful preview.
+            assert!(result.is_err());
+        }
+        let malformed_status = STANDARD.encode(b"R  destination\0");
+        let frame = format!("M\0ok\0feature\0abc\0false\0false\0\0\0{malformed_status}\0");
+        assert!(parse_delete_preview_output(frame.as_bytes(), "M").is_err());
+    }
+
+    #[test]
+    fn windows_preview_script_encodes_paths_and_uses_checked_git_calls() {
+        // Given: Windows paths with PowerShell metacharacters.
+        let script = worktree_delete_preview_script(RemotePlatform::Windows, r"C:\repo '日本語'", r"C:\repo '日本語'\checkout", "M");
+        // When: preparing the PowerShell transport.
+        // Then: data is encoded, status is NUL-safe, and Git errors are checked.
+        assert!(script.contains("FromBase64String"));
+        assert!(script.contains("Invoke-FerryxGit"));
+        assert!(script.contains("'--porcelain=v1','-z'"));
+        assert!(script.contains("ToBase64String"));
+        assert!(script.contains("'merge-base','--is-ancestor','--',$ref,'HEAD'"));
+        assert!(script.contains("$g.Code -ne 0"));
+    }
+
+    #[test]
+    fn preview_parser_reads_windows_frame_and_count_direction() {
+        // Given: a frame in the exact format emitted by PowerShell.
+        let status = STANDARD.encode("?? file with spaces 日本語\0".as_bytes());
+        let frame = format!("M\0ok\0feature\0abc\0false\0false\0origin/main\02\t3\0{status}\0");
+        // When: parsing Windows output.
+        let preview = parse_delete_preview_output(frame.as_bytes(), "M").unwrap();
+        // Then: counts and paths retain their semantic direction/content.
+        assert_eq!((preview.behind, preview.ahead), (Some(2), Some(3)));
+        assert_eq!(preview.dirty_state.files[0].path, "file with spaces 日本語");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_rejects_traversal_before_ssh() {
+        // Given: an otherwise valid endpoint and a traversal path.
+        let host: SshHost = serde_json::from_value(serde_json::json!({"id":"preview-jail","hostname":"never-contact.invalid"})).unwrap();
+        let environment = RemoteEnvironment { platform: RemotePlatform::Posix, executor: super::super::runtime::RemoteExecutor::Sh, version: "test".into(), home: "/tmp".into(), temp: "/tmp".into(), git: true };
+        // When: previewing outside the repository jail.
+        let error = preview_remote_delete(&host, &environment, "/repo", "/repo/../escape").await.unwrap_err();
+        // Then: it fails validation without attempting any SSH connection.
+        assert_eq!(error.code, IpcErrorCode::InvalidPath);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

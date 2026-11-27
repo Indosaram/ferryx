@@ -5,7 +5,7 @@ import type { PairedHostReachabilityView } from "../../lib/pairedHostReachabilit
 import type { RegisteredProject } from "../../lib/tauri";
 import type { Worktree } from "../../lib/types";
 import type { RemoteHostState } from "../../state/remoteHostStore";
-import { buildSidebarModel, filterSidebarModel, sidebarLiveState, type SidebarModelInput } from "./sidebarModel";
+import { buildSidebarModel, filterSidebarModel, sidebarLiveState, worktreeActivityKey, type SidebarModelInput } from "./sidebarModel";
 import { initialCollapsedProjects } from "./sidebarRows";
 import { worktreeLifecycleIdentity } from "../../lib/sidebarPersistence";
 
@@ -233,5 +233,21 @@ describe("sidebarLiveState", () => {
 
     expect(root && live.rows[root.key]).toEqual({ active: true, slot: null, supervisorTyping: true });
     expect(relay && live.rows[relay.key]).toEqual({ active: false, slot: "waiting", supervisorTyping: false });
+  });
+
+  it("lights up a paired row from its workspace-scoped activity without leaking path-only local data", () => {
+    const model = buildSidebarModel(fixture());
+    const pairedRow = model.projects.find((p) => p.groupId === "daemon:site")?.worktrees[0];
+    const live = sidebarLiveState(model, {
+      activityByWorktreePath: { "/work/site": activity("waiting") },
+      activityByWorktreeKey: {
+        [worktreeActivityKey("daemon:site", "/work/site")]: activity("working"),
+      },
+      activeWorkspaceId: "ferryx",
+      activePath: "/code/ferryx",
+    }, "");
+
+    expect(pairedRow && live.rows[pairedRow.key]).toMatchObject({ active: false, slot: "working" });
+    expect(live.footer).toBe("1 running");
   });
 });

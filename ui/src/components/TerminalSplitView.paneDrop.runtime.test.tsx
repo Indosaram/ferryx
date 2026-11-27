@@ -270,6 +270,56 @@ describe("TerminalSplitView pane-targeted tab drop", () => {
     );
   });
 
+  it("does not split a single-pane tab dropped on an edge of its own pane", () => {
+    const onSplitPane = vi.fn();
+    const onMoveTabToSplit = vi.fn();
+
+    render(
+      <TerminalSplitView
+        layout={layoutWithTargetSplit()}
+        sessions={{
+          "session-left": session("session-left"),
+          "session-right": session("session-right"),
+          "session-source": session("session-source"),
+        }}
+        onSplitPane={onSplitPane}
+        onMoveTabToSplit={onMoveTabToSplit}
+      />,
+    );
+
+    const onDragStart = dndHarness.props?.onDragStart;
+    const onDragEnd = dndHarness.props?.onDragEnd;
+    if (!onDragStart || !onDragEnd) {
+      throw new Error("DndContext handlers were not captured");
+    }
+
+    // `tab-source` owns exactly one leaf, so there is no second pane to move beside itself.
+    const ownPaneEdge = dndHarness.droppables.find(
+      (droppable) =>
+        droppable.data?.type === "pane-edge" &&
+        droppable.data?.tabId === "tab-source" &&
+        droppable.data?.leafId === "leaf-source" &&
+        droppable.data?.edge === "right",
+    );
+    expect(ownPaneEdge).toBeDefined();
+    if (!ownPaneEdge || !ownPaneEdge.data) throw new Error("Own pane-edge droppable was not found");
+
+    onDragStart({
+      active: {
+        data: {
+          current: { type: "tab", tabId: "tab-source", groupId: "group-default", index: 1 },
+        },
+      },
+    });
+
+    onDragEnd({
+      over: { id: ownPaneEdge.id, data: { current: ownPaneEdge.data } },
+    });
+
+    expect(onSplitPane).not.toHaveBeenCalled();
+    expect(onMoveTabToSplit).not.toHaveBeenCalled();
+  });
+
   it("calls onSplitPane and avoids onMoveTabToSplit when dragging an active terminal tab onto an edge of its own pane", () => {
     const onSplitPane = vi.fn();
     const onMoveTabToSplit = vi.fn();

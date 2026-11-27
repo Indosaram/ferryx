@@ -6,6 +6,7 @@ import { resetBrowserSettings, saveBrowserSettings } from "./browserSettings";
 import {
   openTerminalToken,
   registerBuiltInBrowserLinkOpener,
+  registerMiniBrowserLinkOpener,
   requestTerminalLinkOpen,
   resolveTokenAtCol,
   routeHttpLink,
@@ -112,6 +113,101 @@ describe("HTTP link routing", () => {
   it("rejects non-http schemes before any opener is called", async () => {
     await expect(routeHttpLink("file:///etc/passwd")).rejects.toThrow(/http\(s\)/i);
     expect(openExternalUrl).not.toHaveBeenCalled();
+  });
+});
+
+describe("Transient Mini Pane routing", () => {
+  it("routes an explicit mini destination to the registered mini opener", async () => {
+    const openBuiltIn = vi.fn(() => Promise.resolve());
+    const openMini = vi.fn(() => Promise.resolve());
+    const unregisterBuiltIn = registerBuiltInBrowserLinkOpener(openBuiltIn);
+    const unregisterMini = registerMiniBrowserLinkOpener(openMini);
+    try {
+      await expect(routeHttpLink("https://example.com/peek", { destination: "mini" })).resolves.toBe("mini");
+      expect(openMini).toHaveBeenCalledWith("https://example.com/peek");
+      expect(openBuiltIn).not.toHaveBeenCalled();
+      expect(openExternalUrl).not.toHaveBeenCalled();
+    } finally {
+      unregisterMini();
+      unregisterBuiltIn();
+    }
+  });
+
+  it("falls back to the built-in browser when no mini opener is registered", async () => {
+    const openBuiltIn = vi.fn(() => Promise.resolve());
+    const unregister = registerBuiltInBrowserLinkOpener(openBuiltIn);
+    try {
+      await expect(routeHttpLink("https://example.com/peek", { destination: "mini" })).resolves.toBe("builtin");
+      expect(openBuiltIn).toHaveBeenCalledWith("https://example.com/peek");
+      expect(openExternalUrl).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("falls back to the system browser when neither a mini nor a built-in opener exists", async () => {
+    await expect(routeHttpLink("https://example.com/peek", { destination: "mini" })).resolves.toBe("external");
+    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/peek");
+  });
+
+  it("routes Shift+click on a terminal link to the mini pane when Shift is not the system browser", async () => {
+    const openBuiltIn = vi.fn(() => Promise.resolve());
+    const openMini = vi.fn(() => Promise.resolve());
+    const unregisterBuiltIn = registerBuiltInBrowserLinkOpener(openBuiltIn);
+    const unregisterMini = registerMiniBrowserLinkOpener(openMini);
+    try {
+      saveBrowserSettings({ shiftOpensSystemBrowser: false, openLinksInBuiltInBrowser: true });
+      await expect(routeHttpLink("https://example.com/shift", { shiftKey: true, source: "terminal" }))
+        .resolves.toBe("mini");
+      expect(openMini).toHaveBeenCalledWith("https://example.com/shift");
+      expect(openBuiltIn).not.toHaveBeenCalled();
+      expect(openExternalUrl).not.toHaveBeenCalled();
+    } finally {
+      unregisterMini();
+      unregisterBuiltIn();
+    }
+  });
+
+  it("routes Shift+click from app chrome to the mini pane as well", async () => {
+    const openMini = vi.fn(() => Promise.resolve());
+    const unregister = registerMiniBrowserLinkOpener(openMini);
+    try {
+      saveBrowserSettings({ shiftOpensSystemBrowser: false });
+      await expect(routeHttpLink("https://example.com/app", { shiftKey: true, source: "app" })).resolves.toBe("mini");
+      expect(openMini).toHaveBeenCalledWith("https://example.com/app");
+    } finally {
+      unregister();
+    }
+  });
+
+  it("leaves a non terminal/app source on its normal route", async () => {
+    const openBuiltIn = vi.fn(() => Promise.resolve());
+    const openMini = vi.fn(() => Promise.resolve());
+    const unregisterBuiltIn = registerBuiltInBrowserLinkOpener(openBuiltIn);
+    const unregisterMini = registerMiniBrowserLinkOpener(openMini);
+    try {
+      saveBrowserSettings({ shiftOpensSystemBrowser: false, openLinksInBuiltInBrowser: true });
+      await expect(routeHttpLink("https://example.com/md", { shiftKey: true, source: "markdown" }))
+        .resolves.toBe("builtin");
+      expect(openMini).not.toHaveBeenCalled();
+      expect(openBuiltIn).toHaveBeenCalledWith("https://example.com/md");
+    } finally {
+      unregisterMini();
+      unregisterBuiltIn();
+    }
+  });
+
+  it("stops routing to the mini once its opener is unregistered", async () => {
+    const openBuiltIn = vi.fn(() => Promise.resolve());
+    const unregisterBuiltIn = registerBuiltInBrowserLinkOpener(openBuiltIn);
+    const unregisterMini = registerMiniBrowserLinkOpener(vi.fn(() => Promise.resolve()));
+    unregisterMini();
+    try {
+      await expect(routeHttpLink("https://example.com/after", { destination: "mini" })).resolves.toBe("builtin");
+      expect(openBuiltIn).toHaveBeenCalledWith("https://example.com/after");
+    } finally {
+      unregisterBuiltIn();
+    }
   });
 });
 

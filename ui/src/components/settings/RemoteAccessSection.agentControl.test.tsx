@@ -19,6 +19,7 @@ vi.mock("../../lib/tauri", () => ({
 }));
 
 import { RemoteAccessSection } from "./RemoteAccessSection";
+import { resetRemoteAccessStateForTests } from "./remote/useRemoteAccessState";
 
 const record = (index: number) => ({
   deviceId: "dev-phone",
@@ -32,6 +33,7 @@ const record = (index: number) => ({
 
 describe("RemoteAccessSection agent control card", () => {
   beforeEach(() => {
+    resetRemoteAccessStateForTests();
     vi.clearAllMocks();
     tauriMocks.getRemoteStatus.mockResolvedValue({
       enabled: true,
@@ -47,7 +49,10 @@ describe("RemoteAccessSection agent control card", () => {
     ]);
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    resetRemoteAccessStateForTests();
+  });
 
   it("the toggle calls the set command and the card renders the audit list", async () => {
     tauriMocks.getAgentControlSettings.mockResolvedValue({

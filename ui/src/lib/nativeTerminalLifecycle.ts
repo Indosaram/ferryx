@@ -4,6 +4,37 @@ import { createAttemptBudget, matchesAttachTuple, type AttemptBudget } from "./l
 
 const durableBindings = new Map<string, { tuple: PaneAttachTuple; budget: AttemptBudget | null }>();
 
+/**
+ * Exits already settled for a backend session, retained after `settleNativeTerminalExit`
+ * drops the durable binding. A duplicate exit receipt carries the identical tuple, so it
+ * must stay idempotent (`true`) instead of reading as an unknown session and inviting a
+ * retry. Registering a binding for the backend retires the record.
+ */
+type SettledNativeTerminalExit = {
+  readonly frontendSessionId: string;
+  readonly incarnation: PaneAttachTuple["incarnation"];
+  readonly daemonEpoch: string;
+  readonly bindingKey: string;
+  readonly attemptGeneration: number;
+};
+const settledNativeTerminalExits = new Map<string, SettledNativeTerminalExit>();
+// Bounded so a long-lived UI does not retain one record per backend ever spawned.
+// Eviction only costs idempotency for exits far older than any live retry.
+const SETTLED_NATIVE_TERMINAL_EXIT_LIMIT = 64;
+
+function rememberSettledNativeTerminalExit(
+  backendSessionId: string,
+  settled: SettledNativeTerminalExit,
+): void {
+  settledNativeTerminalExits.delete(backendSessionId);
+  settledNativeTerminalExits.set(backendSessionId, settled);
+  while (settledNativeTerminalExits.size > SETTLED_NATIVE_TERMINAL_EXIT_LIMIT) {
+    const oldest = settledNativeTerminalExits.keys().next();
+    if (oldest.done) break;
+    settledNativeTerminalExits.delete(oldest.value);
+  }
+}
+
 // Set once the native renderer reports NATIVE_RENDERER_UNAVAILABLE (no GPU adapter or device).
 // Held for this launch only: panes then mount the DOM compatibility renderer, and a restart
 // retries the GPU path.
@@ -39,6 +70,9 @@ export function registerDurableNativeBinding(tuple: PaneAttachTuple, startTimeMs
     { ...current.tuple, attemptGeneration: tuple.attemptGeneration }, tuple,
   ) || tuple.attemptGeneration <= current.tuple.attemptGeneration)) return false;
   durableBindings.set(tuple.backendSessionId, { tuple: { ...tuple }, budget: createAttemptBudget(startTimeMs) });
+  // A fresh binding is a new incarnation to settle; a duplicate of an already settled
+  // exit must no longer short-circuit as idempotent.
+  settledNativeTerminalExits.delete(tuple.backendSessionId);
   return true;
 }
 
@@ -95,10 +129,13 @@ type PendingDetachment = {
   readonly sessionId: string;
   readonly generation: number;
   replacementBindingKey?: string | null;
+  presentationWaitTimeout?: ReturnType<typeof setTimeout>;
   readonly operation: NativeTerminalLifecycleOperation<void>;
   readonly resolve: (detached: boolean) => void;
   readonly reject: (error: unknown) => void;
 };
+
+const PRESENTATION_WAIT_SAFETY_TIMEOUT_MS = 2_000;
 
 const pendingDetachments = new Map<string, PendingDetachment>();
 const detachmentsWaitingForPresentation = new Map<string, PendingDetachment[]>();
@@ -113,7 +150,13 @@ function getSessionGeneration(sessionId: string): number {
   return sessionGenerations.get(sessionId) ?? 0;
 }
 
+function clearPresentationWaitTimeout(pending: PendingDetachment): void {
+  clearTimeout(pending.presentationWaitTimeout);
+  pending.presentationWaitTimeout = undefined;
+}
+
 function executeDetachment(pending: PendingDetachment): void {
+  clearPresentationWaitTimeout(pending);
   if (sessionGenerations.get(pending.sessionId) !== pending.generation) {
     switchDebug("terminal.lifecycle.detach.skipped.stale", {
       backendSessionId: pending.sessionId,
@@ -175,12 +218,10 @@ function executeDetachment(pending: PendingDetachment): void {
 function releasePresentationWaiters(sessionId: string, bindingKey?: string | null): void {
   const pending = detachmentsWaitingForPresentation.get(sessionId);
   if (!pending) return;
-  const released = bindingKey === undefined
-    ? pending
-    : pending.filter((detachment) => detachment.replacementBindingKey === bindingKey);
-  const remaining = bindingKey === undefined
-    ? []
-    : pending.filter((detachment) => detachment.replacementBindingKey !== bindingKey);
+  const matchesBinding = (detachment: PendingDetachment) => bindingKey === undefined ||
+    detachment.replacementBindingKey === null || detachment.replacementBindingKey === bindingKey;
+  const released = pending.filter(matchesBinding);
+  const remaining = pending.filter((detachment) => !matchesBinding(detachment));
   if (released.length === 0) return;
   switchDebug("terminal.lifecycle.presentation.release", {
     backendSessionId: sessionId,
@@ -205,6 +246,7 @@ function cancelHeldDetachmentsFor(sessionId: string): boolean {
   for (const [replacementSessionId, waiting] of detachmentsWaitingForPresentation) {
     const remaining = waiting.filter((detachment) => {
       if (detachment.sessionId !== sessionId) return true;
+      clearPresentationWaitTimeout(detachment);
       detachment.resolve(false);
       cancelled = true;
       return false;
@@ -231,10 +273,19 @@ function holdDetachmentForPresentation(
   }
   const waiting = detachmentsWaitingForPresentation.get(replacementSessionId) ?? [];
   pending.replacementBindingKey = replacementBindingKey;
-  detachmentsWaitingForPresentation.set(
-    replacementSessionId,
-    [...waiting, ...inherited.map((detachment) => ({ ...detachment, replacementBindingKey })), pending],
-  );
+  for (const detachment of inherited) detachment.replacementBindingKey = replacementBindingKey;
+  detachmentsWaitingForPresentation.set(replacementSessionId, [...waiting, ...inherited, pending]);
+  // Inherited waiters keep their original deadline even across rapid replacements.
+  pending.presentationWaitTimeout = setTimeout(() => {
+    for (const [waiterId, waiters] of detachmentsWaitingForPresentation) {
+      if (!waiters.includes(pending)) continue;
+      const retained = waiters.filter((waiter) => waiter !== pending);
+      if (retained.length) detachmentsWaitingForPresentation.set(waiterId, retained);
+      else detachmentsWaitingForPresentation.delete(waiterId);
+      executeDetachment(pending);
+      break;
+    }
+  }, PRESENTATION_WAIT_SAFETY_TIMEOUT_MS);
   switchDebug("terminal.lifecycle.detach.held", {
     outgoingBackendSessionId: pending.sessionId,
     replacementBackendSessionId: replacementSessionId,
@@ -551,12 +602,36 @@ export function emitNativeTerminalPresentation(
   return delivered;
 }
 
+function matchesSettledNativeTerminalExit(
+  frontendSessionId: string,
+  expected: Pick<PaneAttachTuple, "backendSessionId" | "incarnation" | "daemonEpoch" | "bindingKey" | "attemptGeneration">,
+): boolean {
+  const settled = settledNativeTerminalExits.get(expected.backendSessionId);
+  return Boolean(settled && settled.frontendSessionId === frontendSessionId &&
+    settled.incarnation === expected.incarnation && settled.daemonEpoch === expected.daemonEpoch &&
+    settled.bindingKey === expected.bindingKey && settled.attemptGeneration === expected.attemptGeneration);
+}
+
+/**
+ * Settles the exit of one durable native incarnation.
+ *
+ * A stale tuple (different incarnation, epoch, binding or attempt) is refused so the caller
+ * can retry. The matching tuple settles exactly once and stays idempotent afterwards: the
+ * durable binding is dropped, but the settled tuple is remembered so a duplicate exit
+ * receipt for the same incarnation still reports `true` rather than looking like an
+ * unknown session.
+ */
 export function settleNativeTerminalExit(
   frontendSessionId: string,
   expected: Pick<PaneAttachTuple, "backendSessionId" | "incarnation" | "daemonEpoch" | "bindingKey" | "attemptGeneration">,
 ): boolean {
   const current = durableBindings.get(expected.backendSessionId)?.tuple;
-  if (!current || current.frontendSessionId !== frontendSessionId ||
+  if (!current) {
+    // The binding is already gone: either this exact exit settled earlier (idempotent
+    // repeat) or the session was never bound here. Anything else stays retryable.
+    return matchesSettledNativeTerminalExit(frontendSessionId, expected);
+  }
+  if (current.frontendSessionId !== frontendSessionId ||
       current.incarnation !== expected.incarnation || current.daemonEpoch !== expected.daemonEpoch ||
       current.bindingKey !== expected.bindingKey || current.attemptGeneration !== expected.attemptGeneration) return false;
   bumpSessionGeneration(expected.backendSessionId);
@@ -568,16 +643,19 @@ export function settleNativeTerminalExit(
     pendingDetachments.delete(expected.backendSessionId);
     pending.resolve(false);
   }
-  for (const [waiterId, waiters] of detachmentsWaitingForPresentation) {
-    const retained = waiters.filter((waiter) => waiter.sessionId !== expected.backendSessionId);
-    if (retained.length !== waiters.length) {
-      for (const waiter of waiters) {
-        if (waiter.sessionId === expected.backendSessionId) waiter.resolve(false);
-      }
-      if (retained.length) detachmentsWaitingForPresentation.set(waiterId, retained);
-      else detachmentsWaitingForPresentation.delete(waiterId);
-    }
-  }
+  cancelHeldDetachmentsFor(expected.backendSessionId);
+  releasePresentationWaiters(expected.backendSessionId);
+  durableBindings.delete(expected.backendSessionId);
+  rememberSettledNativeTerminalExit(expected.backendSessionId, {
+    frontendSessionId,
+    incarnation: expected.incarnation,
+    daemonEpoch: expected.daemonEpoch,
+    bindingKey: expected.bindingKey,
+    attemptGeneration: expected.attemptGeneration,
+  });
+  // The exit already resolved the detachments it owned above, so the counter is dropped
+  // with the binding; a later re-bind starts this session's generations from zero again.
+  sessionGenerations.delete(expected.backendSessionId);
   return true;
 }
 
@@ -646,6 +724,7 @@ export function resetNativeTerminalLifecycleForTest(): void {
   nativeRendererUnavailable = false;
   nativeRendererListeners.clear();
   durableBindings.clear();
+  settledNativeTerminalExits.clear();
   lifecycleTails.clear();
   inFlightAttachIpcs.clear();
   attachedSessionIds.clear();
@@ -653,6 +732,9 @@ export function resetNativeTerminalLifecycleForTest(): void {
   queuedAttachments.clear();
   sessionGenerations.clear();
   pendingDetachments.clear();
+  for (const waiters of detachmentsWaitingForPresentation.values()) {
+    for (const waiter of waiters) clearPresentationWaitTimeout(waiter);
+  }
   detachmentsWaitingForPresentation.clear();
   presentationSubscriptions.clear();
 }

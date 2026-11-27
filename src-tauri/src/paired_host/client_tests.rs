@@ -2151,10 +2151,7 @@ fn layout_tab(id: &str, session: &str) -> m::SharedTab {
         kind: "terminal".into(),
         label: id.into(),
         pinned: false,
-        pane_tree: Some(m::SharedPane::Leaf {
-            leaf_id: format!("leaf-{id}"),
-            backend_session_id: session.into(),
-        }),
+        pane_tree: Some(m::SharedPane::leaf(format!("leaf-{id}"), session)),
     }
 }
 
@@ -2162,6 +2159,7 @@ fn layout_tab(id: &str, session: &str) -> m::SharedTab {
 fn layout_operations_route_to_the_layout_capability() {
     let read = Operation::LayoutGet {
         workspace_id: "ws-1".into(),
+        worktree_key: None,
         after_revision: None,
     };
     assert!(!read.is_mutation());
@@ -2175,9 +2173,25 @@ fn layout_operations_route_to_the_layout_capability() {
     assert!(!route.conflict_is_answer);
     assert!(route.idempotent);
 
+    // A worktree bucket rides the query as `worktreeKey`.
+    let scoped = Operation::LayoutGet {
+        workspace_id: "ws-1".into(),
+        worktree_key: Some("wt:feature-a".into()),
+        after_revision: None,
+    };
+    let route = scoped.route().expect("route succeeds");
+    assert_eq!(
+        route.query,
+        vec![
+            ("workspaceId".to_string(), "ws-1".to_string()),
+            ("worktreeKey".to_string(), "wt:feature-a".to_string()),
+        ]
+    );
+
     // A long-poll must outlast the host's 25 s park, so it gets its own budget.
     let poll = Operation::LayoutGet {
         workspace_id: "ws-1".into(),
+        worktree_key: None,
         after_revision: Some(4),
     };
     let route = poll.route().expect("route succeeds");
@@ -2193,6 +2207,7 @@ fn layout_operations_route_to_the_layout_capability() {
 
     let write = Operation::LayoutPut {
         workspace_id: "ws-1".into(),
+        worktree_key: None,
         base_revision: 4,
         tabs: vec![layout_tab("t1", "s1")],
     };
@@ -2209,6 +2224,10 @@ fn layout_operations_route_to_the_layout_capability() {
     let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
     assert_eq!(body["workspaceId"], "ws-1");
     assert_eq!(body["baseRevision"], 4);
+    assert!(
+        body.get("worktreeKey").is_none(),
+        "a workspace-level write omits the key rather than sending null"
+    );
     assert_eq!(
         body["tabs"],
         json!([{
@@ -2219,12 +2238,26 @@ fn layout_operations_route_to_the_layout_capability() {
             "paneTree": {"type": "leaf", "leafId": "leaf-t1", "backendSessionId": "s1"},
         }])
     );
+
+    // A scoped write carries the bucket in the body; the route itself stays query-free.
+    let scoped_write = Operation::LayoutPut {
+        workspace_id: "ws-1".into(),
+        worktree_key: Some("wt:feature-a".into()),
+        base_revision: 1,
+        tabs: vec![],
+    };
+    let route = scoped_write.route().expect("route succeeds");
+    assert!(route.query.is_empty(), "the selector rides the body, not the query");
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["worktreeKey"], "wt:feature-a");
+    assert_eq!(body["baseRevision"], 1);
 }
 
 #[test]
 fn layout_operations_carry_their_contract_kind_names() {
     let read = Operation::LayoutGet {
         workspace_id: "ws-1".into(),
+        worktree_key: None,
         after_revision: None,
     };
     assert_eq!(
@@ -2234,14 +2267,25 @@ fn layout_operations_carry_their_contract_kind_names() {
     );
     let poll = Operation::LayoutGet {
         workspace_id: "ws-1".into(),
+        worktree_key: None,
         after_revision: Some(2),
     };
     assert_eq!(
         serde_json::to_value(&poll).unwrap(),
         json!({"kind": "layoutGet", "workspaceId": "ws-1", "afterRevision": 2})
     );
+    let scoped = Operation::LayoutGet {
+        workspace_id: "ws-1".into(),
+        worktree_key: Some("main".into()),
+        after_revision: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&scoped).unwrap(),
+        json!({"kind": "layoutGet", "workspaceId": "ws-1", "worktreeKey": "main"})
+    );
     let write = Operation::LayoutPut {
         workspace_id: "ws-1".into(),
+        worktree_key: None,
         base_revision: 2,
         tabs: vec![],
     };
@@ -2250,7 +2294,7 @@ fn layout_operations_carry_their_contract_kind_names() {
         json!({"kind": "layoutPut", "workspaceId": "ws-1", "baseRevision": 2, "tabs": []})
     );
     // Round-trip: the same bytes the desktop sends decode back to the same operation.
-    for operation in [read, poll, write] {
+    for operation in [read, poll, scoped, write] {
         let encoded = serde_json::to_vec(&operation).unwrap();
         let decoded: Operation = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(

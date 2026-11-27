@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { attentionBySessionIdOf, type AttentionBySessionId } from "../attentionGroup";
+import { subscribePairedHostReachability } from "../pairedHostReachability";
 import * as tauri from "../tauri";
 import type { PanelEvent, PanelSnapshot } from "./contract";
 import { applyPanelEvent } from "./model";
@@ -50,19 +51,26 @@ export function usePanelAttention(source: PanelAttentionSource = {}): AttentionB
         else unlisten = dispose;
       })
       .catch(() => undefined);
-    Promise.resolve()
-      .then(load)
-      .then(
-        (initial) => {
-          if (disposed || !initial) return;
-          show(early.reduce(applyPanelEvent, initial));
-          early.length = 0;
-        },
-        () => undefined,
-      );
+    const reload = () => {
+      Promise.resolve()
+        .then(load)
+        .then(
+          (initial) => {
+            if (disposed || !initial) return;
+            show(early.reduce(applyPanelEvent, initial));
+            early.length = 0;
+          },
+          () => undefined,
+        );
+    };
+    reload();
+    const stopReachability = subscribePairedHostReachability(() => {
+      if (!disposed) reload();
+    });
     return () => {
       disposed = true;
       unlisten?.();
+      stopReachability();
     };
   }, [load, subscribe]);
 

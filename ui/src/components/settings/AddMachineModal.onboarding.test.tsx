@@ -302,4 +302,23 @@ describe("AddMachineModal - SSH install and enroll", () => {
     expect(screen.getByTestId("ssh-install-stage-issuing")).toHaveAttribute("data-state", "failed");
     expect(invokeMock.mock.calls.some(([command]) => command === "cmd_ssh_install_ferryx_node")).toBe(false);
   });
+
+  it("locks the result actions while an install is in flight", async () => {
+    // An install can take a while; Done/Add Project must not let the user leave or start a
+    // second project flow over it, and the wizard's own dismissal lock must not be bypassed.
+    let release!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { release = resolve; });
+    sshIpc(() => pending);
+    await saveSshHost({ onIssueInstallKey: vi.fn().mockResolvedValue(issued), accountMachines: [] });
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Install Ferryx and add to account" })); });
+    expect(screen.getByRole("button", { name: "Add Project" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Done" })).toBeDisabled();
+
+    await act(async () => {
+      release({ cliPath: "/usr/local/bin/ferryx-cli", version: "v", service: { supervised: true, backend: "systemd" } });
+    });
+    expect(screen.getByRole("button", { name: "Add Project" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Done" })).toBeEnabled();
+  });
 });

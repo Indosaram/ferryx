@@ -725,7 +725,9 @@ describe("TerminalPane native routing contract", () => {
     );
 
     expect(screen.queryByTestId("paired-terminal-unavailable")).toBeNull();
-    expect(screen.getByText("Shell exited")).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-pane-overlay")).toHaveAttribute("data-pane-state", "disconnected");
+    expect(screen.getByTestId("terminal-pane-overlay")).toHaveAttribute("data-paired", "true");
+    expect(screen.queryByText("Shell exited")).toBeNull();
     const btn = screen.getByRole("button", { name: "Open new shell" });
     expect(btn).toBeInTheDocument();
     fireEvent.click(btn);
@@ -752,6 +754,67 @@ describe("TerminalPane native routing contract", () => {
 
     expect(screen.getByTestId("paired-terminal-unavailable")).toBeInTheDocument();
     remoteHostStore.reset();
+  });
+
+  it("offers the paired escape once machine features turn on while the pane stays mounted", () => {
+    // Given: a mounted paired pane rendered while native paired support is still off.
+    remoteHostStore.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: false }));
+    const pairedSession: TerminalSession = {
+      id: "paired-pane",
+      workspaceId: "daemon:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      cwd: "/remote/repo",
+      worktree: null,
+      backendSessionId: null,
+      lifecycle: "exited",
+    };
+    render(<TerminalPane session={pairedSession} active={true} onOpenNewShell={vi.fn()} />);
+    expect(screen.getByTestId("paired-terminal-unavailable")).toBeInTheDocument();
+
+    // When: the store flips machine features on without the pane re-rendering from its parent.
+    act(() => {
+      remoteHostStore.setState(s => ({ ...s, machineFeaturesEnabled: true }));
+    });
+
+    // Then: the pane follows the store and offers the replacement shell.
+    expect(screen.queryByTestId("paired-terminal-unavailable")).toBeNull();
+    expect(screen.getByRole("button", { name: "Open new shell" })).toBeEnabled();
+    remoteHostStore.reset();
+  });
+
+  it("names the paired machine and routes Reconnect paired session for a disconnected paired pane", () => {
+    // Given: a paired pane that still owns its backend but whose process view exited.
+    const onReconnect = vi.fn();
+    const pairedSession: TerminalSession = {
+      ...createSession("paired-owned"),
+      workspaceId: "daemon:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      backendSessionId: "backend-paired-owned",
+      lifecycle: "exited",
+    };
+    render(<TerminalPane session={pairedSession} active={true} onReconnect={onReconnect} onOpenNewShell={vi.fn()} />);
+
+    // When: the user reconnects from the status bar.
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect paired session" }));
+
+    // Then: the paired copy replaces the local shell copy and the pane's reconnect handler runs.
+    expect(screen.getByTestId("terminal-pane-overlay")).toHaveAttribute("data-paired", "true");
+    expect(screen.getByTestId("terminal-pane-overlay")).toHaveAttribute("data-pane-state", "disconnected");
+    expect(screen.queryByText("Shell exited")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect shell" })).toBeNull();
+    expect(onReconnect).toHaveBeenCalledExactlyOnceWith("paired-owned");
+  });
+
+  it("says it is reconnecting to the paired machine while a paired pane reconnects", () => {
+    const pairedSession: TerminalSession = {
+      ...createSession("paired-reconnecting"),
+      workspaceId: "daemon:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      backendSessionId: "backend-paired-reconnecting",
+      remoteConnectionState: "reconnecting",
+    };
+    render(<TerminalPane session={pairedSession} active={true} />);
+
+    expect(screen.getByTestId("terminal-pane-overlay")).toHaveAttribute("data-pane-state", "reconnecting");
+    expect(screen.getByTestId("terminal-pane-overlay")).toHaveAttribute("data-paired", "true");
+    expect(screen.queryByText("Reconnecting session...")).toBeNull();
   });
 
   it("shows Reconnecting session... overlay when a local session is reconnecting", () => {

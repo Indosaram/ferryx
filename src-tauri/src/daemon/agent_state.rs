@@ -259,6 +259,37 @@ impl AgentStateHub {
         });
     }
 
+    pub(crate) fn release_remote(&self, session_id: &str) {
+        let mut retained = self.retained.lock();
+        let Some(previous) = retained.get(session_id).cloned() else {
+            return;
+        };
+        if previous.origin == AgentStateOrigin::ProcessReleased && previous.state == "idle" {
+            return;
+        }
+        let state = AgentState {
+            session_id: session_id.to_string(),
+            state: "idle".to_string(),
+            agent: previous.agent,
+            provider_session: previous.provider_session,
+            detail: None,
+            origin: AgentStateOrigin::ProcessReleased,
+            outcome: None,
+            kind: None,
+        };
+        tracing::info!(
+            session_id,
+            reason = "remote_session_released",
+            previous_state = %previous.state,
+            "remote agent activity released"
+        );
+        retained.insert(session_id.to_string(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
+    }
+
     pub(crate) fn release_foreground(&self, session_id: &str) {
         let mut retained = self.retained.lock();
         let previous = retained.get(session_id).cloned();
@@ -1165,6 +1196,27 @@ mod tests {
             Err(broadcast::error::TryRecvError::Lagged(_))
         ));
         assert_eq!(subscription.resynchronize("s1"), Some(state("s1", "idle")));
+        assert!(matches!(
+            subscription.receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn release_remote_clears_stuck_working_state_idempotently() {
+        let hub = Arc::new(AgentStateHub::new(8));
+        let mut subscription = hub.subscribe("ssh-1");
+        hub.publish_canonical(state("ssh-1", "working"));
+        let _ = subscription.receiver.try_recv().unwrap();
+
+        hub.release_remote("ssh-1");
+        let released = subscription.receiver.try_recv().unwrap();
+        assert_eq!(released.state.state, "idle");
+        assert_eq!(released.state.origin, AgentStateOrigin::ProcessReleased);
+        assert_eq!(released.state.outcome, None);
+
+        // Calling again when already released is a no-op and emits no duplicate frame.
+        hub.release_remote("ssh-1");
         assert!(matches!(
             subscription.receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)

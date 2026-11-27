@@ -507,7 +507,9 @@ fn opened_episode(
     if let Some(prompt_id) = &draft.prompt_id {
         return Some(format!("prompt:{prompt_id}"));
     }
-    let done = matches!(draft.state, AgentControlState::Idle | AgentControlState::Unknown);
+    let done = draft.state == AgentControlState::Idle
+        || (draft.state == AgentControlState::Unknown
+            && draft.state_source != AgentStateSource::None);
     if done && previous == Some(AgentControlState::Working) {
         return Some(format!("{DONE_EPISODE}{}", state_since_ms.unwrap_or_default()));
     }
@@ -1820,6 +1822,21 @@ mod tests {
             assert!(!restarted.read_state("s"), "and keeps it unread");
             restarted.publish(draft("s", AgentControlState::Working));
             assert_eq!(restarted.completion("s"), None, "a new turn ends it");
+        }
+
+        #[test]
+        fn working_to_unknown_with_no_state_source_does_not_open_a_completion() {
+            let (bus, clock) = clocked_bus();
+            bus.publish(draft("s", AgentControlState::Working));
+            clock.store(5_000, std::sync::atomic::Ordering::SeqCst);
+            let mut empty_shell = draft("s", AgentControlState::Unknown);
+            empty_shell.state_source = AgentStateSource::None;
+            bus.publish(empty_shell);
+            assert_eq!(
+                bus.completion("s"),
+                None,
+                "an unknown shell with no agent signal is not a reported completion"
+            );
         }
     }
 

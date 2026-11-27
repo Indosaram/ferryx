@@ -11,6 +11,7 @@ import { EmptyWorkspaceView } from "./EmptyWorkspaceView";
 import { SettingsDialog } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
 import { TerminalPane } from "./TerminalPane";
+import { DesktopActivityBar } from "./activity/DesktopActivityBar";
 
 vi.mock("../lib/updater", async (importOriginal) => ({
   ...await importOriginal<typeof import("../lib/updater")>(),
@@ -74,6 +75,15 @@ const session: TerminalSession = {
 function renderShell() {
   return render(
     <>
+      <DesktopActivityBar
+        mode="worktrees"
+        onModeChange={vi.fn()}
+        sidebarOpen
+        onToggleSidebar={vi.fn()}
+        onOpenResources={vi.fn()}
+        onOpenSettings={vi.fn()}
+        isMac={false}
+      />
       <Sidebar
         projects={[{ workspaceId: "ws-main", repoRoot: "/repo", gitRoot: "/repo" }]}
         activeProjectId="ws-main"
@@ -107,6 +117,7 @@ function settingsSections(): string[] {
 
 function entryPoints() {
   return {
+    activityModes: activityModes(),
     sidebarViews: sidebarViews(),
     settingsSections: settingsSections(),
     newBrowserTab: screen.queryByRole("button", { name: /new browser tab/i }) !== null,
@@ -114,7 +125,18 @@ function entryPoints() {
   };
 }
 
+/** The rail's modes, read from the real Activity Bar rather than from its exported constant. */
+function activityModes(): string[] {
+  const tablist = screen.getByRole("tablist", { name: "Activity" });
+  return within(tablist).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label") ?? tab.textContent ?? "");
+}
+
+// The Activity Bar is the shell's top-level navigation, so all four modes are core entry points:
+// `advancedFeatures` gates the DAG badge, new browser tabs and advanced settings, never the rail.
+const ACTIVITY_MODES = ["Supervisor", "Worktrees", "Browser", "Remote Desktop"];
+
 const CORE_ENTRIES = {
+  activityModes: ACTIVITY_MODES,
   // The Supervisor panel is the sidebar's default view; it is not behind advanced features.
   sidebarViews: ["Supervisor", "Worktrees"],
   // Voice is a core entry point: SettingsDialog renders it outside the advanced gate.
@@ -124,6 +146,7 @@ const CORE_ENTRIES = {
 };
 
 const ALL_ENTRIES = {
+  activityModes: ACTIVITY_MODES,
   sidebarViews: ["Supervisor", "Worktrees"],
   settingsSections: [
     "General",
@@ -174,6 +197,9 @@ describe("advanced features progressive disclosure", () => {
     // Core surfaces stay: worktrees, terminal pane, remote and agents.
     expect(screen.getByTestId("native-terminal-pane")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /new terminal/i })).toBeInTheDocument();
+    // Browser mode is a core entry point even with advanced features off: only the browser *tab*
+    // affordance is gated, never the rail mode that opens the Browser activity.
+    expect(screen.getByTestId("activity-mode-browser")).toBeInTheDocument();
   });
 
   it("is on for an existing install with stored workspace state and shows every entry point", () => {

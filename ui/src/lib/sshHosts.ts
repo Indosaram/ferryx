@@ -272,9 +272,12 @@ export async function clearSshPassword(host: SshHost): Promise<void> {
   return invoke<void>("cmd_ssh_clear_password", { host: cleanHostForIpc(host) });
 }
 
-export async function testSshConnection(host: SshHost): Promise<SshTargetSummary> {
+export async function testSshConnection(host: SshHost, candidatePassword?: string): Promise<SshTargetSummary> {
   const cleaned = cleanHostForIpc(host);
-  return invoke<SshTargetSummary>("cmd_ssh_test_connection", { host: cleaned });
+  return invoke<SshTargetSummary>("cmd_ssh_test_connection", {
+    host: cleaned,
+    ...(candidatePassword === undefined ? {} : { candidatePassword }),
+  });
 }
 
 export async function prepareSshIntegration(host: SshHost): Promise<void> {

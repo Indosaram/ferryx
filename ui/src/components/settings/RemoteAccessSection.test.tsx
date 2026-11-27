@@ -50,6 +50,19 @@ vi.mock("../../lib/tauri", () => ({
 }));
 
 const { RemoteAccessSection } = await import("./RemoteAccessSection");
+const { refreshStatus, resetRemoteAccessStateForTests, useRemoteAccessState } = await import("./remote/useRemoteAccessState");
+import type { DeviceInfo, RemoteGatewayStatus } from "../../lib/tauri";
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => { throw new Error("Deferred promise not initialized"); };
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
+function GatewayProbe() {
+  const state = useRemoteAccessState();
+  return <output data-testid="gateway-probe" data-mode={state.status?.mode} data-devices={state.devices.length} data-trust={state.autoTrust?.enabled} />;
+}
 
 const enabledStatus = {
   enabled: true,
@@ -73,6 +86,7 @@ const relayStatus = {
 
 describe("RemoteAccessSection", () => {
   beforeEach(() => {
+    resetRemoteAccessStateForTests();
     vi.clearAllMocks();
     getRemoteStatus.mockResolvedValue(enabledStatus);
     listRemoteDevices.mockResolvedValue([]);
@@ -90,6 +104,7 @@ describe("RemoteAccessSection", () => {
 
   afterEach(() => {
     cleanup();
+    resetRemoteAccessStateForTests();
     vi.useRealTimers();
   });
 
@@ -116,7 +131,8 @@ describe("RemoteAccessSection", () => {
 
     getRemoteStatus.mockResolvedValue({ ...relayStatus, controlChannelConnected: false });
     const connecting = await act(async () => render(<RemoteAccessSection />));
-    expect(screen.getByRole("status")).toHaveTextContent("Local Ready");
+    expect(screen.getByRole("status")).toHaveClass("text-status-warning");
+    expect(screen.getByRole("status")).not.toHaveClass("text-status-success");
     connecting.unmount();
 
     getRemoteStatus.mockResolvedValue(relayStatus);
@@ -222,7 +238,6 @@ describe("RemoteAccessSection", () => {
     await waitFor(() => {
       expect(enableRemoteGateway).toHaveBeenCalledWith({
         mode: "localNetwork",
-        relayUrl: undefined,
       });
     });
   });
@@ -409,6 +424,135 @@ describe("RemoteAccessSection", () => {
     await waitFor(() => expect(setRemoteDevicePermission).toHaveBeenCalledWith("dev-phone", "view"));
     await waitFor(() => expect(screen.getByRole("tab", { name: "Watch only for Phone" })).toHaveAttribute("aria-selected", "true"));
     expect(screen.getByTestId("device-access-scope")).toHaveAttribute("data-scope", "mirror");
+  });
+
+  it("shares one initial fetch and synchronizes diagnostics when the gateway changes", async () => {
+    // Given two consumers sharing the same gateway.
+    getRemoteStatus.mockResolvedValue(disabledStatus);
+    const view = await act(async () => render(<><RemoteAccessSection /><RemoteAccessSection detailsOnly /><GatewayProbe /></>));
+    expect(getRemoteStatus).toHaveBeenCalledTimes(1);
+    expect(listRemoteDevices).toHaveBeenCalledTimes(1);
+    // When the full section enables access.
+    await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Remote Access" })); });
+    // Then the full view and diagnostics observe the same snapshot.
+    expect(screen.getByRole("switch", { name: "Remote Access" })).toBeChecked();
+    expect(screen.getByTestId("gateway-probe")).toHaveAttribute("data-mode", "localNetwork");
+    expect(view.container.querySelectorAll('[data-scope="loopback"]')).toHaveLength(2);
+  });
+
+  it("deduplicates focus refreshes and removes the focus listener when the last consumer unmounts", async () => {
+    // Given two mounted consumers and a deferred focus response.
+    const view = await act(async () => render(<><RemoteAccessSection /><RemoteAccessSection detailsOnly /></>));
+    const response = deferred<RemoteGatewayStatus>();
+    getRemoteStatus.mockReturnValue(response.promise);
+    // When focus fires twice before the response completes.
+    await act(async () => { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new Event("focus")); });
+    // Then there is one focus request, and none after teardown.
+    expect(getRemoteStatus).toHaveBeenCalledTimes(2);
+    await act(async () => { response.resolve(enabledStatus); await response.promise; });
+    view.unmount();
+    window.dispatchEvent(new Event("focus"));
+    expect(getRemoteStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a newer gateway mutation when an older focus refresh resolves", async () => {
+    // Given a disabled gateway with an older refresh in flight.
+    getRemoteStatus.mockResolvedValue(disabledStatus);
+    await act(async () => { render(<><RemoteAccessSection /><GatewayProbe /></>); });
+    const stale = deferred<RemoteGatewayStatus>();
+    getRemoteStatus.mockReturnValueOnce(stale.promise);
+    let pending: Promise<void> = Promise.resolve();
+    act(() => { pending = refreshStatus(); });
+    await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Remote Access" })); });
+    // When the older disabled response arrives after the enable mutation.
+    await act(async () => { stale.resolve(disabledStatus); await pending; });
+    // Then neither consumer rolls back to off.
+    expect(screen.getByRole("switch", { name: "Remote Access" })).toBeChecked();
+    expect(screen.getByTestId("gateway-probe")).toHaveAttribute("data-mode", "localNetwork");
+  });
+
+  it.each(["", "https://draft.example"])("preserves the relay draft %j when a background refresh changes the saved URL", async (draft) => {
+    // Given an edited (including cleared) relay field.
+    getRemoteStatus.mockResolvedValue(relayStatus);
+    await act(async () => { render(<RemoteAccessSection />); });
+    fireEvent.change(screen.getByLabelText("Relay / Signaling Server URL"), { target: { value: draft } });
+    getRemoteStatus.mockResolvedValue({ ...relayStatus, relayUrl: "https://elsewhere.example" });
+    // When a focus refresh completes.
+    await act(async () => { await refreshStatus(); });
+    // Then the local draft is unchanged.
+    expect(screen.getByLabelText("Relay / Signaling Server URL")).toHaveValue(draft);
+  });
+
+  it("keeps local-network mode on re-enable when a saved relay URL remains", async () => {
+    // Given a relay gateway explicitly switched to local access.
+    getRemoteStatus.mockResolvedValue(relayStatus);
+    enableRemoteGateway.mockResolvedValue({ ...enabledStatus, relayUrl: relayStatus.relayUrl });
+    await act(async () => { render(<RemoteAccessSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Use local network" })); });
+    expect(enableRemoteGateway).toHaveBeenLastCalledWith({ mode: "localNetwork" });
+    await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Remote Access" })); });
+    enableRemoteGateway.mockClear();
+    // When access is re-enabled with the saved URL still displayed.
+    await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Remote Access" })); });
+    // Then the selected mode remains localNetwork, not relay.
+    expect(enableRemoteGateway).toHaveBeenCalledWith(expect.objectContaining({ mode: "localNetwork" }));
+  });
+
+  it.each(["status", "devices"])("retries a failed %s request inline", async (failure) => {
+    // Given one failed gateway query.
+    if (failure === "status") getRemoteStatus.mockRejectedValueOnce(new Error("offline"));
+    else listRemoteDevices.mockRejectedValueOnce(new Error("offline"));
+    await act(async () => { render(<RemoteAccessSection />); });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    // When Retry is clicked.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
+    // Then both queries refresh and the error clears without reopening Settings.
+    expect(getRemoteStatus).toHaveBeenCalledTimes(2);
+    expect(listRemoteDevices).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("refreshes authorized devices while a live code is displayed and stops on a device-count change", async () => {
+    // Given an open pairing code and no authorized devices.
+    vi.useFakeTimers();
+    await act(async () => { render(<RemoteAccessSection />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+    const phone: DeviceInfo = { id: "new-phone", name: "New Phone", permission: "view", createdAt: 0, lastSeenAt: 0, revoked: false };
+    listRemoteDevices.mockResolvedValue([phone]);
+    // When an external phone appears at the next bounded refresh.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    // Then Authorized Devices updates and further pairing polls stop.
+    expect(screen.getByRole("button", { name: "Revoke device New Phone" })).toBeInTheDocument();
+    const calls = listRemoteDevices.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(listRemoteDevices).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each(["expiry", "unmount"])("stops pairing refreshes on %s", async (ending) => {
+    // Given a live code with a five-second lifetime.
+    vi.useFakeTimers();
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 5 });
+    const view = await act(async () => render(<RemoteAccessSection />));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(listRemoteDevices).toHaveBeenCalledTimes(3);
+    // When the code expires or its owner unmounts.
+    if (ending === "unmount") view.unmount();
+    else await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    const calls = listRemoteDevices.mock.calls.length;
+    // Then no later refresh occurs.
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+    expect(listRemoteDevices).toHaveBeenCalledTimes(calls);
+  });
+
+  it("does not poll when no pairing code has been minted", async () => {
+    // Given a mounted section without a code.
+    vi.useFakeTimers();
+    await act(async () => { render(<RemoteAccessSection />); });
+    // When time advances without a focus event.
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+    // Then only the initial fetch ran.
+    expect(listRemoteDevices).toHaveBeenCalledTimes(1);
   });
 
   it("retires Remote Access QR/PIN control: Generate QR button and PIN are absent while the remaining surface renders", async () => {

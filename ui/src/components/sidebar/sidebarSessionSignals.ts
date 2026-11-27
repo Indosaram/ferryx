@@ -6,6 +6,7 @@ import type { ActivitySummary } from "../../lib/activity";
 import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
 import type { AgentState } from "../../lib/types";
 import type { SidebarModel } from "./sidebarModel";
+import { worktreeActivityKey } from "./sidebarModel";
 
 /** At most this many Inbox rows an older desktop put in one snapshot (its first, most urgent rows). */
 export const PUBLISHED_ATTENTION_ROWS_CAP = 50;
@@ -26,8 +27,12 @@ export type SidebarSessionSignals = {
    * snapshots published before this field existed; the publisher always sets it.
    */
   readonly activityByWorktreePath?: Readonly<Record<string, ActivitySummary>>;
+  /** Workspace-scoped activity per `<workspaceId>\0<path>`, preserving multi-machine and paired rows. */
+  readonly activityByWorktreeKey?: Readonly<Record<string, ActivitySummary>>;
   /** Worktree paths whose row carries a bell or unseen mark (activity's own or the store's). */
   readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
+  /** Workspace-scoped unread flags keyed by `<workspaceId>\0<path>`. */
+  readonly unreadWorktreeKeys?: Readonly<Record<string, boolean>>;
   /** Bare agent state for rows the desktop has no activity summary for (the slot's fallback). */
   readonly agentStateByPath: Readonly<Record<string, AgentState>>;
   /** Inbox rows from an older desktop (capped). A current desktop has no Inbox and sends none. */
@@ -38,20 +43,28 @@ export const AGENT_STATES: readonly AgentState[] = ["starting", "working", "wait
 
 /**
  * Reduces the desktop's raw signals to what the shared row rule reads, for the model's rows only.
- * Paired rows never take local signals (worktreeRowLive), so they are left out.
+ * Paired rows ignore path-only local signals, but keep their own workspace-scoped signals.
  */
 export function sidebarSessionSignals(model: SidebarModel, raw: {
   readonly activityByWorktreePath?: Readonly<Record<string, ActivitySummary | undefined>>;
+  readonly activityByWorktreeKey?: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths?: Readonly<Record<string, boolean>>;
+  readonly unreadWorktreeKeys?: Readonly<Record<string, boolean>>;
   readonly agentStateByPath?: Readonly<Record<string, AgentState | undefined>>;
   readonly attentionRows?: readonly PublishedAttentionRow[];
 }): SidebarSessionSignals {
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
+  const activityByWorktreeKey: Record<string, ActivitySummary> = {};
   const unreadWorktreePaths: Record<string, boolean> = {};
+  const unreadWorktreeKeys: Record<string, boolean> = {};
   const agentStateByPath: Record<string, AgentState> = {};
   for (const node of model.projects.flatMap((project) => project.worktrees)) {
+    const key = worktreeActivityKey(node.workspaceId, node.path);
+    const scopedSummary = raw.activityByWorktreeKey?.[key];
+    if (scopedSummary !== undefined) activityByWorktreeKey[key] = scopedSummary;
+    if (scopedSummary?.hasUnread || raw.unreadWorktreeKeys?.[key]) unreadWorktreeKeys[key] = true;
     if (node.workspaceId.startsWith("daemon:")) continue;
-    const summary = raw.activityByWorktreePath?.[node.path];
+    const summary = scopedSummary ?? raw.activityByWorktreePath?.[node.path];
     if (summary !== undefined) activityByWorktreePath[node.path] = summary;
     if (summary?.hasUnread || raw.unreadWorktreePaths?.[node.path]) unreadWorktreePaths[node.path] = true;
     const agentState = raw.agentStateByPath?.[node.path];
@@ -59,7 +72,9 @@ export function sidebarSessionSignals(model: SidebarModel, raw: {
   }
   return {
     activityByWorktreePath,
+    ...(Object.keys(activityByWorktreeKey).length > 0 ? { activityByWorktreeKey } : {}),
     unreadWorktreePaths,
+    ...(Object.keys(unreadWorktreeKeys).length > 0 ? { unreadWorktreeKeys } : {}),
     agentStateByPath,
     ...(raw.attentionRows === undefined ? {} : { attentionRows: raw.attentionRows.slice(0, PUBLISHED_ATTENTION_ROWS_CAP) }),
   };

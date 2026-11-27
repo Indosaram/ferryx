@@ -35,6 +35,7 @@ pub(crate) struct Installed {
     recovery: Arc<RecoveryScheduler>,
     session_tools: Arc<ferryx_hub::meta::mhc_supervisor::SessionTools>,
     remote_fleet: Option<Arc<RemoteFleetSource>>,
+    remote_sync_stop: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
 fn current() -> Option<Installed> {
@@ -43,6 +44,11 @@ fn current() -> Option<Installed> {
 
 /// Takes the autonomy service down, before its hub's pool is closed.
 pub(super) fn uninstall() {
+    if let Some(previous) = current() {
+        if let Some(stop) = previous.remote_sync_stop {
+            let _ = stop.send(true);
+        }
+    }
     super::slot_set(&super::PANEL_AUTONOMY, None);
 }
 
@@ -422,6 +428,107 @@ fn local_host_ids() -> Vec<String> {
     ]
 }
 
+/// How often the daemon polls paired hosts for fleet session changes so desktop and mobile
+/// clients receive live `panel.session` updates for remote machines, not just the initial read.
+const REMOTE_FLEET_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteSessionFingerprint {
+    state: String,
+    stale: bool,
+    reason: Option<String>,
+    pending_prompt_id: Option<String>,
+    attention_group: Option<ferryx_hub::supervisor::panel_contract::AttentionGroup>,
+    health: Option<ferryx_hub::supervisor::panel_contract::HealthKind>,
+}
+
+fn remote_fingerprint(session: &FleetSession) -> RemoteSessionFingerprint {
+    RemoteSessionFingerprint {
+        state: session.state.clone(),
+        stale: session.stale,
+        reason: session.reason.clone(),
+        pending_prompt_id: session.pending_prompt.as_ref().map(|prompt| prompt.prompt_id.clone()),
+        attention_group: session.attention.as_ref().map(|attention| attention.group),
+        health: session.health.clone(),
+    }
+}
+
+/// Computes which paired-host sessions appeared or changed since `previous`, updating `previous`
+/// in place so unchanged ticks emit zero frames.
+fn diff_remote_fleet_sessions(
+    previous: &mut std::collections::HashMap<SessionRef, RemoteSessionFingerprint>,
+    next: &[FleetSession],
+) -> Vec<FleetSession> {
+    let mut changed = Vec::new();
+    let mut next_map = std::collections::HashMap::with_capacity(next.len());
+    for session in next {
+        let fp = remote_fingerprint(session);
+        let moved = previous.get(&session.session_ref).is_none_or(|old| *old != fp);
+        if moved {
+            changed.push(session.clone());
+        }
+        next_map.insert(session.session_ref.clone(), fp);
+    }
+    *previous = next_map;
+    changed
+}
+
+/// Reads one paired-host session overlaid with `sources`, for `refresh_panel_session`.
+pub(crate) async fn remote_fleet_session_over(
+    session_ref: &SessionRef,
+    sources: &ferryx_hub::fleet::PanelSources,
+) -> Option<FleetSession> {
+    let source = current().and_then(|installed| installed.remote_fleet)?;
+    let remote = ferryx_hub::meta::mhc_supervisor::FleetSource::list(source.as_ref())
+        .await
+        .ok()?;
+    let found = remote.into_iter().find(|session| &session.session_ref == session_ref)?;
+    let since_ms = super::unix_ms() - super::PANEL_LOG_WINDOW_MS;
+    Some(ferryx_hub::fleet::overlay_attention_from_sources(found, sources, since_ms).await)
+}
+
+fn start_remote_fleet_sync(
+    remote: Arc<RemoteFleetSource>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut seen: std::collections::HashMap<SessionRef, RemoteSessionFingerprint> =
+            std::collections::HashMap::new();
+        let mut interval = tokio::time::interval(REMOTE_FLEET_SYNC_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = stop.changed() => {
+                    if *stop.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let Ok(raw_remote) =
+                        ferryx_hub::meta::mhc_supervisor::FleetSource::list(remote.as_ref()).await
+                    else {
+                        continue;
+                    };
+                    let sources = panel_sources();
+                    let since_ms = super::unix_ms() - super::PANEL_LOG_WINDOW_MS;
+                    let mut overlaid = Vec::with_capacity(raw_remote.len());
+                    for session in raw_remote {
+                        overlaid.push(
+                            ferryx_hub::fleet::overlay_attention_from_sources(
+                                session, &sources, since_ms,
+                            )
+                            .await,
+                        );
+                    }
+                    for session in diff_remote_fleet_sessions(&mut seen, &overlaid) {
+                        super::publish_panel_session(&session);
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// This computer's sessions and every paired computer's, merged with the stale rule. The local
 /// list is read in-process; the paired hosts go through the hub's agent control. Non-owner
 /// redaction is unchanged: callers of this are owner-authorized (the panel and fleet routes,
@@ -510,6 +617,8 @@ pub(super) async fn install(launch: &HubLaunch) {
         )
         .with_gate(autonomy.gate()),
     );
+    let (sync_stop_tx, sync_stop_rx) = tokio::sync::watch::channel(false);
+    start_remote_fleet_sync(Arc::clone(&remote), sync_stop_rx);
     super::slot_set(
         &super::PANEL_AUTONOMY,
         Some(Installed {
@@ -518,6 +627,7 @@ pub(super) async fn install(launch: &HubLaunch) {
             recovery: scheduler,
             session_tools: tools,
             remote_fleet: Some(remote),
+            remote_sync_stop: Some(Arc::new(sync_stop_tx)),
         }),
     );
 }
@@ -863,6 +973,7 @@ pub(crate) mod tests {
                 )),
                 autonomy: Arc::clone(&autonomy),
                 remote_fleet: None,
+                remote_sync_stop: None,
             }),
         );
         let mut prompt = blocked("p1");
@@ -957,7 +1068,7 @@ pub(crate) mod tests {
         ));
         super::super::slot_set(
             &super::super::PANEL_AUTONOMY,
-            Some(Installed { hub, autonomy, recovery: scheduler, session_tools, remote_fleet: None }),
+            Some(Installed { hub, autonomy, recovery: scheduler, session_tools, remote_fleet: None, remote_sync_stop: None }),
         );
         cards[0].prompt.prompt_id.clone()
     }
@@ -1016,6 +1127,7 @@ pub(crate) mod tests {
             )),
             autonomy,
             remote_fleet: None,
+            remote_sync_stop: None,
         };
         (pool, installed)
     }
@@ -1259,5 +1371,57 @@ pub(crate) mod tests {
         assert_eq!(rows[0].incident_key, "recovery:goalquota:lane-1");
         assert!(rows[0].live, "{rows:?}");
         assert!(fixture.control.sends().is_empty());
+    }
+
+    #[test]
+    fn diff_remote_fleet_sessions_publishes_only_new_or_changed_paired_sessions() {
+        use ferryx_hub::supervisor::panel_contract::{
+            Attention, AttentionActivity, AttentionAxes, AttentionCompletion,
+            AttentionDemand, AttentionOwnership, AttentionRead,
+        };
+        let make = |id: &str, state: &str, group_unread: bool| FleetSession {
+            session_ref: SessionRef::new("https://relay.ferryx.dev/host/peer-1", id),
+            host_id: "https://relay.ferryx.dev/host/peer-1".into(),
+            host_label: "peer-1".into(),
+            title: id.into(),
+            cwd: "/work".into(),
+            agent: "claude".into(),
+            state: state.into(),
+            state_source: "provider".into(),
+            screen_readable: true,
+            state_since_ms: Some(1),
+            screen_changed_at_ms: Some(1),
+            pending_prompt: None,
+            last_assistant_line: None,
+            updated_at_ms: 1,
+            stale: false,
+            health: None,
+            attention: Some(Attention::of(AttentionAxes {
+                demand: AttentionDemand::None,
+                activity: if state == "working" {
+                    AttentionActivity::Working
+                } else {
+                    AttentionActivity::Stopped
+                },
+                completion: if group_unread {
+                    AttentionCompletion::Reported
+                } else {
+                    AttentionCompletion::None
+                },
+                read: AttentionRead::Unread,
+                ownership: AttentionOwnership::Owner,
+            })),
+            reason: None,
+            branch: None,
+        };
+        let mut seen = std::collections::HashMap::new();
+        let s1 = make("s1", "working", false);
+        assert_eq!(diff_remote_fleet_sessions(&mut seen, std::slice::from_ref(&s1)).len(), 1);
+        assert!(diff_remote_fleet_sessions(&mut seen, std::slice::from_ref(&s1)).is_empty());
+
+        let s1_done = make("s1", "idle", true);
+        let moved = diff_remote_fleet_sessions(&mut seen, std::slice::from_ref(&s1_done));
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].state, "idle");
     }
 }

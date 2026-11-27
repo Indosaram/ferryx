@@ -6,9 +6,11 @@ type SshWorkspaceStatusProps = {
   readonly message: string;
   readonly error?: string;
   readonly onRetry: () => void;
+  /** Opens Settings > Remote so a broken host can be fixed without hunting for the page. */
+  readonly onOpenSettings?: () => void;
 };
 
-export function SshWorkspaceStatus({ hostLabel, message, error, onRetry }: SshWorkspaceStatusProps) {
+export function SshWorkspaceStatus({ hostLabel, message, error, onRetry, onOpenSettings }: SshWorkspaceStatusProps) {
   return (
     <div
       data-testid="ssh-workspace-status"
@@ -23,7 +25,12 @@ export function SshWorkspaceStatus({ hostLabel, message, error, onRetry }: SshWo
       {error && (
         <>
           <p className="max-w-full select-text break-words text-xs">{error}</p>
-          <Button size="sm" variant="secondary" onClick={onRetry}>Retry connection</Button>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <Button size="sm" variant="secondary" onClick={onRetry}>Retry connection</Button>
+            {onOpenSettings ? (
+              <Button size="sm" variant="outline" onClick={onOpenSettings}>Open SSH Settings</Button>
+            ) : null}
+          </div>
         </>
       )}
     </div>

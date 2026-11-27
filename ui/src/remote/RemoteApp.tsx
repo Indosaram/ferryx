@@ -145,10 +145,20 @@ import {
 
 import { AccountLoginPage } from "./AccountLoginPage";
 import { ApprovePage, isApproveRoute } from "./ApprovePage";
-import { isPairRoute, PAIR_ROUTE_PATH, PairingPage } from "./PairingPage";
+import {
+  isDefaultRelayOrigin,
+  isPairRoute,
+  PAIR_ROUTE_PATH,
+  PairingCompletionError,
+  PairingPage,
+  relayEntryRequested,
+  RELAY_PAIRING_INCOMPLETE,
+  servesAccountApi,
+} from "./PairingPage";
 import {
   useAccountWorktrees,
   type AccountWorktreeOption,
+  type AcquireConnectionOutcome,
 } from "./useAccountWorktrees";
 import {
   mergeSessionInventory,
@@ -355,6 +365,69 @@ const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
 const CONFIRMATION_TIMEOUT_MS = 6000;
 /** How long the foreground probe of the account tunnel may take before it counts as dead. */
 const TUNNEL_PROBE_TIMEOUT_MS = 5000;
+/** A reconnect that failed keeps its structured reason so the strip can word it and offer one action. */
+type ReconnectFailure = Extract<AcquireConnectionOutcome, { ok: false }>;
+
+/** What the connection strip offers besides its sentence; null means no button helps right now. */
+type ReconnectAction =
+  | { readonly kind: "sign-in"; readonly label: string }
+  | { readonly kind: "retry-machine"; readonly label: string }
+  | { readonly kind: "reconnect"; readonly label: string };
+
+type ConnectionStripModel = {
+  readonly text: string;
+  readonly action: ReconnectAction | null;
+};
+
+/**
+ * The sentence and the single action a stalled connection offers. The reason decides both, so a
+ * signed-out session never renders a useless "Reconnect" and an offline computer keeps the copy
+ * that names it. Account mode passes a structured failure; a direct/paired link passes none and
+ * reports only that its events socket has been down long enough to matter.
+ */
+function connectionStrip(input: {
+  readonly health: "connected" | "reconnecting" | "offline";
+  readonly machineName: string;
+  readonly failure: ReconnectFailure | null;
+  readonly directLinkDown: boolean;
+}): ConnectionStripModel | null {
+  if (input.health === "connected") return null;
+  if (input.health === "offline") {
+    return { text: "You're offline. Ferryx reconnects when you're back online.", action: null };
+  }
+  const failure = input.failure;
+  if (failure === null) {
+    // No outcome recorded: either a reconnect is still running, or a direct link lost its socket.
+    return input.directLinkDown
+      ? { text: "The connection to your computer dropped.", action: { kind: "reconnect", label: "Reconnect" } }
+      : { text: `Reconnecting to ${input.machineName}...`, action: null };
+  }
+  const retry: ReconnectAction = { kind: "retry-machine", label: "Retry" };
+  const reconnect: ReconnectAction = { kind: "reconnect", label: "Reconnect" };
+  const signIn: ReconnectAction = { kind: "sign-in", label: "Sign in again" };
+  switch (failure.code) {
+    case "UNAUTHORIZED":
+      return { text: `Your session expired. Sign in again to reconnect to ${input.machineName}.`, action: signIn };
+    case "MACHINE_KEY_CHANGED":
+      return {
+        text: `${input.machineName}'s security key changed. Sign in again to pair this phone with it.`,
+        action: signIn,
+      };
+    case "MACHINE_OFFLINE":
+      return { text: `${input.machineName} is offline.`, action: retry };
+    case "MISSING_MACHINE":
+      return { text: `${input.machineName} is no longer linked to this account.`, action: signIn };
+    case "PLAN_LIMIT":
+      return { text: failure.message, action: null };
+    case "TRANSPORT_ERROR":
+      return { text: `Couldn't reconnect to ${input.machineName}.`, action: reconnect };
+    default: {
+      const unreachable: never = failure.code;
+      return unreachable;
+    }
+  }
+}
+
 /** A dropped events socket is shown only once it stays down this long; brief blips stay quiet. */
 const CONNECTION_STRIP_DELAY_MS = 3000;
 /** The key a shell overlay's history entry carries; the phone screens use their own key. */
@@ -1504,6 +1577,38 @@ export const RemoteApp: React.FC = () => {
   const [approveRoute] = useState(() => isApproveRoute(window.location.pathname));
   // The /pair route is the desktop QR target: a phone exchanges a desktop pairing code there.
   const [pairRoute, setPairRoute] = useState(() => isPairRoute(window.location.pathname));
+  /* A relay page is a page that serves the account API. Three positive signals, never a negative
+     one: the desktop's own link marker (`?relay=1`), the product relay origin itself, or a real
+     `application/json` health answer. A 404 (the desktop gateway's SPA fallback), an HTML body or
+     a failed probe mean "direct", so a transient network blip never reclassifies the page. */
+  const [servesAccountApiAtOrigin, setServesAccountApiAtOrigin] = useState(false);
+  /* A direct local credential already proves this page is the gateway itself, so the mount probe
+     would spend a request learning what the stored token already says. Read once, at entry: a
+     token written later by pairing still probes, and the host drawer can ask on demand below. */
+  const [hasLocalDirectToken] = useState(() =>
+    localStorage.getItem("ferryx_remote_token") !== null ||
+    localStorage.getItem(`ferryx_remote_token_local:${window.location.origin}`) !== null);
+  /* A local-token page skips the mount probe; a surface that needs the classification asks for it. */
+  const [probeOriginRequested, setProbeOriginRequested] = useState(false);
+  /* The marker is read once, when the page opens: leaving /pair rewrites the URL, and a page's
+     role does not change because its own query did. */
+  const [relayMarkerAtEntry] = useState(() => relayEntryRequested(window.location.search));
+  const pageIsRelay = relayMarkerAtEntry ||
+    isDefaultRelayOrigin(window.location.origin) || servesAccountApiAtOrigin;
+  useEffect(() => {
+    if (pageIsRelay) return;
+    if (hasLocalDirectToken && !pairRoute && !probeOriginRequested) return;
+    let disposed = false;
+    void servesAccountApi(window.location.origin).then((serves) => {
+      if (!disposed && serves) setServesAccountApiAtOrigin(true);
+    });
+    return () => { disposed = true; };
+  }, [pageIsRelay, hasLocalDirectToken, pairRoute, probeOriginRequested]);
+  useEffect(() => {
+    const onPopState = () => setPairRoute(isPairRoute(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
   if (approveRoute) {
     // The approval link points at the account origin itself, not at a saved host.
     return <ApprovePage relayUrl={window.location.origin} />;
@@ -1511,7 +1616,7 @@ export const RemoteApp: React.FC = () => {
   if (pairRoute) {
     const origin = window.location.origin;
     // The desktop marks a relay link; a relay reaches the machine only under /host/<machineId>.
-    const viaRelay = new URLSearchParams(window.location.search).get("relay") === "1";
+    const viaRelay = pageIsRelay;
     return (
       <PairingPage
         transportUrl={origin}
@@ -1522,6 +1627,12 @@ export const RemoteApp: React.FC = () => {
         onPaired={(token, metadata) => {
           const machineId = optionalString(metadata?.machineId);
           const displayName = optionalString(metadata?.displayName);
+          if (viaRelay && (!machineId || !displayName)) {
+            /* A relay host is addressed as /host/<machineId>: storing the token under a
+               page-origin slot would write a credential no host can ever use, so refuse and
+               let PairingPage report it instead. */
+            throw new PairingCompletionError(RELAY_PAIRING_INCOMPLETE);
+          }
           if (viaRelay && machineId && displayName) {
             remoteHostStore.upsertHost({
               machineId,
@@ -1558,8 +1669,12 @@ export const RemoteApp: React.FC = () => {
       viewMode={viewMode}
       onViewModeChange={setViewMode}
       initialMagicLinkRequested={magicLinkOverridden}
+      pageIsRelay={pageIsRelay}
+      onNeedRelayClassification={() => setProbeOriginRequested(true)}
       onPairWithCode={() => {
-        window.history.pushState(null, "", PAIR_ROUTE_PATH);
+        // A relay history entry must keep the relay marker: a reload of a bare /pair would
+        // otherwise re-classify the page as a direct gateway.
+        window.history.pushState(null, "", pageIsRelay ? `${PAIR_ROUTE_PATH}?relay=1` : PAIR_ROUTE_PATH);
         setPairRoute(true);
       }}
       onMagicLinkConsumed={() => {
@@ -1624,7 +1739,11 @@ export const RemoteHostConnection: React.FC<{
   initialMagicLinkRequested?: boolean;
   onMagicLinkConsumed?: () => void;
   onPairWithCode?: () => void;
-}> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed, onPairWithCode }) => {
+  /** This host's page was reached through the relay: the local computer is not a selectable host. */
+  pageIsRelay?: boolean;
+  /** A surface needs the relay classification; a page holding a direct token skipped the mount probe. */
+  onNeedRelayClassification?: () => void;
+}> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed, onPairWithCode, pageIsRelay = false, onNeedRelayClassification }) => {
   const desktopSidebar = useRemoteDesktopSidebar();
   const [magicLinkActive, setMagicLinkActive] = useState(initialMagicLinkRequested);
   const [token, setToken] = useState<string | null>(() => {
@@ -1675,6 +1794,8 @@ export const RemoteHostConnection: React.FC<{
   const [signedOutNotice, setSignedOutNotice] = useState<string | null>(null);
   /** When the shell's events socket last went down; null while it is up. */
   const [eventsDownSince, setEventsDownSince] = useState<number | null>(null);
+  /** The events effect's own recovery: re-dials a dead socket or re-reads state on a live one. */
+  const eventsReconnectRef = useRef<(() => void) | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
   /* The one owner of the soft-keyboard layout: the root follows the visual viewport's height and
      its offset, so iOS scrolling the layout viewport under the keyboard never hides the top bar or
@@ -1693,7 +1814,13 @@ export const RemoteHostConnection: React.FC<{
       viewport.removeEventListener("scroll", update);
     };
   }, []);
-  const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
+  const [hostDrawerOpen, setHostDrawerOpenState] = useState(false);
+  /* Opening the drawer is the moment a page that skipped the mount probe learns its role: the
+     drawer hides the local computer on a relay page, so the classification has to be settled. */
+  const setHostDrawerOpen = (open: boolean) => {
+    if (open) onNeedRelayClassification?.();
+    setHostDrawerOpenState(open);
+  };
   // Chat is the default at EVERY width: the terminal is a mode the user asks for, never the
   // landing surface of a phone or a desktop. One owner decides the mode, so no nested drawer
   // can mount the same session twice. When the caller owns that mode, the choice outlives this
@@ -3025,6 +3152,7 @@ export const RemoteHostConnection: React.FC<{
         void refreshWorkspace();
       }
     };
+    eventsReconnectRef.current = recover;
     connect();
     window.addEventListener("online", recover);
     document.addEventListener("visibilitychange", recover);
@@ -3033,6 +3161,7 @@ export const RemoteHostConnection: React.FC<{
       abort.abort();
       if (retry !== null) clearTimeout(retry);
       setEventsDownSince(null);
+      eventsReconnectRef.current = null;
       socket?.close();
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
@@ -3721,6 +3850,8 @@ export const RemoteHostConnection: React.FC<{
      socket that died silently. Coming back to the foreground or back online probes the active
      tunnel and replaces a dead one before the user's next action meets STREAM_CLOSED. */
   const [tunnelResume, setTunnelResume] = useState<"idle" | "reconnecting" | "failed">("idle");
+  /** Why the last reconnect failed; the strip words it and picks the one action that can help. */
+  const [tunnelResumeFailure, setTunnelResumeFailure] = useState<ReconnectFailure | null>(null);
   const tunnelResumeInFlightRef = useRef(false);
   const resumeTunnel = useCallback(async (force: boolean) => {
     const current = activeTunnelConnection;
@@ -3743,15 +3874,24 @@ export const RemoteHostConnection: React.FC<{
       }
       if (!stillCurrent() || (alive && !force)) return;
       setTunnelResume("reconnecting");
+      setTunnelResumeFailure(null);
       const machineId = current.machine.machineId;
-      const conn = await accountDiscoveryRef.current.acquireConnection(machineId);
+      const outcome = await accountDiscoveryRef.current.acquireConnectionDetailed(machineId);
       if (!stillCurrent()) {
-        conn?.close();
+        if (outcome.ok) outcome.connection.close();
         setTunnelResume("idle");
+        setTunnelResumeFailure(null);
         return;
       }
-      if (!conn || conn.machine.machineId !== machineId) {
-        conn?.close();
+      if (!outcome.ok) {
+        setTunnelResumeFailure(outcome);
+        setTunnelResume("failed");
+        return;
+      }
+      const conn = outcome.connection;
+      if (conn.machine.machineId !== machineId) {
+        conn.close();
+        setTunnelResumeFailure({ ok: false, code: "MISSING_MACHINE", message: userFacingError({ code: "NOT_FOUND" }) });
         setTunnelResume("failed");
         return;
       }
@@ -3773,6 +3913,7 @@ export const RemoteHostConnection: React.FC<{
       setActiveTunnelConnection(replacement);
       setToken(conn.deviceToken);
       setTerminalRetry((current) => ({ generation: current.generation + 1, takeoverSessionId: null }));
+      setTunnelResumeFailure(null);
       setTunnelResume("idle");
     } finally {
       tunnelResumeInFlightRef.current = false;
@@ -3815,6 +3956,38 @@ export const RemoteHostConnection: React.FC<{
     : tunnelResume !== "idle" || eventsDownLong
       ? "reconnecting"
       : "connected";
+  const connectionMachineName = activeTunnelConnection?.machine.displayName || "your computer";
+  /* A paired/direct link has no account outcome to report: its stall is the events socket being
+     down long enough to matter, and its one action is re-dialing that socket. */
+  const connectionStripModel = connectionStrip({
+    health: connectionHealth,
+    machineName: connectionMachineName,
+    failure: tunnelResume === "failed" ? tunnelResumeFailure : null,
+    directLinkDown: !isAccountMode && eventsDownLong,
+  });
+  const runConnectionStripAction = (action: ReconnectAction) => {
+    switch (action.kind) {
+      case "sign-in":
+        handleSignOut();
+        return;
+      case "retry-machine": {
+        const machineId = activeTunnelConnection?.machine.machineId;
+        if (!machineId) return;
+        // Re-probe discovery so the next resume finds the machine online, then reconnect now.
+        void accountDiscovery.retryMachine(machineId);
+        void resumeTunnel(true);
+        return;
+      }
+      case "reconnect":
+        if (isAccountMode) void resumeTunnel(true);
+        else eventsReconnectRef.current?.();
+        return;
+      default: {
+        const unreachable: never = action;
+        return unreachable;
+      }
+    }
+  };
   const phoneBack = phoneNav.back;
   // A selection backed out of on the Session screen ("Back to Worktrees") leaves no session to
   // show, so the screen returns to the home it came from.
@@ -6461,6 +6634,7 @@ export const RemoteHostConnection: React.FC<{
         onSelectorOpenChange={() => {}}
         activeMachineId={activeMachineId}
         sidebarSections={sidebarSections}
+        onRetrySection={isAccountMode ? (id) => void accountDiscovery.retryMachine(id) : undefined}
         pickerStatus={accountPickerStatus}
         onSelect={(option) => {
           const accountOpt = (option as Partial<AccountWorktreeOption>).machineId
@@ -6670,28 +6844,29 @@ export const RemoteHostConnection: React.FC<{
         />
       ) : null}
 
-      {connectionHealth !== "connected" && token ? (
+      {connectionStripModel && token ? (
         <div
           data-testid="remote-connection-strip"
           data-health={connectionHealth}
+          data-reason={tunnelResume === "failed" ? tunnelResumeFailure?.code ?? null : null}
           role="status"
           className="mx-3 mt-2 flex min-h-11 items-center gap-3 rounded-lg bg-chat-surface-raised px-3 py-2 text-sm text-chat-foreground"
         >
           <span className="min-w-0 flex-1">
-            {connectionHealth === "offline"
-              ? "You're offline. Ferryx reconnects when you're back online."
-              : tunnelResume === "failed"
-                ? `Couldn't reconnect to ${activeTunnelConnection?.machine.displayName || "your computer"}.`
-                : `Reconnecting to ${activeTunnelConnection?.machine.displayName || "your computer"}...`}
+            {connectionStripModel.text}
           </span>
-          {tunnelResume === "failed" ? (
+          {connectionStripModel.action ? (
             <button
               type="button"
               data-testid="remote-connection-reconnect"
-              onClick={() => void resumeTunnel(true)}
+              data-action={connectionStripModel.action.kind}
+              onClick={() => {
+                const action = connectionStripModel.action;
+                if (action) runConnectionStripAction(action);
+              }}
               className="flex h-11 shrink-0 items-center rounded-lg px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              Reconnect
+              {connectionStripModel.action.label}
             </button>
           ) : null}
         </div>
@@ -6757,6 +6932,7 @@ export const RemoteHostConnection: React.FC<{
         onSignOut={isAccountMode ? handleSignOut : undefined}
         activeMachineId={activeMachineId}
         sidebarSections={sidebarSections}
+        onRetrySection={isAccountMode ? (id) => void accountDiscovery.retryMachine(id) : undefined}
         supervisor={sidebarSupervisor}
         onSidebarViewChange={setSidebarView}
         requestedView={requestedSidebarView}
@@ -6999,6 +7175,7 @@ export const RemoteHostConnection: React.FC<{
           onDisconnect={disconnect}
           onSignOut={handleSignOut}
           isAccountSession={false}
+          showLocalComputer={!pageIsRelay}
         />
       )}
 

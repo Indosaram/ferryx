@@ -595,6 +595,22 @@ async fn fan_out_follows_session_visibility_per_access_scope() {
     assert_eq!(state.dispatch_decision_push(&["mac:desktop-1".to_string()]).await, 1);
     assert_eq!(mirror_mock.received().len(), 1, "a Mirror device gets a mirrored session");
     assert!(machine_mock.received().is_empty(), "a Machine device does not get mirrored sessions");
+
+    // Paired-host sessions named by relay host URL belong to a remote machine, so Machine-scope
+    // devices receive their decision pushes even though the session id is not in this host's local
+    // machine journal.
+    let remote_ref = "https://relay.ferryx.dev/host/peer-1:remote-sess-1".to_string();
+    assert_eq!(state.dispatch_decision_push(&[remote_ref]).await, 1);
+    assert_eq!(
+        machine_mock.received().len(),
+        2,
+        "a Machine Control device receives paired-host decision pushes"
+    );
+    assert_eq!(
+        mirror_mock.received().len(),
+        1,
+        "a Mirror device does not receive paired-host decision pushes"
+    );
 }
 
 #[tokio::test]

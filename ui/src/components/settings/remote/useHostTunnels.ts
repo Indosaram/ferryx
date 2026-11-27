@@ -19,9 +19,11 @@ import {
   TUNNEL_REVISION_REQUIRED_REASON,
   TUNNEL_STORE_CONFLICT_REASON,
   type SshTunnelsEditorHandlers,
+  type TunnelPendingAction,
   type TunnelSaveConflict,
   type TunnelSectionError,
 } from "./SshTunnelsEditor";
+import { describeTunnelFailure } from "./tunnelPresentation";
 
 /** The `IpcErrorCode` Todo 8 answers with when the daemon never advertised `sshTunnelV1`. */
 export const UNSUPPORTED_CAPABILITY_CODE = "UNSUPPORTED_CAPABILITY";
@@ -92,10 +94,14 @@ export function useHostTunnels({ capabilities, active, source }: {
   const [error, setError] = useState<TunnelSectionError | null>(null);
   const [resetPath, setResetPath] = useState<string | null>(null);
   const [conflict, setConflict] = useState<TunnelSaveConflict | null>(null);
+  const [pendingAction, setPendingAction] = useState<TunnelPendingAction | null>(null);
 
   // The newest response wins; a mutation that lands while a read is in flight discards it.
   const requestRef = useRef(0);
   const mountedRef = useRef(true);
+  // One mutation at a time: the state is what disables the buttons, the ref is what a second
+  // click in the same tick consults before React has re-rendered.
+  const pendingRef = useRef<TunnelPendingAction | null>(null);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -107,11 +113,13 @@ export function useHostTunnels({ capabilities, active, source }: {
     // Nothing is requested while the capability is absent: an older daemon must see no tunnel
     // command at all, not just no write.
     if (!enabled || !isTauri()) {
-      return;
+      return undefined;
     }
     const requestId = ++requestRef.current;
     setLoading(true);
-    listTunnels()
+    // The promise is returned so a caller that must report a failure *after* the read can
+    // await it: the read clears `error` on success, and a start's reason must survive that.
+    return listTunnels()
       .then((response) => {
         if (!mountedRef.current || requestId !== requestRef.current) return;
         setOwnList(response);
@@ -171,17 +179,35 @@ export function useHostTunnels({ capabilities, active, source }: {
   // discarded duplicate: mutations re-read through the owner instead.
   const refresh = sourced ? source.refresh : refreshOwn;
 
+  /**
+   * Runs one mutation, refusing any second one until it settles. Every handler below reports
+   * its own failure, so this wrapper owns only the exclusion and the `pendingAction` flag the
+   * editor's buttons read.
+   */
+  const runExclusive = useCallback(
+    (action: TunnelPendingAction, work: () => Promise<void>): void => {
+      if (pendingRef.current !== null) return;
+      pendingRef.current = action;
+      setPendingAction(action);
+      void work().finally(() => {
+        pendingRef.current = null;
+        if (mountedRef.current) setPendingAction(null);
+      });
+    },
+    [],
+  );
+
   const onSave = useCallback(
     (hostId: string, specs: readonly TunnelSpec[], options?: SaveHostTunnelsOptions) => {
       const expectedRevision = options?.force === true ? null : list?.definitionsRevision ?? null;
-      setConflict(null);
-      saveHostTunnels(hostId, specs, expectedRevision, options)
-        .then(() => {
+      runExclusive("save", async () => {
+        setConflict(null);
+        try {
+          await saveHostTunnels(hostId, specs, expectedRevision, options);
           if (!mountedRef.current) return;
           setError(null);
           refresh();
-        })
-        .catch((failure: unknown) => {
+        } catch (failure: unknown) {
           if (!mountedRef.current) return;
           const bridge = toSshTunnelBridgeError(failure, "Failed to save the host's SSH tunnels.");
           // A refused compare-and-swap is the one error the operator can answer: keep the
@@ -191,9 +217,10 @@ export function useHostTunnels({ capabilities, active, source }: {
             return;
           }
           setError({ code: bridge.code, reason: bridge.reason, message: bridge.message });
-        });
+        }
+      });
     },
-    [list, refresh],
+    [list, refresh, runExclusive],
   );
 
   const onStart = useCallback(
@@ -201,59 +228,67 @@ export function useHostTunnels({ capabilities, active, source }: {
       // The revision is the value this snapshot read; the daemon answers `host_revision_stale`
       // when the host changed underneath, which is a refresh, not a start.
       const hostRevision = list ? hostRevisionFromList(list, hostId) : 0;
-      startTunnel({ hostId, specId, hostRevision })
-        .then(() => {
+      runExclusive("start", async () => {
+        try {
+          await startTunnel({ hostId, specId, hostRevision });
           if (!mountedRef.current) return;
           setError(null);
           refresh();
-        })
-        .catch((failure: unknown) => {
-          if (!mountedRef.current) return;
+        } catch (failure: unknown) {
           const bridge = toSshTunnelBridgeError(failure, "Failed to start the SSH tunnel.");
-          // The typed tunnel classification travels in `details.failureCode`; show it rather
-          // than the generic IPC message when the daemon sent one.
+          // A refused start can still have moved the runtime, so the list is re-read — but the
+          // reason is written after that read, because the read's own success clears `error`
+          // and would otherwise erase the only explanation the operator gets.
+          await refresh();
+          if (!mountedRef.current) return;
+          // The typed tunnel classification travels in `details.failureCode`; render its
+          // sentence rather than the token, which is machine vocabulary.
           setError({
             code: bridge.code,
             reason: bridge.reason,
-            message: bridge.failureCode ? `${bridge.failureCode}: ${bridge.message}` : bridge.message,
+            message: bridge.failureCode
+              ? describeTunnelFailure(bridge.failureCode, null)
+              : bridge.message,
           });
-          refresh();
-        });
+        }
+      });
     },
-    [list, refresh],
+    [list, refresh, runExclusive],
   );
 
   const onStop = useCallback(
     (runtimeId: string) => {
-      stopTunnel(runtimeId)
-        .then(() => {
+      runExclusive("stop", async () => {
+        try {
+          await stopTunnel(runtimeId);
           if (!mountedRef.current) return;
           setError(null);
           refresh();
-        })
-        .catch((failure: unknown) => {
+        } catch (failure: unknown) {
           if (!mountedRef.current) return;
           const bridge = toSshTunnelBridgeError(failure, "Failed to stop the SSH tunnel.");
           setError({ code: bridge.code, reason: bridge.reason, message: bridge.message });
-        });
+        }
+      });
     },
-    [refresh],
+    [refresh, runExclusive],
   );
 
   const onReset = useCallback(() => {
-    resetHostTunnelStore()
-      .then((response) => {
+    runExclusive("reset", async () => {
+      try {
+        const response = await resetHostTunnelStore();
         if (!mountedRef.current) return;
         setResetPath(response.quarantinedPath);
         setError(null);
         refresh();
-      })
-      .catch((failure: unknown) => {
+      } catch (failure: unknown) {
         if (!mountedRef.current) return;
         const bridge = toSshTunnelBridgeError(failure, "Failed to reset the SSH tunnel store.");
         setError({ code: bridge.code, reason: bridge.reason, message: bridge.message });
-      });
-  }, [refresh]);
+      }
+    });
+  }, [refresh, runExclusive]);
 
   const editor: SshTunnelsEditorHandlers = {
     capabilities: effective,
@@ -262,6 +297,7 @@ export function useHostTunnels({ capabilities, active, source }: {
     error,
     resetPath,
     conflict,
+    pendingAction,
     onRefresh: refresh,
     onSave,
     onStart,

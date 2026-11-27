@@ -317,6 +317,9 @@ impl Proxy {
     pub(crate) fn mark_disconnected(&mut self) {
         self.transport = None;
         self.controller = None;
+        if let Some(sink) = &self.agent_sink {
+            sink.release(&self.id);
+        }
     }
     /// A live stream riding the relay (no direct epoch) that may move to direct.
     pub(crate) fn relay_attached(&self) -> bool {

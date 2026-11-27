@@ -24,6 +24,9 @@ let supported = false;
 let entries = new Map<string, HostReachability>();
 let bootstrapped: Promise<void> | null = null;
 let unlisten: (() => void) | null = null;
+let listenPromise: Promise<void> | null = null;
+let lifecycle = 0;
+let liveEventSeen = false;
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -59,12 +62,16 @@ function upsert(entry: HostReachability): boolean {
 }
 
 function applyEvent(payload: unknown): void {
-  if (validEntry(payload) && upsert(payload)) emit();
+  if (!validEntry(payload)) return;
+  liveEventSeen = true;
+  const wasSupported = supported;
+  supported = true;
+  if (upsert(payload) || !wasSupported) emit();
 }
 
 function applyList(list: unknown): void {
   const value = list as Partial<PairedHostReachabilityList> | null;
-  supported = value?.supported === true;
+  supported = liveEventSeen || value?.supported === true;
   for (const entry of Array.isArray(value?.entries) ? value.entries : []) {
     if (validEntry(entry)) upsert(entry);
   }
@@ -73,28 +80,45 @@ function applyList(list: unknown): void {
 
 /**
  * One list call plus the change event; never polls. Outside Tauri, or when the command is
- * missing or fails (older backend without `paired_host_reachability_list`), the store reports
- * `supported: false` and callers fall back to the legacy `online` flag.
+ * missing, the store reports `supported: false`. Transient failures allow a later retry.
  */
 export function bootstrapPairedHostReachability(): Promise<void> {
   if (!isTauri()) return Promise.resolve();
   if (bootstrapped) return bootstrapped;
+  const epoch = lifecycle;
+  // Subscription ownership is independent of retryable list requests.
+  listenPromise ??= listen<unknown>(PAIRED_HOST_REACHABILITY_EVENT, event => {
+    if (epoch === lifecycle) applyEvent(event.payload);
+  }).then(dispose => {
+    if (epoch === lifecycle) unlisten = dispose;
+    else dispose();
+  }).catch((err: unknown) => {
+    if (epoch !== lifecycle) return;
+    listenPromise = null;
+    recordUnavailable("listen", err);
+  });
   bootstrapped = (async () => {
-    // Subscribe before listing so a change racing the list is not lost; upsert() orders them.
+    await listenPromise;
+    if (epoch !== lifecycle) return;
     try {
-      unlisten = await listen<unknown>(PAIRED_HOST_REACHABILITY_EVENT, event => applyEvent(event.payload));
+      const list = await invoke<PairedHostReachabilityList>(PAIRED_HOST_REACHABILITY_LIST_COMMAND);
+      if (epoch === lifecycle) applyList(list);
     } catch (err) {
-      recordUnavailable("listen", err);
-    }
-    try {
-      applyList(await invoke<PairedHostReachabilityList>(PAIRED_HOST_REACHABILITY_LIST_COMMAND));
-    } catch (err) {
-      supported = false;
+      if (epoch !== lifecycle) return;
+      supported = liveEventSeen;
+      if (!isUnsupported(err)) bootstrapped = null;
       emit();
       recordUnavailable("list", err);
     }
+    if (epoch === lifecycle && !listenPromise) bootstrapped = null;
   })();
   return bootstrapped;
+}
+
+function isUnsupported(err: unknown): boolean {
+  const { code } = extractPairedHostError(err);
+  return code === "UNKNOWN_COMMAND" || code === "UNSUPPORTED"
+    || (typeof err === "string" && /unknown command|command .+ not found/i.test(err));
 }
 
 /** Only the structured code is recorded; the raw native error never leaves this boundary. */
@@ -122,8 +146,16 @@ export function usePairedHostReachability(hostId: string): PairedHostReachabilit
   return useMemo(() => ({ supported: isSupported, entry }), [isSupported, entry]);
 }
 
-import.meta.hot?.dispose(() => {
+export function resetPairedHostReachabilityForTests(): void {
+  lifecycle += 1;
   unlisten?.();
   unlisten = null;
+  listenPromise = null;
   bootstrapped = null;
-});
+  liveEventSeen = false;
+  supported = false;
+  entries = new Map();
+  listeners.clear();
+}
+
+import.meta.hot?.dispose(resetPairedHostReachabilityForTests);

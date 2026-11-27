@@ -1771,6 +1771,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle(),
                 Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
             );
+            // Chromium engine tabs have no page-world push channel, so their Now Playing state
+            // is polled through the same page-script path.
+            crate::browser::media::install_engine_media_poller(
+                app.handle().clone(),
+                Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
+            );
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
             if let Some(profile) = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow_mut().take()) {
                 let window_config = app
@@ -2081,6 +2087,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_sync_desktop_sidebar,
         cmd_layout_get,
         cmd_layout_put,
+        cmd_layout_wait,
         ipc::project_remote::cmd_project_register_remote,
         ipc::project_remote::cmd_ssh_list_directories,
         cmd_project_unregister,
@@ -2116,6 +2123,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         clipboard_image::cmd_local_paste_clipboard_image,
         ipc::ssh::cmd_ssh_list_remote_worktrees,
         ipc::ssh::cmd_ssh_create_remote_worktree,
+        ipc::ssh::cmd_ssh_preview_remote_worktree_delete,
         ipc::ssh::cmd_ssh_delete_remote_worktree,
         cmd_project_refs,
         ipc::native_menu::cmd_native_terminal_context_menu,
@@ -2230,6 +2238,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_get_state,
         cmd_browser_find,
         cmd_browser_clear_find,
+        cmd_browser_media_control,
         cmd_browser_download,
         cmd_browser_download_with_cookies,
         cmd_browser_download_list,
@@ -2335,6 +2344,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             invoke.message.command(),
             "cmd_rd_connect"
                 | "cmd_rd_input"
+                | "cmd_rd_special_key"
+                | "cmd_rd_set_stream_options"
+                | "cmd_rd_send_clipboard"
+                | "cmd_rd_set_audio_muted"
+                | "cmd_rd_request_keyframe"
                 | "cmd_rd_disconnect"
                 | "cmd_rd_host_state"
                 | "cmd_rd_host_set"
@@ -2343,6 +2357,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
                 crate::ipc::remote_desktop::commands::cmd_rd_connect,
                 crate::ipc::remote_desktop::commands::cmd_rd_input,
+                crate::ipc::remote_desktop::commands::cmd_rd_special_key,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_stream_options,
+                crate::ipc::remote_desktop::commands::cmd_rd_send_clipboard,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_audio_muted,
+                crate::ipc::remote_desktop::commands::cmd_rd_request_keyframe,
                 crate::ipc::remote_desktop::commands::cmd_rd_disconnect,
                 crate::ipc::remote_desktop_host::cmd_rd_host_state,
                 crate::ipc::remote_desktop_host::cmd_rd_host_set,

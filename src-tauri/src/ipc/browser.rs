@@ -1,11 +1,13 @@
 use crate::browser::{
-    browser_find_script, browser_guest_bridge_script, cookie_from_imported, download_url_to_path,
+    browser_find_script, browser_guest_bridge_script, browser_media_control_script,
+    cookie_from_imported, download_url_to_path, MediaControlAction,
     parse_browser_find_callback, parse_browser_guest_action, parse_cookie_file,
     BrowserAutomationAction, BrowserAutomationRequest,
     BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserDialogEntry,
     BrowserDialogHandleRequest, BrowserDialogPolicyRequest, BrowserDownloadRequest,
     BrowserDownloadRequestedPayload, BrowserElementPickedPayload, BrowserError, BrowserFindResult,
-    BrowserGuestAction, BrowserLinkClickedPayload, BrowserManager, BrowserOpenRequestedPayload,
+    BrowserGuestAction, BrowserLinkClickedPayload, BrowserManager, BrowserMediaControlResult,
+    BrowserOpenRequestedPayload,
     BrowserProfileId, BrowserSessionSummary, BrowserShortcutRequestedPayload, BrowserState,
     BrowserStateChangedPayload, CreateBrowserRequest, ImportBrowserCookiesRequest,
     ImportBrowserCookiesResult, ImportInstalledBrowserCookiesRequest,
@@ -1965,6 +1967,19 @@ pub(crate) fn trusted_bridge_sink<R: tauri::Runtime>(
             crate::ipc::browser_vault::handle_form_submitted(&app, &manager, browser_id, raw);
             return;
         }
+        // A Now Playing report from the media-session reporter in the same isolated world. Only
+        // the isolated world can reach this envelope: the values are page-controlled text, so a
+        // page-sourced report is never admitted.
+        if attestation == crate::browser::bridge::Attestation::IsolatedWorld
+            && crate::browser::media::is_media_envelope(raw)
+        {
+            // Only a tab the manager still knows can report: a late report from a closed tab is
+            // dropped instead of resurrecting a card for it.
+            if manager.get_state(browser_id).is_ok() {
+                crate::browser::media::handle_media_envelope(&app, browser_id, raw);
+            }
+            return;
+        }
         let action = match crate::browser::bridge::parse_envelope(raw) {
             Ok(action) => action,
             Err(error) => {
@@ -3199,6 +3214,43 @@ pub async fn cmd_browser_clear_find<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Now Playing: play, pause, toggle, mute or unmute the tab's dominant media element. Runs
+/// through the same page-script path the other browser commands use, for both engines.
+#[tauri::command]
+pub async fn cmd_browser_media_control<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+    action: String,
+) -> Result<BrowserMediaControlResult, IpcError> {
+    let action = MediaControlAction::parse(&action).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            format!(
+                "unknown media action `{action}`: expected one of play, pause, toggle, mute, unmute"
+            ),
+        )
+    })?;
+    // Fail before touching the page when the tab is gone.
+    manager.get_state(&browser_id)?;
+    let script = browser_media_control_script(action);
+    let (result, _truncated) =
+        eval_browser_session(&app, manager.inner(), &browser_id, &script).await?;
+    let applied = result
+        .as_deref()
+        .map(crate::browser::picker::unwrap_eval_json)
+        .and_then(|payload| serde_json::from_str::<BrowserMediaControlResult>(&payload).ok())
+        .unwrap_or_else(|| BrowserMediaControlResult {
+            action: action.as_str().to_string(),
+            applied: false,
+            playing: false,
+            muted: false,
+            has_media: false,
+            reason: Some("the page reported no media outcome".to_string()),
+        });
+    Ok(applied)
+}
+
 #[tauri::command]
 pub async fn cmd_browser_download(url: String, file_path: String) -> Result<(), IpcError> {
     download_url_to_path(&url, std::path::Path::new(&file_path)).await?;
@@ -3974,6 +4026,10 @@ pub async fn close_browser_session<R: tauri::Runtime>(
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
     crate::browser::site_permissions::forget_browser(browser_id);
+    crate::browser::media::forget_browser(browser_id);
+    // The Now Playing card outlives the tab that produced it, so a closed tab has to publish
+    // its empty state; the forgetting above already dropped the throttle that would suppress it.
+    crate::browser::media::publish(app, crate::browser::media::BrowserMediaState::empty(browser_id));
     crate::browser::sign_in_handoff::untrack(browser_id);
     crate::ipc::browser_library::forget_tab(browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]

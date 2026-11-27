@@ -317,14 +317,17 @@ pub async fn cmd_sync_desktop_sidebar(
 #[cfg(feature = "desktop")]
 /// Reads one workspace's shared layout document. With `after_revision` the daemon parks until
 /// the stored revision is newer, so the desktop's long-poll loop costs one call per change.
+/// `worktree_key` selects one worktree bucket of the workspace; absent is the workspace-level
+/// document a legacy publisher reads.
 #[tauri::command]
 pub async fn cmd_layout_get(
     daemon_client: State<'_, Arc<DaemonClient>>,
     workspace_id: String,
+    worktree_key: Option<String>,
     after_revision: Option<u64>,
 ) -> Result<crate::remote::machine_protocol::SharedLayout, IpcError> {
     daemon_client
-        .layout_get(&workspace_id, after_revision)
+        .layout_get(&workspace_id, worktree_key.as_deref(), after_revision)
         .await
 }
 
@@ -335,11 +338,32 @@ pub async fn cmd_layout_get(
 pub async fn cmd_layout_put(
     daemon_client: State<'_, Arc<DaemonClient>>,
     workspace_id: String,
+    worktree_key: Option<String>,
     base_revision: u64,
     tabs: Vec<crate::remote::machine_protocol::SharedTab>,
 ) -> Result<crate::remote::machine_protocol::LayoutPutOutcome, IpcError> {
     daemon_client
-        .layout_put(&workspace_id, base_revision, tabs)
+        .layout_put(
+            &workspace_id,
+            worktree_key.as_deref(),
+            base_revision,
+            tabs,
+        )
+        .await
+}
+
+#[cfg(feature = "desktop")]
+/// Answers the current document once it is newer than `after_revision`, parking up to the
+/// daemon's long-poll timeout. Same bucket selection as `cmd_layout_get`.
+#[tauri::command]
+pub async fn cmd_layout_wait(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    workspace_id: String,
+    worktree_key: Option<String>,
+    after_revision: u64,
+) -> Result<crate::remote::machine_protocol::SharedLayout, IpcError> {
+    daemon_client
+        .layout_get(&workspace_id, worktree_key.as_deref(), Some(after_revision))
         .await
 }
 

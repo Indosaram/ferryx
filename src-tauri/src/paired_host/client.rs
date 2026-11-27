@@ -82,9 +82,12 @@ pub enum Operation {
         request: m::FileReadRequest,
     },
     /// The host's shared layout document for one workspace (`layoutSyncV1`). With
-    /// `after_revision` this long-polls until the host's revision is newer.
+    /// `after_revision` this long-polls until the host's revision is newer. `worktree_key`
+    /// selects one worktree bucket of that workspace.
     LayoutGet {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_revision: Option<u64>,
     },
@@ -92,6 +95,8 @@ pub enum Operation {
     /// stored document, so a retry cannot double-apply.
     LayoutPut {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_key: Option<String>,
         base_revision: u64,
         tabs: Vec<m::SharedTab>,
     },
@@ -620,11 +625,15 @@ impl Operation {
             }
             Self::LayoutGet {
                 workspace_id,
+                worktree_key,
                 after_revision,
             } => {
                 path = "workspace/layout";
                 r.capability = Some(m::LAYOUT_SYNC_CAPABILITY);
                 r.query.push(("workspaceId".into(), workspace_id.clone()));
+                if let Some(key) = worktree_key {
+                    r.query.push(("worktreeKey".into(), key.clone()));
+                }
                 if let Some(revision) = after_revision {
                     r.query.push(("afterRevision".into(), revision.to_string()));
                     // The host parks up to 25 s before it answers; outlast that park.
@@ -825,6 +834,7 @@ impl Operation {
             }
             Self::LayoutPut {
                 workspace_id,
+                worktree_key,
                 base_revision,
                 tabs,
             } => {
@@ -832,13 +842,18 @@ impl Operation {
                 // caller's domain result rather than a transport error.
                 r.conflict_is_answer = true;
                 r.method = Method::PUT;
+                // The body is the host's `LayoutPutRequest`; `worktreeKey` is omitted, not null,
+                // when the document is the workspace-level one.
+                let mut body = serde_json::json!({
+                    "workspaceId": workspace_id,
+                    "baseRevision": base_revision,
+                    "tabs": tabs,
+                });
+                if let Some(key) = worktree_key {
+                    body["worktreeKey"] = serde_json::Value::String(key.clone());
+                }
                 r.body = Some(
-                    serde_json::to_vec(&serde_json::json!({
-                        "workspaceId": workspace_id,
-                        "baseRevision": base_revision,
-                        "tabs": tabs,
-                    }))
-                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                    serde_json::to_vec(&body).map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
             Self::SupervisorRequest { envelope: body }
@@ -1147,6 +1162,22 @@ pub struct PairedDagStream {
     pub lease: CredentialLease,
 }
 
+/// Transport route taken by a remote desktop socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDesktopRoute {
+    Direct,
+    Relay,
+}
+
+impl RemoteDesktopRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+        }
+    }
+}
+
 /// Gateway socket target of the remote desktop byte bridge.
 pub const REMOTE_DESKTOP_STREAM_TARGET: &str = "/api/v1/remote-desktop/stream";
 
@@ -1204,16 +1235,14 @@ impl MachineClient {
         Ok(bytes)
     }
 
-    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
-    /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
-    /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
-    /// direct attempt sends only the Authorization header.
-    pub async fn remote_desktop_stream(
+    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host and
+    /// reports whether the connection went over a direct peer link or the relay tunnel.
+    pub async fn remote_desktop_stream_with_route(
         &self,
         service: &PairedHostService,
         host_id: String,
         generation: Epoch,
-    ) -> Result<super::secure_http::PairedSocket> {
+    ) -> Result<(super::secure_http::PairedSocket, RemoteDesktopRoute)> {
         let (host, lease) = service.capture_operation(host_id, generation).await?;
         if host.grant_scope != GrantScope::Machine {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
@@ -1238,25 +1267,43 @@ impl MachineClient {
             },
             None => None,
         };
-        let socket = match direct {
-            Some(socket) => socket,
+        let (socket, route) = match direct {
+            Some(socket) => (socket, RemoteDesktopRoute::Direct),
             None => {
                 let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
                     .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-                self.open_relay_socket(
-                    &host,
-                    &lease,
-                    &relay,
-                    &segments,
-                    &[],
-                    REMOTE_DESKTOP_STREAM_TARGET,
-                    REMOTE_DESKTOP_MAX_FRAME_BYTES,
-                )
-                .await?
+                let socket = self
+                    .open_relay_socket(
+                        &host,
+                        &lease,
+                        &relay,
+                        &segments,
+                        &[],
+                        REMOTE_DESKTOP_STREAM_TARGET,
+                        REMOTE_DESKTOP_MAX_FRAME_BYTES,
+                    )
+                    .await?;
+                (socket, RemoteDesktopRoute::Relay)
             }
         };
         service
             .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok((socket, route))
+    }
+
+    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
+    /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
+    /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
+    /// direct attempt sends only the Authorization header.
+    pub async fn remote_desktop_stream(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<super::secure_http::PairedSocket> {
+        let (socket, _) = self
+            .remote_desktop_stream_with_route(service, host_id, generation)
             .await?;
         Ok(socket)
     }
@@ -2446,18 +2493,41 @@ fn map_result(
         Operation::FileWrite { .. } => OperationResult::FileWrite(decode(bytes)?),
         Operation::FileList { .. } => OperationResult::FileList(decode(bytes)?),
         Operation::FileMkdir { .. } => OperationResult::FileMkdir(decode(bytes)?),
-        Operation::LayoutGet { workspace_id, .. } => {
+        // A legacy host that predates `worktreeKey` answers the workspace-level document and
+        // echoes no key, so only the workspace identity is checked here: an absent key in the
+        // answer means the host ignored the selector, not that the answer is corrupt.
+        Operation::LayoutGet {
+            workspace_id,
+            worktree_key,
+            ..
+        } => {
             let row: LayoutAnswer = decode(bytes)?;
-            if row.layout.workspace_id != *workspace_id {
+            if row.layout.workspace_id != *workspace_id
+                || row
+                    .layout
+                    .worktree_key
+                    .as_deref()
+                    .is_some_and(|key| Some(key) != worktree_key.as_deref())
+            {
                 return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
             }
             OperationResult::Layout(row.layout)
         }
         // A stale base answers the host's stored document with 409 instead of an error, so the
         // transport records that status and the body decodes the same either way.
-        Operation::LayoutPut { workspace_id, .. } => {
+        Operation::LayoutPut {
+            workspace_id,
+            worktree_key,
+            ..
+        } => {
             let row: LayoutAnswer = decode(bytes)?;
-            if row.layout.workspace_id != *workspace_id {
+            if row.layout.workspace_id != *workspace_id
+                || row
+                    .layout
+                    .worktree_key
+                    .as_deref()
+                    .is_some_and(|key| Some(key) != worktree_key.as_deref())
+            {
                 return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
             }
             if conflict {

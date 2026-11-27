@@ -18,16 +18,123 @@ pub mod wire {
     //! Pure encodings shared by the bridge, the frame channel and the input path.
     use std::collections::BTreeSet;
 
-    use ferryx_rd_proto::{InputEvent, InputEventType, Modifiers};
-    use serde::Deserialize;
+    use ferryx_rd_proto::{InputEvent, InputEventType, Modifiers, StreamCodecPreference};
+    use serde::{Deserialize, Serialize};
 
     /// Frame channel message kinds (byte 0).
     pub const FRAME_KIND_VIDEO: u8 = 0x01;
     pub const FRAME_KIND_STATUS: u8 = 0x02;
+    pub const FRAME_KIND_META: u8 = 0x03;
+    pub const FRAME_KIND_AUDIO: u8 = 0x04;
+    pub const FRAME_KIND_CLIPBOARD: u8 = 0x05;
     /// Stream bridge channels (byte 0) and the TCP chunk cap of the gateway contract.
     pub const BRIDGE_TCP: u8 = 0x01;
     pub const BRIDGE_UDP: u8 = 0x02;
     pub const MAX_TCP_CHUNK: usize = 60_000;
+    pub const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
+
+    pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+    pub const AUDIO_CHANNELS: u16 = 2;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RdDisplayInfo {
+        pub index: u8,
+        pub name: String,
+        pub width: u32,
+        pub height: u32,
+        pub primary: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RdSessionMeta {
+        pub route: String,
+        pub host_name: String,
+        pub displays: Vec<RdDisplayInfo>,
+        pub active_display: u8,
+        pub supports_stream_options: bool,
+        pub width: u32,
+        pub height: u32,
+        pub codec: Option<String>,
+        pub target_fps: u16,
+        pub scale_permille: u16,
+        pub jpeg_quality: u8,
+        pub max_present_fps: u32,
+        pub fps: u32,
+        pub rtt_ms: Option<f64>,
+        pub packet_loss_ratio: Option<f64>,
+        pub clipboard_allowed: bool,
+        pub audio_available: bool,
+        pub audio_muted: bool,
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RdStreamOptions {
+        pub display_index: Option<u8>,
+        pub scale_permille: Option<u16>,
+        pub fps: Option<u16>,
+        pub bitrate: Option<u32>,
+        pub jpeg_quality: Option<u8>,
+        pub max_present_fps: Option<u32>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub enum RdSpecialKeyAction {
+        CtrlAltDel,
+        AltTab,
+        CmdTab,
+        Meta,
+        CmdW,
+        CtrlW,
+        AltF4,
+        Escape,
+        PrintScreen,
+    }
+
+    pub fn codec_label(codec: StreamCodecPreference) -> &'static str {
+        match codec {
+            StreamCodecPreference::Auto => "auto",
+            StreamCodecPreference::H264 => "h264",
+            StreamCodecPreference::Hevc => "hevc",
+        }
+    }
+
+    /// Maps a special key toolbar action to an atomic down/up key sequence.
+    /// `CtrlAltDel` returns `None` because it routes through native Secure Attention (SAS).
+    pub fn special_key_sequence(action: RdSpecialKeyAction) -> Option<Vec<RdInputEvent>> {
+        let key = |code: &str, down: bool| RdInputEvent::Key {
+            code: code.to_owned(),
+            down,
+        };
+        let chord = |mods: &[&str], main: &str| {
+            let mut events = Vec::with_capacity(mods.len() * 2 + 2);
+            for m in mods {
+                events.push(key(m, true));
+            }
+            events.push(key(main, true));
+            events.push(key(main, false));
+            for m in mods.iter().rev() {
+                events.push(key(m, false));
+            }
+            events
+        };
+        Some(match action {
+            RdSpecialKeyAction::CtrlAltDel => return None,
+            RdSpecialKeyAction::AltTab => chord(&["AltLeft"], "Tab"),
+            RdSpecialKeyAction::CmdTab => chord(&["MetaLeft"], "Tab"),
+            RdSpecialKeyAction::Meta => vec![key("MetaLeft", true), key("MetaLeft", false)],
+            RdSpecialKeyAction::CmdW => chord(&["MetaLeft"], "KeyW"),
+            RdSpecialKeyAction::CtrlW => chord(&["ControlLeft"], "KeyW"),
+            RdSpecialKeyAction::AltF4 => chord(&["AltLeft"], "F4"),
+            RdSpecialKeyAction::Escape => vec![key("Escape", true), key("Escape", false)],
+            RdSpecialKeyAction::PrintScreen => {
+                vec![key("PrintScreen", true), key("PrintScreen", false)]
+            }
+        })
+    }
 
     /// `0x01, u32 width, u32 height, u64 frameId` (little endian), then the JPEG bytes.
     pub fn encode_video_message(width: u32, height: u32, frame_id: u64, jpeg: &[u8]) -> Vec<u8> {
@@ -45,6 +152,36 @@ pub mod wire {
         let mut message = vec![FRAME_KIND_STATUS];
         message.extend_from_slice(
             serde_json::json!({ "state": state, "reason": reason })
+                .to_string()
+                .as_bytes(),
+        );
+        message
+    }
+
+    /// `0x03` then UTF-8 JSON [`RdSessionMeta`].
+    pub fn encode_meta_message(meta: &RdSessionMeta) -> Vec<u8> {
+        let mut message = vec![FRAME_KIND_META];
+        if let Ok(bytes) = serde_json::to_vec(meta) {
+            message.extend_from_slice(&bytes);
+        }
+        message
+    }
+
+    /// `0x04, u32 sampleRate, u16 channels` (little endian), then interleaved f32 LE PCM bytes.
+    pub fn encode_audio_message(sample_rate: u32, channels: u16, pcm: &[u8]) -> Vec<u8> {
+        let mut message = Vec::with_capacity(7 + pcm.len());
+        message.push(FRAME_KIND_AUDIO);
+        message.extend_from_slice(&sample_rate.to_le_bytes());
+        message.extend_from_slice(&channels.to_le_bytes());
+        message.extend_from_slice(pcm);
+        message
+    }
+
+    /// `0x05` then UTF-8 JSON `{"text"}`.
+    pub fn encode_clipboard_message(text: &str) -> Vec<u8> {
+        let mut message = vec![FRAME_KIND_CLIPBOARD];
+        message.extend_from_slice(
+            serde_json::json!({ "text": text })
                 .to_string()
                 .as_bytes(),
         );
@@ -175,7 +312,7 @@ pub mod wire {
             "F8" => 100,
             "F9" => 101,
             "F11" => 103,
-            "F13" => 105,
+            "F13" | "PrintScreen" => 105,
             "F16" => 106,
             "F14" => 107,
             "F10" => 109,
@@ -486,6 +623,87 @@ pub mod wire {
                 dom_code_to_key("F24"),
                 Some(ferryx_rd_proto::extended_keys::F24)
             );
+            assert_eq!(dom_code_to_key("PrintScreen"), Some(105));
+        }
+
+        #[test]
+        fn meta_audio_and_clipboard_messages_encode_wire_headers() {
+            let meta = RdSessionMeta {
+                route: "direct".to_owned(),
+                host_name: "Studio".to_owned(),
+                displays: vec![RdDisplayInfo {
+                    index: 0,
+                    name: "Display 1".to_owned(),
+                    width: 2560,
+                    height: 1440,
+                    primary: true,
+                }],
+                active_display: 0,
+                supports_stream_options: true,
+                width: 2560,
+                height: 1440,
+                codec: Some("h264".to_owned()),
+                target_fps: 60,
+                scale_permille: 1000,
+                jpeg_quality: 72,
+                max_present_fps: 30,
+                fps: 29,
+                rtt_ms: Some(4.5),
+                packet_loss_ratio: Some(0.0),
+                clipboard_allowed: true,
+                audio_available: true,
+                audio_muted: false,
+            };
+            let encoded_meta = encode_meta_message(&meta);
+            assert_eq!(encoded_meta[0], FRAME_KIND_META);
+            let decoded: RdSessionMeta =
+                serde_json::from_slice(&encoded_meta[1..]).expect("meta json");
+            assert_eq!(decoded, meta);
+
+            let pcm = [0u8, 1, 2, 3, 4, 5, 6, 7];
+            let encoded_audio = encode_audio_message(48_000, 2, &pcm);
+            assert_eq!(encoded_audio[0], FRAME_KIND_AUDIO);
+            assert_eq!(
+                u32::from_le_bytes(encoded_audio[1..5].try_into().unwrap()),
+                48_000
+            );
+            assert_eq!(
+                u16::from_le_bytes(encoded_audio[5..7].try_into().unwrap()),
+                2
+            );
+            assert_eq!(&encoded_audio[7..], &pcm);
+
+            let encoded_clip = encode_clipboard_message("hello remote");
+            assert_eq!(encoded_clip[0], FRAME_KIND_CLIPBOARD);
+            let clip_json: serde_json::Value =
+                serde_json::from_slice(&encoded_clip[1..]).expect("clipboard json");
+            assert_eq!(clip_json["text"], "hello remote");
+        }
+
+        #[test]
+        fn special_key_sequences_keep_ctrl_alt_del_native_and_balance_chords() {
+            assert!(special_key_sequence(RdSpecialKeyAction::CtrlAltDel).is_none());
+            let mut mapper = InputMapper::default();
+            for action in [
+                RdSpecialKeyAction::AltTab,
+                RdSpecialKeyAction::CmdTab,
+                RdSpecialKeyAction::Meta,
+                RdSpecialKeyAction::CmdW,
+                RdSpecialKeyAction::CtrlW,
+                RdSpecialKeyAction::AltF4,
+                RdSpecialKeyAction::Escape,
+                RdSpecialKeyAction::PrintScreen,
+            ] {
+                let seq = special_key_sequence(action).expect("key sequence");
+                assert!(seq.len() >= 2);
+                let mapped: Vec<_> = seq.iter().filter_map(|ev| mapper.map(ev)).collect();
+                assert_eq!(mapped.len(), seq.len(), "all events for {action:?} must map");
+                assert_eq!(
+                    mapped.last().unwrap().modifiers,
+                    Modifiers::empty(),
+                    "modifiers must be clean after {action:?}"
+                );
+            }
         }
     }
 }
@@ -495,27 +713,135 @@ pub mod wire {
 #[cfg(feature = "remote-desktop")]
 mod viewer {
     //! The per-session std thread: `ClientSession`, decode, JPEG and the frame channel.
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use ferryx_rd_app::{ClientSession, PairingRecord, ReconnectState, SessionEvent};
     use ferryx_rd_decode::{detect_codec, CodecKind, HevcDecoder};
     use ferryx_rd_proto::{ControlMessage, StreamCodecPreference, StreamOptionsRequest};
+    use parking_lot::Mutex;
     use tauri::ipc::{Channel, Response};
 
-    use super::wire;
+    use super::wire::{self, RdDisplayInfo, RdSessionMeta};
 
-    /// Upper bound on JPEG frames pushed to the WebView.
-    const MAX_PRESENT_FPS: u32 = 30;
-    const JPEG_QUALITY: u8 = 70;
+    /// Default upper bound on JPEG frames pushed to the WebView and JPEG quality.
+    pub const DEFAULT_MAX_PRESENT_FPS: u32 = 30;
+    pub const DEFAULT_JPEG_QUALITY: u8 = 72;
+
+    /// Shared per-session state controlled by both the viewer thread and Tauri commands.
+    pub struct ViewerRuntime {
+        pub route: Mutex<&'static str>,
+        pub host_name: Mutex<String>,
+        pub jpeg_quality: AtomicU8,
+        pub max_present_fps: AtomicU32,
+        pub audio_muted: AtomicBool,
+        pub audio_available: AtomicBool,
+        pub next_request_id: AtomicU32,
+        pub requested_options: Mutex<StreamOptionsRequest>,
+        pub last_frame_size: Mutex<(u32, u32)>,
+        pub presented_fps: AtomicU32,
+        pub frames: Channel<Response>,
+    }
+
+    impl ViewerRuntime {
+        pub fn new(initial_route: &'static str, frames: Channel<Response>) -> Self {
+            Self {
+                route: Mutex::new(initial_route),
+                host_name: Mutex::new(String::new()),
+                jpeg_quality: AtomicU8::new(DEFAULT_JPEG_QUALITY),
+                max_present_fps: AtomicU32::new(DEFAULT_MAX_PRESENT_FPS),
+                audio_muted: AtomicBool::new(false),
+                audio_available: AtomicBool::new(false),
+                next_request_id: AtomicU32::new(2),
+                requested_options: Mutex::new(StreamOptionsRequest {
+                    request_id: 1,
+                    scale_permille: 1000,
+                    fps: 60,
+                    codec: StreamCodecPreference::H264,
+                    display_index: 0,
+                    bitrate: 0,
+                }),
+                last_frame_size: Mutex::new((0, 0)),
+                presented_fps: AtomicU32::new(0),
+                frames,
+            }
+        }
+
+        pub fn set_route(&self, route: &'static str) {
+            *self.route.lock() = route;
+        }
+
+        pub fn build_meta(&self, session: &ClientSession) -> RdSessionMeta {
+            let stream_state = session.stream_state().unwrap_or_default();
+            let stats = session.session_stats().ok();
+            let requested = *self.requested_options.lock();
+            let (last_w, last_h) = *self.last_frame_size.lock();
+            let (width, height, active_display, codec, target_fps) = match stream_state.active {
+                Some(active) => (
+                    if last_w > 0 { last_w } else { active.width },
+                    if last_h > 0 { last_h } else { active.height },
+                    active.display_index,
+                    Some(wire::codec_label(active.codec).to_owned()),
+                    active.fps,
+                ),
+                None => (
+                    last_w,
+                    last_h,
+                    requested.display_index,
+                    Some(wire::codec_label(requested.codec).to_owned()),
+                    requested.fps,
+                ),
+            };
+            let displays = stream_state
+                .displays
+                .into_iter()
+                .map(|d| RdDisplayInfo {
+                    index: d.index,
+                    name: d.name,
+                    width: d.width,
+                    height: d.height,
+                    primary: d.primary,
+                })
+                .collect();
+            let rtt_ms = stats
+                .as_ref()
+                .and_then(|s| s.rtt_smoothed_ms.or(s.rtt_latest_ms));
+            let packet_loss_ratio = stats.as_ref().and_then(|s| s.packet_loss_ratio);
+            RdSessionMeta {
+                route: (*self.route.lock()).to_owned(),
+                host_name: self.host_name.lock().clone(),
+                displays,
+                active_display,
+                supports_stream_options: stream_state.host_supports_stream_options,
+                width,
+                height,
+                codec,
+                target_fps,
+                scale_permille: requested.scale_permille,
+                jpeg_quality: self.jpeg_quality.load(Ordering::Relaxed),
+                max_present_fps: self.max_present_fps.load(Ordering::Relaxed),
+                fps: self.presented_fps.load(Ordering::Relaxed),
+                rtt_ms,
+                packet_loss_ratio,
+                clipboard_allowed: session.clipboard_allowed().unwrap_or(false),
+                audio_available: self.audio_available.load(Ordering::Relaxed),
+                audio_muted: self.audio_muted.load(Ordering::Relaxed),
+            }
+        }
+
+        pub fn emit_meta(&self, session: &ClientSession) {
+            let meta = self.build_meta(session);
+            let _ = self.frames.send(Response::new(wire::encode_meta_message(&meta)));
+        }
+    }
 
     pub struct ViewerConfig {
         pub session: ClientSession,
         pub pairing: PairingRecord,
         pub loopback_tcp: u16,
         pub loopback_udp: u16,
-        pub frames: Channel<Response>,
+        pub runtime: Arc<ViewerRuntime>,
         pub stop: Arc<AtomicBool>,
         /// Called once when the thread ends, so the registry and bridge tear down.
         pub on_exit: Box<dyn FnOnce() + Send>,
@@ -531,7 +857,7 @@ mod viewer {
             pairing,
             loopback_tcp,
             loopback_udp,
-            frames,
+            runtime,
             stop,
             on_exit,
         } = config;
@@ -540,11 +866,11 @@ mod viewer {
             pairing,
             loopback_tcp,
             loopback_udp,
-            &frames,
+            &runtime,
             &stop,
         );
         let _ = session.disconnect();
-        status(&frames, "ended", reason.as_deref());
+        status(&runtime.frames, "ended", reason.as_deref());
         on_exit();
     }
 
@@ -553,9 +879,10 @@ mod viewer {
         pairing: PairingRecord,
         loopback_tcp: u16,
         loopback_udp: u16,
-        frames: &Channel<Response>,
+        runtime: &ViewerRuntime,
         stop: &AtomicBool,
     ) -> Option<String> {
+        let frames = &runtime.frames;
         status(frames, "connecting", None);
         let ready = match session.connect_with_pairing_via(
             pairing,
@@ -567,6 +894,7 @@ mod viewer {
             Err(error) => return Some(format!("Remote desktop could not connect: {error}")),
         };
         tracing::info!(host = %ready.server.name, "remote desktop session ready");
+        *runtime.host_name.lock() = ready.server.name.clone();
         let mut tcp_runtime = match session.spawn_tcp_runtime() {
             Ok(runtime) => runtime,
             Err(error) => return Some(format!("Remote desktop control channel failed: {error}")),
@@ -581,26 +909,24 @@ mod viewer {
             .unwrap_or(false);
         if host_supports_options {
             // The software decode path is fastest on H.264; the host falls back on its own.
-            let _ = session.request_stream_options(StreamOptionsRequest {
-                request_id: 1,
-                scale_permille: 1000,
-                fps: 60,
-                codec: StreamCodecPreference::H264,
-                display_index: 0,
-                bitrate: 0,
-            });
+            let initial = *runtime.requested_options.lock();
+            let _ = session.request_stream_options(initial);
         }
         let _ = session.send_control(ControlMessage::RequestKeyFrame);
         status(frames, "connected", None);
+        runtime.emit_meta(session);
 
-        let min_interval = Duration::from_secs(1) / MAX_PRESENT_FPS;
         let mut last_present: Option<Instant> = None;
+        let mut fps_window_start = Instant::now();
+        let mut fps_window_frames: u32 = 0;
+        let mut last_meta_emit = Instant::now();
         let mut decoder: Option<(CodecKind, HevcDecoder)> = None;
         let mut announced_ready = false;
         let mut reconnecting = false;
         let mut ended: Option<String> = None;
 
         while !stop.load(Ordering::SeqCst) && ended.is_none() {
+            let mut meta_dirty = false;
             while let Ok(event) = tcp_runtime.events().try_recv() {
                 match event {
                     Ok(SessionEvent::StreamConfig(ControlMessage::SessionEnded(end))) => {
@@ -609,6 +935,17 @@ mod viewer {
                     Ok(SessionEvent::StreamConfig(ControlMessage::StreamOptionsActive(_))) => {
                         // Codec or size changed: the next keyframe builds a fresh decoder.
                         decoder = None;
+                        meta_dirty = true;
+                    }
+                    Ok(SessionEvent::StreamConfig(
+                        ControlMessage::HostDisplayList(_)
+                        | ControlMessage::GuestPermissions(_)
+                        | ControlMessage::HostPolicy(_),
+                    )) => {
+                        meta_dirty = true;
+                    }
+                    Ok(SessionEvent::Clipboard(text)) => {
+                        let _ = frames.send(Response::new(wire::encode_clipboard_message(&text)));
                     }
                     Ok(_) => {}
                     Err(error) => ended = Some(format!("Remote desktop connection lost: {error}")),
@@ -632,11 +969,24 @@ mod viewer {
                 if !reconnecting {
                     decoder = None;
                     let _ = session.send_control(ControlMessage::RequestKeyFrame);
+                    meta_dirty = true;
                 }
             }
-            let frame = match session.receive_udp_event() {
-                Ok(SessionEvent::Frame(frame)) => frame,
-                Ok(_) => continue,
+            if fps_window_start.elapsed() >= Duration::from_secs(1) {
+                let elapsed_secs = fps_window_start.elapsed().as_secs_f64().max(0.001);
+                let measured = ((fps_window_frames as f64) / elapsed_secs).round() as u32;
+                runtime.presented_fps.store(measured, Ordering::Relaxed);
+                fps_window_frames = 0;
+                fps_window_start = Instant::now();
+                meta_dirty = true;
+            }
+            if meta_dirty || last_meta_emit.elapsed() >= Duration::from_secs(2) {
+                runtime.emit_meta(session);
+                last_meta_emit = Instant::now();
+            }
+
+            let udp_event = match session.receive_udp_event() {
+                Ok(event) => event,
                 Err(ferryx_rd_app::SessionError::Io(error))
                     if matches!(
                         error.kind(),
@@ -654,6 +1004,24 @@ mod viewer {
                     ended = Some(format!("Remote desktop media failed: {error}"));
                     break;
                 }
+            };
+            let frame = match udp_event {
+                SessionEvent::Frame(frame) => frame,
+                SessionEvent::Audio(pcm) => {
+                    if !runtime.audio_available.swap(true, Ordering::Relaxed) {
+                        runtime.emit_meta(session);
+                    }
+                    if !runtime.audio_muted.load(Ordering::Relaxed) && !pcm.is_empty() {
+                        let msg = wire::encode_audio_message(
+                            wire::AUDIO_SAMPLE_RATE,
+                            wire::AUDIO_CHANNELS,
+                            &pcm,
+                        );
+                        let _ = frames.send(Response::new(msg));
+                    }
+                    continue;
+                }
+                _ => continue,
             };
             let key = frame.header.is_key_frame;
             let codec_changed = key
@@ -688,12 +1056,20 @@ mod viewer {
                 announced_ready = true;
                 session.video_ready();
             }
+            let max_fps = runtime.max_present_fps.load(Ordering::Relaxed).clamp(10, 60);
+            let min_interval = Duration::from_secs(1) / max_fps;
             let due = last_present.is_none_or(|at| at.elapsed() >= min_interval);
             if !due {
                 continue;
             }
-            match ferryx_rd_app::nv12_frame_to_jpeg(picture, JPEG_QUALITY) {
+            let quality = runtime.jpeg_quality.load(Ordering::Relaxed).clamp(30, 95);
+            match ferryx_rd_app::nv12_frame_to_jpeg(picture, quality) {
                 Ok(jpeg) => {
+                    let prev_size = *runtime.last_frame_size.lock();
+                    if prev_size != (picture.width, picture.height) {
+                        *runtime.last_frame_size.lock() = (picture.width, picture.height);
+                        runtime.emit_meta(session);
+                    }
                     let message = wire::encode_video_message(
                         picture.width,
                         picture.height,
@@ -704,6 +1080,7 @@ mod viewer {
                         ended = Some("The viewer closed".to_owned());
                         break;
                     }
+                    fps_window_frames = fps_window_frames.saturating_add(1);
                     last_present = Some(Instant::now());
                     let _ = session.frame_presented(frame.header.frame_id);
                 }
@@ -724,14 +1101,18 @@ pub mod commands {
     use std::sync::Arc;
 
     use ferryx_rd_app::{ClientSession, PairingStore, SessionConfig};
-    use ferryx_rd_proto::InputEvent;
+    use ferryx_rd_proto::{ControlMessage, InputEvent, StreamCodecPreference};
     use parking_lot::Mutex;
     use serde::Serialize;
     use tauri::ipc::{Channel, Response};
 
-    use super::transport::{self, rd_error, RD_CONNECT_FAILED, RD_NOT_FOUND};
-    use super::viewer;
-    use super::wire::{InputMapper, RdInputEvent};
+    use super::transport::{
+        self, rd_error, RD_CONNECT_FAILED, RD_NOT_FOUND, RD_PERMISSION_REQUIRED, RD_UNSUPPORTED,
+    };
+    use super::viewer::{self, ViewerRuntime};
+    use super::wire::{
+        self, InputMapper, RdInputEvent, RdSessionMeta, RdSpecialKeyAction, RdStreamOptions,
+    };
     use crate::ipc::error::IpcError;
     use crate::paired_host::client::MachineClient;
     use crate::paired_host::inventory::{AuthStatus, GrantScope};
@@ -743,6 +1124,7 @@ pub mod commands {
     struct RdSession {
         session: ClientSession,
         mapper: Mutex<InputMapper>,
+        runtime: Arc<ViewerRuntime>,
         stop: Arc<AtomicBool>,
         bridge_stop: tokio::sync::watch::Sender<bool>,
     }
@@ -806,7 +1188,7 @@ pub mod commands {
             .ok_or_else(|| rd_error(RD_NOT_FOUND, "That paired host is not known"))?;
         if host.grant_scope != GrantScope::Machine || host.auth_status != AuthStatus::Paired {
             return Err(rd_error(
-                transport::RD_PERMISSION_REQUIRED,
+                RD_PERMISSION_REQUIRED,
                 "Remote desktop needs a current Machine pairing with control access",
             ));
         }
@@ -829,8 +1211,8 @@ pub mod commands {
         })
         .await?;
 
-        let first = client
-            .remote_desktop_stream(&service, host_id.clone(), host.generation)
+        let (first, initial_route) = client
+            .remote_desktop_stream_with_route(&service, host_id.clone(), host.generation)
             .await
             .map_err(|error| transport::map_client_error(&error))?;
         let local = |error: std::io::Error| {
@@ -858,9 +1240,11 @@ pub mod commands {
         let rd_session_id = uuid::Uuid::new_v4().to_string();
         let (bridge_stop, bridge_stopped) = tokio::sync::watch::channel(false);
         let stop = Arc::new(AtomicBool::new(false));
+        let runtime = Arc::new(ViewerRuntime::new(initial_route.as_str(), frames));
         let entry = Arc::new(RdSession {
             session: session.clone(),
             mapper: Mutex::new(InputMapper::default()),
+            runtime: Arc::clone(&runtime),
             stop: Arc::clone(&stop),
             bridge_stop,
         });
@@ -869,6 +1253,8 @@ pub mod commands {
             .get_or_insert_with(HashMap::new)
             .insert(rd_session_id.clone(), Arc::clone(&entry));
 
+        let route_runtime = Arc::clone(&runtime);
+        let route_session = session.clone();
         tokio::spawn(transport::run_bridge(
             listener,
             udp,
@@ -878,6 +1264,10 @@ pub mod commands {
                 service,
                 host_id,
                 generation: host.generation,
+                on_route: Some(Arc::new(move |route| {
+                    route_runtime.set_route(route.as_str());
+                    route_runtime.emit_meta(&route_session);
+                })),
             },
             bridge_stopped,
         ));
@@ -890,7 +1280,7 @@ pub mod commands {
                     pairing,
                     loopback_tcp,
                     loopback_udp,
-                    frames,
+                    runtime,
                     stop,
                     on_exit: Box::new(move || {
                         if let Some(entry) = remove_session(&exit_id) {
@@ -935,11 +1325,205 @@ pub mod commands {
                 .send_inputs(&mapped)
                 .map_err(|error| match error {
                     ferryx_rd_app::SessionError::PermissionDenied => rd_error(
-                        transport::RD_PERMISSION_REQUIRED,
+                        RD_PERMISSION_REQUIRED,
                         "The host does not allow input from this session",
                     ),
                     other => rd_error(RD_CONNECT_FAILED, other.to_string()),
                 })
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_special_key(
+        rd_session_id: String,
+        action: RdSpecialKeyAction,
+    ) -> Result<(), IpcError> {
+        let entry = find_session(&rd_session_id)
+            .ok_or_else(|| rd_error(RD_NOT_FOUND, "That remote desktop session has ended"))?;
+        if action == RdSpecialKeyAction::CtrlAltDel {
+            return crate::ipc::run_blocking(move || {
+                entry
+                    .session
+                    .request_secure_attention()
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        ferryx_rd_app::SessionError::Unsupported => rd_error(
+                            RD_UNSUPPORTED,
+                            "The remote host does not support Secure Attention (Ctrl+Alt+Del)",
+                        ),
+                        ferryx_rd_app::SessionError::PermissionDenied => rd_error(
+                            RD_PERMISSION_REQUIRED,
+                            "The host does not allow input from this session",
+                        ),
+                        other => rd_error(RD_CONNECT_FAILED, other.to_string()),
+                    })
+            })
+            .await;
+        }
+        let seq = wire::special_key_sequence(action)
+            .ok_or_else(|| rd_error(RD_UNSUPPORTED, "Unsupported special key action"))?;
+        let mapped: Vec<InputEvent> = {
+            let mut mapper = entry.mapper.lock();
+            seq.iter().filter_map(|ev| mapper.map(ev)).collect()
+        };
+        if mapped.is_empty() {
+            return Ok(());
+        }
+        crate::ipc::run_blocking(move || {
+            entry
+                .session
+                .send_inputs(&mapped)
+                .map_err(|error| match error {
+                    ferryx_rd_app::SessionError::PermissionDenied => rd_error(
+                        RD_PERMISSION_REQUIRED,
+                        "The host does not allow input from this session",
+                    ),
+                    other => rd_error(RD_CONNECT_FAILED, other.to_string()),
+                })
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_set_stream_options(
+        rd_session_id: String,
+        options: RdStreamOptions,
+    ) -> Result<RdSessionMeta, IpcError> {
+        let entry = find_session(&rd_session_id)
+            .ok_or_else(|| rd_error(RD_NOT_FOUND, "That remote desktop session has ended"))?;
+        if let Some(q) = options.jpeg_quality {
+            entry
+                .runtime
+                .jpeg_quality
+                .store(q.clamp(30, 95), Ordering::Relaxed);
+        }
+        if let Some(fps) = options.max_present_fps {
+            entry
+                .runtime
+                .max_present_fps
+                .store(fps.clamp(10, 60), Ordering::Relaxed);
+        }
+        let host_change = options.display_index.is_some()
+            || options.scale_permille.is_some()
+            || options.fps.is_some()
+            || options.bitrate.is_some();
+        crate::ipc::run_blocking(move || {
+            if host_change {
+                let state = entry
+                    .session
+                    .stream_state()
+                    .map_err(|error| rd_error(RD_CONNECT_FAILED, error.to_string()))?;
+                if !state.host_supports_stream_options {
+                    if options.display_index.is_some() {
+                        return Err(rd_error(
+                            RD_UNSUPPORTED,
+                            "The remote host does not support switching displays or stream options",
+                        ));
+                    }
+                } else {
+                    if let Some(display_index) = options.display_index {
+                        if !state.displays.is_empty()
+                            && !state.displays.iter().any(|d| d.index == display_index)
+                        {
+                            return Err(rd_error(
+                                RD_NOT_FOUND,
+                                format!("Display {display_index} is not available on the host"),
+                            ));
+                        }
+                    }
+                    let req = {
+                        let mut current = entry.runtime.requested_options.lock();
+                        let next_id = entry
+                            .runtime
+                            .next_request_id
+                            .fetch_add(1, Ordering::Relaxed);
+                        current.request_id = next_id;
+                        if let Some(display_index) = options.display_index {
+                            current.display_index = display_index;
+                        }
+                        if let Some(scale) = options.scale_permille {
+                            current.scale_permille = scale.clamp(250, 1000);
+                        }
+                        if let Some(fps) = options.fps {
+                            current.fps = fps.clamp(15, 60);
+                        }
+                        if let Some(bitrate) = options.bitrate {
+                            current.bitrate = bitrate;
+                        }
+                        current.codec = StreamCodecPreference::H264;
+                        *current
+                    };
+                    entry
+                        .session
+                        .request_stream_options(req)
+                        .map_err(|error| rd_error(RD_CONNECT_FAILED, error.to_string()))?;
+                    let _ = entry.session.send_control(ControlMessage::RequestKeyFrame);
+                }
+            }
+            let meta = entry.runtime.build_meta(&entry.session);
+            entry.runtime.emit_meta(&entry.session);
+            Ok(meta)
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_send_clipboard(
+        rd_session_id: String,
+        text: String,
+    ) -> Result<(), IpcError> {
+        let entry = find_session(&rd_session_id)
+            .ok_or_else(|| rd_error(RD_NOT_FOUND, "That remote desktop session has ended"))?;
+        if text.len() > wire::MAX_CLIPBOARD_BYTES {
+            return Err(rd_error(
+                RD_CONNECT_FAILED,
+                "Clipboard text exceeds the 1 MiB limit",
+            ));
+        }
+        crate::ipc::run_blocking(move || {
+            let allowed = entry.session.clipboard_allowed().unwrap_or(false);
+            if !allowed {
+                return Err(rd_error(
+                    RD_PERMISSION_REQUIRED,
+                    "The host does not allow clipboard sharing for this session",
+                ));
+            }
+            entry
+                .session
+                .send_clipboard_text(text)
+                .map_err(|error| match error {
+                    ferryx_rd_app::SessionError::PermissionDenied => rd_error(
+                        RD_PERMISSION_REQUIRED,
+                        "The host does not allow clipboard sharing for this session",
+                    ),
+                    other => rd_error(RD_CONNECT_FAILED, other.to_string()),
+                })
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_set_audio_muted(
+        rd_session_id: String,
+        muted: bool,
+    ) -> Result<bool, IpcError> {
+        let entry = find_session(&rd_session_id)
+            .ok_or_else(|| rd_error(RD_NOT_FOUND, "That remote desktop session has ended"))?;
+        entry.runtime.audio_muted.store(muted, Ordering::Relaxed);
+        entry.runtime.emit_meta(&entry.session);
+        Ok(muted)
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_request_keyframe(rd_session_id: String) -> Result<(), IpcError> {
+        let entry = find_session(&rd_session_id)
+            .ok_or_else(|| rd_error(RD_NOT_FOUND, "That remote desktop session has ended"))?;
+        crate::ipc::run_blocking(move || {
+            entry
+                .session
+                .send_control(ControlMessage::RequestKeyFrame)
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, error.to_string()))
         })
         .await
     }
@@ -970,7 +1554,7 @@ mod transport {
 
     use super::wire;
     use crate::ipc::error::{IpcError, IpcErrorCode};
-    use crate::paired_host::client::{ClientError, MachineClient};
+    use crate::paired_host::client::{ClientError, MachineClient, RemoteDesktopRoute};
     use crate::paired_host::secure_http::PairedSocket;
     use crate::paired_host::service::PairedHostService;
     use crate::scoped_contracts::Epoch;
@@ -1069,6 +1653,7 @@ mod transport {
         pub service: PairedHostService,
         pub host_id: String,
         pub generation: Epoch,
+        pub on_route: Option<Arc<dyn Fn(RemoteDesktopRoute) + Send + Sync>>,
     }
 
     /// Serves the loopback endpoint `ClientSession` connects to. Every accepted TCP
@@ -1109,14 +1694,19 @@ mod transport {
                     let opened = tokio::select! {
                         biased;
                         _ = stopped(&mut stop) => return,
-                        opened = source.client.remote_desktop_stream(
+                        opened = source.client.remote_desktop_stream_with_route(
                             &source.service,
                             source.host_id.clone(),
                             source.generation,
                         ) => opened,
                     };
                     match opened {
-                        Ok(socket) => socket,
+                        Ok((socket, route)) => {
+                            if let Some(on_route) = &source.on_route {
+                                on_route(route);
+                            }
+                            socket
+                        }
                         Err(error) => {
                             // Dropping the connection lets the session's reconnect retry.
                             tracing::debug!(code = %error.code, "remote desktop stream reopen failed");
