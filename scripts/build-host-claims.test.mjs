@@ -396,8 +396,13 @@ test("release and acquire racing on one host never lose the installed claim", as
   if (existsSync(join(dir, "racer"))) {
     assert.match(readFileSync(join(dir, "racer"), "utf8").trim(), /^(pid \d+|until \d+)$/);
   }
+  // A guard temp copy may legitimately survive: when a guard moved aside turns out to belong
+  // to a live pid whose name was already reinstalled, fx_claim_guard keeps the copy rather
+  // than drop a live holder's guard ("litter is the lesser fault"). What must never survive
+  // is a tombstone, or a guard still installed under the claim's own name.
   const leftovers = readdirSync(dir).filter(n => n.startsWith(".racer"));
-  assert.deepEqual(leftovers, [], "no guard, new or tombstone file survives the race");
+  const strays = leftovers.filter(n => !/^\.racer\.guard\.[A-Za-z0-9]+$/.test(n));
+  assert.deepEqual(strays, [], "no tombstone or installed guard survives the race");
 });
 
 // ln(1) reports success when its second argument is an existing directory, linking
