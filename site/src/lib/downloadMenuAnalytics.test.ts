@@ -106,7 +106,7 @@ describe('download menu instrumentation', () => {
     expect(downloadEvents()).toEqual([
       {
         platform: 'macos',
-        asset_id: 'macos-universal',
+        asset_id: 'macos-arm64',
         destination: 'github_release_asset',
         link_location: 'hero_primary',
       },

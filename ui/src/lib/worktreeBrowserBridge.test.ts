@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { BrowserSessionCreatedPayload } from "./browserTauri";
-import { routeBrowserModeShortcut, SHORTCUTS, type ShortcutActivityMode, type ShortcutBinding } from "./shortcuts";
+import {
+  routeBrowserModeShortcut,
+  SHORTCUTS,
+  type BrowserModeShortcutEvent,
+  type ShortcutActivityMode,
+  type ShortcutBinding,
+} from "./shortcuts";
 import type { LayoutState } from "./types";
 import {
   adoptCliBrowserSession,
@@ -321,7 +327,7 @@ describe("activity mode shortcut table", () => {
         const chord = platformChord(shortcut.binding, isMac);
         seen.set(chord, [...(seen.get(chord) ?? []), shortcut.id]);
       }
-      const collisions = Object.entries(seen).filter(([, ids]) => ids.length > 1);
+      const collisions = [...seen.entries()].filter(([, ids]) => ids.length > 1);
       // The only allowed collisions are the documented browser/terminal surface split.
       for (const [chord, ids] of collisions) {
         expect(ids.some((id) => id.startsWith("browser.")), `chord ${chord}`).toBe(true);
@@ -357,7 +363,18 @@ describe("activity mode shortcut table", () => {
 });
 
 describe("routeBrowserModeShortcut", () => {
-  const modEvent = (key: string, overrides: Partial<KeyboardEventInit> = {}, isMac = true): KeyboardEventInit => ({
+  /** A keydown as the router sees it: every modifier spelled out, so a literal cannot drift. */
+  const chord = (patch: Partial<BrowserModeShortcutEvent>): BrowserModeShortcutEvent => ({
+    key: "",
+    code: "",
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...patch,
+  });
+
+  const modEvent = (key: string, overrides: Partial<BrowserModeShortcutEvent> = {}, isMac = true): BrowserModeShortcutEvent => chord({
     key,
     code: `Key${key.toUpperCase()}`,
     metaKey: isMac,
@@ -375,37 +392,37 @@ describe("routeBrowserModeShortcut", () => {
   });
 
   it("routes Ctrl+Tab and Ctrl+Shift+Tab to the Maho switcher in Browser mode", () => {
-    expect(routeBrowserModeShortcut({ key: "Tab", code: "Tab", ctrlKey: true }, "browser", true)).toBe("switcher-next");
-    expect(routeBrowserModeShortcut({ key: "Tab", code: "Tab", ctrlKey: true, shiftKey: true }, "browser", false))
+    expect(routeBrowserModeShortcut(chord({ key: "Tab", code: "Tab", ctrlKey: true }), "browser", true)).toBe("switcher-next");
+    expect(routeBrowserModeShortcut(chord({ key: "Tab", code: "Tab", ctrlKey: true, shiftKey: true }), "browser", false))
       .toBe("switcher-prev");
   });
 
   it("never claims Cmd+Tab on macOS, which belongs to the OS window switcher", () => {
-    expect(routeBrowserModeShortcut({ key: "Tab", code: "Tab", metaKey: true }, "browser", true)).toBeNull();
+    expect(routeBrowserModeShortcut(chord({ key: "Tab", code: "Tab", metaKey: true }), "browser", true)).toBeNull();
   });
 
   it("returns null in Worktrees mode so Ctrl+Tab stays tab-next and Cmd+Shift+I stays Supervisor", () => {
-    expect(routeBrowserModeShortcut({ key: "Tab", code: "Tab", ctrlKey: true }, "worktrees", true)).toBeNull();
+    expect(routeBrowserModeShortcut(chord({ key: "Tab", code: "Tab", ctrlKey: true }), "worktrees", true)).toBeNull();
     expect(routeBrowserModeShortcut(modEvent("t"), "worktrees", true)).toBeNull();
     expect(routeBrowserModeShortcut(modEvent("w"), "worktrees", true)).toBeNull();
     expect(routeBrowserModeShortcut(modEvent("l"), "worktrees", true)).toBeNull();
     // Mod+Shift+I is notifications.toggle (Supervisor) and has no browser-mode meaning.
-    expect(routeBrowserModeShortcut({ key: "i", code: "KeyI", metaKey: true, shiftKey: true }, "worktrees", true))
+    expect(routeBrowserModeShortcut(chord({ key: "i", code: "KeyI", metaKey: true, shiftKey: true }), "worktrees", true))
       .toBeNull();
-    expect(routeBrowserModeShortcut({ key: "i", code: "KeyI", metaKey: true, shiftKey: true }, "browser", true))
+    expect(routeBrowserModeShortcut(chord({ key: "i", code: "KeyI", metaKey: true, shiftKey: true }), "browser", true))
       .toBeNull();
   });
 
   it("returns null in the other two modes", () => {
     for (const mode of ["supervisor", "remoteDesktop"] as const) {
       expect(routeBrowserModeShortcut(modEvent("t"), mode, true)).toBeNull();
-      expect(routeBrowserModeShortcut({ key: "Tab", code: "Tab", ctrlKey: true }, mode, true)).toBeNull();
+      expect(routeBrowserModeShortcut(chord({ key: "Tab", code: "Tab", ctrlKey: true }), mode, true)).toBeNull();
     }
   });
 
   it("leaves Alt-carrying and shifted letter chords alone", () => {
     expect(routeBrowserModeShortcut(modEvent("t", { altKey: true }), "browser", true)).toBeNull();
     expect(routeBrowserModeShortcut(modEvent("t", { shiftKey: true }), "browser", true)).toBeNull();
-    expect(routeBrowserModeShortcut({ key: "r", code: "KeyR" }, "browser", true)).toBeNull();
+    expect(routeBrowserModeShortcut(chord({ key: "r", code: "KeyR" }), "browser", true)).toBeNull();
   });
 });

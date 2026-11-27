@@ -22,7 +22,7 @@ function answers(overrides: {
     available: true,
     sttSource: "codex" as const,
     speakAvailable: false,
-    speakReason: "Spoken replies need a speech key.",
+    speakReason: "Spoken replies use the realtime voice on your Codex sign-in.",
   };
   invoke.mockImplementation(async (command: string) => {
     if (command === "cmd_voice_call_key_state") return key;
@@ -42,7 +42,7 @@ describe("VoiceSection", () => {
     render(<VoiceSection />);
 
     await waitFor(() => expect(screen.getByLabelText("Speech provider API key")).toBeTruthy());
-    expect(screen.getByText(/Dictation works without a key/)).toBeTruthy();
+    expect(screen.getByText(/Run `codex login` on this machine/)).toBeTruthy();
     expect(screen.queryByText("Saved")).toBeNull();
   });
 
@@ -51,18 +51,18 @@ describe("VoiceSection", () => {
     render(<VoiceSection />);
 
     await waitFor(() => expect(screen.getByText("Text replies only")).toBeTruthy());
-    expect(screen.getByText(/Dictation is free through your Codex sign-in/)).toBeTruthy();
+    expect(screen.getByText(/Spoken replies use the realtime voice on your Codex sign-in/)).toBeTruthy();
   });
 
-  it("offers spoken replies once a key pays for them", async () => {
+  it("says spoken replies run on the Codex sign-in once it is present", async () => {
     answers({
       key: { saved: true, source: "file" },
       status: { available: true, sttSource: "key", speakAvailable: true, speakReason: null },
     });
     render(<VoiceSection />);
 
-    await waitFor(() => expect(screen.getByText("Your account")).toBeTruthy());
-    expect(screen.getByText(/Spoken replies use your own provider account/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("Codex sign-in")).toBeTruthy());
+    expect(screen.getByText(/Dictation and spoken replies are covered by your Codex sign-in/)).toBeTruthy();
   });
 
   it("saves the typed key and then says it is saved", async () => {

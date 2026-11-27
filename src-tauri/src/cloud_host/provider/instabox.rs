@@ -515,6 +515,11 @@ mod tests {
             .expect("chmod the stub");
     }
 
+    /// The stub is a POSIX shell script, so only a unix host can execute it. The tests that spawn it
+    /// are compile-checked everywhere; on a non-unix host the file simply keeps its default mode.
+    #[cfg(not(unix))]
+    fn make_executable(_script: &std::path::Path) {}
+
     /// A stub `instabox` that records every invocation's argv and answers from canned files.
     ///
     /// This is the seam that lets a test exercise a real call site - `exec`, `ssh_target`,
