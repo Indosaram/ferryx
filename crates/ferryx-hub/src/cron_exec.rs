@@ -796,11 +796,11 @@ struct ScriptTree {
 }
 
 impl ScriptTree {
-    fn arm(child: &tokio::process::Child) -> Self {
+    fn arm(_child: &tokio::process::Child) -> Self {
         Self {
             // `process_group(0)` made the child a group leader, so its pid is the group id.
             #[cfg(unix)]
-            pgid: child.id().map(|pid| pid as libc::pid_t).unwrap_or(0),
+            pgid: _child.id().map(|pid| pid as libc::pid_t).unwrap_or(0),
             armed: true,
         }
     }
