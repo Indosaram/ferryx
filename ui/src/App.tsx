@@ -40,7 +40,6 @@ import {
   type ActivityMode,
 } from "./lib/sidebarPersistence";
 import { Button } from "./components/ui/button";
-import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { cycleAppearanceTheme, openAppearanceSurface } from "./lib/appearanceCommands";
 import { useAppearanceSettings, useApplyAppearanceSettings } from "./lib/appearanceSettings";
