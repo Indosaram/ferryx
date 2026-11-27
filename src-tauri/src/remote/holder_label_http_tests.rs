@@ -272,6 +272,7 @@ async fn owner_hop_preserves_negotiated_conflict() {
                 assert_eq!(requested_json, opt_in);
                 let reply = format!("HTTP/1.1 409 Conflict\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 io.get_mut().write_all(reply.as_bytes()).await.unwrap();
+                let _ = io.get_mut().shutdown().await;
             };
             let dial = async {
                 let url = format!("{}/api/v1/terminal/{ID}?daemonEpoch=1&render=grid", fixture.base);

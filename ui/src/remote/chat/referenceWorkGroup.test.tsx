@@ -276,12 +276,15 @@ describe("diff summary", () => {
 
   it("shows file counts and a small inline body, and withholds a large body", () => {
     const { rerender } = render(<ReferencePartList parts={[diff({ id: "d1", body: SMALL_PATCH })]} />);
-    expect(screen.getByTestId("reference-diff-summary")).toHaveTextContent("src/a.ts +2 -1");
+    expect(screen.getByTestId("reference-diff-summary")).toHaveTextContent("src/a.ts");
+    // The counts are their own labelled group (t3code DiffStatLabel), not part of the file name.
+    expect(screen.getByTestId("diff-stat-label")).toHaveTextContent("+2");
+    expect(screen.getByTestId("diff-stat-label")).toHaveTextContent("-1");
     expect(screen.getByTestId("reference-diff-body")).toHaveTextContent("+newer");
 
     const large = `${SMALL_PATCH}\n${"x".repeat(REFERENCE_DIFF_INLINE_LIMIT)}`;
     rerender(<ReferencePartList parts={[diff({ id: "d1", body: large })]} />);
-    expect(screen.getByTestId("reference-diff-summary")).toHaveTextContent("src/a.ts +2 -1");
+    expect(screen.getByTestId("reference-diff-summary")).toHaveTextContent("src/a.ts");
     expect(screen.queryByTestId("reference-diff-body")).not.toBeInTheDocument();
     expect(screen.queryByText("+newer")).not.toBeInTheDocument();
   });

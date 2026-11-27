@@ -86,8 +86,8 @@ export function VoiceSection() {
                 ? "Using a key from this process's environment."
                 : "Your key is saved on this machine and is never shown again."
               : codex
-                ? "Not needed for dictation: your Codex sign-in is already paying for it. Add a key only to hear replies spoken aloud."
-                : "Dictation works without a key when this machine has a Codex sign-in. A key also enables spoken replies, billed to your own account."
+                ? "Not needed: your Codex sign-in covers dictation and the realtime voice that speaks replies. A key only replaces the dictation provider."
+                : "Run `codex login` on this machine: dictation and spoken replies (realtime voice) both use that sign-in. A key only replaces the dictation provider."
           }
         >
           {saved ? (
@@ -131,12 +131,12 @@ export function VoiceSection() {
           label="Billing"
           description={
             voice?.speakAvailable
-              ? "Dictation is covered by your Codex sign-in. Spoken replies use your own provider account, about one cent an exchange."
-              : "Dictation is free through your Codex sign-in. Spoken replies stay off until a key is saved, so replies arrive as text."
+              ? "Dictation and spoken replies are covered by your Codex sign-in. Replies are spoken by the OpenAI realtime voice."
+              : "Spoken replies use the realtime voice on your Codex sign-in. Until you sign in, replies arrive as text."
           }
         >
           <span className="text-[12px] text-muted-foreground">
-            {voice?.speakAvailable ? "Your account" : "Text replies only"}
+            {voice?.speakAvailable ? "Codex sign-in" : "Text replies only"}
           </span>
         </SettingRow>
         {save.kind === "error" ? (

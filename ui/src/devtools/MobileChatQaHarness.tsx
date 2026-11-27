@@ -11,7 +11,11 @@ import { MobileChatWorkspace } from "../remote/chat/MobileChatWorkspace";
 import type { MobileChatMessageProps } from "../remote/chat/MobileChatMessage";
 import type { ChatAttachment, ChatWorkItem } from "../remote/chat/MobileChatComponents";
 import { MobileKeyDock } from "../components/MobileKeyDock";
-import { QA_KEYBOARD_HEIGHT, QaTerminalSurface, chatQaComposerProps } from "./chatQaStates";
+import { QA_KEYBOARD_HEIGHT, QaTerminalSurface, chatQaComposerProps, chatQaMessages, seedChatQaAnswerAttachments } from "./chatQaStates";
+import {
+  StructuredChatQaFixture,
+  isStructuredChatQaState,
+} from "./structuredChatQaStates";
 import { PHONE_HOME_QA_STATES, PhoneHomeQaState, QaSessionStrip, SESSION_STRIP_QA_STATES } from "./phoneHomeQaStates";
 import { SIDEBAR_PARITY_QA_STATES, SidebarParityQaState } from "./sidebarParityQa";
 import { PHONE_NAV_QA_STATE, PhoneNavQaState } from "./phoneNavQa";
@@ -250,6 +254,14 @@ export const MobileChatQaHarness: React.FC = () => {
   useEffect(() => {
     document.documentElement.dataset.qaReady = "true";
   }, []);
+  // The prompt card's answer attachments live in a module store keyed by the card's own key, so
+  // the seed runs once after mount and the card's own subscription redraws the attach row.
+  useEffect(() => {
+    seedChatQaAnswerAttachments(STATE);
+  }, []);
+  if (isStructuredChatQaState(STATE)) {
+    return <StructuredChatQaFixture state={STATE} />;
+  }
   if ((PHONE_HOME_QA_STATES as readonly string[]).includes(STATE)) {
     return <PhoneHomeQaState state={STATE} model={SEEDED_MODEL} />;
   }
@@ -263,7 +275,10 @@ export const MobileChatQaHarness: React.FC = () => {
 const sessionStrip = (SESSION_STRIP_QA_STATES as readonly string[]).includes(STATE);
 
 const ChatQaHarness: React.FC = () => {
-  const seeded = useMemo(() => buildMessages(STATE), []);
+  const seeded = useMemo(
+    () => [...(chatQaMessages(STATE) ?? buildMessages(STATE))],
+    [],
+  );
   const [messages, setMessages] = useState<MobileChatMessageProps[]>(seeded);
   const [isRunning, setIsRunning] = useState(STATE === "running");
   const [pickerOpen, setPickerOpen] = useState(STATE === "drawer-open");
@@ -273,6 +288,10 @@ const ChatQaHarness: React.FC = () => {
     STATE === "terminal-mode" || STATE === "terminal-dock" ? "terminal" : "chat"
   );
   const composerState = useMemo(() => chatQaComposerProps(STATE), []);
+  // A state that seeds a draft (chips, citation, unsaved) must own it here: the workspace treats
+  // a `draft` prop as controlled, so without an owner the composer would ignore every keystroke
+  // the capture script types into it.
+  const [draft, setDraft] = useState<string | undefined>(() => composerState.draft);
 
   const attention: MobileTopBarAttention | null =
     STATE === "topbar-attention"
@@ -357,7 +376,6 @@ const ChatQaHarness: React.FC = () => {
             headerSubtitle={contextLabel}
             workspaceLabel="maho-workspace"
             worktreeLabel={STATE === "topbar-long-title" ? LONG_WORKTREE : "feature/mobile-chat"}
-            draft={STATE === "long" ? LONG_DRAFT : undefined}
             onBack={() => undefined}
             messages={messages}
             warnings={
@@ -369,6 +387,10 @@ const ChatQaHarness: React.FC = () => {
             onSendMessage={handleSend}
             onStopExecution={() => setIsRunning(false)}
             {...composerState}
+            /* After the spread: a seeded draft (chips, citation) stays controlled here so the
+               capture script's typing lands in the box instead of being ignored. */
+            draft={STATE === "long" ? LONG_DRAFT : draft}
+            onDraftChange={setDraft}
           />
         </div>
       )}

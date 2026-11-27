@@ -899,6 +899,7 @@ mod tests {
     /// test is the only caller that gives it a job. It reports on stdout rather than through its exit
     /// status, so "the lock was free" is a value the parent reads rather than a passing test.
     #[test]
+    #[cfg(unix)]
     fn flock_probe_child() {
         let Ok(mode) = std::env::var("FX_FLOCK_MODE") else { return };
         let root = PathBuf::from(std::env::var("FX_FLOCK_ROOT").expect("FX_FLOCK_ROOT"));

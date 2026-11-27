@@ -15,6 +15,8 @@ pub mod checkpoint_import;
 pub mod child_env;
 #[cfg(feature = "hub-voice")]
 pub mod codex_speech;
+#[cfg(feature = "hub-voice")]
+pub mod realtime_speech;
 pub mod config;
 pub mod context;
 pub mod control;

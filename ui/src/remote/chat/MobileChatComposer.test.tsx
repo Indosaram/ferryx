@@ -65,14 +65,26 @@ describe("MobileChatComposer touch safety", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps Enter as a new line on a touch screen; the Send button sends", () => {
+  // composer.md:31 "Enter sends. In a list or quote, Shift+Enter continues it" has no pointer
+  // exception, and t3code's editor hands Enter to the composer's key handler whatever the
+  // pointer type (ComposerPromptEditorTiptap.tsx:1471-1479). A hardware keyboard on a tablet
+  // therefore sends, exactly like a desktop one.
+  it("sends on Enter from a hardware keyboard on a touch screen", () => {
     setCoarsePointer(true);
     const onSend = vi.fn();
     render(<MobileChatComposer onSend={onSend} />);
     const textarea = screen.getByTestId("chat-composer-textarea");
     fireEvent.change(textarea, { target: { value: "line one" } });
     fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith("line one");
+  });
+
+  it("keeps the Send button as the touch path for a draft", () => {
+    setCoarsePointer(true);
+    const onSend = vi.fn();
+    render(<MobileChatComposer onSend={onSend} />);
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    fireEvent.change(textarea, { target: { value: "line one" } });
     fireEvent.click(screen.getByTestId("send-button"));
     expect(onSend).toHaveBeenCalledWith("line one");
   });

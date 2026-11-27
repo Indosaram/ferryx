@@ -6,6 +6,7 @@ import {
   CreditCard,
   Globe,
   Keyboard,
+  MessageSquare,
   Mic,
   Palette,
   Radio,
@@ -22,6 +23,7 @@ import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../rem
 import { AgentsSection } from "./settings/AgentsSection";
 import { AppearanceSection } from "./settings/AppearanceSection";
 import { BrowserSection } from "./settings/BrowserSection";
+import { ChatSection } from "./settings/ChatSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
@@ -59,6 +61,7 @@ const VALID_SECTIONS: readonly SectionId[] = [
   "appearance",
   "terminal",
   "shortcuts",
+  "chat",
   "agents",
   "browser",
   "notifications",
@@ -194,6 +197,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <NavButton active={section === "appearance"} icon={<Palette />} label="Appearance" onClick={() => setSection("appearance")} />
             <NavButton active={section === "terminal"} icon={<TerminalSquare />} label="Terminal" onClick={() => setSection("terminal")} />
             <NavButton active={section === "shortcuts"} icon={<Keyboard />} label="Keyboard Shortcuts" onClick={() => setSection("shortcuts")} />
+            <NavButton active={section === "chat"} icon={<MessageSquare />} label="Chat" onClick={() => setSection("chat")} />
             <NavButton active={section === "agents"} icon={<Bot />} label="Agents" onClick={() => setSection("agents")} />
             {advancedFeatures ? (
               <>
@@ -218,6 +222,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
         <div data-testid="settings-content" className="mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
           {section === "general" ? <GeneralSection /> : null}
           {section === "appearance" ? <AppearanceSection /> : null}
+          {section === "chat" ? <ChatSection /> : null}
           {section === "terminal" ? (
             <TerminalSection
               fontFamily={settings.fontFamily}

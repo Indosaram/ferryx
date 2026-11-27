@@ -53,8 +53,17 @@ async fn owner_handshake<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         Ok(Ok(WebSocketStream::from_raw_socket(TokioIo::new(socket), Role::Client, None).await))
     };
     // Keep the driver inside the caller's existing timeout and revocation boundary.
-    let (result, ()) = tokio::try_join!(exchange, async { driver.with_upgrades().await.map_err(|_| unavailable()) })?;
-    Ok(result)
+    // Once a non-101 refusal response has been read completely, a trailing socket reset from the
+    // closing owner must not replace that negotiated refusal with 503 HOST_UNAVAILABLE.
+    let (result, driver_outcome) = tokio::join!(exchange, driver.with_upgrades());
+    match result {
+        Ok(Err(refusal)) => Ok(Err(refusal)),
+        Ok(Ok(socket)) => {
+            driver_outcome.map_err(|_| unavailable())?;
+            Ok(Ok(socket))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub(super) async fn upgrade(

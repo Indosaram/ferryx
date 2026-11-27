@@ -781,7 +781,7 @@ $vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
 # Setting $env:COMSPEC from PowerShell is not enough: the child cmd.exe comes up with the
 # machine COMSPEC again, so vcvars still misbehaves. COMSPEC has to be assigned inside the
 # generated .bat before the call. Measured on maho-win, this form yields
-# VCINSTALLDIR=...\BuildTools\VC\, WindowsSdkDir=...\Windows Kits\10\, and nmake on PATH.
+# VCINSTALLDIR=...\\BuildTools\\VC\\, WindowsSdkDir=...\\Windows Kits\\10\\, and nmake on PATH.
 # vswhere is reached through [Environment] instead of the env:ProgramFiles(x86) variable:
 # the parenthesised name is not a valid variable literal and expands to nothing on this host.
 $realCmd = Join-Path $env:SystemRoot 'System32\\cmd.exe'

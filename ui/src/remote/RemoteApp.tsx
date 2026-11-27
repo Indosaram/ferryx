@@ -69,6 +69,11 @@ import {
   type FollowUpIdleClock,
 } from "./chat/referenceFollowUpIdle";
 import { ReferencePromptCard } from "./chat/ReferencePromptCard";
+import { referenceAnswerAttachmentStore } from "./chat/promptAttach/referencePromptAttach";
+import { answerAttachSeam, composerControlsFromCapabilities } from "./chat/workspace/seams";
+import { bindStructuredChatRemote, remoteStructuredChatTransport } from "../lib/structuredChatRemote";
+import { imageActionHandlers } from "./chat/messages/imageActions";
+import { usePaneChatPreferences } from "../lib/usePaneChatPreferences";
 import {
   ReferenceFileError,
   cancelReferenceChatFile,
@@ -182,6 +187,20 @@ const RemoteBrowserWorkspace = lazy(() =>
 const MobileChatWorkspace = lazy(() =>
   import("./chat/MobileChatWorkspace").then((m) => ({ default: m.MobileChatWorkspace }))
 );
+
+const StructuredChatPane = lazy(() =>
+  import("./chat/structured/StructuredChatPane").then((m) => ({ default: m.StructuredChatPane }))
+);
+
+const REMOTE_STRUCTURED_PROVIDERS = new Set([
+  "codex",
+  "claude",
+  "maho",
+  "omo",
+  "antigravity",
+  "opencode",
+  "cline",
+]);
 import {
   getStoredAccountSessionToken,
   getStoredAccountId,
@@ -4203,6 +4222,14 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [chatDaemonEpoch, chatGateway, chatProviderSession, effectiveSessionId]);
   const chatTargetKey = chatReferenceTarget === null ? null : referenceTargetKey(chatReferenceTarget);
+  // Settings -> Chat (t3code activity-log.md): tool-row visibility and the announcement level are
+  // device-local preferences; the remote surface reads the same ones the desktop pane does, so a
+  // setting changed in Settings applies to both without a per-surface copy.
+  const paneChatPreferences = usePaneChatPreferences();
+  // t3code activity-log.md "Open an image": the lightbox saves or copies the bytes it shows. The
+  // web client has no native save dialog, so the save is a download of the same URL and the copy
+  // is the async clipboard, which is what a browser can hand another app.
+  const chatImageActions = useMemo(() => imageActionHandlers(), []);
   const historyAnswerKey = followUpHistoryAnswerKey(chatPage?.turns);
   const freshHistoryAnswerKey =
     historyAnswerKey !== null && historyAnswerKey !== followUpIdleDeliveredTurnRef.current
@@ -5694,6 +5721,92 @@ export const RemoteHostConnection: React.FC<{
     setChatQueued([...referenceFollowUps.read(target)]);
   }, []);
 
+  const editChatQueued = useCallback((id: string, text: string) => {
+    const target = chatTargetRef.current;
+    const trimmed = text.trim();
+    if (!target || !trimmed) return;
+    if (!referenceFollowUps.cancel(target, id)) return;
+    referenceFollowUps.admit(target, trimmed);
+    setChatQueued([...referenceFollowUps.read(target)]);
+  }, []);
+
+  const sendChatQueuedNow = useCallback((id: string) => {
+    const target = chatTargetRef.current;
+    if (!target) return;
+    const current = referenceFollowUps.read(target);
+    const row = current.find((item) => item.id === id);
+    if (!row) return;
+    referenceFollowUps.cancel(target, id);
+    setChatQueued([...referenceFollowUps.read(target)]);
+    if (chatActivityRef.current === "working") {
+      if (!steerChatMessage(row.text)) {
+        void handleChatComposerSend(row.text);
+      }
+    } else {
+      void handleChatComposerSend(row.text);
+    }
+  }, [handleChatComposerSend, steerChatMessage]);
+
+  const [chatStructuredMode, setChatStructuredMode] = useState(false);
+  const [chatStructuredSessionId, setChatStructuredSessionId] = useState<string | null>(null);
+  const [chatStructuredError, setChatStructuredError] = useState<string | null>(null);
+  const [chatStructuredOpening, setChatStructuredOpening] = useState(false);
+
+  useEffect(() => {
+    bindStructuredChatRemote(token ? { baseUrl: transportBaseUrl, token } : null);
+  }, [token, transportBaseUrl]);
+
+  const normalizedChatProvider = (chatAgentType ?? "").trim().toLowerCase();
+  const supportsRemoteStructured = REMOTE_STRUCTURED_PROVIDERS.has(normalizedChatProvider);
+
+  const openRemoteStructuredChat = useCallback(async () => {
+    if (!supportsRemoteStructured || chatStructuredOpening || !token) return;
+    setChatStructuredOpening(true);
+    setChatStructuredError(null);
+    try {
+      const transport = remoteStructuredChatTransport();
+      const signal = new AbortController().signal;
+      const listed = await transport({ op: "listSessions", body: {} }, signal);
+      if (listed.ok) {
+        const active = listed.data.find(
+          (row) => row.provider === normalizedChatProvider && row.state === "running",
+        );
+        if (active) {
+          setChatStructuredSessionId(active.sessionId);
+          setChatStructuredMode(true);
+          return;
+        }
+      }
+      const cwd = model.context.worktreeLabel ?? model.context.workspaceId ?? ".";
+      const created = await transport(
+        {
+          op: "createSession",
+          body: { provider: normalizedChatProvider, cwd },
+        },
+        signal,
+      );
+      if (created.ok) {
+        setChatStructuredSessionId(created.data.sessionId);
+        setChatStructuredMode(true);
+      } else {
+        setChatStructuredError(created.message);
+        setChatStructuredMode(false);
+      }
+    } catch (reason: unknown) {
+      setChatStructuredError(reason instanceof Error ? reason.message : String(reason));
+      setChatStructuredMode(false);
+    } finally {
+      setChatStructuredOpening(false);
+    }
+  }, [
+    chatStructuredOpening,
+    model.context.workspaceId,
+    model.context.worktreeLabel,
+    normalizedChatProvider,
+    supportsRemoteStructured,
+    token,
+  ]);
+
   useEffect(() => referenceFollowUps.subscribe(() => {
     const target = chatTargetRef.current;
     if (!target) return;
@@ -6042,6 +6155,31 @@ export const RemoteHostConnection: React.FC<{
     });
   }, [activeTunnelConnection, chatGateway?.capabilities, continuationAffordance]);
 
+  /**
+   * A prompt's answer files: the same host route and receipt as the composer's, with none of the
+   * composer's state (lane G6's `onAttachAnswerFiles`). The card owns the answer set; a refusal
+   * reaches it as a throw. The remote surface stages through the owning host's `files` route.
+   */
+  const attachChatAnswerFiles = useCallback(
+    async (files: readonly File[]): Promise<readonly ReferenceFileReceipt[]> => {
+      const target = chatTargetRef.current;
+      if (target === null || files.length === 0) return [];
+      const signal = chatLaneAbortRef.current.signal;
+      const receipts: ReferenceFileReceipt[] = [];
+      for (const file of files) {
+        signal.throwIfAborted();
+        receipts.push(
+          await stageReferenceChatFile({ transport: chatFileTransport }, target, file, signal, {
+            fileCount: receipts.length,
+            turnBytes: receipts.reduce((sum, entry) => sum + entry.receipt.sizeBytes, 0),
+          }),
+        );
+      }
+      return receipts;
+    },
+    [chatFileTransport],
+  );
+
   /** The card the original pane is waiting on. Its press and focus rules are the card's own. */
   const chatPromptCard = useMemo(() => {
     if (chatPrompt === null || chatScreenRevision === null) return null;
@@ -6064,9 +6202,19 @@ export const RemoteHostConnection: React.FC<{
           if (toMessageBox) chatComposerRef.current?.focus();
         }}
         onTypedAnswerDone={() => setChatTypedAnswer(null)}
+        /* Lane G6 parity with DesktopChatPane: the card keys its answer set by this pane's own
+           target, and stages through the owning host's files route. */
+        {...answerAttachSeam(attachChatAnswerFiles, chatTargetKey)}
       />
     );
-  }, [answerChatPrompt, chatPrompt, chatPromptError, chatScreenRevision, chatTypedAnswer]);
+  }, [answerChatPrompt, attachChatAnswerFiles, chatPrompt, chatPromptError, chatScreenRevision, chatTargetKey, chatTypedAnswer]);
+
+  // The pane's requests resolved: the answer sets staged under it belong to a question the thread
+  // has moved past, so they are pruned rather than kept for a card that will not return.
+  useEffect(() => {
+    if (chatTargetKey === null || chatPrompt !== null) return;
+    referenceAnswerAttachmentStore.clearScope(chatTargetKey);
+  }, [chatPrompt, chatTargetKey]);
 
   /** Older pages first, then the newest page and the user's own pending echoes. */
   const chatTranscript = useMemo(
@@ -6081,6 +6229,41 @@ export const RemoteHostConnection: React.FC<{
       });
     },
     [chatMessages, chatOlderMessages],
+  );
+
+  const chatSentPrompts = useMemo(() => {
+    const seen = new Set<string>();
+    const prompts: string[] = [];
+    for (const message of chatTranscript) {
+      if (message.role !== "user" || message.pending || message.id.startsWith("pending-")) continue;
+      const text = message.content.trim();
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      prompts.push(text);
+    }
+    return prompts;
+  }, [chatTranscript]);
+
+  const chatThreadChips = useMemo(
+    () =>
+      (model.context.terminalTabs ?? []).map((tab) => ({
+        id: tab.id,
+        kind: "thread" as const,
+        label: tab.label,
+        ...(tab.worktreeLabel ? { detail: tab.worktreeLabel } : {}),
+      })),
+    [model.context.terminalTabs],
+  );
+
+  const chatDerivedControls = useMemo(
+    () =>
+      composerControlsFromCapabilities(chatPage?.composer ?? null, {
+        onControlChange: (controlId, valueId, apply) => {
+          applyChatControl({ controlId, valueId, label: valueId, apply });
+        },
+        threads: chatThreadChips,
+      }),
+    [applyChatControl, chatPage?.composer, chatThreadChips],
   );
 
   const chatVoiceFetch = useMemo<VoiceFetch | null>(() => {
@@ -7004,6 +7187,52 @@ export const RemoteHostConnection: React.FC<{
             />
           ) : viewMode === "chat" ? renderLazy(
             <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
+              {supportsRemoteStructured ? (
+                <div className="flex items-center justify-between border-b border-chat-border bg-chat-surface px-3 py-1 text-xs text-chat-foreground-secondary">
+                  <span>
+                    {chatStructuredMode && chatStructuredSessionId
+                      ? `Structured chat · ${normalizedChatProvider}`
+                      : chatStructuredError
+                        ? `Structured unavailable: ${chatStructuredError}`
+                        : `PTY Chat · ${normalizedChatProvider}`}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="remote-chat-structured-toggle"
+                    disabled={chatStructuredOpening}
+                    onClick={() => {
+                      if (chatStructuredMode) {
+                        setChatStructuredMode(false);
+                      } else {
+                        void openRemoteStructuredChat();
+                      }
+                    }}
+                    className="rounded border border-chat-border px-2 py-0.5 text-chat-foreground hover:bg-chat-surface-hover disabled:opacity-50"
+                  >
+                    {chatStructuredMode
+                      ? "PTY Chat"
+                      : chatStructuredOpening
+                        ? "Opening…"
+                        : "Structured Chat"}
+                  </button>
+                </div>
+              ) : null}
+              {chatStructuredMode && chatStructuredSessionId ? (
+                <div className="flex-1 min-h-0 flex flex-col" data-testid="remote-structured-chat-pane">
+                  <StructuredChatPane
+                    transport={remoteStructuredChatTransport()}
+                    sessionId={chatStructuredSessionId}
+                    workspaceLabel={model.context.workspaceId ?? undefined}
+                    showHeader={desktopSidebar}
+                    headerTitle={`${normalizedChatProvider} · structured`}
+                    headerSubtitle={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
+                    onBack={() => setSelectorOpen(true)}
+                    toolCallVisibility={paneChatPreferences.toolCallVisibility}
+                    announceLevel={paneChatPreferences.announceLevel}
+                    active={viewMode === "chat"}
+                  />
+                </div>
+              ) : (
               <MobileChatWorkspace
                 showHeader={desktopSidebar}
                 headerTitle={
@@ -7024,6 +7253,7 @@ export const RemoteHostConnection: React.FC<{
                 onSendMessage={handleChatComposerSend}
                 voiceConversation={chatVoiceConversation}
                 onStopExecution={() => void stopChatExecution()}
+                onInterrupt={() => void stopChatExecution()}
                 onOpenTerminal={() => setViewMode("terminal")}
                 continuationOffers={continuationAffordance?.modes}
                 onContinueInNewPane={continuationAffordance ? continueInNewPane : undefined}
@@ -7051,11 +7281,14 @@ export const RemoteHostConnection: React.FC<{
                 heldUnsaved={chatHeldUnsaved}
                 queuedMessages={chatQueued}
                 onCancelQueued={cancelChatFollowUp}
+                onRemoveQueued={cancelChatFollowUp}
+                onEditQueued={editChatQueued}
+                onSendQueuedNow={sendChatQueuedNow}
+                onInterruptQueued={() => void stopChatExecution()}
                 onQueueMessage={queueChatFollowUp}
                 onSteerMessage={steerChatMessage}
                 onEditHeld={editChatHeld}
                 onSendHeld={(id) => {
-                  // A row already on its way is not sent again.
                   if (chatHeldSendingRef.current.has(id)) return;
                   const held = chatHeld.find((message) => message.id === id);
                   if (held) void sendChatMessage(held.text, id);
@@ -7070,18 +7303,29 @@ export const RemoteHostConnection: React.FC<{
                 }
                 composerWarningAction={chatComposerNotice === CHAT_HELD_REMOVED_NOTICE ? chatComposerNoticeAction : null}
                 composerPlaceholder={chatComposerPlaceholder}
-                composerCapabilities={chatPage?.composer ?? null}
+                composerCapabilities={chatDerivedControls.capabilities}
+                chipSources={chatDerivedControls.chipSources}
+                permissionControl={chatDerivedControls.permissionControl}
+                executionModeControl={chatDerivedControls.executionModeControl}
+                thinkingControl={chatDerivedControls.thinkingControl}
+                sentPrompts={chatSentPrompts}
                 onApplyControl={applyChatControl}
                 controlNotice={chatControlNotice}
                 dictationFence={chatTargetKey ?? ""}
                 dictationSuspended={viewMode !== "chat"}
                 referenceContext={chatPartContext}
+                active={viewMode === "chat"}
+                toolCallVisibility={paneChatPreferences.toolCallVisibility}
+                announceLevel={paneChatPreferences.announceLevel}
+                onSaveImage={chatImageActions.onSaveImage}
+                onCopyImage={chatImageActions.onCopyImage}
                 disabled={
                   chatReferenceTarget !== null &&
                   chatPrompt === null &&
                   referenceDrafts.isUnknownHeld(chatReferenceTarget)
                 }
               />
+              )}
             </div>
           ) : viewMode === "browser" ? renderLazy(
             <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">

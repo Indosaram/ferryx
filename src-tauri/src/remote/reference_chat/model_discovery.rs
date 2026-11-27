@@ -36,6 +36,9 @@ pub const CODEX_PROBE_PROGRAM: &str = "codex";
 
 /// Grok program. The listing is `grok models` text, not JSON.
 pub const GROK_PROBE_PROGRAM: &str = "grok";
+pub const MAHO_PROBE_PROGRAM: &str = "mhc";
+pub const OMO_PROBE_PROGRAM: &str = "omo";
+pub const OPENCODE_PROBE_PROGRAM: &str = "opencode";
 
 /// Claude `--print` stream-json `list_models` args, from Orca `buildClaudeModelListArgs()`
 /// at `b1b97e742fadd6c615192b26dd0678f59ec456eb` (`src/shared/claude-model-list-probe.ts`).
@@ -67,6 +70,9 @@ pub const CODEX_PROBE_ARGS: &[&str] = &[
 
 /// `grok models`. Orca `GROK_MODEL_LIST_ARGS` (`src/shared/grok-model-list-probe.ts`).
 pub const GROK_PROBE_ARGS: &[&str] = &["models"];
+pub const MAHO_PROBE_ARGS: &[&str] = &["--list-models"];
+pub const OMO_PROBE_ARGS: &[&str] = &["--list-models"];
+pub const OPENCODE_PROBE_ARGS: &[&str] = &["models"];
 
 /// Stdin for the Claude probe. The request id is [`CLAUDE_LIST_MODELS_REQUEST_ID`].
 pub fn claude_probe_stdin() -> String {
@@ -817,6 +823,90 @@ fn label_part(part: &str) -> String {
     out
 }
 
+pub fn parse_maho_list_models(stdout: &str) -> Result<DiscoveredModels, DiscoveryError> {
+    if stdout.len() > DISCOVERY_STDOUT_LIMIT {
+        return Err(DiscoveryError::Oversized);
+    }
+    let thinking = vec![
+        "off".to_string(),
+        "minimal".to_string(),
+        "low".to_string(),
+        "medium".to_string(),
+        "high".to_string(),
+        "xhigh".to_string(),
+        "max".to_string(),
+    ];
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut saw_table_header = false;
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("---") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 2
+            && cols[0].eq_ignore_ascii_case("provider")
+            && cols[1].eq_ignore_ascii_case("model")
+        {
+            saw_table_header = true;
+            continue;
+        }
+        if !saw_table_header {
+            continue;
+        }
+        let id = if cols.len() >= 2 && !cols[0].contains('/') && !cols[1].starts_with('(') {
+            format!("{}/{}", cols[0], cols[1])
+        } else {
+            cols[0].to_string()
+        };
+        if seen.insert(id.clone()) {
+            models.push(DiscoveredModel {
+                label: id.clone(),
+                id,
+                efforts: thinking.clone(),
+            });
+        }
+    }
+    if models.is_empty() {
+        return Err(DiscoveryError::Empty);
+    }
+    Ok(DiscoveredModels {
+        current: None,
+        models,
+        slash_commands: Vec::new(),
+    })
+}
+
+pub fn parse_opencode_models(stdout: &str) -> Result<DiscoveredModels, DiscoveryError> {
+    if stdout.len() > DISCOVERY_STDOUT_LIMIT {
+        return Err(DiscoveryError::Oversized);
+    }
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || !line.contains('/') || line.contains(char::is_whitespace) {
+            continue;
+        }
+        if seen.insert(line.to_string()) {
+            models.push(DiscoveredModel {
+                id: line.to_string(),
+                label: line.to_string(),
+                efforts: Vec::new(),
+            });
+        }
+    }
+    if models.is_empty() {
+        return Err(DiscoveryError::Empty);
+    }
+    Ok(DiscoveredModels {
+        current: None,
+        models,
+        slash_commands: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1052,5 +1142,26 @@ mod tests {
         assert!(codex.slash_commands.is_empty());
         let grok = parse_grok_models("Available models:\n  * grok-4.6 (default)\n").expect("grok");
         assert!(grok.slash_commands.is_empty());
+    }
+
+    #[test]
+    fn maho_and_opencode_model_parsers_handle_real_output_and_limits() {
+        let maho_out = "provider   model\n---\nmahoquot   claude-opus-5-5\nopenai/gpt-5\n";
+        let maho = parse_maho_list_models(maho_out).expect("maho models");
+        assert_eq!(maho.models.len(), 2);
+        assert_eq!(maho.models[0].id, "mahoquot/claude-opus-5-5");
+        assert_eq!(maho.models[0].efforts.len(), 7);
+        assert_eq!(maho.models[1].id, "openai/gpt-5");
+        assert_eq!(parse_maho_list_models("No models available. Run mhc auth login.\n"), Err(DiscoveryError::Empty));
+        assert_eq!(parse_maho_list_models(""), Err(DiscoveryError::Empty));
+        assert_eq!(parse_maho_list_models(&oversized()), Err(DiscoveryError::Oversized));
+
+        let oc_out = "anthropic/claude-sonnet-4\nopenai/gpt-5\nnot-a-model-header\n";
+        let oc = parse_opencode_models(oc_out).expect("opencode models");
+        assert_eq!(oc.models.len(), 2);
+        assert_eq!(oc.models[0].id, "anthropic/claude-sonnet-4");
+        assert_eq!(oc.models[1].id, "openai/gpt-5");
+        assert_eq!(parse_opencode_models(""), Err(DiscoveryError::Empty));
+        assert_eq!(parse_opencode_models(&oversized()), Err(DiscoveryError::Oversized));
     }
 }

@@ -80,6 +80,13 @@ export interface DesktopChatLane {
   readonly attaching: boolean;
   readonly attachError: ReferenceFileError | null;
   readonly attachFiles: (files: readonly File[], caret: number) => Promise<void>;
+  /**
+   * Stage files for a prompt's answer field (G6's `ReferencePromptCard.onAttachAnswerFiles`).
+   * Nothing here touches the draft or the composer's staged files: an answer set is the card's
+   * own, so the same host route returns receipts and the card decides what the answer text says.
+   * A refusal throws, and the card reports it against the files that asked for it.
+   */
+  readonly attachAnswerFiles: (files: readonly File[]) => Promise<readonly ReferenceFileReceipt[]>;
   readonly removeStagedFile: (attachmentId: string) => Promise<void>;
   readonly target: ReferenceTargetRef | null;
   readonly exited: boolean;
@@ -431,6 +438,36 @@ export function useDesktopChat({
     }
   }, [patch]);
 
+  // A prompt's answer files: the same host route and receipt as the composer's, with none of
+  // the composer's state. The card owns the answer set; a refusal reaches it as a throw.
+  const attachAnswerFiles = useCallback(async (files: readonly File[]): Promise<readonly ReferenceFileReceipt[]> => {
+    const t = targetRef.current;
+    if (t === null || exitedRef.current || files.length === 0) return [];
+    const staging = fileStagingRef.current;
+    if (!staging) {
+      throw new ReferenceFileError(
+        "UNSUPPORTED",
+        "Local chat has no file staging route yet; attach the file by path in the terminal instead.",
+      );
+    }
+    if (!staging.capabilities.includes(DESKTOP_CHAT_FILE_CAPABILITY)) {
+      throw new ReferenceFileError(
+        "UNSUPPORTED",
+        `This host does not advertise ${DESKTOP_CHAT_FILE_CAPABILITY}; files cannot be staged.`,
+      );
+    }
+    const signal = laneRef.current.controller.signal;
+    const receipts: ReferenceFileReceipt[] = [];
+    for (const file of files) {
+      signal.throwIfAborted();
+      receipts.push(await stageReferenceChatFile({ transport: staging.transport }, t, file, signal, {
+        fileCount: receipts.length,
+        turnBytes: receipts.reduce((sum, entry) => sum + entry.receipt.sizeBytes, 0),
+      }));
+    }
+    return receipts;
+  }, []);
+
   const submit = useCallback(async (t: ReferenceTargetRef, text: string): Promise<void> => {
     const key = referenceTargetKey(t);
     const requestId = newDesktopChatRequestId();
@@ -637,6 +674,7 @@ export function useDesktopChat({
     attaching: live.attaching,
     attachError: live.attachError,
     attachFiles,
+    attachAnswerFiles,
     removeStagedFile,
     target,
     exited,
