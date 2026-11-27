@@ -9188,6 +9188,13 @@ mod tests {
         assert_eq!(harness.state.session_attach_tuple(&session_id), tuple_before);
         assert!(harness.state.session_is_shareable(&session_id), "pump and stream stay live");
         assert_eq!(harness.state.viewer_windows(&session_id), vec!["main", "ws-test"]);
+        // `register_viewer_with` schedules an initial paint for `ws-test`; drain it before
+        // sending output so `execute_dispatched` below awaits the output frame rather than
+        // consuming the initial viewer paint before the stream pump runs.
+        drain_dispatched(&mut harness).await;
+        harness.events.lock().clear();
+        viewer_events.lock().clear();
+        harness.window.state::<RenderDispatch>().dispatch_windows.lock().clear();
 
         harness
             ._output

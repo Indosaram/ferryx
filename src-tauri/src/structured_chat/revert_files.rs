@@ -221,6 +221,10 @@ impl TempIndex {
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(cwd)
+            // Snapshots must round-trip worktree bytes verbatim on every OS; Windows defaults
+            // `core.autocrlf=true`, which would otherwise rewrite LF files to CRLF on restore.
+            .arg("-c")
+            .arg("core.autocrlf=false")
             .args(args)
             .env("GIT_INDEX_FILE", &self.path)
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -459,6 +463,20 @@ mod tests {
             "uncommitted edit\n",
             "a snapshot is the worktree, not HEAD"
         );
+    }
+
+    #[tokio::test]
+    async fn restore_preserves_lf_and_crlf_bytes_under_autocrlf_true() {
+        let repo = Repo::new();
+        repo.git(&["config", "core.autocrlf", "true"]);
+        repo.write("lf.txt", "line one\nline two\n");
+        repo.write("crlf.txt", "line one\r\nline two\r\n");
+        let snapshot = capture_snapshot(&repo.dir).await.expect("capture").expect("tree");
+        repo.write("lf.txt", "changed\n");
+        repo.write("crlf.txt", "changed\r\n");
+        restore_snapshot(&repo.dir, &snapshot).await.expect("restore");
+        assert_eq!(repo.read("lf.txt"), "line one\nline two\n");
+        assert_eq!(repo.read("crlf.txt"), "line one\r\nline two\r\n");
     }
 
     #[tokio::test]
