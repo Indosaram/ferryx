@@ -349,6 +349,64 @@ fn classify_spawn_failure(error: SpawnError) -> SpawnPaneFailure {
     }
 }
 
+/// Resolves the directory a spawn will run in against the pane's resolved worktree root.
+///
+/// A cwd the caller typed must stay inside that root: the jail is what keeps a pane from starting
+/// in an unrelated checkout. A cwd recovered from the agent's own session store is not caller
+/// input, it is the project the session actually ran in, so a resume has to land there even when
+/// it is a different checkout from the pane's workspace. That one is admitted on ownership
+/// instead of containment, so a store record cannot hand the pane another user's tree.
+fn resolve_spawn_cwd(
+    custom_cwd_str: &str,
+    canonical: &Path,
+    default_cwd: &Path,
+    mgr: &crate::worktree::WorktreeManager,
+    from_session_store: bool,
+) -> Result<PathBuf, String> {
+    if from_session_store {
+        if let Some(error) = store_cwd_owner_error(canonical) {
+            return Err(error);
+        }
+        return Ok(canonical.to_path_buf());
+    }
+    let allowed = mgr
+        .canonical_allowed_path(canonical)
+        .map_err(|e| format!("CWD '{custom_cwd_str}' is outside workspace: {e}"))?;
+    if allowed.as_path() != default_cwd && !allowed.starts_with(default_cwd) {
+        return Err(format!(
+            "CWD '{custom_cwd_str}' is outside the resolved workspace/worktree root '{}'",
+            default_cwd.display()
+        ));
+    }
+    Ok(allowed)
+}
+
+/// Rejects a session-store cwd this user does not own; `None` means it is admissible.
+#[cfg(unix)]
+fn store_cwd_owner_error(canonical: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = match fs::metadata(canonical) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let shown = canonical.display();
+            return Some(format!("CWD '{shown}' cannot be read: {error}"));
+        }
+    };
+    // SAFETY: getuid takes no arguments, dereferences nothing and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if metadata.uid() != uid {
+        let shown = canonical.display();
+        return Some(format!("CWD '{shown}' belongs to another user"));
+    }
+    None
+}
+
+/// Windows has no POSIX owner to compare, so a store cwd is admitted as read.
+#[cfg(not(unix))]
+fn store_cwd_owner_error(_canonical: &Path) -> Option<String> {
+    None
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SpawnError {
     #[error(
@@ -3526,6 +3584,9 @@ impl DaemonSessionService {
                 } else {
                     resume_cwd
                 };
+                // A cwd recovered from the agent's session store is the project the session ran
+                // in, not a path this request chose; it is judged on ownership, not containment.
+                let from_session_store = machine.is_none() && resume_cwd.is_some();
                 let cwd = resume_cwd
                     .map(|path| path.to_string_lossy().into_owned())
                     .or(cwd);
@@ -3544,18 +3605,14 @@ impl DaemonSessionService {
                     let canonical = fs::canonicalize(&custom_path).map_err(|e| {
                         SpawnError::Other(format!("Cannot canonicalize CWD {custom_cwd_str}: {e}"))
                     })?;
-                    let allowed = mgr.canonical_allowed_path(&canonical).map_err(|e| {
-                        SpawnError::Other(format!(
-                            "CWD '{custom_cwd_str}' is outside workspace: {e}"
-                        ))
-                    })?;
-                    if allowed != default_cwd && !allowed.starts_with(&default_cwd) {
-                        return Err(SpawnError::Other(format!(
-                    "CWD '{custom_cwd_str}' is outside the resolved workspace/worktree root '{}'",
-                    default_cwd.display()
-                )));
-                    }
-                    allowed
+                    resolve_spawn_cwd(
+                        custom_cwd_str,
+                        &canonical,
+                        &default_cwd,
+                        &mgr,
+                        from_session_store,
+                    )
+                    .map_err(SpawnError::Other)?
                 } else {
                     default_cwd.clone()
                 };
@@ -4757,5 +4814,50 @@ mod tests {
             "session worktree_path must be the workspace root, not the subdirectory"
         );
         let _ = server.handle_close(&session_id).await;
+    }
+
+    /// The resume of a session that ran in another checkout must land in that checkout: the store
+    /// record, not the pane's workspace, names the project. Pinned because the jail that guards a
+    /// caller-typed cwd used to reject the store-derived one too.
+    #[test]
+    fn a_session_store_cwd_outside_the_worktree_root_is_admitted_when_this_user_owns_it() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root_dir.path()).unwrap();
+        let outside = std::fs::canonicalize(outside_dir.path()).unwrap();
+        let manager = crate::worktree::WorktreeManager::for_test_root(root.clone());
+        let resolved =
+            resolve_spawn_cwd(outside.to_str().unwrap(), &outside, &root, &manager, true)
+                .expect("a store cwd outside the worktree root is where the session ran");
+        assert_eq!(resolved, outside);
+    }
+
+    /// The same path stays refused when the caller typed it: widening the store case must not
+    /// widen the workspace jail.
+    #[test]
+    fn a_caller_supplied_cwd_outside_the_worktree_root_is_still_refused() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root_dir.path()).unwrap();
+        let outside = std::fs::canonicalize(outside_dir.path()).unwrap();
+        let manager = crate::worktree::WorktreeManager::for_test_root(root.clone());
+        let error = resolve_spawn_cwd(outside.to_str().unwrap(), &outside, &root, &manager, false)
+            .expect_err("a cwd the caller typed must stay inside the pane's workspace root");
+        assert!(error.starts_with("CWD "), "{error}");
+        assert!(error.contains("outside workspace"), "{error}");
+    }
+
+    /// A store record that names a path this process cannot even stat is refused instead of being
+    /// resumed: ownership cannot be established, so the pane must not be handed the path.
+    #[test]
+    fn a_session_store_cwd_that_cannot_be_read_is_refused() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root_dir.path()).unwrap();
+        let manager = crate::worktree::WorktreeManager::for_test_root(root.clone());
+        let gone = root.join("checkout-that-is-gone");
+        let error = resolve_spawn_cwd(gone.to_str().unwrap(), &gone, &root, &manager, true)
+            .expect_err("an unreadable store cwd cannot be proven to belong to this user");
+        assert!(error.starts_with("CWD "), "{error}");
+        assert!(error.contains("cannot be read"), "{error}");
     }
 }
