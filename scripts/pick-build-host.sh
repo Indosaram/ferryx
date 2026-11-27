@@ -2,7 +2,9 @@
 # Pick one idle build host and claim it until released.
 #   host=$(scripts/pick-build-host.sh)            # lease for FERRYX_BUILD_CLAIM_TTL seconds (default 7200)
 #   FERRYX_BUILD_OWNER_PID=<pid> scripts/pick-build-host.sh   # claim held while <pid> is alive
-#   scripts/pick-build-host.sh --release <host>   # release when the build ends, pass or fail
+#   scripts/pick-build-host.sh --release <host> --lease <epoch>   # end a lease; the picker
+#                                                 # prints <epoch> on stderr when it claims
+#   FERRYX_BUILD_OWNER_PID=<pid> scripts/pick-build-host.sh --release <host>   # end a pid claim
 # A claim is ignored once its lease expired or its owner pid exited.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -15,12 +17,17 @@ LOCKDIR=$(fx_lockdir); mkdir -p "$LOCKDIR" || { echo "picker: cannot create lock
 HOSTS_FILE=${FERRYX_BUILD_HOSTS_FILE:-$HOME/.config/ferryx/build-hosts}
 
 if [ "${1:-}" = "--release" ]; then
-  [ -n "${2:-}" ] || { echo "usage: $0 --release <host>" >&2; exit 2; }
+  [ -n "${2:-}" ] || { echo "usage: $0 --release <host> [--lease <epoch>]" >&2; exit 2; }
   fx_valid_host "$2" || { echo "picker: cannot release '$2': not a usable host name" >&2; exit 2; }
-  rc=0; fx_claim_release "$2" "${FERRYX_BUILD_OWNER_PID:-}" || rc=$?
+  owner=${FERRYX_BUILD_OWNER_PID:-}; lease=
+  if [ "${3:-}" = "--lease" ]; then
+    case "${4:-}" in ''|*[!0-9]*) echo "usage: $0 --release <host> --lease <epoch>" >&2; exit 2 ;; esac
+    owner=; lease=$4
+  fi
+  rc=0; fx_claim_release "$2" "$owner" "$lease" || rc=$?
   case "$rc" in
     0) exit 0 ;;
-    5) echo "picker: refusing to release $2: the claim is live and this is not its owner" >&2; exit 5 ;;
+    5) echo "picker: refusing to release $2: the claim is live and not this caller's (claim: $(cat "$LOCKDIR/$2" 2>/dev/null)); a lease is released with --lease <epoch> as printed when it was taken, a pid claim with its FERRYX_BUILD_OWNER_PID" >&2; exit 5 ;;
     *) echo "picker: cannot release '$2': the claim could not be removed" >&2; exit 1 ;;
   esac
 fi
@@ -126,11 +133,15 @@ Ask the user before spending on either.
 MSG
   exit 3
 fi
-if [ -n "$OWNER" ]; then payload="pid $OWNER"; else payload="until $(( $(date +%s) + CLAIM_TTL ))"; fi
+lease_until=""
+if [ -n "$OWNER" ]; then payload="pid $OWNER"; else lease_until=$(( $(date +%s) + CLAIM_TTL )); payload="until $lease_until"; fi
 fx_claim_acquire "$best" "$payload"; arc=$?
 case "$arc" in
   0) ;;
   2) echo "$best: claim taken by another session; retry" >&2; exit 3 ;;
   *) echo "$best: cannot write a claim in $LOCKDIR" >&2; exit 2 ;;
 esac
+# A lease names no process, so its epoch is the only proof of who took it: print the exact
+# release command, or the caller can only wait the lease out.
+[ -n "$lease_until" ] && echo "$best: leased until $lease_until; release with: $0 --release $best --lease $lease_until" >&2
 echo "$best"

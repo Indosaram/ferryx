@@ -268,6 +268,17 @@ fx_claim_owned_file() {
   [ "${kind:-}" = pid ] && [ "${val:-}" = "$want" ]
 }
 
+# fx_claim_lease_is <path> <epoch> -> true when <path> is exactly the `until <epoch>` lease
+# the picker issued. The epoch is that lease's token: the picker prints it when it claims,
+# so only a caller that was handed it can end the lease before it runs out.
+fx_claim_lease_is() {
+  local f=${1:-} want=${2:-} kind val
+  case "$want" in ''|*[!0-9]*) return 1 ;; esac
+  [ -f "$f" ] && [ -r "$f" ] || return 1
+  read -r kind val 2>/dev/null <"$f" || :
+  [ "${kind:-}" = until ] && [ "${val:-}" = "$want" ]
+}
+
 # fx_claim_install <host> <payload> -> 0 installed, 2 already held, 1 error.
 # The link is only attempted when the name is absent. ln(1) reports success when its
 # second argument is an existing directory, putting the link *inside* it, so this
@@ -336,21 +347,24 @@ fx_claim_renew() {
   return "$rc"
 }
 
-# fx_claim_release <host> <owner-pid|-> -> 0 released or nothing to release,
+# fx_claim_release <host> <owner-pid|-> [lease-epoch] -> 0 released or nothing to release,
 # 5 refused, 1 error.
 # Only the pid named in a claim may release it, and the compare plus the rename
 # happen under the guard, so a release cannot discard a claim another run installed
-# in that instant. An ownerless call (`-`) clears an expired `until` lease and
-# nothing else - a `pid` claim whose owner died, and a claim that cannot be parsed,
-# both stay: a release is the optional path, so it is the narrow one, and only an
-# acquire that actually wants the host may reap those. `--force` is accepted for
-# callers that still pass it and changes nothing; this function never removes a
-# claim it does not own.
+# in that instant. A live `until` lease is released by the epoch the picker printed
+# when it issued it, the only thing that ties a lease to the caller that took it.
+# Otherwise an ownerless call (`-`) clears an expired `until` lease and nothing
+# else - a `pid` claim whose owner died, and a claim that cannot be parsed, both
+# stay: a release is the optional path, so it is the narrow one, and only an acquire
+# that actually wants the host may reap those. `--force` is accepted for callers that
+# still pass it and changes nothing; this function never removes a claim it does not
+# own.
 fx_claim_release() {
-  local host=${1:-} owner=${2:-} dir f drc=0
+  local host=${1:-} owner=${2:-} lease=${3:-} dir f drc=0
   fx_valid_host "$host" || return 1
   dir=$(fx_lockdir); f=$dir/$host
   case "$owner" in -|'') owner= ;; esac
+  case "$lease" in ''|*[!0-9]*) lease= ;; esac
   fx_claim_guard "$host" || return 1
   # Re-read under the guard: another run may have taken the claim away, or replaced
   # it with one of its own, since this call was made.
@@ -359,12 +373,12 @@ fx_claim_release() {
   fi
   if [ -n "$owner" ]; then
     fx_claim_detach "$host" fx_claim_owned_file "$owner" || drc=$?
+  elif [ -n "$lease" ] && fx_claim_lease_is "$f" "$lease"; then
+    fx_claim_detach "$host" fx_claim_lease_is "$lease" || drc=$?
+  elif fx_claim_lease_expired "$f"; then
+    fx_claim_detach "$host" fx_claim_lease_expired || drc=$?
   else
-    if fx_claim_lease_expired "$f"; then
-      fx_claim_detach "$host" fx_claim_lease_expired || drc=$?
-    else
-      fx_claim_unguard "$host"; return 5
-    fi
+    fx_claim_unguard "$host"; return 5
   fi
   fx_claim_unguard "$host"
   case "$drc" in
