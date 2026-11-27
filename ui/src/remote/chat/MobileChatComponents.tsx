@@ -52,6 +52,7 @@ import {
   nestedTasksForTool,
   planReferenceWorkNesting,
   referencePartKey,
+  referenceWorkActivitySummary,
   referenceWorkGroupCompleted,
   referenceWorkGroupLabel,
   referenceWorkGroupNeedsChrome,
@@ -60,6 +61,27 @@ import {
   type ReferenceWorkMember,
   type ReferenceWorkNesting,
 } from "./referenceWorkGroup";
+import { HighlightedCodeLines } from "./messages/codeHighlight";
+import { MermaidCodeBlock } from "./messages/mermaidBlock";
+import { ZoomableImage } from "./messages/imageLightbox";
+import { MarkdownLink } from "./messages/markdownLinks";
+import { MarkdownTable } from "./messages/markdownTable";
+import { ProposedPlanCard } from "./messages/planCard";
+import { HtmlRenderFrame } from "./messages/htmlRenderFrame";
+import {
+  ApprovalMoreOptionsMenu,
+  DEFAULT_APPROVAL_EXTRA_OPTIONS,
+  type ApprovalExtraOption,
+} from "./messages/approvalMoreOptions";
+import {
+  htmlRenderPartHtml,
+  htmlRenderPartTitle,
+  isHtmlRenderPart,
+  isPlanPart,
+  partExitCode,
+  planPartMarkdown,
+  tailLines,
+} from "./messages/partKinds";
 
 export type ActivityState = "thinking" | "running_tool" | "waiting_for_input" | "idle";
 
@@ -124,13 +146,13 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
               key={att.id}
               className="relative overflow-hidden rounded-lg border border-chat-border bg-chat-surface max-w-[12.5rem]"
             >
-              <img
+              {/* The thumbnail opens the lightbox: a pasted image is worth a full-screen look. */}
+              <ZoomableImage
                 src={att.url}
                 alt={att.name}
-                className="h-28 w-auto object-cover"
-                loading="lazy"
+                thumbnailTestId="message-image-thumbnail"
               />
-              <div className="absolute inset-x-0 bottom-0 bg-chat-screen/90 px-1.5 py-0.5 text-xs text-chat-foreground truncate">
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-chat-screen/90 px-1.5 py-0.5 text-xs text-chat-foreground truncate">
                 {att.name}
               </div>
             </div>
@@ -329,10 +351,11 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = ({
       {output && (
         <pre
           data-testid="work-row-output"
+          data-live={isRunning || undefined}
           tabIndex={0}
           className="font-mono text-[0.8125rem] leading-relaxed text-chat-foreground whitespace-pre-wrap break-words select-text"
         >
-          {output}
+          {isRunning ? tailLines(output) : output}
         </pre>
       )}
     </div>
@@ -428,6 +451,10 @@ export interface ApprovalActionCardProps {
   /** `event`: the button's click, so a caller can tell a tap from a key press */
   onAccept: (feedback?: string, event?: React.MouseEvent<HTMLButtonElement>) => void;
   onDecline: (feedback?: string, event?: React.MouseEvent<HTMLButtonElement>) => void;
+  /** Wider decisions (Cancel, Always allow this session) live behind one menu. */
+  extraOptions?: readonly ApprovalExtraOption[];
+  /** Without a handler the menu is not drawn: an option nobody can act on is a lie. */
+  onChooseOption?: (decision: string, event?: React.MouseEvent<HTMLButtonElement>) => void;
   isSubmitting?: boolean;
   className?: string;
 }
@@ -442,6 +469,8 @@ export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
   feedbackPlaceholder = "Add instructions or a reason…",
   onAccept,
   onDecline,
+  extraOptions,
+  onChooseOption,
   isSubmitting = false,
   className,
 }) => {
@@ -508,6 +537,16 @@ export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
             Add a note
           </button>
         )}
+        {onChooseOption && (
+          <ApprovalMoreOptionsMenu
+            options={extraOptions ?? DEFAULT_APPROVAL_EXTRA_OPTIONS}
+            disabled={isSubmitting}
+            onChoose={(decision, event) => {
+              haptic("warning");
+              onChooseOption(decision, event);
+            }}
+          />
+        )}
       </div>
     </>
   );
@@ -570,6 +609,8 @@ export interface ReferencePartRenderContext {
   onLoadPayload?: (payload: ReferencePayloadRef) => void;
   /** The payload ref a load is in flight for, so its button reads as busy. */
   loadingPayloadRef?: string | null;
+  /** Open a recorded file change as a reviewable diff (activity-log.md "Open diff"). */
+  onOpenDiff?: (part: Extract<ReferencePart, { kind: "diff" }>) => void;
 }
 
 /** A turn's own timestamp, as the chat prints it: ISO string, epoch millis, or as given. */
@@ -716,7 +757,11 @@ export const MarkdownLinkContext = React.createContext(false);
 export const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ src, alt }) => {
   const insideLink = React.useContext(MarkdownLinkContext);
   if (typeof src === "string" && INLINE_MARKDOWN_IMAGE.test(src)) {
-    return <img src={src} alt={alt ?? ""} loading="lazy" className="my-1 max-w-full rounded-md" />;
+    // The page already carries these bytes, so the thumbnail opens the lightbox.
+    if (insideLink) {
+      return <img src={src} alt={alt ?? ""} loading="lazy" className="my-1 max-w-full rounded-md" />;
+    }
+    return <ZoomableImage src={src} alt={alt} thumbnailTestId="markdown-inline-image" />;
   }
   let host = "";
   let href: string | undefined;
@@ -775,15 +820,38 @@ const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props })
   );
 };
 
+/** The fence language as written, so `c++`, `c#`, `objective-c`, `f#` survive the chip. */
+const CODE_FENCE_LANGUAGE_PATTERN = /(?:^|\s)language-([^\s]+)/;
+
 const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) => {
+  const match = CODE_FENCE_LANGUAGE_PATTERN.exec(className || "");
+  const language = match ? match[1] : "";
+  const codeText = String(children).replace(/\n$/, "");
+  if (language === "mermaid") {
+    // The plain block is the fallback: a diagram that fails, or a reader who asks for the
+    // source, still gets the copy and wrap controls every other code block has.
+    return (
+      <MermaidCodeBlock
+        code={codeText}
+        fallback={<PlainCodeBlock codeText={codeText} language={language} className={className} {...props} />}
+      />
+    );
+  }
+  return <PlainCodeBlock codeText={codeText} language={language} className={className} {...props} />;
+};
+
+/** The chat's one code block: a language chip, copy, wrap, and the highlighted body. */
+const PlainCodeBlock: React.FC<CodeBlockProps & { codeText: string; language: string }> = ({
+  className,
+  codeText,
+  language,
+  ...props
+}) => {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   // long lines wrap by default: a phone has no room for a sideways scroller inside the stream
   const [wrap, setWrap] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const match = /language-(\w+)/.exec(className || "");
-  const language = match ? match[1] : "";
-  const codeText = String(children).replace(/\n$/, "");
 
   useEffect(() => {
     return () => {
@@ -821,10 +889,15 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
           {line.length > 0 ? line : " "}
         </span>
       ))
-    : children;
+    : (
+      <HighlightedCodeLines code={codeText} fenceLanguage={language} className="w-full" />
+    );
 
   return (
-    <div className="my-2.5 rounded-xl border border-chat-border bg-chat-screen overflow-hidden">
+    <div
+      dir="ltr"
+      className="my-2.5 rounded-xl border border-chat-border bg-chat-screen overflow-hidden"
+    >
       <div className="flex items-center justify-between gap-2 bg-chat-surface pl-3 text-xs text-chat-foreground-secondary">
         <span className="font-mono">{language || "code"}</span>
         <span className="flex items-center">
@@ -870,7 +943,10 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
           wrap ? "whitespace-pre-wrap break-words" : "overflow-x-auto scrollbar-sleek",
         )}
       >
-        <pre className={cn("!bg-transparent !p-0 !m-0", wrap && "whitespace-pre-wrap break-words")}>
+        <pre
+          dir="ltr"
+          className={cn("!bg-transparent !p-0 !m-0", wrap && "whitespace-pre-wrap break-words")}
+        >
           <code className={className} {...props}>
             {codeBody}
           </code>
@@ -944,11 +1020,7 @@ export const CHAT_MARKDOWN_COMPONENTS = {
     </h6>
   ),
   hr: () => <hr className="my-4 border-0 border-t border-chat-border" />,
-  table: ({ children }: any) => (
-    <div className="my-2 w-full overflow-x-auto">
-      <table className="w-full border-collapse text-sm">{children}</table>
-    </div>
-  ),
+  table: ({ children }: any) => <MarkdownTable>{children}</MarkdownTable>,
   thead: ({ children }: any) => <thead>{children}</thead>,
   tbody: ({ children }: any) => <tbody>{children}</tbody>,
   tr: ({ children }: any) => <tr>{children}</tr>,
@@ -963,15 +1035,11 @@ export const CHAT_MARKDOWN_COMPONENTS = {
     </td>
   ),
   a: ({ href, children }: any) => (
-    <a
-      href={href}
-      target="_blank"
-      onClick={handleExternalLinkClick}
-      rel="noopener noreferrer"
-      className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
-    >
+    // File links become buttons (never an <a href> to a local path); external
+    // links route through the pane's onOpenExternal when it provides one.
+    <MarkdownLink href={href}>
       <MarkdownLinkContext.Provider value={true}>{children}</MarkdownLinkContext.Provider>
-    </a>
+    </MarkdownLink>
   ),
   blockquote: ({ children }: any) => (
     <blockquote className="my-2 rounded-lg bg-chat-surface px-3 py-2 text-chat-foreground-secondary">
@@ -984,10 +1052,27 @@ export const CHAT_MARKDOWN_COMPONENTS = {
 let chatMathModule: typeof ChatMathModule | undefined;
 let chatMathLoad: Promise<typeof ChatMathModule> | undefined;
 
+/**
+ * Whether a body carries math the renderer should be asked to draw. A price range
+ * (`$5 and $10`) and a shell variable pair (`$PATH and $HOME`) are prose: math opens on
+ * a non-digit and closes on a non-space, so neither becomes a formula.
+ */
+export function chatTextHasMath(text: string): boolean {
+  if (/\$\$[\s\S]+?\$\$/.test(text)) return true;
+  for (const match of text.matchAll(/\$(?!\s)([^$\n]+?)\$/g)) {
+    const body = match[1]!;
+    if (body.trim().length === 0) continue;
+    if (/^\d/.test(body)) continue;
+    if (/\s$/.test(body)) continue;
+    return true;
+  }
+  return false;
+}
+
 /** The existing markdown pipeline, with math loaded only for opted-in assistant prose. */
 export function ChatProseMarkdown({ text, assistant = false }: { text: string; assistant?: boolean }) {
   const { settings } = useAppearanceSettings();
-  const enabled = assistant && settings.renderMath && /\$[^$]+\$/.test(text);
+  const enabled = assistant && settings.renderMath && chatTextHasMath(text);
   const [math, setMath] = useState<typeof ChatMathModule | undefined>(chatMathModule);
   const [loadError, setLoadError] = useState(false);
   useEffect(() => {
@@ -1003,8 +1088,9 @@ export function ChatProseMarkdown({ text, assistant = false }: { text: string; a
     return () => { active = false; };
   }, [enabled, math]);
   const components = CHAT_MARKDOWN_COMPONENTS;
-  // Disabled math stays literal, including backslashes markdown would otherwise consume.
-  if (assistant && !settings.renderMath && text.includes("$")) return <span className="whitespace-pre-wrap">{text}</span>;
+  // With math off the prose is still markdown: remarkMath is only added when enabled, so
+  // `$` stays literal on its own (see chatMath.test.tsx) without demoting the whole body
+  // to plain text.
   return <>
     {loadError && <span role="status">Math renderer unavailable; showing source.</span>}
     <ReactMarkdown remarkPlugins={enabled && math ? [remarkGfm, remarkMath] : [remarkGfm]} rehypePlugins={enabled && math ? chatMathRehypePlugins : []} components={components} urlTransform={chatMarkdownUrlTransform}>
@@ -1282,25 +1368,13 @@ export const ReferenceImagePart: React.FC<{
   const src = context?.resolveImageUrl?.(part) ?? null;
   if (src !== null && src !== "") {
     return (
-      <a
-        href={src}
-        target="_blank"
-        onClick={handleExternalLinkClick}
-        rel="noopener noreferrer"
-        title={part.ref}
-        className={cn(
-          "block overflow-hidden rounded-lg border border-chat-border bg-chat-surface max-w-[12.5rem]",
-          className,
-        )}
-      >
-        <img
-          data-testid="reference-image"
+      <div className={cn("max-w-[12.5rem]", className)}>
+        <ZoomableImage
           src={src}
           alt={part.mediaType}
-          loading="lazy"
-          className="h-28 w-auto object-cover"
+          thumbnailTestId="reference-image"
         />
-      </a>
+      </div>
     );
   }
   return (
@@ -1338,6 +1412,9 @@ export const ReferenceToolPartCard: React.FC<{
   const canLoadPayload = payloadRef !== null && onLoadPayload !== undefined;
   const loadingPayload = payloadRef !== null && context?.loadingPayloadRef === payloadRef.ref;
   const status = part.status ?? null;
+  const exitCode = partExitCode(part);
+  const running = status === "running";
+  const shownOutput = running ? tailLines(part.output) : part.output;
   const canExpand = Boolean(
     part.input || part.output || images.length > 0 || canRequestWholeOutput || canLoadPayload,
   );
@@ -1372,11 +1449,23 @@ export const ReferenceToolPartCard: React.FC<{
       {part.output && (
         <pre
           data-testid="reference-tool-output"
+          data-live={running || undefined}
           tabIndex={0}
           className="font-mono text-[0.8125rem] leading-relaxed text-chat-foreground whitespace-pre-wrap break-words select-text"
         >
-          {part.output}
+          {shownOutput}
+          {running && part.output.length > shownOutput.length && (
+            <span className="block text-xs text-chat-foreground-tertiary">Showing the latest output only; the command is still running.</span>
+          )}
         </pre>
+      )}
+      {exitCode !== null && (
+        <p
+          data-testid="tool-call-exit-code"
+          className={cn("font-mono text-xs", exitCode === 0 ? "text-chat-foreground-secondary" : "text-chat-danger")}
+        >
+          exit {exitCode}
+        </p>
       )}
       {images.length > 0 && (
         <div className="flex flex-wrap gap-2">
@@ -1497,9 +1586,26 @@ export const ReferencePartView: React.FC<{
   timestamp?: string | number | null;
   className?: string;
   mathInProse?: boolean;
-}> = ({ part, context, timestamp, className, mathInProse = false }) => {
+  /**
+   * Find draws a prose part as highlighted text instead of markdown, so the
+   * match marks (and next/prev's scroll target) are real elements in the DOM.
+   */
+  highlightProse?: ((part: ReferencePart) => React.ReactNode) | null;
+}> = ({ part, context, timestamp, className, mathInProse = false, highlightProse = null }) => {
   switch (part.kind) {
     case "text":
+      if (highlightProse) {
+        return (
+          <p
+            className={cn(
+              "whitespace-pre-wrap text-base leading-relaxed text-chat-foreground break-words select-text",
+              className,
+            )}
+          >
+            {highlightProse(part)}
+          </p>
+        );
+      }
       // Turn body prose matches the user bubble and plain assistant body (16px, primary color);
       // ReferenceProse's smaller secondary style stays for summaries and task results.
       return (
@@ -1536,8 +1642,29 @@ export const ReferencePartView: React.FC<{
       return <ReferenceTaskResultsBlock part={part} className={className} />;
     case "diff":
       return <ReferenceDiffPart part={part} context={context} className={className} />;
-    default:
+    default: {
+      // Kinds the frozen union may grow into: a proposed plan and a visual reply.
+      // Anything else renders nothing new, exactly as before.
+      if (isPlanPart(part)) {
+        return (
+          <ProposedPlanCard
+            planMarkdown={planPartMarkdown(part)}
+            className={className}
+            renderMarkdown={(markdown) => <ChatProseMarkdown text={markdown} assistant />}
+          />
+        );
+      }
+      if (isHtmlRenderPart(part)) {
+        return (
+          <HtmlRenderFrame
+            html={htmlRenderPartHtml(part)}
+            title={htmlRenderPartTitle(part)}
+            className={className}
+          />
+        );
+      }
       return null;
+    }
   }
 };
 
@@ -1593,7 +1720,17 @@ export const ReferencePartList: React.FC<{
   timestamp?: string | number | null;
   className?: string;
   mathInProse?: boolean;
-}> = ({ parts, hideWork = false, context, timestamp, className, mathInProse = false }) => {
+  /** Find draws prose parts as highlighted text so matches are in the DOM. */
+  highlightProse?: ((part: ReferencePart) => React.ReactNode) | null;
+}> = ({
+  parts,
+  hideWork = false,
+  context,
+  timestamp,
+  className,
+  mathInProse = false,
+  highlightProse = null,
+}) => {
   const nesting = planReferenceWorkNesting(parts);
   const segments = groupReferenceWorkParts(parts);
   const anyVisible = segments.some((segment) => {
@@ -1619,6 +1756,7 @@ export const ReferencePartList: React.FC<{
               mathInProse={mathInProse}
               context={context}
               timestamp={timestamp}
+              highlightProse={highlightProse}
             />
           );
         }
@@ -1645,6 +1783,7 @@ export const ReferencePartList: React.FC<{
             key={segment.key}
             groupKey={segment.key}
             label={referenceWorkGroupLabel(segment.members, nesting)}
+            summary={referenceWorkActivitySummary(segment.members, nesting)}
             running={referenceWorkGroupRunning(segment.members)}
             completed={referenceWorkGroupCompleted(segment.members)}
             status={referenceWorkGroupSharedStatus(segment.members)}

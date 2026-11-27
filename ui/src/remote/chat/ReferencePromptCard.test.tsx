@@ -8,7 +8,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { userFacingError } from "../userFacingError";
 import { ReferencePromptCard, type ReferencePromptCardProps } from "./ReferencePromptCard";
 import { REFERENCE_PROMPT_STALE_MESSAGE } from "./referencePromptAnswer";
-import type { ReferencePrompt, ReferencePromptAnswerPayload } from "./referenceTypes";
+import { referenceAnswerAttachmentStore } from "./promptAttach/referencePromptAttach";
+import type { ReferenceFileReceipt, ReferencePrompt, ReferencePromptAnswerPayload } from "./referenceTypes";
 
 function prompt(overrides: Partial<ReferencePrompt> = {}): ReferencePrompt {
   return {
@@ -53,6 +54,9 @@ function renderCard(overrides: Partial<ReferencePromptCardProps> = {}) {
     prompt: prompt(),
     screenRevision: "rev-7",
     onAnswer,
+    // the owner always names its pane; a test card names its own so the answer-set key is
+    // stable and clearable between cases
+    answerScope: "card-test",
     ...overrides,
   };
   const view = render(<ReferencePromptCard {...props} />);
@@ -66,6 +70,9 @@ function pick(index: number): HTMLElement {
 }
 
 describe("ReferencePromptCard", () => {
+  beforeEach(() => {
+    referenceAnswerAttachmentStore.clearScope("card-test");
+  });
   it("requires explicit confirmation before dismissing an ambiguous answer", async () => {
     const onDismissAmbiguous = vi.fn(async () => undefined);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
@@ -516,5 +523,496 @@ describe("ReferencePromptCard existing shells and disclosures", () => {
     expect(screen.getByTestId("reference-prompt-fallback")).toHaveTextContent(
       "Answer it in the terminal",
     );
+  });
+});
+
+describe("ReferencePromptCard answer attachments", () => {
+  const clearSets = () => {
+    referenceAnswerAttachmentStore.clearScope("card-test");
+  };
+  beforeEach(() => {
+    cleanup();
+    clearSets();
+  });
+  afterEach(() => {
+    cleanup();
+    clearSets();
+  });
+
+  const customPrompt = (overrides: Partial<ReferencePrompt> = {}): ReferencePrompt =>
+    prompt({
+      options: [{ label: "Other" }, { label: "Add tests" }, { label: "Ship as is" }],
+      customOptionIndex: 0,
+      ...overrides,
+    });
+
+  function staged(name: string, bytes = 4, type = "text/plain"): File {
+    return new File([new Uint8Array(bytes)], name, { type });
+  }
+
+  function stagedReceipt(name: string): ReferenceFileReceipt {
+    return {
+      receipt: {
+        hostId: "h1",
+        attachmentId: `att-${name}`,
+        sha256: "ab",
+        sizeBytes: 4,
+        mediaType: "text/plain",
+      },
+      displayName: name,
+      mentionText: `@uploads/${name} `,
+    };
+  }
+
+  async function attachThrough(
+    uploader: (files: readonly File[]) => Promise<readonly ReferenceFileReceipt[]>,
+    files: File[],
+  ): Promise<void> {
+    const input = screen.getByTestId("reference-answer-attach-input");
+    await act(async () => {
+      fireEvent.change(input, { target: { files } });
+    });
+    await waitFor(() => expect(uploader).toHaveBeenCalledTimes(1));
+  }
+
+  it("shows no attach control without the upload prop (an older server)", () => {
+    renderCard({ prompt: customPrompt() });
+    expect(screen.queryByTestId("reference-answer-attach")).not.toBeInTheDocument();
+    expect(screen.getByTestId("reference-prompt-custom-input")).toBeInTheDocument();
+  });
+
+  it("shows no attach control on a question with only predefined choices", () => {
+    renderCard({ prompt: prompt(), onAttachAnswerFiles: vi.fn(async (files) => files.map(() => stagedReceipt("x"))) });
+    expect(screen.queryByTestId("reference-answer-attach")).not.toBeInTheDocument();
+  });
+
+  it("uploads picked files before the answer can go out, then sends their paths as mentions", async () => {
+    const gate = deferred<ReferenceFileReceipt[]>();
+    const uploader = vi.fn(async () => gate.promise);
+    const onAnswer = accepted();
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader, onAnswer });
+    const input = screen.getByTestId("reference-prompt-custom-input");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "use these" } });
+    });
+    await attachThrough(uploader, [staged("a.txt"), staged("b.txt")]);
+    // the upload is in flight: nothing may leave yet
+    expect(uploader).toHaveBeenCalledWith([expect.any(File), expect.any(File)]);
+    expect(screen.getByTestId("reference-prompt-custom-send")).toBeDisabled();
+    await act(async () => {
+      gate.resolve([stagedReceipt("a.txt"), stagedReceipt("b.txt")]);
+    });
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-custom-send")).toBeEnabled());
+    fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({
+      customText: "use these @uploads/a.txt @uploads/b.txt",
+    });
+  });
+
+  it("takes an image pasted into the answer field", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader });
+    const input = screen.getByTestId("reference-prompt-custom-input");
+    const image = staged("shot.png", 4, "image/png");
+    await act(async () => {
+      fireEvent.paste(input, { clipboardData: { files: [image] } });
+    });
+    await waitFor(() => expect(uploader).toHaveBeenCalledTimes(1));
+    expect(uploader).toHaveBeenCalledWith([image]);
+  });
+
+  it("holds a failed upload out of the send, and retry sends it again", async () => {
+    const uploader = vi
+      .fn<(files: readonly File[]) => Promise<readonly ReferenceFileReceipt[]>>()
+      .mockRejectedValueOnce(new Error("host unreachable"))
+      .mockResolvedValue([stagedReceipt("a.txt")]);
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader });
+    await attachThrough(uploader, [staged("a.txt")]);
+    await waitFor(() => expect(uploader).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      const failed = screen
+        .getAllByTestId(/^reference-answer-attachment-/)
+        .find((each) => each.getAttribute("data-status") === "failed");
+      expect(failed).toBeTruthy();
+    });
+    expect(screen.getByTestId("reference-prompt-custom-send")).toBeDisabled();
+    const retry = screen
+      .getAllByRole("button")
+      .find((each) => each.getAttribute("data-testid")?.startsWith("reference-answer-attachment-retry-"));
+    expect(retry).toBeTruthy();
+    fireEvent.click(retry as HTMLElement);
+    await waitFor(() => expect(uploader).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-custom-send")).toBeEnabled());
+  });
+
+  it("lets the user remove a failed upload and answer without it", async () => {
+    const uploader = vi.fn(async () => {
+      throw new Error("host unreachable");
+    });
+    const onAnswer = accepted();
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader, onAnswer });
+    await attachThrough(uploader, [staged("a.txt")]);
+    const remove = await waitFor(() => {
+      const button = screen
+        .getAllByRole("button")
+        .find((each) => each.getAttribute("data-testid")?.startsWith("reference-answer-attachment-remove-"));
+      expect(button).toBeTruthy();
+      return button as HTMLElement;
+    });
+    fireEvent.click(remove);
+    const input = screen.getByTestId("reference-prompt-custom-input");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "no files" } });
+    });
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-custom-send")).toBeEnabled());
+    fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({ customText: "no files" });
+  });
+
+  it("keeps the typed answer and the files when a submit fails", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    const onAnswer = vi.fn<(payload: ReferencePromptAnswerPayload) => Promise<boolean>>(async () => {
+      throw new Error("transport down");
+    });
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader, onAnswer });
+    await attachThrough(uploader, [staged("a.txt")]);
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-custom-send")).toBeEnabled());
+    const input = screen.getByTestId("reference-prompt-custom-input");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "still here" } });
+    });
+    fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-error")).toBeInTheDocument());
+    expect((input as HTMLInputElement).value).toBe("still here");
+    expect(
+      screen
+        .getAllByTestId(/^reference-answer-attachment-/)
+        .filter((each) => each.getAttribute("data-status") === "ready"),
+    ).toHaveLength(1);
+  });
+
+  it("keeps each question's answer set: another prompt sees none of it, the same one still does", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    const { view } = renderCard({
+      prompt: customPrompt({ id: "pq1" }),
+      onAttachAnswerFiles: uploader,
+    });
+    await attachThrough(uploader, [staged("kept.txt")]);
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-custom-send")).toBeEnabled());
+    view.unmount();
+    const other = renderCard({ prompt: customPrompt({ id: "pq2" }), onAttachAnswerFiles: uploader });
+    expect(screen.queryByTestId("reference-answer-attach")).toBeInTheDocument();
+    // another question's answer set carries none of this one's files
+    expect(
+      other.view.container.querySelectorAll('[data-testid^="reference-answer-attachment-"][data-status]'),
+    ).toHaveLength(0);
+    other.view.unmount();
+    const again = renderCard({ prompt: customPrompt({ id: "pq1" }), onAttachAnswerFiles: uploader });
+    expect(
+      again.view.container.querySelectorAll('[data-testid^="reference-answer-attachment-"][data-status]'),
+    ).toHaveLength(1);
+  });
+
+  it("sends a file by itself as its saved path alone", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    const onAnswer = accepted();
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader, onAnswer });
+    await attachThrough(uploader, [staged("only.txt")]);
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-custom-send")).toBeEnabled());
+    fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({ customText: "@uploads/only.txt" });
+  });
+
+  it("refuses a file over the composer's size limit without uploading it", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader });
+    const input = screen.getByTestId("reference-answer-attach-input");
+    const huge = staged("huge.png", 11 * 1024 * 1024, "image/png");
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [huge] } });
+    });
+    expect(screen.getByTestId("reference-prompt-error")).toBeInTheDocument();
+    expect(uploader).not.toHaveBeenCalled();
+  });
+
+  it("keeps an upload that finishes after the user moved to another question", async () => {
+    const gate = deferred<ReferenceFileReceipt[]>();
+    const uploader = vi.fn(async () => gate.promise);
+    const { view } = renderCard({ prompt: customPrompt({ id: "pq1" }), onAttachAnswerFiles: uploader });
+    await attachThrough(uploader, [staged("late.txt")]);
+    view.unmount();
+    await act(async () => {
+      gate.resolve([stagedReceipt("late.txt")]);
+    });
+    const again = renderCard({ prompt: customPrompt({ id: "pq1" }), onAttachAnswerFiles: uploader });
+    expect(
+      again.view.container.querySelectorAll('[data-testid^="reference-answer-attachment-"][data-status="ready"]'),
+    ).toHaveLength(1);
+  });
+
+  it("sends a picked option together with the attached files as one custom answer", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    const onAnswer = accepted();
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader, onAnswer });
+    await attachThrough(uploader, [staged("a.txt")]);
+    fireEvent.click(screen.getByTestId("reference-prompt-option-1"), { detail: 1 });
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-submit")).toBeEnabled());
+    fireEvent.click(screen.getByTestId("reference-prompt-submit"), { detail: 1 });
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({
+      customText: "2 @uploads/a.txt",
+    });
+  });
+
+  it("keeps the same question's answer set apart between two panes", async () => {
+    // a prompt id is a content hash: the identical question on another host/session is the
+    // same id, and must not find the first pane's files
+    const firstUpload = vi.fn(async (files: readonly File[]) =>
+      files.map((each) => stagedReceipt(each.name)),
+    );
+    const first = renderCard({
+      prompt: customPrompt({ id: "same" }),
+      answerScope: "hostA|owner|epoch|session-1",
+      onAttachAnswerFiles: firstUpload,
+    });
+    await attachThrough(firstUpload, [staged("secret.txt")]);
+    await waitFor(() => expect(firstUpload).toHaveBeenCalledTimes(1));
+    first.view.unmount();
+
+    const secondUpload = vi.fn(async (files: readonly File[]) =>
+      files.map((each) => stagedReceipt(each.name)),
+    );
+    const onAnswer = accepted();
+    const second = renderCard({
+      prompt: customPrompt({ id: "same" }),
+      answerScope: "hostB|owner|epoch|session-2",
+      onAttachAnswerFiles: secondUpload,
+      onAnswer,
+    });
+    expect(second.view.container.querySelectorAll("[data-status]")).toHaveLength(0);
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("reference-prompt-custom-input"), {
+        target: { value: "x" },
+      });
+    });
+    fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({ customText: "x" });
+    referenceAnswerAttachmentStore.clearScope("hostA|owner|epoch|session-1");
+    referenceAnswerAttachmentStore.clearScope("hostB|owner|epoch|session-2");
+  });
+
+  it("holds the typed-answer Confirm while an upload is in flight", async () => {
+    const gate = deferred<ReferenceFileReceipt[]>();
+    const uploader = vi.fn(async () => gate.promise);
+    const onAnswer = accepted();
+    renderCard({
+      prompt: customPrompt(),
+      onAttachAnswerFiles: uploader,
+      onAnswer,
+      typedAnswer: { optionIndex: 1 },
+    });
+    await attachThrough(uploader, [staged("a.txt")]);
+    expect(screen.getByTestId("reference-prompt-confirm-send")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("reference-prompt-confirm-send"), { detail: 1 });
+    expect(onAnswer).not.toHaveBeenCalled();
+    await act(async () => {
+      gate.resolve([stagedReceipt("a.txt")]);
+    });
+    await waitFor(() => expect(screen.getByTestId("reference-prompt-confirm-send")).toBeEnabled());
+  });
+
+  it("sends the typed-answer Confirm's ready attachments instead of dropping them", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    const onAnswer = accepted();
+    renderCard({
+      prompt: customPrompt(),
+      onAttachAnswerFiles: uploader,
+      onAnswer,
+      typedAnswer: { optionIndex: 1 },
+    });
+    await attachThrough(uploader, [staged("a.txt")]);
+    await waitFor(() =>
+      expect(screen.getByTestId("reference-prompt-confirm-send")).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByTestId("reference-prompt-confirm-send"), { detail: 1 });
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({
+      customText: "2 @uploads/a.txt",
+    });
+  });
+
+  it("offers no tab stop of its own for the file input", () => {
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: vi.fn(async () => []) });
+    const input = screen.getByTestId("reference-answer-attach-input");
+    expect(input).toHaveAttribute("hidden");
+    expect((input as HTMLInputElement).tabIndex).toBe(-1);
+  });
+
+  it("accepts only as many files as the server stages in one turn", async () => {
+    const uploader = vi.fn(async (files: readonly File[]) => files.map((each) => stagedReceipt(each.name)));
+    renderCard({ prompt: customPrompt(), onAttachAnswerFiles: uploader });
+    const input = screen.getByTestId("reference-answer-attach-input");
+    const five = [0, 1, 2, 3, 4].map((index) => staged(`f${index}.txt`, 1));
+    await act(async () => {
+      fireEvent.change(input, { target: { files: five } });
+    });
+    expect(uploader).toHaveBeenCalledWith([expect.any(File), expect.any(File), expect.any(File), expect.any(File)]);
+    expect(screen.getByTestId("reference-prompt-error")).toHaveTextContent("at most 4");
+    expect(document.querySelectorAll('[data-testid^="reference-answer-attachment-"][data-status]')).toHaveLength(4);
+  });
+});
+
+describe("ReferencePromptCard approval keyboard shortcuts", () => {
+  beforeEach(() => {
+    cleanup();
+    referenceAnswerAttachmentStore.clearScope("card-test");
+  });
+  afterEach(() => {
+    cleanup();
+    referenceAnswerAttachmentStore.clearScope("card-test");
+  });
+
+  const approval = (overrides: Partial<ReferencePrompt> = {}): ReferencePrompt =>
+    prompt({
+      kind: "approval",
+      title: "Run command?",
+      question: "Run command?",
+      options: [{ label: "Allow once" }, { label: "Allow for session" }, { label: "Decline" }],
+      ...overrides,
+    });
+
+  it("answers a two-option approval with its number keys", async () => {
+    const onAnswer = accepted();
+    renderCard({
+      prompt: approval({ options: [{ label: "Allow once" }, { label: "Decline" }] }),
+      onAnswer,
+    });
+    fireEvent.keyDown(document, { key: "1" });
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({ optionIndex: 0 });
+    fireEvent.keyDown(document, { key: "2" });
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(2));
+    expect(onAnswer.mock.calls[1]?.[0]?.answer).toEqual({ optionIndex: 1 });
+  });
+
+  it("answers Allow once / Allow for session / Decline with 1 / 2 / 3", async () => {
+    const onAnswer = accepted();
+    renderCard({ prompt: approval(), onAnswer });
+    for (const [digit, index] of [["1", 0], ["2", 1], ["3", 2]] as const) {
+      fireEvent.keyDown(document, { key: digit });
+      await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(index + 1));
+      expect(onAnswer.mock.calls[index]?.[0]?.answer).toEqual({ optionIndex: index });
+    }
+  });
+
+  it("never takes a number typed in the answer field as an option pick", async () => {
+    const onAnswer = accepted();
+    renderCard({
+      prompt: approval({
+        customOptionIndex: 2,
+        options: [{ label: "Allow once" }, { label: "Decline" }, { label: "Other" }],
+      }),
+      onAnswer,
+    });
+    const input = screen.getByTestId("reference-prompt-custom-input");
+    input.focus();
+    fireEvent.keyDown(input, { key: "1" });
+    fireEvent.keyDown(input, { key: "2" });
+    expect(onAnswer).not.toHaveBeenCalled();
+    expect((input as HTMLInputElement).value).toBe("");
+  });
+
+  it("only toggles a multiple choice with the number keys, and ignores a number past the options", () => {
+    const onAnswer = accepted();
+    renderCard({
+      prompt: prompt({ multiSelect: true, options: [{ label: "A" }, { label: "B" }] }),
+      onAnswer,
+    });
+    fireEvent.keyDown(document, { key: "1" });
+    expect(screen.getByTestId("reference-prompt-submit")).toHaveTextContent("Send answer (1)");
+    fireEvent.keyDown(document, { key: "3" });
+    expect(onAnswer).not.toHaveBeenCalled();
+    expect(screen.getByTestId("reference-prompt-submit")).toHaveTextContent("Send answer (1)");
+  });
+
+  it("does not take a number for a card in a hidden pane", async () => {
+    // panes stay mounted while hidden (`DesktopChatPane`'s `hidden={!visible}`): the digit
+    // belongs to the pane the user is looking at, and this one is not it
+    const onAnswer = accepted();
+    render(
+      <div hidden>
+        <ReferencePromptCard
+          prompt={approval()}
+          screenRevision="rev-7"
+          onAnswer={onAnswer}
+        />
+      </div>,
+    );
+    fireEvent.keyDown(document, { key: "1" });
+    await act(async () => {});
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("answers only one of two cards on the page with one key press", async () => {
+    // every mounted card hears the document's keydown: one digit must still answer once
+    const first = accepted();
+    const second = accepted();
+    render(
+      <>
+        <ReferencePromptCard prompt={approval({ id: "c1" })} screenRevision="rev-7" onAnswer={first} />
+        <ReferencePromptCard prompt={approval({ id: "c2" })} screenRevision="rev-7" onAnswer={second} />
+      </>,
+    );
+    fireEvent.keyDown(document.body, { key: "1" });
+    await act(async () => {});
+    expect(first.mock.calls.length + second.mock.calls.length).toBe(1);
+  });
+
+  it("ignores a digit under a modifier, in an IME, in a text field and in editable content", async () => {
+    const onAnswer = accepted();
+    render(
+      <>
+        <ReferencePromptCard prompt={approval()} screenRevision="rev-7" onAnswer={onAnswer} />
+        <textarea data-testid="composer-field" />
+        <div data-testid="editable" contentEditable />
+      </>,
+    );
+    fireEvent.keyDown(document.body, { key: "1", metaKey: true });
+    fireEvent.keyDown(document.body, { key: "1", ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: "1", altKey: true });
+    fireEvent.keyDown(document.body, { key: "1", isComposing: true });
+    fireEvent.keyDown(document.body, { key: "1", keyCode: 229 });
+    fireEvent.keyDown(screen.getByTestId("composer-field"), { key: "1" });
+    fireEvent.keyDown(screen.getByTestId("editable"), { key: "1" });
+    const prevented = new KeyboardEvent("keydown", { key: "1", bubbles: true, cancelable: true });
+    prevented.preventDefault();
+    document.body.dispatchEvent(prevented);
+    await act(async () => {});
+    expect(onAnswer).not.toHaveBeenCalled();
+    // and the plain digit still answers
+    fireEvent.keyDown(document.body, { key: "3" });
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({ optionIndex: 2 });
+  });
+
+  it("takes a number again once the pane is shown", async () => {
+    const onAnswer = accepted();
+    const { container } = render(
+      <div hidden>
+        <ReferencePromptCard
+          prompt={approval()}
+          screenRevision="rev-7"
+          onAnswer={onAnswer}
+        />
+      </div>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement;
+    wrapper.hidden = false;
+    fireEvent.keyDown(document, { key: "1" });
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
   });
 });
