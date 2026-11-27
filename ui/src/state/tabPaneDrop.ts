@@ -34,6 +34,12 @@ export function moveTabIntoPaneSplit(
   direction: PaneDirection,
   position: "first" | "second" = "second",
   ratio = 0.5,
+  /**
+   * Seed for the ids minted when a moved leaf collides with one already in the target tab.
+   * `dispatch` pre-mints it so its own reduction and React's commit reduction of the same action
+   * derive identical leaf ids. Omitted, the collision falls back to a fresh random id.
+   */
+  movedLeafId?: string,
 ): LayoutState {
   const state = normalizeLayout(inputLayout);
   if (sourceTabId === targetTabId) return state;
@@ -85,7 +91,7 @@ export function moveTabIntoPaneSplit(
   // Legacy layouts can give every tab the same leaf id (for example `leaf-init`).
   // Remap only colliding source ids before the subtree is inserted so the combined
   // tree has a one-to-one leaf -> local session/browser mapping.
-  const moved = remapPaneLayout(sourceLayout, new Set(targetLeafIds));
+  const moved = remapPaneLayout(sourceLayout, new Set(targetLeafIds), movedLeafId);
   const nextTargetRoot = splitLeafWithSubtree(
     targetLayout.root,
     targetLeafId,
@@ -145,12 +151,26 @@ export function moveTabIntoPaneSplit(
   });
 }
 
-function remapPaneLayout(layout: TabPaneLayout, reservedLeafIds: Set<string>): TabPaneLayout {
+function remapPaneLayout(
+  layout: TabPaneLayout,
+  reservedLeafIds: Set<string>,
+  movedLeafId?: string,
+): TabPaneLayout {
   const leafIdMap = new Map<string, string>();
+  // With a pre-minted seed the new ids are derived from it, so `dispatch`'s two reductions of the
+  // same action rename the colliding leaves identically. Without one (a direct reducer call in a
+  // unit test) this keeps the original random mint.
+  const mintMovedLeafId = (leafId: string, attempt: number): string => {
+    if (!movedLeafId) return createMovedLeafId();
+    const base = `${movedLeafId}:${leafId}`;
+    return attempt === 0 ? base : `${base}:${attempt}`;
+  };
   const visit = (node: PaneNode): PaneNode => {
     if (node.type === "leaf") {
       let nextLeafId = node.leafId;
-      while (reservedLeafIds.has(nextLeafId)) nextLeafId = createMovedLeafId();
+      for (let attempt = 0; reservedLeafIds.has(nextLeafId); attempt += 1) {
+        nextLeafId = mintMovedLeafId(node.leafId, attempt);
+      }
       reservedLeafIds.add(nextLeafId);
       leafIdMap.set(node.leafId, nextLeafId);
       return nextLeafId === node.leafId ? node : { ...node, leafId: nextLeafId };

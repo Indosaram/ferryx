@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { AlertCircle, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
 import { MACHINE_STATUS_EXPLANATIONS } from "../../../lib/machineStatus";
 import type { SshAuthMethod, SshHost, SshRemoteEnvironment, SshTargetSummary } from "../../../lib/sshHosts";
@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../ui/sheet";
 import { useModalDialog } from "../../useModalDialog";
 import { SshTunnelsEditor, type SshTunnelsEditorHandlers } from "./SshTunnelsEditor";
+import type { SshPasswordFeedback } from "./useSshActions";
 import { MachineStatusLabel, pairedDisplayName, sshRowStatus, usePairedRowStatus, type PairedStatusInput } from "./MachineRow";
 
 export interface SshTestState {
@@ -50,12 +51,24 @@ export interface PairedDetailsProps extends PairedStatusInput {
   /** Re-pairing goes through the Ferryx account, so it needs a signed-in session. */
   signedIn: boolean;
   repairRequested: boolean;
+  /** A re-pair pass is in flight; the button stays disabled until it settles. */
+  repairBusy?: boolean;
+  /** What the last re-pair pass did, so the drawer never claims success it cannot show. */
+  repairFeedback?: RepairFeedback | null;
   confirmingForget: boolean;
   onCheck: () => void;
   onRepair: () => void;
   onForget: () => void;
   onConfirmForget: () => void;
   onCancelForget: () => void;
+}
+
+/** Outcome of a re-pair pass, keyed by a sanitized code so the UI never parses prose. */
+export interface RepairFeedback {
+  /** `neutral` is a pass that finished without saying what it changed; it claims nothing. */
+  tone: "success" | "error" | "neutral";
+  code: string;
+  message: string;
 }
 
 function PairedDetails(props: PairedDetailsProps) {
@@ -86,11 +99,11 @@ function PairedDetails(props: PairedDetailsProps) {
           variant="outline"
           size="sm"
           aria-label={`Re-pair ${name}`}
-          disabled={busy || !props.signedIn}
+          disabled={busy || props.repairBusy || !props.signedIn}
           aria-describedby={props.signedIn ? undefined : "machine-drawer-repair-reason"}
           onClick={props.onRepair}
         >
-          Re-pair
+          {props.repairBusy ? "Re-pairing…" : "Re-pair"}
         </Button>
         <Button type="button" variant="outline" size="sm" aria-label={`Forget ${name}`} disabled={busy || !host.generation} onClick={props.onForget}>
           Forget credentials
@@ -103,8 +116,22 @@ function PairedDetails(props: PairedDetailsProps) {
       ) : null}
       {props.repairRequested ? (
         <p role="status" data-code="REPAIR_REQUIRES_ENROLLMENT" className="text-[12px] text-muted-foreground">
-          Re-pairing goes through your Ferryx account: sign in above and this machine pairs itself again. No
-          credentials have been replaced.
+          {props.signedIn
+            ? "This machine is not enrolled in your Ferryx account yet, so there is nothing to re-pair from here. Enroll it from that computer's Settings › Remote; it then pairs itself automatically. No credentials have been replaced."
+            : "Sign in above and this machine pairs itself again. No credentials have been replaced."}
+        </p>
+      ) : null}
+      {props.repairBusy ? (
+        <p role="status" data-code="REPAIR_IN_PROGRESS" className="text-[12px] text-muted-foreground">
+          Re-pairing this machine…
+        </p>
+      ) : props.repairFeedback ? (
+        <p
+          role={props.repairFeedback.tone === "error" ? "alert" : "status"}
+          data-code={props.repairFeedback.code}
+          className={`text-[12px] ${props.repairFeedback.tone === "error" ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {props.repairFeedback.message}
         </p>
       ) : null}
       {props.confirmingForget ? (
@@ -135,6 +162,8 @@ export interface SshEditState {
 }
 
 function SshEditForm({ edit, busy }: { edit: SshEditState; busy: boolean }) {
+  // The select portals into this form (inside the sheet) so it stays within the sheet's focus scope.
+  const [selectContainer, setSelectContainer] = useState<HTMLFormElement | null>(null);
   const { form } = edit;
   const fill = (target: ParsedSshTarget) => {
     edit.onChange(f => applySshTarget(f, target));
@@ -150,7 +179,7 @@ function SshEditForm({ edit, busy }: { edit: SshEditState; busy: boolean }) {
     </div>
   );
   return (
-    <form onSubmit={edit.onSubmit} className="space-y-3 rounded border border-border bg-muted/30 p-3">
+    <form ref={setSelectContainer} onSubmit={edit.onSubmit} className="space-y-3 rounded border border-border bg-muted/30 p-3">
       <SshCommandField compact disabled={busy} onParsed={fill} />
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         {input("Label", "label", form.hostname.trim() || undefined)}
@@ -173,7 +202,7 @@ function SshEditForm({ edit, busy }: { edit: SshEditState; busy: boolean }) {
                 <SelectTrigger className="h-7 text-[12px]" aria-label="Auth Method">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent container={selectContainer}>
                   <SelectItem value="agent">SSH Agent</SelectItem>
                   <SelectItem value="key">Key File</SelectItem>
                   <SelectItem value="password">Password</SelectItem>
@@ -211,6 +240,8 @@ export interface SshDetailsProps {
   busy: boolean;
   agentIntegrationEnabled: boolean;
   removalResult?: string;
+  /** Last outcome of "Clear saved password", shown beside the button. */
+  passwordFeedback?: SshPasswordFeedback | null;
   edit: SshEditState | null;
   /**
    * Saved tunnel definitions of the section, produced once by `useSshActions`. `null` means
@@ -221,6 +252,8 @@ export interface SshDetailsProps {
   onTest: () => void;
   onPrepare: () => void;
   onRemoveIntegration: () => void;
+  /** Removes the stored SSH password; only password-auth hosts show the button. */
+  onClearPassword: () => void;
   onEdit: () => void;
   onToggleDisable: () => void;
   onDelete: () => void;
@@ -242,6 +275,7 @@ function SshDetails(props: SshDetailsProps) {
         <Field label="Auth method" value={host.authMethod} />
         {host.identityFile ? <Field label="Identity file" value={host.identityFile} mono /> : null}
         {host.jumpHost ? <Field label="Jump host" value={host.jumpHost} /> : null}
+        {host.shell ? <Field label="Shell" value={host.shell} mono /> : null}
       </dl>
       {test?.error ? <p className="break-words text-[12px] text-destructive">{test.error}</p> : null}
       {test?.environment ? (
@@ -270,11 +304,26 @@ function SshDetails(props: SshDetailsProps) {
         </Button>
         {props.removalResult ? <span className="self-center text-[11px] text-muted-foreground">{props.removalResult}</span> : null}
         <Button type="button" variant="outline" size="sm" aria-label={`Edit ${host.label}`} disabled={busy} onClick={props.onEdit}>Edit</Button>
+        {host.authMethod === "password" ? (
+          <Button type="button" variant="outline" size="sm" aria-label={`Clear saved password for ${host.label}`} disabled={busy} onClick={props.onClearPassword}>
+            Clear saved password
+          </Button>
+        ) : null}
         <Button type="button" variant="outline" size="sm" aria-label={`Toggle disable ${host.label}`} disabled={busy} onClick={props.onToggleDisable}>
           {host.disabled ? "Enable" : "Disable"}
         </Button>
         <Button type="button" variant="outline" size="sm" aria-label={`Delete ${host.label}`} disabled={busy} onClick={props.onDelete}>Delete</Button>
       </div>
+      {props.passwordFeedback ? (
+        <p
+          role={props.passwordFeedback.tone === "error" ? "alert" : "status"}
+          data-testid={`ssh-password-feedback-${host.id}`}
+          data-tone={props.passwordFeedback.tone}
+          className={`text-[12px] ${props.passwordFeedback.tone === "error" ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {props.passwordFeedback.message}
+        </p>
+      ) : null}
       {props.confirmingDelete ? (
         <ConfirmGroup
           label="Confirm machine deletion"
@@ -301,10 +350,12 @@ export type MachineDrawerContent =
  * rows. On close, focus goes to the control the parent returns from returnFocusTo: the row's Details
  * button, or its "More actions" trigger when the drawer was opened from that menu.
  */
-export function MachineDrawer({ content, error, onClose, returnFocusTo }: {
+export function MachineDrawer({ content, error, errorKind = null, onClose, returnFocusTo }: {
   content: MachineDrawerContent | null;
   /** The section's action error; shown here while the drawer covers the list. */
   error: string | null;
+  /** The structured reason behind `error`, so callers assert a token instead of the sentence. */
+  errorKind?: string | null;
   onClose: () => void;
   returnFocusTo: () => HTMLElement | null | undefined;
 }) {
@@ -329,7 +380,7 @@ export function MachineDrawer({ content, error, onClose, returnFocusTo }: {
           <SheetDescription>{content?.kind === "paired" ? "Paired machine" : "SSH machine"}</SheetDescription>
         </div>
         {error ? (
-          <div role="alert" className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-2.5 text-[12px] text-destructive">
+          <div role="alert" data-testid="machine-drawer-error" data-error-kind={errorKind ?? undefined} className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-2.5 text-[12px] text-destructive">
             <AlertCircle className="size-4 shrink-0" />
             <span>{error}</span>
           </div>

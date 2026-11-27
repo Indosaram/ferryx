@@ -32,13 +32,32 @@ function chooseAddMachineMethod(name: string) {
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 }
 
+/**
+ * Pick an SSH authentication method in the wizard's Radix Select. A plain click opens the
+ * trigger (the mouse branch needs a real pointerType, which jsdom's PointerEvent lacks), and
+ * the option commits on its own click.
+ */
+async function chooseAuthMethod(label: string) {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("combobox", { name: "Authentication method" }));
+  });
+  const option = await screen.findByRole("option", { name: label });
+  await act(async () => { fireEvent.click(option); });
+}
+
 vi.mock("../../remote/accountAttach", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../remote/accountAttach")>()),
   getOrCreateAttachKey: grantMocks.attachKey,
 }));
 
-const pairingMocks = vi.hoisted(() => ({ adopt: vi.fn(async () => {}) }));
-vi.mock("../../lib/accountPairing", () => ({ adoptAccountSession: pairingMocks.adopt }));
+// The real helper returns a reconciliation report or null; the mock keeps that shape so a test
+// can hand the drawer a specific outcome. Both entry points share one fn: `adoptAccountSession`
+// is the fire-and-forget trigger and `adoptAccountSessionWithReport` is the same pass plus report.
+const pairingMocks = vi.hoisted(() => ({ adopt: vi.fn(async (): Promise<unknown> => undefined) }));
+vi.mock("../../lib/accountPairing", () => ({
+  adoptAccountSession: pairingMocks.adopt,
+  adoptAccountSessionWithReport: pairingMocks.adopt,
+}));
 
 vi.mock("../../remote/accountSession", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../remote/accountSession")>()),
@@ -281,6 +300,68 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.queryByRole("list", { name: "Discovered machines" }) && within(screen.getByRole("list", { name: "Discovered machines" })).queryByText("Disabled Peer")).toBeFalsy();
   });
 
+  it("scopes the list to SSH machines for a deep link and lets the user clear that scope", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} initialContext={{ page: "machines", filter: "ssh" }} />);
+    });
+
+    const machines = screen.getByRole("list", { name: "Remote machines" });
+    expect(within(machines).getByText("Dev Server")).toBeInTheDocument();
+    expect(within(machines).queryByText("Linux Build Box")).toBeNull();
+    // The count describes what the user is looking at, not everything that exists.
+    expect(within(screen.getByRole("region", { name: "My machines" })).getByText("1 machine")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-machine-filter-pill")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all machines" }));
+
+    const cleared = screen.getByRole("list", { name: "Remote machines" });
+    expect(within(cleared).getByText("Linux Build Box")).toBeInTheDocument();
+    expect(within(cleared).getByText("Dev Server")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-machine-filter-pill")).toBeNull();
+  });
+
+  it("shows a configured SSH shell in the machine drawer", async () => {
+    const shellHost: SshHost = { ...mockSshHost, id: "ssh-shell-box", label: "Shell Box", shell: "pwsh" };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_list_hosts") return [shellHost];
+      if (command === "cmd_agent_integration_get") return { enabled: true };
+      return undefined;
+    });
+    const { store, inventory } = createTestInventory([]);
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={vi.fn()} />); });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Details for Shell Box" }));
+
+    const drawer = screen.getByRole("dialog");
+    expect(within(drawer).getByText("Shell")).toBeInTheDocument();
+    expect(within(drawer).getByText("pwsh")).toBeInTheDocument();
+  });
+
+  it("opens the peer's own drawer from Set up instead of re-running discovery for the whole tailnet", async () => {
+    const tailnet: SshHost = { ...mockSshHost, id: "tailscale:needs-setup", label: "Setup Peer", hostname: "100.64.0.11", source: "tailscale" };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_ssh_sync_tailscale") return { hosts: [tailnet], targets: [{ host: tailnet, reachable: true, helper: "missing", checkedAt: 1 }] };
+      if (command === "cmd_ssh_list_hosts") return [tailnet];
+      if (command === "cmd_agent_integration_get") return { enabled: true };
+      return undefined;
+    });
+    await syncTailscaleMachines();
+    const { store, inventory } = createTestInventory([]);
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} onOpenSshProject={vi.fn()} />); });
+    invokeMock.mockClear();
+
+    const discovered = screen.getByRole("list", { name: "Discovered machines" });
+    await act(async () => { fireEvent.click(within(discovered).getByRole("button", { name: "Set up Setup Peer" })); });
+
+    // The failed step and its own Retry live in that host's drawer.
+    const drawer = screen.getByRole("dialog");
+    expect(within(drawer).getByRole("button", { name: "Test connection to Setup Peer" })).toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("cmd_ssh_sync_tailscale");
+  });
+
   it("shows OFFLINE and CHECKING from paired-host reachability, with a visible reason on the disabled primary", async () => {
     const offlineId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "offline-box");
     const checkingId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "checking-box");
@@ -344,13 +425,13 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "More actions for Dev Server" })));
   });
 
-  it("authenticates SSH with a separate password before probing and never saves it in the host", async () => {
+  it("authenticates SSH with a separate password after probing and never saves it in the host", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();
     await act(async () => { render(<RemoteSection store={store} inventory={inventory} />); });
     fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
     chooseAddMachineMethod("Connect with SSH");
-    fireEvent.change(screen.getByLabelText("Authentication method"), { target: { value: "password" } });
+    await chooseAuthMethod("Password");
     fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Password server" } });
     fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "password.example" } });
     fireEvent.change(screen.getByLabelText("SSH password"), { target: { value: "fixture-secret" } });
@@ -358,8 +439,11 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     const calls = invokeMock.mock.calls;
     const authIndex = calls.findIndex(([command]) => command === "cmd_ssh_set_password");
     const probeIndex = calls.findIndex(([command]) => command === "cmd_ssh_test_connection");
-    expect(authIndex).toBeGreaterThanOrEqual(0);
-    expect(probeIndex).toBeGreaterThan(authIndex);
+    // The typed password is a candidate on the probe; it is only stored once the host is saved,
+    // so a refused connection never overwrites the credentials of an existing host.
+    expect(probeIndex).toBeGreaterThanOrEqual(0);
+    expect(calls[probeIndex][1]).toMatchObject({ candidatePassword: "fixture-secret" });
+    expect(authIndex).toBeGreaterThan(probeIndex);
     expect(calls[authIndex][1]).toMatchObject({ password: "fixture-secret", host: { authMethod: "password" } });
     const saved = calls.find(([command]) => command === "cmd_ssh_update_host");
     expect(saved?.[1].host).not.toHaveProperty("password");
@@ -537,7 +621,8 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
 
     const machineList = screen.getByRole("list", { name: "Remote machines" });
     expect(within(machineList).getByText("Dev Server")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeInTheDocument();
+    // An untested machine offers the connection test, not "Add Project" it cannot honour yet.
+    expect(screen.getByRole("button", { name: "Retry on Dev Server" })).toBeInTheDocument();
   });
 
   it("lists one machine from a stubbed account API with a signed-in fixture and enables Add Project only when grant scope is machine", async () => {
@@ -759,15 +844,15 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     // System config detected and card displayed
     expect(await screen.findByText("System SSH Config")).toBeInTheDocument();
     expect(await screen.findByText("1 hosts found")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Import all system hosts" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import selected system hosts" })).toHaveTextContent("Import Selected (1)");
     expect(screen.getByRole("button", { name: "Choose custom SSH config file" })).toBeInTheDocument();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Import all system hosts" }));
+      fireEvent.click(screen.getByRole("button", { name: "Import selected system hosts" }));
     });
 
     expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_import_config", {
-      configText: "Host sys-box\n  HostName 10.0.0.2",
+      configText: expect.stringContaining("Host sys-box"),
     });
   });
 
@@ -872,9 +957,13 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     const pairedAddBtn = screen.getByRole("button", { name: "Add Project on Linux Build Box" });
     expect(pairedAddBtn).toBeDisabled();
 
-    // SSH Add Project IS ENABLED because onOpenSshProject is provided
-    const sshAddBtn = screen.getByRole("button", { name: "Add Project on Dev Server" });
-    expect(sshAddBtn).not.toBeDisabled();
+    // The SSH row's own action is enabled because onOpenSshProject is provided: an untested
+    // machine offers the connection test first.
+    const sshRetryBtn = screen.getByRole("button", { name: "Retry on Dev Server" });
+    expect(sshRetryBtn).not.toBeDisabled();
+    await act(async () => { fireEvent.click(sshRetryBtn); });
+    const sshAddBtn = await screen.findByRole("button", { name: "Add Project on Dev Server" });
+    expect(sshAddBtn).toBeEnabled();
     fireEvent.click(sshAddBtn);
     expect(onOpenSshProject).toHaveBeenCalledWith("ssh-box-1");
   });
@@ -1200,15 +1289,22 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       .find((el) => el.getAttribute("data-code") === "REPAIR_REQUIRES_ENROLLMENT");
     expect(statusEl).toBeDefined();
     if (!statusEl) return;
-    // Re-pairing is signing in again; there is no code to read out or run by hand.
-    expect(statusEl.textContent).toContain("pairs itself again");
-    expect(statusEl.textContent).not.toContain("enrollment code");
-    expect(statusEl.textContent).not.toContain("ferryx-cli account enroll");
-    expect(screen.queryByText(/machine-access PIN/)).toBeNull();
+    // Re-pairing is signing in again. There is no code to read out or run by hand, so the drawer
+    // offers no enrollment-code or PIN field: enrollment happens on that computer, not here.
+    expect(screen.queryByLabelText(/enrollment code/i)).toBeNull();
+    expect(screen.queryByRole("textbox", { name: /pin/i })).toBeNull();
   });
 
   it("re-pair on an enrolled account machine hands the account session to the daemon instead of asking for a grant", async () => {
     pairingMocks.adopt.mockClear();
+    // The pass reports what it did; the drawer shows that outcome instead of a generic "done".
+    // Persistent, not `Once`: the auto-pair effect on mount also calls adopt with the same token.
+    pairingMocks.adopt.mockResolvedValue({
+      paired: [remoteHostKey(DEFAULT_RELAY_ORIGIN, "mach-with-machine-scope")],
+      alreadyUsable: [],
+      skipped: [],
+      blocked: null,
+    });
 
     const machineScopedMachine: AccountMachineView = {
       machineRecordId: "rec-machine",
@@ -1277,8 +1373,14 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       for (const el of statusElements) {
         expect(el).not.toHaveAttribute("data-code", "REPAIR_REQUIRES_ENROLLMENT");
       }
+      // What the pass did is reported by code, never by parsing prose.
+      await waitFor(() => {
+        const reported = screen.queryAllByRole("status");
+        expect(reported.some((el) => el.getAttribute("data-code") === "PAIRED")).toBe(true);
+      });
     } finally {
       vi.unstubAllGlobals();
+      pairingMocks.adopt.mockResolvedValue(undefined);
     }
   });
 

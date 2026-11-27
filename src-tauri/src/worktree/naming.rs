@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -220,6 +221,9 @@ pub fn write_configured_prefix(
     repo_root: &Path,
     prefix: Option<&str>,
 ) -> std::io::Result<()> {
+    let _write_guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let mut settings = load_settings(path);
     settings.version = 1;
     let key = repo_key(repo_root);
@@ -241,30 +245,40 @@ pub fn write_configured_prefix(
     }
     let bytes = serde_json::to_vec_pretty(&settings)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let temp = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), seq));
     std::fs::write(&temp, bytes)?;
-    std::fs::rename(&temp, path)?;
-    // In-process writes invalidate directly; the mtime check covers writes by other processes.
-    *PREFIX_CACHE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) = None;
+    std::fs::rename(&temp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })?;
+    // Publish after rename; readers that raced this write retain an older generation.
+    SETTINGS_WRITE_GEN.fetch_add(1, Ordering::Release);
     Ok(())
 }
 
-type PrefixCache = Option<(PathBuf, Option<SystemTime>, Vec<String>)>;
+static SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+static SETTINGS_WRITE_GEN: AtomicU64 = AtomicU64::new(0);
+type PrefixCache = Option<(PathBuf, Option<SystemTime>, u64, Vec<String>)>;
 static PREFIX_CACHE: Mutex<PrefixCache> = Mutex::new(None);
 
-/// Every valid prefix configured for any repository, cached by file modification time.
+/// Every valid prefix configured for any repository, cached by mtime and in-process generation.
 pub fn configured_prefixes(settings: Option<&Path>) -> Vec<String> {
     let Some(path) = settings else {
         return Vec::new();
     };
-    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let mut cache = PREFIX_CACHE
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    if let Some((cached_path, cached_modified, prefixes)) = cache.as_ref() {
-        if cached_path == path && *cached_modified == modified && modified.is_some() {
+    // Capture before reading so a concurrent write cannot stamp stale data as current.
+    let generation = SETTINGS_WRITE_GEN.load(Ordering::Acquire);
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let Some((cached_path, cached_modified, cached_generation, prefixes)) = cache.as_ref() {
+        if cached_path == path
+            && *cached_modified == modified
+            && modified.is_some()
+            && *cached_generation == generation
+        {
             return prefixes.clone();
         }
     }
@@ -276,7 +290,7 @@ pub fn configured_prefixes(settings: Option<&Path>) -> Vec<String> {
         .collect();
     prefixes.sort();
     prefixes.dedup();
-    *cache = Some((path.to_path_buf(), modified, prefixes.clone()));
+    *cache = Some((path.to_path_buf(), modified, generation, prefixes.clone()));
     prefixes
 }
 
@@ -456,6 +470,88 @@ pub fn slug_from_worktree_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SettingsDir(PathBuf);
+
+    impl SettingsDir {
+        fn new() -> Self {
+            let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "ferryx-naming-test-{}-{seq}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn settings_path(&self) -> PathBuf {
+            self.0.join(SETTINGS_FILE_NAME)
+        }
+    }
+
+    impl Drop for SettingsDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove settings test directory");
+        }
+    }
+
+    #[test]
+    fn concurrent_prefix_writes_preserve_repos_and_refresh_cached_prefixes() {
+        const WRITERS: usize = 8;
+        let dir = SettingsDir::new();
+        let path = dir.settings_path();
+        let start = std::sync::Barrier::new(WRITERS);
+        std::thread::scope(|scope| {
+            for index in 0..WRITERS {
+                let path = &path;
+                let start = &start;
+                scope.spawn(move || {
+                    let repo = PathBuf::from(format!("repo-{index}"));
+                    start.wait();
+                    for round in 0..8 {
+                        let prefix = format!("team-{index}-{round}");
+                        write_configured_prefix(path, &repo, Some(&prefix)).unwrap();
+                        assert!(configured_prefixes(Some(path)).contains(&prefix));
+                    }
+                });
+            }
+        });
+        let settings = load_settings(&path);
+        assert_eq!(settings.version, 1);
+        assert_eq!(settings.repos.len(), WRITERS);
+        let expected: Vec<String> = (0..WRITERS).map(|i| format!("team-{i}-7")).collect();
+        assert_eq!(configured_prefixes(Some(&path)), expected);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn prefix_cache_refreshes_when_writes_have_identical_mtimes() {
+        let dir = SettingsDir::new();
+        let path = dir.settings_path();
+        let repo = dir.0.join("repo");
+        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for prefix in [Some("first"), Some("other"), None] {
+            write_configured_prefix(&path, &repo, prefix).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            let expected: Vec<String> = prefix.into_iter().map(str::to_string).collect();
+            assert_eq!(configured_prefixes(Some(&path)), expected);
+        }
+    }
+
+    #[test]
+    fn prefix_write_cleans_up_temp_file_when_rename_fails() {
+        let dir = SettingsDir::new();
+        let path = dir.settings_path();
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_configured_prefix(&path, &dir.0.join("repo"), Some("team")).is_err());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
 
     #[test]
     fn prefix_validation_follows_the_documented_pattern() {

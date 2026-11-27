@@ -146,6 +146,8 @@ vi.mock("./lib/updateToast", () => ({ initUpdateToasts: () => () => undefined })
 vi.mock("./components/SettingsDialog", () => ({ SettingsDialog: () => null }));
 
 let triggerUnavailable: ((sessionId: string, backendSessionId: string, reason: string | null, bindingKey: string | null) => void) | null = null;
+let reconnectPairedSession: ((sessionId: string) => Promise<void> | void) | null = null;
+let reconnectSshSession: ((sessionId: string) => Promise<void> | void) | null = null;
 let requestRecoveryAdmission: ((frontendSessionId: string, onResult: (result: import("./state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void) | null = null;
 const admissionCancellations = new Set<() => void>();
 
@@ -207,12 +209,18 @@ vi.mock("./components/TerminalSplitView", () => ({
   TerminalSplitView: ({
     onBackendSessionUnavailable,
     onRefreshSessionIdentity,
+    onReconnectPairedSession,
+    onReconnectSshSession,
   }: {
     onBackendSessionUnavailable?: (sessionId: string, backendSessionId: string, reason: string | null, bindingKey: string | null) => void;
     onRefreshSessionIdentity?: (frontendSessionId: string, onResult: (result: import("./state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
+    onReconnectPairedSession?: (sessionId: string) => Promise<void> | void;
+    onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   }) => {
     useLayoutEffect(() => {
       triggerUnavailable = onBackendSessionUnavailable ?? null;
+      reconnectPairedSession = onReconnectPairedSession ?? null;
+      reconnectSshSession = onReconnectSshSession ?? null;
       requestRecoveryAdmission = onRefreshSessionIdentity ? (sessionId, onResult) => {
         const cancel = onRefreshSessionIdentity(sessionId, onResult);
         admissionCancellations.add(cancel);
@@ -265,6 +273,8 @@ describe("App paired recovery boundary", () => {
     storeObservation.state = null;
     storeObservation.persist = undefined;
     triggerUnavailable = null;
+    reconnectPairedSession = null;
+    reconnectSshSession = null;
     requestRecoveryAdmission = null;
     native.isTauriRuntime.mockReturnValue(false);
     native.registerProject.mockImplementation(async (r: { workspaceId: string; repoPath: string }) => ({
@@ -628,6 +638,54 @@ describe("App paired recovery boundary", () => {
     } finally { cancel(); }
   });
   });
+  it.each([
+    [{ admitted: false, ownerUnavailable: false, staleTuple: false, blocked: false, affirmativeExit: true }, "resolves"],
+    [{ admitted: false, ownerUnavailable: false, staleTuple: false, blocked: true, affirmativeExit: false, blockedCode: "CONTROL_CONFLICT" }, "rejects"],
+  ] as const)("reconnects a paired pane through the paired owner, never the SSH helper (%#)", async (retryResult, expected) => {
+    // Given: a restored paired pane that still owns its paired proxy backend.
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([pairedProject]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, pairedProject.workspaceId);
+    const persisted: PersistedWorkspaceSession = {
+      version: 2, timestamp: Date.now(), activeWorkspaceId: pairedProject.workspaceId,
+      workspaces: {
+        [pairedProject.workspaceId]: {
+          activeWorktreePath: pairedProject.repoRoot, workspaceId: pairedProject.workspaceId,
+          repoRoot: pairedProject.repoRoot, target: pairedProject.target, remoteWorkspaceId: "remote-project",
+          worktrees: [{ path: pairedProject.repoRoot, branch: "main", head: "HEAD", isMain: true, isLocked: false }],
+          terminalSessions: {
+            "paired-session": { localSessionId: "paired-session", backendSessionId: "paired-proxy-123",
+              worktreePath: pairedProject.repoRoot, cwd: pairedProject.repoRoot, createdAt: Date.now(),
+              daemonEpoch: "epoch-paired", incarnation: "inc-paired" },
+          },
+          layout: { splitMode: "none", primaryTabId: "tab-1", secondaryTabId: null, activeTabId: "tab-1",
+            tabs: [{ id: "tab-1", label: "paired terminal", sessionId: "paired-session", kind: "terminal" }] },
+        },
+      },
+    };
+    native.loadSession.mockResolvedValue(persisted);
+    native.retryPairedSession.mockResolvedValue(retryResult);
+    await renderRestoredApp();
+    expect(reconnectPairedSession).not.toBeNull();
+    expect(reconnectSshSession).not.toBe(reconnectPairedSession);
+
+    // When: the pane's Reconnect paired session action runs.
+    let outcome!: { settled: "resolves" } | { settled: "rejects"; error: unknown };
+    await act(async () => {
+      outcome = await Promise.resolve(reconnectPairedSession!("paired-session")).then(
+        () => ({ settled: "resolves" as const }),
+        (error: unknown) => ({ settled: "rejects" as const, error }),
+      );
+    });
+
+    // Then: the paired owner's retry ran with the pane's tuple and the SSH retry never did.
+    expect(native.retryPairedSession).toHaveBeenCalledExactlyOnceWith({ backendSessionId: "paired-proxy-123", daemonEpoch: "epoch-paired", incarnation: "inc-paired" });
+    expect(native.retryTerminalRemoteSession).not.toHaveBeenCalled();
+    expect(outcome.settled).toBe(expected);
+    if (outcome.settled === "rejects") expect(outcome.error).toMatchObject({ code: "CONTROL_CONFLICT" });
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
+  });
+
   it.each([
     [{ admitted: false, ownerUnavailable: false, staleTuple: false, blocked: true, affirmativeExit: false }, "blocked"],
     [{ admitted: false, ownerUnavailable: false, staleTuple: false, blocked: false, affirmativeExit: true }, "exited"],

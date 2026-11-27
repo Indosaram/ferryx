@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { BrowserTab, FileTab, TabGroupLayoutNode, TerminalTab } from "../lib/types";
-import { createLayoutState, defaultContentForTab, focusedPaneSessionId, layoutReducer } from "./layout";
+import type { BrowserTab, FileTab, LayoutState, TabGroupLayoutNode, TerminalTab } from "../lib/types";
+import { createTerminalPaneContent } from "../lib/types";
+import { createLayoutState, defaultContentForTab, focusedPaneSessionId, layoutReducer, normalizeLayout } from "./layout";
 import { computeLeafRects, findLeaf, resolveSeam } from "./paneTree";
 
 function tab(id: string, sessionId: string): TerminalTab {
@@ -668,6 +669,201 @@ describe("focusedPaneSessionId", () => {
     const state = createLayoutState([browser], browser.id);
 
     expect(focusedPaneSessionId(state, browser)).toBeNull();
+  });
+});
+
+describe("normalizeLayout repairs a corrupted LayoutState", () => {
+  function singleTab(id: string): TerminalTab {
+    return tab(id, `session-${id}`);
+  }
+
+  function paneLayoutFor(id: string) {
+    const leafId = `leaf-${id}`;
+    return {
+      root: { type: "leaf" as const, leafId },
+      activeLeafId: leafId,
+      expandedLeafId: null,
+      sessionIdsByLeafId: { [leafId]: `session-${id}` },
+      contentsByLeafId: { [leafId]: createTerminalPaneContent(`session-${id}`) },
+    };
+  }
+
+  it("drops surplus layouts, dangling leaf ids, and duplicate tab ids", () => {
+    const base = createLayoutState([singleTab("t1")], "t1");
+    const corrupted: LayoutState = {
+      ...base,
+      // A duplicated tab row survives a stale merge; the reducer keeps one.
+      tabs: [singleTab("t1"), singleTab("t1")],
+      layoutsByTabId: {
+        ...base.layoutsByTabId,
+        // A layout for a tab that no longer exists.
+        ghost: paneLayoutFor("ghost"),
+        // A focus and a zoom that name leaves the tree does not have.
+        t1: { ...base.layoutsByTabId.t1, activeLeafId: "missing", expandedLeafId: "missing" },
+      },
+    };
+
+    const repaired = normalizeLayout(corrupted);
+
+    expect(repaired.tabs.map((candidate) => candidate.id)).toEqual(["t1"]);
+    expect(Object.keys(repaired.layoutsByTabId)).toEqual(["t1"]);
+    expect(repaired.layoutsByTabId.t1.activeLeafId).toBe("leaf-init");
+    expect(repaired.layoutsByTabId.t1.expandedLeafId).toBeNull();
+    // A repaired state must satisfy the invariant, or every later reduction pays for it again.
+    expect(normalizeLayout(repaired)).toBe(repaired);
+  });
+
+  it("realigns activeTabId with the focused group's own active tab", () => {
+    const state: LayoutState = {
+      tabs: [singleTab("t1"), singleTab("t2")],
+      // t2 is not in the focused group, so the pair disagrees.
+      activeTabId: "t2",
+      layoutsByTabId: { t1: paneLayoutFor("t1"), t2: paneLayoutFor("t2") },
+      tabGroups: {
+        G1: { id: "G1", tabIds: ["t1"], activeTabId: "t1" },
+        G2: { id: "G2", tabIds: ["t2"], activeTabId: "t2" },
+      },
+      tabGroupLayout: {
+        type: "split", direction: "horizontal", ratio: 0.5,
+        first: { type: "group", groupId: "G1" },
+        second: { type: "group", groupId: "G2" },
+      },
+      focusedGroupId: "G1",
+    };
+
+    const repaired = normalizeLayout(state);
+
+    expect(repaired.activeTabId).toBe("t1");
+    expect(repaired.tabGroups?.G1.activeTabId).toBe("t1");
+    expect(normalizeLayout(repaired)).toBe(repaired);
+  });
+
+  it("repairs a group split tree that names a group no longer present", () => {
+    const state: LayoutState = {
+      tabs: [singleTab("t1")],
+      activeTabId: "t1",
+      layoutsByTabId: { t1: paneLayoutFor("t1") },
+      tabGroups: { G1: { id: "G1", tabIds: ["t1"], activeTabId: "t1" } },
+      // `G-gone` has no entry in tabGroups.
+      tabGroupLayout: {
+        type: "split", direction: "vertical", ratio: 0.5,
+        first: { type: "group", groupId: "G1" },
+        second: { type: "group", groupId: "G-gone" },
+      },
+      focusedGroupId: "G1",
+    };
+
+    const repaired = normalizeLayout(state);
+
+    expect(repaired.tabGroupLayout).toEqual({ type: "group", groupId: "G1" });
+    expect(normalizeLayout(repaired)).toBe(repaired);
+  });
+});
+
+describe("CLOSE_TAB in a multi-group layout", () => {
+  function multiGroupState(): LayoutState {
+    const ids = ["t1", "t2", "t3", "t4", "t5"];
+    const layoutsByTabId = Object.fromEntries(ids.map((id) => {
+      const leafId = `leaf-${id}`;
+      return [id, {
+        root: { type: "leaf" as const, leafId },
+        activeLeafId: leafId,
+        expandedLeafId: null,
+        sessionIdsByLeafId: { [leafId]: `session-${id}` },
+        contentsByLeafId: { [leafId]: createTerminalPaneContent(`session-${id}`) },
+      }];
+    }));
+    return {
+      tabs: ids.map((id) => tab(id, `session-${id}`)),
+      activeTabId: "t5",
+      layoutsByTabId,
+      tabGroups: {
+        G1: { id: "G1", tabIds: ["t1", "t2"], activeTabId: "t2" },
+        G2: { id: "G2", tabIds: ["t3", "t4", "t5"], activeTabId: "t5" },
+      },
+      tabGroupLayout: {
+        type: "split", direction: "horizontal", ratio: 0.5,
+        first: { type: "group", groupId: "G1" },
+        second: { type: "group", groupId: "G2" },
+      },
+      focusedGroupId: "G2",
+    };
+  }
+
+  it("selects the group-local neighbor instead of the next tab in flat order", () => {
+    const next = layoutReducer(multiGroupState(), { type: "CLOSE_TAB", tabId: "t5" });
+
+    expect(next.activeTabId).toBe("t4");
+    expect(next.focusedGroupId).toBe("G2");
+    expect(next.tabGroups?.G2).toMatchObject({ tabIds: ["t3", "t4"], activeTabId: "t4" });
+    expect(next.tabGroups?.G1).toMatchObject({ tabIds: ["t1", "t2"], activeTabId: "t2" });
+  });
+
+  it("honors a return tab that lives in another group", () => {
+    const base = multiGroupState();
+    const state: LayoutState = {
+      ...base,
+      activeTabId: "t3",
+      tabGroups: { ...base.tabGroups, G2: { ...base.tabGroups!.G2, activeTabId: "t3" } },
+      returnTabIdByTabId: { t3: "t1" },
+    };
+
+    const next = layoutReducer(state, { type: "CLOSE_TAB", tabId: "t3" });
+
+    expect(next.activeTabId).toBe("t1");
+    expect(next.focusedGroupId).toBe("G1");
+    expect(next.tabGroups?.G2.tabIds).toEqual(["t4", "t5"]);
+  });
+
+  it("drops return entries that named the closed tab as their target", () => {
+    const base = multiGroupState();
+    const state: LayoutState = {
+      ...base,
+      // `t4` was opened from `t5`; closing `t5` must not leave `t4` pointing at a dead tab.
+      returnTabIdByTabId: { t4: "t5", t5: "t1" },
+    };
+
+    const next = layoutReducer(state, { type: "CLOSE_TAB", tabId: "t5" });
+
+    expect(next.returnTabIdByTabId ?? {}).toEqual({});
+  });
+
+  it("falls back to another group when the closing group empties", () => {
+    const state: LayoutState = {
+      tabs: [tab("t1", "session-t1"), tab("t2", "session-t2"), tab("t3", "session-t3")],
+      activeTabId: "t3",
+      layoutsByTabId: {
+        t1: {
+          root: { type: "leaf", leafId: "leaf-t1" }, activeLeafId: "leaf-t1", expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-t1": "session-t1" },
+        },
+        t2: {
+          root: { type: "leaf", leafId: "leaf-t2" }, activeLeafId: "leaf-t2", expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-t2": "session-t2" },
+        },
+        t3: {
+          root: { type: "leaf", leafId: "leaf-t3" }, activeLeafId: "leaf-t3", expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-t3": "session-t3" },
+        },
+      },
+      tabGroups: {
+        G1: { id: "G1", tabIds: ["t1", "t2"], activeTabId: "t2" },
+        G2: { id: "G2", tabIds: ["t3"], activeTabId: "t3" },
+      },
+      tabGroupLayout: {
+        type: "split", direction: "horizontal", ratio: 0.5,
+        first: { type: "group", groupId: "G2" },
+        second: { type: "group", groupId: "G1" },
+      },
+      focusedGroupId: "G2",
+    };
+
+    const next = layoutReducer(state, { type: "CLOSE_TAB", tabId: "t3" });
+
+    // The whole group is gone, so the surviving group takes focus at its own active tab.
+    expect(next.tabGroups?.G2).toBeUndefined();
+    expect(next.activeTabId).toBe("t2");
+    expect(next.focusedGroupId).toBe("G1");
   });
 });
 

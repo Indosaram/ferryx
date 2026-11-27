@@ -4148,21 +4148,31 @@ pub(crate) fn refresh_panel_session(
     session_ref: &ferryx_hub::supervisor::panel_contract::SessionRef,
     sources: ferryx_hub::fleet::PanelSources,
 ) {
-    if !panel_autonomy::is_local_host(session_ref.host_id()) {
-        return;
-    }
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
-    let session_id = session_ref.backend_session_id().to_string();
-    runtime.spawn(async move {
-        let Some(state) = state.upgrade() else { return };
-        let read = tokio::time::timeout(
-            crate::remote::machine_events::PANEL_SESSION_READ,
-            local_fleet_session_over(&state, &session_id, &sources),
-        );
-        if let Ok(Some(session)) = read.await {
-            publish_panel_session(&session);
-        }
-    });
+    if panel_autonomy::is_local_host(session_ref.host_id()) {
+        let session_id = session_ref.backend_session_id().to_string();
+        runtime.spawn(async move {
+            let Some(state) = state.upgrade() else { return };
+            let read = tokio::time::timeout(
+                crate::remote::machine_events::PANEL_SESSION_READ,
+                local_fleet_session_over(&state, &session_id, &sources),
+            );
+            if let Ok(Some(session)) = read.await {
+                publish_panel_session(&session);
+            }
+        });
+    } else {
+        let session_ref = session_ref.clone();
+        runtime.spawn(async move {
+            let read = tokio::time::timeout(
+                crate::remote::machine_events::PANEL_SESSION_READ,
+                panel_autonomy::remote_fleet_session_over(&session_ref, &sources),
+            );
+            if let Ok(Some(session)) = read.await {
+                publish_panel_session(&session);
+            }
+        });
+    }
 }
 
 /// The supervisor pause flag the panel reports. The pause route sets it.

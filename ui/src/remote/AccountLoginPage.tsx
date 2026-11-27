@@ -221,7 +221,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   };
 
   const elapsed = sentAt === null ? 0 : now - sentAt;
-  const canResend = sentAt !== null && elapsed >= RESEND_AFTER_MS && !loading;
+  const canResend = (sentAt === null || elapsed >= RESEND_AFTER_MS) && !loading;
   const consuming = loading && !codeRequested && !email.trim();
 
   return (

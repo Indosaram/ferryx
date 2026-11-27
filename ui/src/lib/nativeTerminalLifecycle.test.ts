@@ -68,6 +68,10 @@ describe("nativeTerminalLifecycle presentation budget", () => {
     expect(settleNativeTerminalExit(tuple.frontendSessionId, { ...tuple, incarnation: "old-life" })).toBe(false);
     expect(getDurableNativeBinding(tuple.backendSessionId)).toEqual(tuple);
     expect(settleNativeTerminalExit(tuple.frontendSessionId, tuple)).toBe(true);
+    // A duplicate receipt for the settled incarnation is idempotent, not an unknown session.
+    expect(settleNativeTerminalExit(tuple.frontendSessionId, tuple)).toBe(true);
+    expect(getDurableNativeBinding(tuple.backendSessionId)).toBeUndefined();
+    expect(settleNativeTerminalExit(tuple.frontendSessionId, { ...tuple, attemptGeneration: 4 })).toBe(false);
     expect(attachNativeTerminalLifecycle(tuple.backendSessionId, async () => {})).resolves.toBeUndefined();
   });
 
@@ -451,6 +455,184 @@ describe("nativeTerminalLifecycle sibling pane ownership", () => {
     resetNativeTerminalLifecycleForTest();
     expect(emitNativeTerminalPresentation(matching)).toBe(0);
     expect(received).toHaveLength(1);
+  });
+});
+
+describe("nativeTerminalLifecycle held detachment safety", () => {
+  const replacementTuple: PaneAttachTuple = {
+    backendSessionId: "session-b", incarnation: "life-b", daemonEpoch: "8",
+    frontendSessionId: "front-b", paneIdentity: "pane-b", bindingKey: "bind-1", attemptGeneration: 1,
+  };
+
+  beforeEach(() => {
+    resetNativeTerminalLifecycleForTest();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    resetNativeTerminalLifecycleForTest();
+    vi.useRealTimers();
+  });
+
+  it("releases an unbound replacement waiter when the replacement presents its registered binding", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    const detachment = detachNativeTerminalLifecycle("session-a", detached);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined, null);
+    expect(detached).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+
+    expect(registerDurableNativeBinding(replacementTuple)).toBe(true);
+    presentNativeTerminalLifecycle("session-b", "bind-1");
+
+    await expect(detachment).resolves.toBe(true);
+    expect(detached).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a bound waiter parked until its matching binding presents", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    const detachment = detachNativeTerminalLifecycle("session-a", detached);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined, "bind-1");
+
+    presentNativeTerminalLifecycle("session-b", "stale-binding");
+    expect(detached).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+    presentNativeTerminalLifecycle("session-b", "bind-1");
+
+    await expect(detachment).resolves.toBe(true);
+    expect(detached).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("detaches after the safety deadline when the replacement never presents", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    const detachment = detachNativeTerminalLifecycle("session-a", detached);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined);
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(detached).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(detachment).resolves.toBe(true);
+    expect(detached).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    presentNativeTerminalLifecycle("session-b");
+    expect(detached).toHaveBeenCalledOnce();
+  });
+
+  it("keeps inherited waiters bounded by their original safety deadline", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detachedA = vi.fn(async () => undefined);
+    const detachmentA = detachNativeTerminalLifecycle("session-a", detachedA);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const detachedB = vi.fn(async () => undefined);
+    const detachmentB = detachNativeTerminalLifecycle("session-b", detachedB);
+    await attachNativeTerminalLifecycle("session-c", async () => undefined, "bind-c");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(detachmentA).resolves.toBe(true);
+    expect(detachedA).toHaveBeenCalledOnce();
+    expect(detachedB).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+    presentNativeTerminalLifecycle("session-c", "bind-c");
+    await expect(detachmentB).resolves.toBe(true);
+    expect(detachedB).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("releases the outgoing surface immediately when its replacement exits", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    const detachment = detachNativeTerminalLifecycle("session-a", detached);
+    expect(registerDurableNativeBinding(replacementTuple)).toBe(true);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined, "bind-1");
+    expect(detached).not.toHaveBeenCalled();
+
+    expect(settleNativeTerminalExit("front-b", { ...replacementTuple, incarnation: "stale" })).toBe(false);
+    expect(detached).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(settleNativeTerminalExit("front-b", replacementTuple)).toBe(true);
+
+    await expect(detachment).resolves.toBe(true);
+    expect(detached).toHaveBeenCalledOnce();
+    expect(getDurableNativeBinding("session-b")).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a repeated exit for the settled incarnation idempotent and releases its waiters once", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    const detachment = detachNativeTerminalLifecycle("session-a", detached);
+    expect(registerDurableNativeBinding(replacementTuple)).toBe(true);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined, "bind-1");
+    expect(detached).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+
+    // The exit receipt can arrive twice (lifecycle event plus a recovery probe).
+    // Both must report settled so neither caller retries a dead session.
+    expect(settleNativeTerminalExit("front-b", replacementTuple)).toBe(true);
+    await expect(detachment).resolves.toBe(true);
+    expect(detached).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(settleNativeTerminalExit("front-b", replacementTuple)).toBe(true);
+    expect(detached).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // A stale tuple is still refused after the exit settled.
+    expect(settleNativeTerminalExit("front-b", { ...replacementTuple, incarnation: "stale" })).toBe(false);
+    expect(settleNativeTerminalExit("front-b", { ...replacementTuple, attemptGeneration: 2 })).toBe(false);
+    expect(settleNativeTerminalExit("front-other", replacementTuple)).toBe(false);
+
+    // A new binding for the backend is a fresh incarnation to settle again.
+    expect(registerDurableNativeBinding({ ...replacementTuple, attemptGeneration: 2 })).toBe(true);
+    expect(settleNativeTerminalExit("front-b", replacementTuple)).toBe(false);
+    expect(settleNativeTerminalExit("front-b", { ...replacementTuple, attemptGeneration: 2 })).toBe(true);
+  });
+
+  it("clears the safety timer when the outgoing pane returns", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    const detachment = detachNativeTerminalLifecycle("session-a", detached);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined);
+
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+
+    await expect(detachment).resolves.toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(detached).not.toHaveBeenCalled();
+  });
+
+  it("clears the safety timer when the held outgoing session exits", async () => {
+    expect(registerDurableNativeBinding(replacementTuple)).toBe(true);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    const detachment = detachNativeTerminalLifecycle("session-b", detached);
+    await attachNativeTerminalLifecycle("session-c", async () => undefined);
+
+    expect(settleNativeTerminalExit("front-b", replacementTuple)).toBe(true);
+
+    await expect(detachment).resolves.toBe(false);
+    expect(detached).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears held safety timers on test reset", async () => {
+    await attachNativeTerminalLifecycle("session-a", async () => undefined);
+    const detached = vi.fn(async () => undefined);
+    void detachNativeTerminalLifecycle("session-a", detached);
+    await attachNativeTerminalLifecycle("session-b", async () => undefined);
+    expect(vi.getTimerCount()).toBe(1);
+
+    resetNativeTerminalLifecycleForTest();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(detached).not.toHaveBeenCalled();
   });
 });
 

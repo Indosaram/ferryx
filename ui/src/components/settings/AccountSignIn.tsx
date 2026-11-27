@@ -22,6 +22,15 @@ export interface AccountSignInProps {
 const LOGIN_POLL_INTERVAL_MS = 2000;
 const LOGIN_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (TTL 600s)
 
+/** Poll error codes after which the emailed link can never work again, so a resend is the only path. */
+const RESENDABLE_ERROR_CODES = new Set([
+  "EXPIRED",
+  "LOGIN_HANDLE_INVALID",
+  "LOGIN_CODE_USED",
+  "LOGIN_CODE_EXPIRED",
+  "LOGIN_CODE_EXPIRED_OR_UNKNOWN",
+]);
+
 /**
  * The emailed link is `{origin}/login?code=<code>`; accept the whole link or the bare code,
  * since the email only ever shows the link.
@@ -44,6 +53,8 @@ export function AccountSignIn({
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [codeRequested, setCodeRequested] = useState(false);
+  /** The address the pending link went to, so an expired link can be resent without retyping it. */
+  const [requestedEmail, setRequestedEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -194,11 +205,7 @@ export function AccountSignIn({
     }
   }, [onSignIn, origin]);
 
-  const handleRequestMagicLink = async (e: FormEvent) => {
-    e.preventDefault();
-    const cleanEmail = email.trim();
-    if (!cleanEmail || loading) return;
-
+  const requestLink = async (cleanEmail: string) => {
     stopPolling();
     setLoading(true);
     setError(null);
@@ -206,6 +213,7 @@ export function AccountSignIn({
     try {
       const res = await requestLogin(origin, cleanEmail);
       setCodeRequested(true);
+      setRequestedEmail(cleanEmail);
       setInfoMessage(
         `Magic sign-in link sent to ${cleanEmail}. Open the link in the email; this window will sign in automatically. If it does not, paste the whole link below.`,
       );
@@ -231,6 +239,13 @@ export function AccountSignIn({
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleRequestMagicLink = async (e: FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = email.trim();
+    if (!cleanEmail || loading) return;
+    await requestLink(cleanEmail);
   };
 
   const handleConsumeCode = async (e: FormEvent) => {
@@ -268,6 +283,10 @@ export function AccountSignIn({
       setLoading(false);
     }
   };
+
+  const resendEmail = requestedEmail || email.trim();
+  // Only an address we already sent a link to can be resent; otherwise the email form is the path.
+  const linkExpired = codeRequested && resendEmail !== "" && errorCode !== null && RESENDABLE_ERROR_CODES.has(errorCode);
 
   return (
     <div
@@ -359,6 +378,17 @@ export function AccountSignIn({
             >
               {loading ? "Signing in…" : "Sign In"}
             </Button>
+            {linkExpired ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={loading}
+                onClick={() => void requestLink(resendEmail)}
+              >
+                Send a new link
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="ghost"
@@ -367,6 +397,7 @@ export function AccountSignIn({
               onClick={() => {
                 stopPolling();
                 setCodeRequested(false);
+                setRequestedEmail("");
                 setCode("");
                 setError(null);
                 setErrorCode(null);

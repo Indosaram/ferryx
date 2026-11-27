@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActiveAgent, Worktree } from "../lib/types";
@@ -56,6 +56,39 @@ const rootWorktree: Worktree = {
 afterEach(cleanup);
 
 describe("WorktreeList actions", () => {
+  it("marks a slash-normalized worktree path active only within the selected workspace", () => {
+    const row = { ...worktree, path: "C:/Repo/feature/", workspaceId: "project-a" };
+    const context = {
+      activePath: "C:\\Repo\\feature", activeWorkspaceId: "project-a", statuses: {}, agentsByPath: new Map(),
+      onSelect: vi.fn(), onDelete: vi.fn(),
+    };
+    expect(worktreeListRowProps(row, context).active).toBe(true);
+    expect(worktreeListRowProps(row, { ...context, activeWorkspaceId: "project-b" }).active).toBe(false);
+  });
+
+  it("handles a denied branch clipboard write without an unhandled rejection", async () => {
+    let rejectWrite!: (error: unknown) => void;
+    const write = new Promise<void>((_resolve, reject) => { rejectWrite = reject; });
+    const writeText = vi.fn(() => write);
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    const successCount = toastMocks.success.mock.calls.length;
+    try {
+      render(<WorktreeList worktrees={[worktree]} activePath="" agents={[]} statuses={{}}
+        onSelect={vi.fn()} onDelete={vi.fn()} />);
+      fireEvent.contextMenu(screen.getByText("feature").closest(".group\\/worktree-row")!);
+      // The menu registers the rejection handler before the clipboard operation settles.
+      lastMenuCall().onAction("copy-branch");
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("orca/ws-main/feature");
+      await act(async () => { rejectWrite(new DOMException("Clipboard denied", "NotAllowedError")); });
+      expect(toastMocks.success).toHaveBeenCalledTimes(successCount);
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
   it("carries an inactive unmanaged root's render workspace into Pin Row", () => {
     const onLaneAction = vi.fn();
     const props = worktreeListRowProps(rootWorktree, {

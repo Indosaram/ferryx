@@ -12,7 +12,8 @@ export interface DiscoveredListProps {
   hosts: { host: SshHost; target?: SshTargetSummary; status: MachineStatus }[];
   banner: DiscoveryBanner | null;
   refreshing: boolean;
-  onSetUp: () => void;
+  /** Opens this host's own setup drawer; setup needs the machine, not a global re-scan. */
+  onSetUp: (host: SshHost) => void;
   onRetryDiscovery: () => void;
   /** Opens the machine drawer for a saved host, so a host stuck in setup can still be edited, disabled or deleted. */
   onDetails: (hostId: string) => void;
@@ -57,7 +58,7 @@ export function DiscoveredList({ hosts, banner, refreshing, onSetUp, onRetryDisc
               </div>
               {/* Every row here is a saved SSH host, so each one also gets Details for Edit, Disable and Delete. */}
               <div className="flex shrink-0 items-center gap-2">
-                <Button type="button" size="sm" variant="outline" aria-label={`Set up ${host.label}`} disabled={refreshing} onClick={onSetUp}>
+                <Button type="button" size="sm" variant="outline" aria-label={`Set up ${host.label}`} disabled={refreshing} onClick={() => onSetUp(host)}>
                   Set up
                 </Button>
                 <Button type="button" size="sm" variant="outline" ref={detailsRef(host.id)} aria-label={`Details for ${host.label}`} aria-haspopup="dialog" onClick={() => onDetails(host.id)}>

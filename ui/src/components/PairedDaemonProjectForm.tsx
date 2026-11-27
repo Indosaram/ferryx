@@ -8,16 +8,20 @@ import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
 import { safeRandomUUID } from "../lib/uuid";
 import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
 import { useModalDialog } from "./useModalDialog";
+import { pairedMachineStatus } from "../lib/machineStatus";
+import { getPairedHostReachability, subscribePairedHostReachability } from "../lib/pairedHostReachability";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 
 function unavailable(host: HostEndpoint | undefined, nativeReady: boolean): string | null {
   if (!nativeReady) return "Native machine access is unavailable. Upgrade the desktop and local daemon.";
-  if (!host) return "Pair a daemon in Settings > Remote Access, then select a machine.";
+  if (!host) return "Pair a daemon in Settings > Remote, then select a machine.";
   // Signing in pairs every machine of the account, so an unpaired row is mid-pairing, not a
   // state the user has to register. Never point at a manual connect step that no longer exists.
   if (host.authStatus !== "paired" || host.grantScope !== "machine") return "This machine is still pairing with your Ferryx account. It becomes available on its own.";
   if (!host.generation || !host.machineId) return "Upgrade the desktop and daemon, then pair this machine again.";
-  if (!host.online) return "This machine is offline. Connect its daemon to the relay before adding a project.";
-  return null;
+  const status = pairedMachineStatus({ host, nativeReady, accountEnrolled: false,
+    reachability: getPairedHostReachability(host.hostId) });
+  return status.primaryEnabled ? null : status.reason;
 }
 
 export function PairedDaemonProjectForm({ onBack, onClose, onRegistered, initialTarget }: {
@@ -28,26 +32,46 @@ export function PairedDaemonProjectForm({ onBack, onClose, onRegistered, initial
   const [registering, setRegistering] = useState(false);
   // Escape must not dismiss mid-registration, or onRegistered is skipped for a project that did register.
   const { dialogRef } = useModalDialog({ onEscape: onClose, dismissible: !registering });
+  // The select portals into this dialog so it stays inside the dialog's focus scope.
+  const [dialogContainer, setDialogContainer] = useState<HTMLDivElement | null>(null);
+  const setDialogNode = useCallback((node: HTMLDivElement | null) => {
+    dialogRef(node);
+    setDialogContainer(node);
+  }, [dialogRef]);
+  // Machine access needs both native readiness and the machine feature gate: an inventory that
+  // reports ready while features are disabled must fail closed, not offer a dead picker.
+  const nativeReady = state.nativeStatus === "ready" && state.machineFeaturesEnabled === true;
   const hosts = Object.values(state.hosts);
-  const [selectedHostId, setHostId] = useState(() => hosts[0]?.hostId ?? "");
+  const reachabilitySnapshot = useSyncExternalStore(subscribePairedHostReachability,
+    () => JSON.stringify(hosts.map(row => getPairedHostReachability(row.hostId))));
+  const [selectedHostId, setHostId] = useState("");
+  useEffect(() => {
+    if (initialTarget || selectedHostId) return;
+    const eligible = hosts.find(row => unavailable(row, nativeReady) === null);
+    if (eligible) setHostId(eligible.hostId);
+  }, [hosts, initialTarget, selectedHostId, nativeReady, reachabilitySnapshot]);
   const hostId = initialTarget?.hostId ?? selectedHostId;
   const host = state.hosts[hostId];
   const issue = initialTarget && host?.generation !== initialTarget.generation
     ? "Machine credentials changed. Return to Settings and check this machine again."
-    : unavailable(host, state.nativeStatus === "ready");
+    : unavailable(host, nativeReady);
   const key = JSON.stringify([hostId, host?.generation, issue]);
   // Remounting discards selected paths, cached listings, negotiated capabilities and pending UI adoption.
   return <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Add Paired Daemon Project" className="w-full max-w-[480px] space-y-3 rounded-lg border border-border bg-popover p-3 shadow-elevation-4">
+    <div ref={setDialogNode} role="dialog" aria-modal="true" aria-label="Add Paired Daemon Project" className="w-full max-w-[480px] space-y-3 rounded-lg border border-border bg-popover p-3 shadow-elevation-4">
       <h2 className="text-[13px] font-medium">Add Paired Daemon Project</h2>
-      <p className="text-xs text-muted-foreground">Browse folders on the paired machine without SSH. Pair or manage machines in Settings &gt; Remote Access.</p>
+      <p className="text-xs text-muted-foreground">Browse folders on the paired machine without SSH. Pair or manage machines in Settings &gt; Remote.</p>
       <PairedFolder key={key} host={host} issue={issue} onClose={onClose} onBack={onBack} onRegistered={onRegistered} onBusyChange={setRegistering}
         hostSelector={(busy) => <label className="block text-xs">Paired machine
-          <select aria-label="Paired machine" value={hostId} disabled={busy || !!initialTarget} className="mt-1 h-8 w-full rounded border border-input bg-background px-2"
-            onChange={event => setHostId(event.target.value)}>
-            <option value="">Select a paired machine</option>
-            {hosts.map(row => <option key={row.hostId} value={row.hostId}>{row.displayName ?? row.name}</option>)}
-          </select>
+          <Select value={hostId} disabled={busy || !!initialTarget} onValueChange={setHostId}>
+            <SelectTrigger aria-label="Paired machine" className="mt-1 h-8 text-xs">
+              <SelectValue placeholder="Select a paired machine">{host?.displayName ?? host?.name}</SelectValue>
+            </SelectTrigger>
+            <SelectContent container={dialogContainer}>
+              {hosts.map(row => <SelectItem key={row.hostId} value={row.hostId}
+                disabled={unavailable(row, nativeReady) !== null}>{row.displayName ?? row.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </label>} />
     </div>
   </div>;
@@ -81,7 +105,7 @@ function PairedFolder({ host, issue, hostSelector, onClose, onBack, onRegistered
         setDiscovery(result.capabilities.includes("repoDiscoveryV1"));
         setReady(true);
       }
-    }).catch(cause => { if (alive.current) setError(`Machine access unavailable (${cause instanceof Error ? cause.message : "PAIRED_HOST_UNAVAILABLE"}). Upgrade or re-pair in Settings > Remote Access.`); });
+    }).catch(cause => { if (alive.current) setError(`Machine access unavailable (${cause instanceof Error ? cause.message : "PAIRED_HOST_UNAVAILABLE"}). Upgrade or re-pair in Settings > Remote.`); });
     return () => { alive.current = false; };
   }, [adapter]);
   const source = useMemo<DirectorySource | undefined>(() => adapter ? {

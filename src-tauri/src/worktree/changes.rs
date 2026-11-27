@@ -3,7 +3,7 @@
 //! Every path a caller passes is relative to the worktree root and is jailed to it; Git sees it
 //! as a literal pathspec after `--`. Pushes never force.
 
-use crate::worktree::git::{parse_status_porcelain, run_git};
+use crate::worktree::git::{parse_status_porcelain_z, run_git};
 use crate::worktree::model::{DirtyState, WorktreeError};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -171,8 +171,8 @@ pub fn git_diff(
 /// File list for the Changes panel. Unlike the sidebar dirty check, untracked directories are
 /// expanded to their files (`-uall`) so each new file can be selected and previewed.
 pub fn git_changes_status(worktree: &Path) -> Result<DirtyState, GitChangeError> {
-    let output = run_git(worktree, &["status", "--porcelain", "-uall"])?;
-    Ok(parse_status_porcelain(&output))
+    let output = run_git(worktree, &["status", "--porcelain=v1", "-z", "-uall"])?;
+    Ok(parse_status_porcelain_z(&output))
 }
 
 /// Largest untracked file shown as a preview patch.
@@ -423,6 +423,45 @@ mod tests {
         assert_eq!(paths, vec!["dir/new.txt".to_string()]);
         let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some(&paths[0])).unwrap();
         assert!(patch.contains("+fresh"), "{patch}");
+    }
+
+    #[test]
+    fn changes_status_preserves_utf8_and_space_paths_through_stage_and_diff() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        let paths = ["\u{d55c}\u{ae00} \u{d30c}\u{c77c}.txt", "space name.txt", "dir/nested space.txt"];
+        fs::create_dir(repo.join("dir")).unwrap();
+        for path in paths {
+            fs::write(repo.join(path), "fresh\n").unwrap();
+        }
+        let state = git_changes_status(&repo).unwrap();
+        assert!(state.is_dirty);
+        assert_eq!(state.files.len(), paths.len());
+        for path in paths {
+            assert!(state.files.iter().any(|file| file.path == path && file.status_code == "??"));
+            let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some(path)).unwrap();
+            assert!(patch.contains("+fresh"), "{patch}");
+            git_stage(&repo, &[path.into()]).unwrap();
+            let patch = git_diff(&repo, &GitDiffScope::Staged, Some(path)).unwrap();
+            assert!(patch.contains("+fresh"), "{patch}");
+        }
+        let staged = git_changes_status(&repo).unwrap();
+        assert_eq!(staged.files.len(), paths.len());
+        assert!(staged.files.iter().all(|file| file.status_code == "A "));
+    }
+
+    #[test]
+    fn changes_status_staged_git_mv_reports_only_the_destination() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        let destination = "\u{d55c}\u{ae00} \u{d30c}\u{c77c}.txt";
+        run_git(&repo, &["mv", "file.txt", destination]).unwrap();
+        fs::write(repo.join("next file.txt"), "next\n").unwrap();
+        let state = git_changes_status(&repo).unwrap();
+        assert!(state.is_dirty);
+        assert_eq!(state.files.len(), 2);
+        assert!(state.files.iter().any(|file| file.path == destination && file.status_code == "R "));
+        assert!(state.files.iter().any(|file| file.path == "next file.txt" && file.status_code == "??"));
+        let patch = git_diff(&repo, &GitDiffScope::Staged, Some(destination)).unwrap();
+        assert!(!patch.is_empty());
     }
 
     #[test]

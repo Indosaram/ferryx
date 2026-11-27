@@ -9,13 +9,20 @@ import type { StructuredIpcError } from "./types";
 
 export const RD_FRAME_KIND_VIDEO = 0x01;
 export const RD_FRAME_KIND_STATUS = 0x02;
-export const RD_FRAME_KIND_CURSOR = 0x03;
+export const RD_FRAME_KIND_META = 0x03;
+export const RD_FRAME_KIND_AUDIO = 0x04;
+export const RD_FRAME_KIND_CLIPBOARD = 0x05;
+/**
+ * Remote cursor update; the payload after the kind byte is JSON:
+ * `{ x, y, cursorType, visible, shapeId?, rgbaBase64?, width?, height?, hotspotX?, hotspotY? }`.
+ */
+export const RD_FRAME_KIND_CURSOR = 0x06;
 /**
  * Native presentation notification. The canonical wire format is EXACTLY 9 bytes, little endian,
  * with no JSON and no image payload:
  *
  * ```text
- * byte 0        kind = 0x04
+ * byte 0        kind = 0x07
  * bytes 1..4    u32 LE width
  * bytes 5..8    u32 LE height
  * ```
@@ -24,11 +31,94 @@ export const RD_FRAME_KIND_CURSOR = 0x03;
  * Wave 3 Todo 7 must write exactly these 9 bytes; anything shorter is rejected by
  * `parseRdFrameMessage`, and trailing bytes are ignored.
  */
-export const RD_FRAME_KIND_NATIVE_PRESENTED = 0x04;
+export const RD_FRAME_KIND_NATIVE_PRESENTED = 0x07;
 /** kind(1) + width(4) + height(4) + frameId(8). */
 export const RD_VIDEO_HEADER_BYTES = 17;
+/** kind(1) + sampleRate(4) + channels(2). */
+export const RD_AUDIO_HEADER_BYTES = 7;
 
 export type RdConnectionState = "connecting" | "connected" | "reconnecting" | "ended";
+
+export type RdRouteKind = "direct" | "relay";
+
+export type RdDisplayInfo = {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+};
+
+export type RdSessionMeta = {
+  route: string;
+  hostName: string;
+  displays: RdDisplayInfo[];
+  activeDisplay: number;
+  supportsStreamOptions: boolean;
+  width: number;
+  height: number;
+  codec: string | null;
+  targetFps: number;
+  scalePermille: number;
+  jpegQuality: number;
+  maxPresentFps: number;
+  fps: number;
+  rttMs: number | null;
+  packetLossRatio: number | null;
+  clipboardAllowed: boolean;
+  audioAvailable: boolean;
+  audioMuted: boolean;
+};
+
+export type RdStreamOptions = {
+  displayIndex?: number;
+  scalePermille?: number;
+  fps?: number;
+  bitrate?: number;
+  jpegQuality?: number;
+  maxPresentFps?: number;
+};
+
+export type RdSpecialKeyAction =
+  | "ctrlAltDel"
+  | "altTab"
+  | "cmdTab"
+  | "meta"
+  | "cmdW"
+  | "ctrlW"
+  | "altF4"
+  | "escape"
+  | "printScreen";
+
+export type RdQualityPresetId = "sharp" | "balanced" | "fast";
+
+export type RdQualityPreset = {
+  id: RdQualityPresetId;
+  label: string;
+  description: string;
+  options: RdStreamOptions;
+};
+
+export const RD_QUALITY_PRESETS: readonly RdQualityPreset[] = [
+  {
+    id: "sharp",
+    label: "Sharp",
+    description: "Native scale · up to 60 fps",
+    options: { scalePermille: 1000, fps: 60, bitrate: 0, jpegQuality: 85, maxPresentFps: 60 },
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    description: "Native scale · 30 fps",
+    options: { scalePermille: 1000, fps: 60, bitrate: 0, jpegQuality: 72, maxPresentFps: 30 },
+  },
+  {
+    id: "fast",
+    label: "Fast",
+    description: "75% scale · lower bandwidth",
+    options: { scalePermille: 750, fps: 30, bitrate: 4_000_000, jpegQuality: 55, maxPresentFps: 30 },
+  },
+];
 
 export type RdVideoFrame = {
   kind: "video";
@@ -60,7 +150,31 @@ export type RdCursorFrame = {
 
 export type RdNativePresentedFrame = { kind: "nativePresented"; width: number; height: number };
 
-export type RdFrameMessage = RdVideoFrame | RdStatusFrame | RdCursorFrame | RdNativePresentedFrame;
+export type RdMetaFrame = {
+  kind: "meta";
+  meta: RdSessionMeta;
+};
+
+export type RdAudioFrame = {
+  kind: "audio";
+  sampleRate: number;
+  channels: number;
+  pcm: Uint8Array;
+};
+
+export type RdClipboardFrame = {
+  kind: "clipboard";
+  text: string;
+};
+
+export type RdFrameMessage =
+  | RdVideoFrame
+  | RdStatusFrame
+  | RdCursorFrame
+  | RdNativePresentedFrame
+  | RdMetaFrame
+  | RdAudioFrame
+  | RdClipboardFrame;
 
 export type RdPlayoutMode = "immediate" | "latest_wins" | "adaptive";
 export type RdScaleMode = "fit" | "native100" | "scale75" | "scale50";
@@ -211,14 +325,75 @@ export function parseRdFrameMessage(frame: ArrayBuffer | Uint8Array | number[]):
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     return { kind: "nativePresented", width: view.getUint32(1, true), height: view.getUint32(5, true) };
   }
+  if (kind === RD_FRAME_KIND_META) {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
+    if (!parsed || typeof parsed !== "object") throw new Error("remote desktop meta frame is not an object");
+    const r = parsed as Record<string, unknown>;
+    const rawDisplays = Array.isArray(r.displays) ? r.displays : [];
+    const displays: RdDisplayInfo[] = rawDisplays
+      .filter((d): d is Record<string, unknown> => Boolean(d && typeof d === "object"))
+      .map((d) => ({
+        index: typeof d.index === "number" ? d.index : 0,
+        name: typeof d.name === "string" ? d.name : "",
+        width: typeof d.width === "number" ? d.width : 0,
+        height: typeof d.height === "number" ? d.height : 0,
+        primary: d.primary === true,
+      }));
+    return {
+      kind: "meta",
+      meta: {
+        route: typeof r.route === "string" ? r.route : "relay",
+        hostName: typeof r.hostName === "string" ? r.hostName : "",
+        displays,
+        activeDisplay: typeof r.activeDisplay === "number" ? r.activeDisplay : 0,
+        supportsStreamOptions: r.supportsStreamOptions === true,
+        width: typeof r.width === "number" ? r.width : 0,
+        height: typeof r.height === "number" ? r.height : 0,
+        codec: typeof r.codec === "string" ? r.codec : null,
+        targetFps: typeof r.targetFps === "number" ? r.targetFps : 60,
+        scalePermille: typeof r.scalePermille === "number" ? r.scalePermille : 1000,
+        jpegQuality: typeof r.jpegQuality === "number" ? r.jpegQuality : 72,
+        maxPresentFps: typeof r.maxPresentFps === "number" ? r.maxPresentFps : 30,
+        fps: typeof r.fps === "number" ? r.fps : 0,
+        rttMs: typeof r.rttMs === "number" && Number.isFinite(r.rttMs) ? r.rttMs : null,
+        packetLossRatio:
+          typeof r.packetLossRatio === "number" && Number.isFinite(r.packetLossRatio)
+            ? r.packetLossRatio
+            : null,
+        clipboardAllowed: r.clipboardAllowed === true,
+        audioAvailable: r.audioAvailable === true,
+        audioMuted: r.audioMuted === true,
+      },
+    };
+  }
+  if (kind === RD_FRAME_KIND_AUDIO) {
+    if (bytes.byteLength < RD_AUDIO_HEADER_BYTES) {
+      throw new Error(`remote desktop audio frame is too short: ${bytes.byteLength}`);
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return {
+      kind: "audio",
+      sampleRate: view.getUint32(1, true),
+      channels: view.getUint16(5, true),
+      pcm: bytes.subarray(RD_AUDIO_HEADER_BYTES),
+    };
+  }
+  if (kind === RD_FRAME_KIND_CLIPBOARD) {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
+    if (!parsed || typeof parsed !== "object") throw new Error("remote desktop clipboard frame is not an object");
+    const record = parsed as { text?: unknown };
+    if (typeof record.text !== "string") throw new Error("remote desktop clipboard frame missing text");
+    return { kind: "clipboard", text: record.text };
+  }
   throw new Error(`unknown remote desktop frame kind: ${String(kind)}`);
 }
 
 export type FramePoint = { x: number; y: number };
+export type RdFitMode = "fit" | "actual";
 
 /**
- * Maps a client point to normalized 0..1 coordinates of a frame drawn aspect-fit (centered,
- * letterboxed) inside `rect`. Points in the letterbox bars return null.
+ * Maps a client point to normalized 0..1 coordinates of a frame drawn either aspect-fit
+ * (centered, letterboxed) or 1:1 actual size inside `rect`. Points outside return null.
  */
 export function mapClientPointToFrame(
   clientX: number,
@@ -226,8 +401,15 @@ export function mapClientPointToFrame(
   rect: { left: number; top: number; width: number; height: number },
   frameWidth: number,
   frameHeight: number,
+  fitMode: RdFitMode = "fit",
 ): FramePoint | null {
   if (rect.width <= 0 || rect.height <= 0 || frameWidth <= 0 || frameHeight <= 0) return null;
+  if (fitMode === "actual") {
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    return { x, y };
+  }
   const scale = Math.min(rect.width / frameWidth, rect.height / frameHeight);
   const drawnWidth = frameWidth * scale;
   const drawnHeight = frameHeight * scale;
@@ -354,6 +536,26 @@ export function rdInput(rdSessionId: string, events: RdInputEvent[]): Promise<vo
   return rdInvoke<void>("cmd_rd_input", { rdSessionId, events });
 }
 
+export function rdSpecialKey(rdSessionId: string, action: RdSpecialKeyAction): Promise<void> {
+  return rdInvoke<void>("cmd_rd_special_key", { rdSessionId, action });
+}
+
+export function rdSetStreamOptions(rdSessionId: string, options: RdStreamOptions): Promise<RdSessionMeta> {
+  return rdInvoke<RdSessionMeta>("cmd_rd_set_stream_options", { rdSessionId, options });
+}
+
+export function rdSendClipboard(rdSessionId: string, text: string): Promise<void> {
+  return rdInvoke<void>("cmd_rd_send_clipboard", { rdSessionId, text });
+}
+
+export function rdSetAudioMuted(rdSessionId: string, muted: boolean): Promise<boolean> {
+  return rdInvoke<boolean>("cmd_rd_set_audio_muted", { rdSessionId, muted });
+}
+
+export function rdRequestKeyframe(rdSessionId: string): Promise<void> {
+  return rdInvoke<void>("cmd_rd_request_keyframe", { rdSessionId });
+}
+
 export function rdDisconnect(rdSessionId: string): Promise<void> {
   return rdInvoke<void>("cmd_rd_disconnect", { rdSessionId });
 }
@@ -453,4 +655,101 @@ export class RdInputSender {
         this.pump();
       });
   }
+}
+
+/**
+ * Lightweight cross-platform Web Audio player for decoded 48kHz stereo f32 LE PCM chunks.
+ * Safe no-op in environments without AudioContext (e.g. jsdom tests).
+ */
+export class RdAudioPlayer {
+  private ctx: AudioContext | null = null;
+  private gain: GainNode | null = null;
+  private nextTime = 0;
+  private muted = false;
+  private closed = false;
+
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    if (this.gain && this.ctx) {
+      this.gain.gain.setValueAtTime(muted ? 0 : 1, this.ctx.currentTime);
+    }
+    if (!muted) this.resume();
+  }
+
+  resume(): void {
+    if (this.closed || !this.ctx || this.ctx.state !== "suspended") return;
+    void this.ctx.resume().catch(() => undefined);
+  }
+
+  push(frame: RdAudioFrame): void {
+    if (this.closed || this.muted || frame.channels === 0 || frame.sampleRate === 0) return;
+    const bytesPerFrame = frame.channels * 4;
+    const sampleFrames = Math.floor(frame.pcm.byteLength / bytesPerFrame);
+    if (sampleFrames <= 0) return;
+    const AudioCtx =
+      typeof globalThis !== "undefined"
+        ? (globalThis.AudioContext ?? (globalThis as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)
+        : undefined;
+    if (!AudioCtx) return;
+    if (!this.ctx) {
+      try {
+        this.ctx = new AudioCtx({ sampleRate: frame.sampleRate });
+        this.gain = this.ctx.createGain();
+        this.gain.gain.value = this.muted ? 0 : 1;
+        this.gain.connect(this.ctx.destination);
+      } catch {
+        return;
+      }
+    }
+    if (this.ctx.state === "suspended") {
+      void this.ctx.resume().catch(() => undefined);
+    }
+    const buffer = this.ctx.createBuffer(frame.channels, sampleFrames, frame.sampleRate);
+    const view = new DataView(frame.pcm.buffer, frame.pcm.byteOffset, sampleFrames * bytesPerFrame);
+    for (let ch = 0; ch < frame.channels; ch += 1) {
+      const channelData = buffer.getChannelData(ch);
+      for (let i = 0; i < sampleFrames; i += 1) {
+        channelData[i] = view.getFloat32((i * frame.channels + ch) * 4, true);
+      }
+    }
+    const source = this.ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.gain ?? this.ctx.destination);
+    const now = this.ctx.currentTime;
+    if (this.nextTime < now || this.nextTime > now + 0.18) {
+      this.nextTime = now + 0.02;
+    }
+    source.start(this.nextTime);
+    this.nextTime += buffer.duration;
+  }
+
+  close(): void {
+    this.closed = true;
+    const ctx = this.ctx;
+    this.ctx = null;
+    this.gain = null;
+    this.nextTime = 0;
+    if (ctx) {
+      void ctx.close().catch(() => undefined);
+    }
+  }
+}
+
+type CapturedShortcutHandler = (action: RdSpecialKeyAction) => boolean;
+const shortcutCaptureHandlers = new Set<CapturedShortcutHandler>();
+
+/** Registers an active RemoteDesktopPane handler for native menu shortcuts (e.g. macOS Cmd+W). */
+export function registerRemoteDesktopShortcutCapture(handler: CapturedShortcutHandler): () => void {
+  shortcutCaptureHandlers.add(handler);
+  return () => {
+    shortcutCaptureHandlers.delete(handler);
+  };
+}
+
+/** Forwards a native menu shortcut to a focused RemoteDesktopPane with shortcut capture enabled. */
+export function forwardCapturedRemoteDesktopShortcut(action: RdSpecialKeyAction): boolean {
+  for (const handler of shortcutCaptureHandlers) {
+    if (handler(action)) return true;
+  }
+  return false;
 }

@@ -59,6 +59,12 @@ export interface UseSshTunnelsResult extends TunnelSnapshot {
   /** Forward a port now: an ad-hoc start the daemon mints an id for. */
   startAdHoc: (hostId: string, spec: AdHocTunnelSpec) => Promise<void>;
   stop: (row: TunnelRow) => Promise<void>;
+  /**
+   * Hide a stopped row for the rest of the session: the local retired history drops it and a
+   * later `refresh()` never resurrects it. Nothing is deleted from the daemon or the host
+   * store — the row simply stops being reported as a stopped tunnel.
+   */
+  dismissStopped: (row: TunnelRow) => void;
 }
 
 const EMPTY: TunnelSnapshot = {
@@ -81,6 +87,11 @@ export function useSshTunnels(options: UseSshTunnelsOptions = {}): UseSshTunnels
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
 
+  // Keys whose stopped row was dismissed or superseded on purpose: the next `refresh()` must
+  // not resurrect them. The ref is what the async read consults; the snapshot carries the
+  // visible half so the row leaves the list on the same render.
+  const dismissedKeysRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     clockRef.current = clock;
   });
@@ -93,7 +104,7 @@ export function useSshTunnels(options: UseSshTunnelsOptions = {}): UseSshTunnels
     try {
       const list = normalizeList(await listTunnels());
       if (!mountedRef.current) return;
-      const retired = retireMissingViews(list, snapshotRef.current);
+      const retired = retireMissingViews(list, snapshotRef.current, dismissedKeysRef.current);
       setSnapshot({
         list,
         retired,
@@ -137,6 +148,23 @@ export function useSshTunnels(options: UseSshTunnelsOptions = {}): UseSshTunnels
     [],
   );
 
+  const forgetRetired = useCallback((key: string) => {
+    dismissedKeysRef.current.add(key);
+    setSnapshot((prev) =>
+      prev.retired.some((view) => viewKey(view) === key)
+        ? { ...prev, retired: prev.retired.filter((view) => viewKey(view) !== key) }
+        : prev,
+    );
+  }, []);
+
+  const dismissStopped = useCallback((row: TunnelRow) => {
+    if (row.state !== "stopped" || row.saved) return;
+    // Only a row the local history invented can be dismissed. A stopped row the daemon itself
+    // reported has no local entry to forget, and hiding it would contradict the list it came from.
+    if (!snapshotRef.current.retired.some((view) => viewKey(view) === row.key)) return;
+    forgetRetired(row.key);
+  }, [forgetRetired]);
+
   // Every mutation the panel performs re-reads the list; it never patches a row locally.
   const startSaved = useCallback(async (row: TunnelRow) => {
     const hostRevision = hostRevisionFor(row.hostId);
@@ -146,10 +174,14 @@ export function useSshTunnels(options: UseSshTunnelsOptions = {}): UseSshTunnels
       } else {
         await startTunnel({ hostId: row.hostId, spec: adHocSpecFromRow(row), hostRevision });
       }
+      // Only an accepted restart supersedes the old view: the ad-hoc start mints a fresh spec
+      // id, so the previous one can only return as a stopped row beside the new runtime. A
+      // refused start keeps it, so the operator still has the row to act on again.
+      if (!row.saved) forgetRetired(row.key);
     } finally {
       await refresh();
     }
-  }, [hostRevisionFor, refresh]);
+  }, [forgetRetired, hostRevisionFor, refresh]);
 
   const startAdHoc = useCallback(async (hostId: string, spec: AdHocTunnelSpec) => {
     const hostRevision = hostRevisionFor(hostId);
@@ -169,7 +201,7 @@ export function useSshTunnels(options: UseSshTunnelsOptions = {}): UseSshTunnels
     }
   }, [refresh]);
 
-  return { ...snapshot, refresh, startSaved, startAdHoc, stop };
+  return { ...snapshot, refresh, startSaved, startAdHoc, stop, dismissStopped };
 }
 
 /** The injected clock when a test supplies one, the wall clock otherwise. */
@@ -180,9 +212,14 @@ function now(clock?: () => number): number {
 /**
  * The retired set for the next snapshot: a view the newest response no longer reports was live
  * once, so it renders as `stopped` with its last known ports instead of vanishing. A row that
- * comes back in a later response leaves the retired set, because the response is canonical.
+ * comes back in a later response leaves the retired set, because the response is canonical;
+ * a key the operator dismissed never enters it at all.
  */
-function retireMissingViews(next: TunnelListResponse, previous: TunnelSnapshot): TunnelView[] {
+function retireMissingViews(
+  next: TunnelListResponse,
+  previous: TunnelSnapshot,
+  dismissed: ReadonlySet<string>,
+): TunnelView[] {
   const liveKeys = new Set(next.views.map(viewKey));
   const liveRuntimeIds = new Set(
     next.views.map((view) => view.runtimeId).filter((id): id is string => id !== null),
@@ -190,9 +227,11 @@ function retireMissingViews(next: TunnelListResponse, previous: TunnelSnapshot):
   const candidates: TunnelView[] = [...previous.retired, ...(previous.list?.views ?? [])];
   const retired = new Map<string, TunnelView>();
   for (const view of candidates) {
-    if (liveKeys.has(viewKey(view))) continue;
+    const key = viewKey(view);
+    if (dismissed.has(key)) continue;
+    if (liveKeys.has(key)) continue;
     if (view.runtimeId !== null && liveRuntimeIds.has(view.runtimeId)) continue;
-    retired.set(viewKey(view), view);
+    retired.set(key, view);
   }
   return [...retired.values()];
 }
@@ -215,11 +254,15 @@ function normalizeList(raw: unknown): TunnelListResponse {
 /**
  * The ad-hoc payload for restoring a runtime the daemon never saved. `id` is omitted on purpose:
  * the daemon mints one per runtime, so sending the minted id back would look like a saved spec.
+ *
+ * The port is the one the runtime reported: an explicit port stays stable across a restart.
+ * `0` is not a legal wire value (`validate_spec` rejects it), so an absent port — never `0` —
+ * is how a restart asks the daemon to allocate one.
  */
 function adHocSpecFromRow(row: TunnelRow): AdHocTunnelSpec {
   return {
     label: row.label,
-    localPort: row.localPort,
+    localPort: row.localPort > 0 ? row.localPort : undefined,
     remoteHost: row.remoteHost,
     remotePort: row.remotePort,
     enabled: true,

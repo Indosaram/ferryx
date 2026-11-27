@@ -4,15 +4,13 @@ import { useAccountWorktrees } from "./useAccountWorktrees";
 import type { AccountMachineView, AccountGrantResponse, PairExchangeResponse, AllocateSessionResponse } from "./accountSession";
 import type { TunnelResponse } from "./attachTunnel";
 
-vi.mock("./accountSession", () => ({
+vi.mock("./accountSession", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./accountSession")>(),
   listMachines: vi.fn(),
   allocateSession: vi.fn(),
   openTunnel: vi.fn(),
   redeemInTunnel: vi.fn(),
   requestGrant: vi.fn(),
-  AccountSessionError: class extends Error {
-    code?: string;
-  },
 }));
 
 vi.mock("./accountAttach", () => ({
@@ -377,6 +375,39 @@ describe("useAccountWorktrees machine projects discovery", () => {
   };
   const sshJson = (value: unknown): TunnelResponse => ({ status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify(value)) });
   const SSH_ID = "ssh:f41f0c2a";
+
+  it("transfers tunnel ownership when detailed acquisition succeeds", async () => {
+    // Given a ready machine with a pooled discovery tunnel.
+    const machine = sshMachine("detailed-ownership");
+    mockPairing(machine);
+    const close = vi.fn();
+    const discovered = new Promise<void>((resolve) => {
+      vi.mocked(openTunnel).mockResolvedValue({
+        transport: {
+          fetchLike: vi.fn(async (path: string) => {
+            if (path === "/api/v1/sessions") {
+              resolve();
+              return sshJson({ revision: "1", completeness: "complete", sessions: [] });
+            }
+            return sshJson({ projects: [] });
+          }),
+          openWebSocket: vi.fn(), close,
+        },
+        close,
+      });
+    });
+    const { result, unmount } = renderHook(() => useAccountWorktrees(relayUrl, sessionToken, true));
+    await act(async () => { await discovered; });
+
+    // When detailed acquisition transfers the tunnel to its caller.
+    const outcome = await result.current.acquireConnectionDetailed(machine.machineId);
+    unmount();
+
+    // Then hook cleanup cannot close the caller's active connection.
+    expect(outcome).toMatchObject({ ok: true, connection: { machine, deviceToken: "token", close } });
+    expect(close).not.toHaveBeenCalled();
+    expect(openTunnel).toHaveBeenCalledTimes(1);
+  });
 
   it("lists SSH-host projects from workspace state and keeps their running sessions", async () => {
     const machine = sshMachine("ssh-desktop");

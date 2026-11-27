@@ -51,6 +51,14 @@ function formatUnixSeconds(seconds: number): string {
   return new Date(seconds * 1000).toLocaleString();
 }
 
+/** Remaining lifetime as `Nm SSs`, for the live countdown beside the absolute deadline. */
+function formatRemaining(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
 export type MachineApprovalOutcome = "approved" | "denied";
 
 export interface MachineApprovalCardProps {
@@ -76,8 +84,15 @@ export function MachineApprovalCard({ request, onApprove, onDeny, onDecided, aut
   const [busy, setBusy] = useState<MachineApprovalOutcome | null>(null);
   const [outcome, setOutcome] = useState<MachineApprovalOutcome | null>(null);
   const [error, setError] = useState<{ code: string | null; message: string } | null>(null);
+  const [nowMs, setNowMs] = useState(() => now());
+  // The clock is only read inside the ticker, so keep it in a ref: a caller passing an inline
+  // closure must not re-subscribe the interval on every render.
+  const nowRef = useRef(now);
+  nowRef.current = now;
   const denyRef = useRef<HTMLButtonElement>(null);
   const mountedRef = useRef(true);
+
+  const expired = request.expiresAt * 1000 <= nowMs;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -88,7 +103,18 @@ export function MachineApprovalCard({ request, onApprove, onDeny, onDecided, aut
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const expired = request.expiresAt * 1000 <= now();
+  // Requests outlive the card, so a static read of the clock would keep showing a live deadline
+  // forever. Tick once a second and stop the moment the request expires (or on unmount).
+  useEffect(() => {
+    if (request.expiresAt * 1000 <= nowRef.current()) return;
+    const timer = setInterval(() => {
+      const current = nowRef.current();
+      setNowMs(current);
+      if (request.expiresAt * 1000 <= current) clearInterval(timer);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [request.expiresAt]);
+
   const finalError = error?.code ? FINAL_ERROR_CODES.has(error.code) : false;
   const locked = busy !== null || outcome !== null || finalError;
 
@@ -133,8 +159,13 @@ export function MachineApprovalCard({ request, onApprove, onDeny, onDecided, aut
         <dt className="text-muted-foreground">App version</dt>
         <dd data-testid="approval-version" className="break-words text-foreground">{request.appVersion || "unknown"}</dd>
         <dt className="text-muted-foreground">Expires</dt>
-        <dd data-testid="approval-expiry" className="text-foreground">
-          {expired ? "Expired" : formatUnixSeconds(request.expiresAt)}
+        <dd
+          data-testid="approval-expiry"
+          data-expired={expired ? "true" : "false"}
+          data-remaining-seconds={Math.max(0, Math.ceil((request.expiresAt * 1000 - nowMs) / 1000))}
+          className="text-foreground"
+        >
+          {expired ? "Expired" : `${formatUnixSeconds(request.expiresAt)} (in ${formatRemaining(request.expiresAt * 1000 - nowMs)})`}
         </dd>
       </dl>
 

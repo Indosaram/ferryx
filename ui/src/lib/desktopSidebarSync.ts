@@ -106,6 +106,7 @@ export type DesktopSidebarInput = {
   readonly laneLifecycles?: Readonly<Record<string, SidebarLaneLifecycle>>;
   /** The live-only signals the Sidebar receives; published so the remote shows the same rows. */
   readonly activityByWorktreePath: Readonly<Record<string, ActivitySummary | undefined>>;
+  readonly activityByWorktreeKey?: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
   readonly agents: readonly ActiveAgent[];
 };
@@ -142,17 +143,18 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- persistenceVersion invalidates the storage reads inside
   }, [projects, activeProjectId, emptyKey, persistenceVersion, laneOrder, laneLifecycles]);
   const built = useSidebarModel({ projects, activeProjectId, worktrees, inactiveProjectWorktrees }, persisted).model;
-  const { activityByWorktreePath, unreadWorktreePaths, agents } = input;
+  const { activityByWorktreePath, activityByWorktreeKey, unreadWorktreePaths, agents } = input;
   const model = useMemo(() => enabled
     ? {
         ...built,
         signals: sidebarSessionSignals(built, {
           activityByWorktreePath,
+          activityByWorktreeKey,
           unreadWorktreePaths,
           agentStateByPath: agentStatesByPath(agents.map((agent) => [agent.worktreePath, agent] as const)),
         }),
       }
-    : null, [activityByWorktreePath, agents, built, enabled, unreadWorktreePaths]);
+    : null, [activityByWorktreeKey, activityByWorktreePath, agents, built, enabled, unreadWorktreePaths]);
 
   const modelRef = useRef(model);
   modelRef.current = model;

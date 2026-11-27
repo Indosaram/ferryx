@@ -634,12 +634,75 @@ pub use lifecycle::*;
 /// Capability name a host advertises once it serves the workspace layout document.
 pub const LAYOUT_SYNC_CAPABILITY: &str = "layoutSyncV1";
 
+/// Longest worktree key a layout document may be bucketed under.
+const MAX_SHARED_WORKTREE_KEY_BYTES: usize = 4 + 128;
+/// Longest workspace-relative path a `file` leaf may carry.
+const MAX_SHARED_FILE_REL_PATH_BYTES: usize = 512;
+/// Leaf kinds the shared document may name.
+const SHARED_PANE_KINDS: [&str; 6] = ["terminal", "browser", "file", "changes", "dag", "remoteDesktop"];
+
+/// Whether `key` names a worktree bucket the shared layout may be scoped to.
+///
+/// Exactly three forms are accepted: the bare `main`, `wt:<slug>` with a `[A-Za-z0-9._-]{1,128}`
+/// slug, and `ext:<hex>` with a `[0-9a-f]{16,64}` id. The single `:` after the prefix is the only
+/// colon a key may carry, so drive letters, absolute paths, `..`, whitespace and empty suffixes
+/// are all refused.
+pub fn validate_shared_worktree_key(key: &str) -> bool {
+    if key == "main" {
+        return true;
+    }
+    if key.len() > MAX_SHARED_WORKTREE_KEY_BYTES {
+        return false;
+    }
+    if let Some(slug) = key.strip_prefix("wt:") {
+        return !slug.is_empty()
+            && slug.len() <= 128
+            && !slug.contains("..")
+            && slug
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'));
+    }
+    if let Some(id) = key.strip_prefix("ext:") {
+        return (16..=64).contains(&id.len())
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    }
+    false
+}
+
+/// Whether `path` is a workspace-relative POSIX path a `file` leaf may show: non-empty, at most
+/// 512 bytes, no leading `/`, no `\`, no control character, no `..` segment and no drive prefix.
+pub fn validate_shared_file_rel_path(path: &str) -> bool {
+    if path.is_empty()
+        || path.len() > MAX_SHARED_FILE_REL_PATH_BYTES
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|segment| segment == "..")
+    {
+        return false;
+    }
+    let mut chars = path.chars();
+    !matches!((chars.next(), chars.next()), (Some(letter), Some(':')) if letter.is_ascii_alphabetic())
+}
+
+/// Whether a leaf's declared `pane_kind` is one this contract knows.
+pub fn validate_shared_pane_kind(kind: &str) -> bool {
+    SHARED_PANE_KINDS.contains(&kind)
+}
+
 /// One workspace's layout document: tabs and pane structure only, never view state
-/// (no active tab, focus, scroll or split mode). `workspace_id` is the HOST workspace id.
+/// (no active tab, focus, scroll or split mode). `workspace_id` is the HOST workspace id and
+/// `worktree_key` scopes the document to one worktree of that workspace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedLayout {
     pub workspace_id: String,
+    /// `main`, `wt:<slug>` or `ext:<hex>`; absent is the workspace-level document legacy clients
+    /// publish and read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_key: Option<String>,
     pub revision: u64,
     pub tabs: Vec<SharedTab>,
 }
@@ -647,8 +710,14 @@ pub struct SharedLayout {
 impl SharedLayout {
     /// The document a workspace that has never published reads as.
     pub fn empty(workspace_id: &str) -> Self {
+        Self::empty_for(workspace_id, None)
+    }
+
+    /// The same empty document scoped to one worktree of the workspace.
+    pub fn empty_for(workspace_id: &str, worktree_key: Option<&str>) -> Self {
         Self {
             workspace_id: workspace_id.to_owned(),
+            worktree_key: worktree_key.map(str::to_owned),
             revision: 0,
             tabs: Vec::new(),
         }
@@ -667,12 +736,33 @@ pub struct SharedTab {
 }
 
 /// A pane tree node. Field names and the split shape mirror the desktop's `PaneNode`.
+///
+/// A leaf's metadata is additive and optional: a legacy `layoutSyncV1` client publishes only
+/// `leafId` and `backendSessionId`, and a terminal leaf keeps publishing exactly those.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SharedPane {
     Leaf {
         leaf_id: String,
+        /// Empty for a leaf that owns no backend session (browser, file, changes, DAG, remote
+        /// desktop), so an older reader never sees a missing field.
+        #[serde(default)]
         backend_session_id: String,
+        /// `terminal`, `browser`, `file`, `changes`, `dag` or `remoteDesktop`; absent reads as a
+        /// terminal, which is what a legacy client publishes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        browser_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        /// Workspace-relative POSIX path a `file` leaf shows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_rel_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dag_run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_id: Option<String>,
     },
     Split {
         direction: SharedPaneDirection,
@@ -689,12 +779,32 @@ pub enum SharedPaneDirection {
     Vertical,
 }
 
+impl SharedPane {
+    /// A terminal leaf carrying no metadata: the shape every legacy publisher writes.
+    pub fn leaf(leaf_id: impl Into<String>, backend_session_id: impl Into<String>) -> Self {
+        Self::Leaf {
+            leaf_id: leaf_id.into(),
+            backend_session_id: backend_session_id.into(),
+            pane_kind: None,
+            browser_id: None,
+            url: None,
+            file_rel_path: None,
+            dag_run_id: None,
+            host_id: None,
+        }
+    }
+}
+
 /// `PUT /api/v1/workspace/layout` body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutPutRequest {
     #[serde(deserialize_with = "required")]
     pub workspace_id: String,
+    /// Which worktree of the workspace the document belongs to; absent is the workspace-level
+    /// document legacy clients write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_key: Option<String>,
     pub base_revision: u64,
     pub tabs: Vec<SharedTab>,
 }

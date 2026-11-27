@@ -228,6 +228,26 @@ describe("SSH reconnect after daemon exit", () => {
     expect(screen.getByRole("button", { name: "Reconnect SSH" })).toBeEnabled();
   });
 
+  it.each([
+    ["expired", { remoteConnectionState: "expired" }],
+    ["legacyLost", { remoteConnectionState: "legacyLost" }],
+    ["reconnecting", { remoteConnectionState: "reconnecting" }],
+    ["disconnected", { remoteConnectionState: "disconnected" }],
+  ] as const)("offers an Open new shell escape from the %s SSH overlay", async (_state, overrides) => {
+    // Given: an SSH pane stuck in a remote state whose own reconnect may never settle.
+    const session: TerminalSession = { ...connectedWorkspace().sessions.pane, ...overrides };
+    const onOpenNewShell = vi.fn().mockResolvedValue(undefined);
+    render(<TerminalPane session={session} active onReconnect={vi.fn()} onOpenNewShell={onOpenNewShell} />);
+
+    // When: the user takes the escape.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Open new shell" }));
+    });
+
+    // Then: a replacement shell is requested for this pane.
+    expect(onOpenNewShell).toHaveBeenCalledExactlyOnceWith("pane");
+  });
+
   it("still rejects replacing a local agent with a fresh shell", async () => {
     const session: TerminalSession = {
       ...connectedWorkspace().sessions.pane,

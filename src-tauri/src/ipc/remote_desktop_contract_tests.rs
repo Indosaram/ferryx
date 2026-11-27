@@ -196,6 +196,7 @@ impl Harness {
                     service: PairedHostService::open(dir.path().join("client")),
                     host_id: host_id.clone(),
                     generation: crate::scoped_contracts::Epoch(0),
+                    on_route: None,
                 }, stopped, Some(Arc::clone(&shared.telemetry))));
                 (quic, peer, reader, server, bridge, bridge_stop, tcp_port, udp_port)
             }).await.expect("bounded gateway setup")
@@ -214,7 +215,8 @@ impl Harness {
         let (done, viewer_done) = mpsc::channel();
         let viewer_config = viewer::ViewerConfig {
             session: session.clone(), pairing, loopback_tcp: tcp_port, loopback_udp: udp_port,
-            frames: channel, stop: Arc::clone(&viewer_stop),
+            runtime: Arc::new(viewer::ViewerRuntime::new("direct", channel, shared.clone())),
+            stop: Arc::clone(&viewer_stop),
             on_exit: Box::new(move || { done.send(()).unwrap(); }),
         };
         let viewer_thread = std::thread::spawn({
@@ -247,7 +249,14 @@ impl Harness {
                     let status: serde_json::Value = serde_json::from_slice(&bytes[1..]).unwrap();
                     assert_ne!(status["state"], "ended", "{status}");
                 }
-                wire::FRAME_KIND_CURSOR | wire::FRAME_KIND_NATIVE_PRESENTED => {}
+                // Meta, audio and clipboard messages ride the same channel; this
+                // fixture's host sends no clipboard traffic, and the audio frames are the
+                // headless fallback the assertions above account for.
+                wire::FRAME_KIND_CURSOR
+                | wire::FRAME_KIND_NATIVE_PRESENTED
+                | wire::FRAME_KIND_META
+                | wire::FRAME_KIND_AUDIO
+                | wire::FRAME_KIND_CLIPBOARD => {}
                 other => panic!("unexpected viewer message {other}"),
             }
             // Each channel delivery is an actual pipeline event, not a polling timer.

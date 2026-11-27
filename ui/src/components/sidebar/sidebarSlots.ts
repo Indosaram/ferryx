@@ -137,16 +137,28 @@ export function projectAttentionState(activity: ActivitySummary): AttentionState
 }
 
 const isPairedRow = (worktree: Pick<Worktree, "workspaceId">) => Boolean(worktree.workspaceId?.startsWith("daemon:"));
+const scopedRowKey = (worktree: Pick<Worktree, "path" | "workspaceId">) =>
+  worktree.workspaceId ? `${worktree.workspaceId}\0${worktree.path}` : null;
 
 export function summarizeProjectActivity(
   worktrees: readonly Pick<Worktree, "path" | "workspaceId">[],
   activityByWorktreePath: Readonly<Record<string, ActivitySummary | undefined>> | undefined,
   unreadWorktreePaths: Readonly<Record<string, boolean>> | undefined,
+  activityByWorktreeKey?: Readonly<Record<string, ActivitySummary | undefined>>,
+  unreadWorktreeKeys?: Readonly<Record<string, boolean>>,
 ): ActivitySummary {
   const summaries = worktrees
-    .map((worktree) => isPairedRow(worktree) ? undefined : activityByWorktreePath?.[worktree.path])
+    .map((worktree) => {
+      const key = scopedRowKey(worktree);
+      if (key && activityByWorktreeKey?.[key] !== undefined) return activityByWorktreeKey[key];
+      return isPairedRow(worktree) ? undefined : activityByWorktreePath?.[worktree.path];
+    })
     .filter((summary): summary is ActivitySummary => Boolean(summary));
-  const hasUnread = worktrees.some((worktree) => !isPairedRow(worktree) && Boolean(unreadWorktreePaths?.[worktree.path]));
+  const hasUnread = worktrees.some((worktree) => {
+    const key = scopedRowKey(worktree);
+    if (key && unreadWorktreeKeys?.[key] !== undefined) return Boolean(unreadWorktreeKeys[key]);
+    return !isPairedRow(worktree) && Boolean(unreadWorktreePaths?.[worktree.path]);
+  });
   return combineActivitySummaries(summaries, hasUnread);
 }
 

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
+  clearSshPassword,
   deleteSshHost,
   extractIpcErrorMessage,
   prepareSshIntegration,
@@ -14,12 +15,18 @@ import type { SshTestState } from "./MachineDrawer";
 import { sameConnection } from "./remoteModel";
 import { useHostTunnels, type HostTunnelsSource } from "./useHostTunnels";
 
+/** Outcome of a credential action, shown beside the button that ran it. */
+export interface SshPasswordFeedback {
+  tone: "success" | "error";
+  message: string;
+}
+
 /** SSH machine state and actions of the Remote section, moved out of RemoteSection unchanged. */
 export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabilities, tunnelSectionOpen, tunnelSource }: {
   sshHosts: SshHost[];
   busy: boolean;
   setBusy: (busy: boolean) => void;
-  setActionError: (error: string | null) => void;
+  setActionError: (error: string | null, kind?: string | null) => void;
   /**
    * The capabilities the connected daemon advertises. `undefined` means "not known yet" and
    * is treated exactly like an absent `sshTunnelV1`: the tunnel section explains itself and
@@ -39,12 +46,22 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
   const [sshTestResults, setSshTestResults] = useState<Record<string, SshTestState>>({});
   const [sshPreparedHosts, setSshPreparedHosts] = useState<Record<string, boolean>>({});
   const [sshRemovalResults, setSshRemovalResults] = useState<Record<string, string>>({});
+  const [sshPasswordFeedback, setSshPasswordFeedback] = useState<Record<string, SshPasswordFeedback>>({});
   const [editingSshHost, setEditingSshHost] = useState<SshHost | null>(null);
   const [editFormData, setEditFormData] = useState<HostFormData | null>(null);
   const [editPassword, setEditPassword] = useState("");
   const [showAdvancedEditSsh, setShowAdvancedEditSsh] = useState(false);
 
   const [confirmDeleteSshId, setConfirmDeleteSshId] = useState<string | null>(null);
+
+  // Every request captures this counter when it starts. Opening another machine's drawer bumps
+  // it, so a response that belongs to the previous drawer can no longer write the shared
+  // `actionError` or the edit form — the user would otherwise see Machine A's failure in
+  // Machine B's drawer. Per-host results stay keyed by host id and are guarded by
+  // `isCurrentHost` instead, so they survive a drawer switch.
+  const operationRef = useRef(0);
+  const beginOperation = () => operationRef.current;
+  const isCurrentOperation = (operation: number) => operationRef.current === operation;
 
   // Saved tunnel definitions: the editor is the only reader, and it sends nothing while the
   // capability is absent (MH-10). The hook owns its own snapshot, never a host-store copy —
@@ -70,6 +87,25 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
 
   const isCurrentHost = (host: SshHost) =>
     hostsRef.current.some(cur => sameConnection(cur, host));
+
+  /**
+   * Drops everything the drawer was showing for the machine it just left. Called when the
+   * drawer closes or switches hosts; bumping the counter also orphans any request still in
+   * flight for the previous machine.
+   */
+  const resetTransientState = useCallback(() => {
+    // Bumping the counter orphans the previous drawer's requests; clearing `busy` releases the
+    // flag those requests would otherwise have cleared from their own `finally`. Without this,
+    // abandoning an action by closing or switching drawers leaves the next drawer's first
+    // action blocked behind a `busy` nobody will ever reset.
+    operationRef.current += 1;
+    setBusy(false);
+    setEditingSshHost(null);
+    setEditFormData(null);
+    setEditPassword("");
+    setShowAdvancedEditSsh(false);
+    setConfirmDeleteSshId(null);
+  }, [setBusy]);
 
   // SSH actions with stale async guard
   const handleTestSsh = async (host: SshHost) => {
@@ -105,6 +141,7 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
 
   const handlePrepareSsh = async (host: SshHost) => {
     if (busy) return;
+    const operation = beginOperation();
     setBusy(true);
     setActionError(null);
     try {
@@ -112,15 +149,16 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
       if (!isCurrentHost(host)) return;
       setSshPreparedHosts(prev => ({ ...prev, [host.id]: true }));
     } catch (err) {
-      if (!isCurrentHost(host)) return;
+      if (!isCurrentHost(host) || !isCurrentOperation(operation)) return;
       setActionError(extractIpcErrorMessage(err, "Agent integration preparation failed."));
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) setBusy(false);
     }
   };
 
   const handleRemoveSshIntegration = async (host: SshHost) => {
     if (busy) return;
+    const operation = beginOperation();
     setBusy(true);
     setActionError(null);
     try {
@@ -132,37 +170,74 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
         [host.id]: `Removed ${result.removed.length}, kept ${result.keptModified.length} modified`,
       }));
     } catch (err) {
-      if (!isCurrentHost(host)) return;
+      if (!isCurrentHost(host) || !isCurrentOperation(operation)) return;
       setActionError(extractIpcErrorMessage(err, "Agent integration removal failed."));
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) setBusy(false);
     }
   };
 
   const handleToggleDisableSsh = async (host: SshHost) => {
     if (busy) return;
+    const operation = beginOperation();
     setBusy(true);
     setActionError(null);
     try {
       await updateSshHost({ ...host, disabled: !host.disabled });
     } catch (err) {
+      if (!isCurrentOperation(operation)) return;
       setActionError(extractIpcErrorMessage(err, "Failed to update SSH machine."));
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) setBusy(false);
     }
   };
 
   const handleDeleteSsh = async (hostId: string) => {
     if (busy) return;
+    const operation = beginOperation();
     setBusy(true);
     setActionError(null);
     try {
       await deleteSshHost(hostId);
+      if (!isCurrentOperation(operation)) return;
       setConfirmDeleteSshId(null);
     } catch (err) {
+      if (!isCurrentOperation(operation)) return;
       setActionError(extractIpcErrorMessage(err, "Failed to delete SSH machine."));
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) setBusy(false);
+    }
+  };
+
+  /** Removes the stored password without touching the rest of the host or its saved project. */
+  const handleClearSshPassword = async (host: SshHost) => {
+    if (busy) return;
+    const operation = beginOperation();
+    setBusy(true);
+    setActionError(null);
+    setSshPasswordFeedback(prev => {
+      const next = { ...prev };
+      delete next[host.id];
+      return next;
+    });
+    try {
+      await clearSshPassword(host);
+      if (!isCurrentOperation(operation)) return;
+      setSshPasswordFeedback(prev => ({ ...prev, [host.id]: { tone: "success", message: "Saved password cleared." } }));
+      // The credential changed, so any earlier test result no longer describes this host.
+      setSshTestResults(prev => {
+        const next = { ...prev };
+        delete next[host.id];
+        return next;
+      });
+    } catch (err) {
+      if (!isCurrentOperation(operation)) return;
+      setSshPasswordFeedback(prev => ({
+        ...prev,
+        [host.id]: { tone: "error", message: extractIpcErrorMessage(err, "Failed to clear the saved password.") },
+      }));
+    } finally {
+      if (isCurrentOperation(operation)) setBusy(false);
     }
   };
 
@@ -195,7 +270,15 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
       setActionError("Port must be an integer between 1 and 65535.");
       return;
     }
+    const switchingToPassword = editFormData.authMethod === "password" && editingSshHost.authMethod !== "password";
+    const newPassword = editFormData.authMethod === "password" ? editPassword : "";
+    if (switchingToPassword && !newPassword) {
+      // Saving here would store a password host with no credential and leave the machine unusable.
+      setActionError("Enter the SSH password to switch this machine to password authentication.", "password-required");
+      return;
+    }
 
+    const operation = beginOperation();
     setBusy(true);
     setActionError(null);
 
@@ -212,30 +295,39 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
     };
 
     try {
-      if (updated.authMethod === "password" && editPassword) {
-        await setSshPassword(updated, editPassword);
-        const summary = await testSshConnection(updated);
+      if (newPassword) {
+        // Verify the new credential against the machine before anything is stored: a failed
+        // attempt must never replace the password that currently works.
+        const summary = await testSshConnection(updated, newPassword);
+        if (!isCurrentOperation(operation)) return;
         if (!summary.reachable) {
           setActionError(summary.lastError || "SSH authentication failed.");
           return;
         }
+        await updateSshHost(updated);
+        if (!isCurrentOperation(operation)) return;
+        await setSshPassword(updated, newPassword);
+        if (!isCurrentOperation(operation)) return;
+      } else {
+        await updateSshHost(updated);
+        if (!isCurrentOperation(operation)) return;
       }
-      await updateSshHost(updated);
       setEditPassword("");
       setEditingSshHost(null);
       setEditFormData(null);
     } catch (err) {
+      if (!isCurrentOperation(operation)) return;
       setActionError(extractIpcErrorMessage(err, "Failed to save SSH machine."));
     } finally {
-      setBusy(false);
+      if (isCurrentOperation(operation)) setBusy(false);
     }
   };
 
   return {
-    sshTestResults, setSshTestResults, sshPreparedHosts, sshRemovalResults,
+    sshTestResults, setSshTestResults, sshPreparedHosts, sshRemovalResults, sshPasswordFeedback,
     editingSshHost, setEditingSshHost, editFormData, setEditFormData, editPassword, setEditPassword,
     showAdvancedEditSsh, setShowAdvancedEditSsh, confirmDeleteSshId, setConfirmDeleteSshId,
     handleTestSsh, handlePrepareSsh, handleRemoveSshIntegration, handleToggleDisableSsh, handleDeleteSsh,
-    handleStartEditSsh, handleSaveEditSsh, tunnels,
+    handleStartEditSsh, handleSaveEditSsh, handleClearSshPassword, resetTransientState, tunnels,
   };
 }

@@ -15,9 +15,13 @@ vi.mock("./tauri", () => ({ bootTrace: vi.fn().mockResolvedValue(undefined) }));
 const entry = (hostId: string, generation: string, state: "checking" | "online" | "offline", checkedAtMs = 1) =>
   ({ hostId, generation, state, checkedAtMs, lastError: state === "offline" ? "unreachable" : null });
 
+let resetStore: (() => void) | undefined;
 async function load() {
+  resetStore?.();
   vi.resetModules();
-  return import("./pairedHostReachability");
+  const store = await import("./pairedHostReachability");
+  resetStore = store.resetPairedHostReachabilityForTests;
+  return store;
 }
 function fire(payload: unknown) {
   const handler = mocks.handlers.get("paired_host_reachability_changed");
@@ -34,9 +38,99 @@ beforeEach(() => {
     return () => mocks.handlers.delete(name);
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { resetStore?.(); vi.restoreAllMocks(); });
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => { throw new Error("uninitialized deferred"); };
+  let reject: (error: unknown) => void = () => { throw new Error("uninitialized deferred"); };
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 describe("pairedHostReachability store", () => {
+  it("retries transient lists with one listener and releases it exactly once", async () => {
+    // Given a daemon that becomes available after startup.
+    mocks.invoke.mockRejectedValueOnce({ code: "IO", message: "daemon unavailable" })
+      .mockResolvedValue({ supported: true, entries: [entry("a", "2", "online")] });
+    const dispose = vi.fn();
+    mocks.listen.mockResolvedValue(dispose);
+    const m = await load();
+    // When bootstrap is retried after failure.
+    await m.bootstrapPairedHostReachability();
+    await Promise.all([m.bootstrapPairedHostReachability(), m.bootstrapPairedHostReachability()]);
+    // Then list recovery does not replace subscription ownership.
+    expect(m.getPairedHostReachability("a").supported).toBe(true);
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(mocks.listen).toHaveBeenCalledTimes(1);
+    m.resetPairedHostReachabilityForTests();
+    m.resetPairedHostReachabilityForTests();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, "UNKNOWN_COMMAND", "UNSUPPORTED", "Command paired_host_reachability_list not found"] as const)(
+    "keeps explicit unsupported result %s terminal until a live event", async (failure) => {
+      // Given an older daemon.
+      if (failure === false) mocks.invoke.mockResolvedValue({ supported: false, entries: [] });
+      else mocks.invoke.mockRejectedValue(failure.includes(" ") ? failure : { code: failure });
+      const m = await load();
+      await m.bootstrapPairedHostReachability();
+      // When bootstrap repeats and a valid live event follows.
+      await m.bootstrapPairedHostReachability();
+      expect(m.getPairedHostReachability("a").supported).toBe(false);
+      fire(entry("a", "1", "online"));
+      // Then the event proves support without another list request.
+      expect(m.getPairedHostReachability("a").supported).toBe(true);
+      expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["unsupported", "failed"])("preserves event support against a stale %s list", async (outcome) => {
+    // Given an in-flight list.
+    const response = deferred<unknown>();
+    const called = deferred<void>();
+    mocks.invoke.mockImplementation(() => { called.resolve(); return response.promise; });
+    const m = await load();
+    const boot = m.bootstrapPairedHostReachability();
+    await called.promise;
+    // When a live event wins the race.
+    fire(entry("a", "4", "online"));
+    if (outcome === "unsupported") response.resolve({ supported: false, entries: [] });
+    else response.reject({ code: "IO" });
+    await boot;
+    // Then list fallback cannot downgrade live support.
+    expect(m.getPairedHostReachability("a")).toEqual({ supported: true, entry: entry("a", "4", "online") });
+  });
+
+  it("disposes a listener that resolves after reset and fences its old list", async () => {
+    // Given pending subscription registration.
+    const registration = deferred<() => void>();
+    const dispose = vi.fn();
+    mocks.listen.mockReturnValueOnce(registration.promise);
+    const m = await load();
+    const boot = m.bootstrapPairedHostReachability();
+    // When reset takes ownership before registration completes.
+    m.resetPairedHostReachabilityForTests();
+    registration.resolve(dispose);
+    await boot;
+    // Then the late subscription is released without listing.
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("retries subscription registration after a listener failure", async () => {
+    // Given a failed listener registration with a successful list.
+    mocks.listen.mockRejectedValueOnce({ code: "IO" });
+    mocks.invoke.mockResolvedValue({ supported: true, entries: [] });
+    const m = await load();
+    await m.bootstrapPairedHostReachability();
+    // When bootstrap retries registration.
+    await m.bootstrapPairedHostReachability();
+    fire(entry("a", "1", "online"));
+    // Then events reach the store through one successfully registered listener.
+    expect(mocks.listen).toHaveBeenCalledTimes(2);
+    expect(m.getPairedHostReachability("a").entry?.state).toBe("online");
+  });
+
   it("stores the initial list from one invoke", async () => {
     mocks.invoke.mockResolvedValue({ supported: true, entries: [entry("a", "3", "online"), entry("b", "1", "offline")] });
     const m = await load();

@@ -20,6 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 import {
   __resetRdSupportedForTests,
+  forwardCapturedRemoteDesktopShortcut,
   mapClientPointToFrame,
   parseRdFrameMessage,
   onRdDisplayRefreshChanged,
@@ -30,13 +31,19 @@ import {
   rdHostSet,
   RdInputSender,
   rdMouseButton,
+  rdRequestKeyframe,
+  rdSendClipboard,
   rdSetAudio,
+  rdSetAudioMuted,
   rdSetOptions,
+  rdSetStreamOptions,
+  rdSpecialKey,
   rdStats,
   rdSupported,
   rdSurfaceAttach,
   rdSurfaceDetach,
   rdSurfaceUpdateBounds,
+  registerRemoteDesktopShortcutCapture,
   wheelDeltaPixels,
   type RdFrameMessage,
   type RdInputEvent,
@@ -64,7 +71,7 @@ function statusFrame(json: string): Uint8Array {
 
 function cursorFrame(json: string): Uint8Array {
   const bytes = statusFrame(json);
-  bytes[0] = 0x03;
+  bytes[0] = 0x06;
   return bytes;
 }
 
@@ -125,7 +132,7 @@ describe("parseRdFrameMessage", () => {
   });
 
   it("decodes the 9-byte native-presented header in little endian, including offset views", () => {
-    const bytes = new Uint8Array([0x04, 0x80, 0x07, 0, 0, 0x38, 0x04, 0, 0]);
+    const bytes = new Uint8Array([0x07, 0x80, 0x07, 0, 0, 0x38, 0x04, 0, 0]);
     expect(parseRdFrameMessage(bytes)).toEqual({ kind: "nativePresented", width: 1920, height: 1080 });
     const padded = new Uint8Array(12);
     padded.set(bytes, 3);
@@ -134,13 +141,63 @@ describe("parseRdFrameMessage", () => {
 
   it.each([1, 2, 3, 4, 5, 6, 7, 8])("rejects a %i-byte native-presented frame", (length) => {
     const bytes = new Uint8Array(length);
-    bytes[0] = 0x04;
+    bytes[0] = 0x07;
     expect(() => parseRdFrameMessage(bytes)).toThrow(/too short/);
+  });
+
+  it("decodes meta, audio and clipboard frames", () => {
+    const metaPayload = new TextEncoder().encode(JSON.stringify({
+      route: "direct",
+      hostName: "Studio",
+      displays: [{ index: 0, name: "Main", width: 2560, height: 1440, primary: true }],
+      activeDisplay: 0,
+      supportsStreamOptions: true,
+      width: 2560,
+      height: 1440,
+      codec: "h264",
+      targetFps: 60,
+      scalePermille: 1000,
+      jpegQuality: 72,
+      maxPresentFps: 30,
+      fps: 30,
+      rttMs: 8.2,
+      packetLossRatio: 0,
+      clipboardAllowed: true,
+      audioAvailable: true,
+      audioMuted: false,
+    }));
+    const metaBytes = new Uint8Array(1 + metaPayload.length);
+    metaBytes[0] = 0x03;
+    metaBytes.set(metaPayload, 1);
+    expect(parseRdFrameMessage(metaBytes)).toEqual({
+      kind: "meta",
+      meta: expect.objectContaining({ route: "direct", hostName: "Studio", fps: 30, rttMs: 8.2 }),
+    });
+
+    const audioBytes = new Uint8Array(7 + 8);
+    const view = new DataView(audioBytes.buffer);
+    audioBytes[0] = 0x04;
+    view.setUint32(1, 48000, true);
+    view.setUint16(5, 2, true);
+    audioBytes.set([1, 2, 3, 4, 5, 6, 7, 8], 7);
+    expect(parseRdFrameMessage(audioBytes)).toEqual({
+      kind: "audio",
+      sampleRate: 48000,
+      channels: 2,
+      pcm: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
+    });
+
+    const clipPayload = new TextEncoder().encode(JSON.stringify({ text: "copied text" }));
+    const clipBytes = new Uint8Array(1 + clipPayload.length);
+    clipBytes[0] = 0x05;
+    clipBytes.set(clipPayload, 1);
+    expect(parseRdFrameMessage(clipBytes)).toEqual({ kind: "clipboard", text: "copied text" });
   });
 
   it("rejects malformed frames", () => {
     expect(() => parseRdFrameMessage(new Uint8Array())).toThrow();
     expect(() => parseRdFrameMessage(new Uint8Array([0x01, 1, 2]))).toThrow(/too short/);
+    expect(() => parseRdFrameMessage(new Uint8Array([0x04, 1, 2]))).toThrow(/too short/);
     expect(() => parseRdFrameMessage(statusFrame('{"state":"bogus"}'))).toThrow(/unknown remote desktop state/);
     expect(() => parseRdFrameMessage(new Uint8Array([0x09]))).toThrow(/unknown remote desktop frame kind/);
   });
@@ -166,6 +223,12 @@ describe("mapClientPointToFrame", () => {
     // 500x1000 drawn at 200x400, centered horizontally: left bar is 100px.
     expect(mapClientPointToFrame(250, 150, rect, 500, 1000)).toEqual({ x: 0.25, y: 0.25 });
     expect(mapClientPointToFrame(150, 150, rect, 500, 1000)).toBeNull();
+  });
+
+  it("maps 1:1 actual size coordinates without letterboxing", () => {
+    const actualRect = { left: 20, top: 40, width: 1600, height: 900 };
+    expect(mapClientPointToFrame(420, 490, actualRect, 1600, 900, "actual")).toEqual({ x: 0.25, y: 0.5 });
+    expect(mapClientPointToFrame(10, 490, actualRect, 1600, 900, "actual")).toBeNull();
   });
 });
 
@@ -328,5 +391,36 @@ describe("commands", () => {
     expect(invoke).toHaveBeenCalledWith("cmd_rd_host_set", { enabled: true, allowInput: false, allowClipboard: false });
     expect(rdErrorMessage({ code: "RD_HOST_DISABLED", message: "x" })).toMatch(/turned off/);
     expect(rdErrorMessage({ code: "OTHER", message: "raw message" })).toBe("raw message");
+  });
+
+  it("invokes special key, stream options, clipboard, audio mute and keyframe commands", async () => {
+    invoke.mockResolvedValue(undefined);
+    await rdSpecialKey("rd-1", "ctrlAltDel");
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_special_key", { rdSessionId: "rd-1", action: "ctrlAltDel" });
+
+    await rdSetStreamOptions("rd-1", { displayIndex: 1, scalePermille: 750, fps: 30, jpegQuality: 55 });
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_set_stream_options", {
+      rdSessionId: "rd-1",
+      options: { displayIndex: 1, scalePermille: 750, fps: 30, jpegQuality: 55 },
+    });
+
+    await rdSendClipboard("rd-1", "hello");
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_send_clipboard", { rdSessionId: "rd-1", text: "hello" });
+
+    await rdSetAudioMuted("rd-1", true);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_set_audio_muted", { rdSessionId: "rd-1", muted: true });
+
+    await rdRequestKeyframe("rd-1");
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_request_keyframe", { rdSessionId: "rd-1" });
+
+    const seen: string[] = [];
+    const dispose = registerRemoteDesktopShortcutCapture((action) => {
+      seen.push(action);
+      return true;
+    });
+    expect(forwardCapturedRemoteDesktopShortcut("cmdW")).toBe(true);
+    expect(seen).toEqual(["cmdW"]);
+    dispose();
+    expect(forwardCapturedRemoteDesktopShortcut("cmdW")).toBe(false);
   });
 });

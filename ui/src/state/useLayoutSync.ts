@@ -7,11 +7,14 @@ import {
 } from "../lib/pairedDaemonProject";
 import { layoutGet, layoutPut } from "../lib/tauri";
 import type { RegisteredProject, TerminalSession } from "../lib/types";
+import { isSameWorktreePath } from "../components/sidebar/sidebarSupervisor";
 import {
   applySharedLayout,
   createLayoutSyncLoop,
   toRevision,
   toSharedLayout,
+  wireWorktreeKey,
+  worktreeLayoutKey,
   type LayoutSyncTransport,
   type SharedLayout,
   type SharedTab,
@@ -52,17 +55,24 @@ function detachedSession(workspaceId: string, backendSessionId: string): Termina
   };
 }
 
-export function layoutSyncHostTransport(workspaceId: string): LayoutSyncTransport {
+export function layoutSyncHostTransport(workspaceId: string, worktreeKey?: string): LayoutSyncTransport {
   return {
     get: async (afterRevision) => {
-      const doc = await layoutGet(workspaceId, afterRevision);
-      return doc.workspaceId === workspaceId ? doc : null;
+      const doc = await layoutGet(workspaceId, afterRevision, worktreeKey);
+      if (doc.workspaceId !== workspaceId) return null;
+      // A legacy host answers the workspace-level document; anything else must be our bucket.
+      if (worktreeKey !== undefined && doc.worktreeKey !== undefined && doc.worktreeKey !== worktreeKey) return null;
+      return doc;
     },
-    put: (baseRevision, tabs) => layoutPut(workspaceId, baseRevision, tabs),
+    put: (baseRevision, tabs) => layoutPut(workspaceId, baseRevision, tabs, worktreeKey),
   };
 }
 
-function pairedTransport(adapter: PairedDaemonProjectAdapter, remoteWorkspaceId: string): LayoutSyncTransport {
+function pairedTransport(
+  adapter: PairedDaemonProjectAdapter,
+  remoteWorkspaceId: string,
+  worktreeKey?: string,
+): LayoutSyncTransport {
   const withNumberRevision = (layout: SharedLayout): SharedLayout => {
     const revision = toRevision(layout.revision);
     if (revision === null) throw new PairedOperationError("INVALID_RESPONSE");
@@ -73,11 +83,12 @@ function pairedTransport(adapter: PairedDaemonProjectAdapter, remoteWorkspaceId:
       const { layout } = await adapter.layoutGet(
         remoteWorkspaceId,
         afterRevision === null ? undefined : String(afterRevision),
+        worktreeKey,
       );
       return withNumberRevision(layout);
     },
     put: async (baseRevision, tabs) => {
-      const result = await adapter.layoutPut(remoteWorkspaceId, String(baseRevision), tabs);
+      const result = await adapter.layoutPut(remoteWorkspaceId, String(baseRevision), tabs, worktreeKey);
       return { layout: withNumberRevision(result.layout), conflict: result.conflict };
     },
   };
@@ -137,29 +148,56 @@ export function useLayoutSync({
   const isPaired = paired !== null;
   const remoteWorkspaceId = paired?.remoteWorkspaceId;
   const workspaceId = project.workspaceId;
+  // The document is scoped to one worktree: a managed worktree travels as its identity slug,
+  // the main checkout as `main`, an unmanaged external one as a digest. A raw path never does.
+  const activeWorktree = state.worktrees.find((worktree) => isSameWorktreePath(worktree.path, state.activeWorktreePath ?? ""));
+  const wireKey = wireWorktreeKey(activeWorktree, project.repoRoot);
+  const localWorktreePath = state.activeWorktreePath ?? activeWorktree?.path ?? null;
+  const wireKeyRef = useRef<string | undefined>(wireKey);
+  wireKeyRef.current = wireKey;
 
   useEffect(() => {
     if (!enabled) return;
     if (isPaired && (!adapter || !remoteWorkspaceId)) return;
     const transport = adapter && remoteWorkspaceId && isPaired
-      ? pairedTransport(adapter, remoteWorkspaceId)
-      : layoutSyncHostTransport(workspaceId);
+      ? pairedTransport(adapter, remoteWorkspaceId, wireKey)
+      : layoutSyncHostTransport(workspaceId, wireKey);
+    const readShared = (layout: WorkspaceState["layout"], sessions: WorkspaceState["sessions"]): SharedTab[] =>
+      toSharedLayout(layout, sessions, undefined, project.repoRoot);
+    // Every async continuation below runs after this effect may have been torn down by a
+    // workspace switch, a worktree switch or unmount; none of them may dispatch then.
+    let cancelled = false;
+    const stillCurrent = (): boolean => {
+      if (cancelled) return false;
+      if (stateRef.current.workspaceId !== undefined && stateRef.current.workspaceId !== workspaceId) return false;
+      return wireKeyRef.current === wireKey;
+    };
 
     /**
      * Fills in the host-side identity of panes that appeared from a document. The layout only
      * carries the backend session id, while attaching needs the daemon epoch and the working
      * directory, and both live on the host's session list.
+     *
+     * `synced` is the state the minting restore dispatched. React may not have committed it yet
+     * when the host answers, so `stateRef.current` can still be one state behind and know nothing
+     * about these sessions. Enrichment then builds on that dispatched state, so it patches the
+     * records the layout actually references and never rewrites the pre-sync layout.
      */
-    const enrichDetached = (mintedIds: string[]) => {
-      if (!adapter || !remoteWorkspaceId || mintedIds.length === 0) return;
+    const enrichDetached = (minted: Map<string, TerminalSession>, synced: WorkspaceState) => {
+      if (!adapter || !remoteWorkspaceId || minted.size === 0) return;
       void adapter.sessions(remoteWorkspaceId).then((listed) => {
+        if (cancelled) return;
         const rows = new Map(listed.sessions.map((row) => [row.target.sessionId, row]));
-        const current = stateRef.current;
+        const live = stateRef.current;
+        const committed = [...minted.keys()].every((id) => live.sessions[id] !== undefined);
+        const base: WorkspaceState = committed
+          ? live
+          : { ...live, layout: synced.layout, sessions: { ...synced.sessions, ...live.sessions }, worktreeLayouts: synced.worktreeLayouts };
         const patched: Record<string, TerminalSession> = {};
-        for (const id of mintedIds) {
-          const session = current.sessions[id];
-          const row = session?.backendSessionId ? rows.get(session.backendSessionId) : undefined;
-          if (!session || !row) continue;
+        for (const [id, mintedSession] of minted) {
+          const session = base.sessions[id] ?? mintedSession;
+          const row = session.backendSessionId ? rows.get(session.backendSessionId) : undefined;
+          if (!row) continue;
           const epoch = /^(0|[1-9][0-9]*)$/.test(row.target.daemonEpoch) ? row.target.daemonEpoch : null;
           patched[id] = {
             ...session,
@@ -174,15 +212,22 @@ export function useLayoutSync({
           };
         }
         if (Object.keys(patched).length === 0) return;
+        if (!stillCurrent()) return;
         dispatchRef.current({
           type: "RESTORE_WORKSPACE",
-          state: { ...current, sessions: { ...current.sessions, ...patched } },
+          state: { ...base, sessions: { ...base.sessions, ...patched } },
         });
-      }).catch((error) => errorRef.current?.(error));
+      }).catch((error) => {
+        if (cancelled) return;
+        errorRef.current?.(error);
+      });
     };
 
     const applyRemote = (doc: SharedLayout) => {
+      if (cancelled) return;
       const current = stateRef.current;
+      if (current.workspaceId !== undefined && current.workspaceId !== workspaceId) return;
+      if (wireKeyRef.current !== wireKey) return;
       const minted = new Map<string, TerminalSession>();
       const resolveSession = (backendSessionId: string) => {
         const known = findFrontendSessionId(current.sessions, backendSessionId);
@@ -191,44 +236,53 @@ export function useLayoutSync({
         minted.set(session.id, session);
         return session.id;
       };
-      const { layout } = applySharedLayout(current.layout, doc, resolveSession);
+      const { layout } = applySharedLayout(current.layout, doc, resolveSession, { workspaceRoot: project.repoRoot });
       const sessions = { ...current.sessions, ...Object.fromEntries(minted) };
+      // The document is bucketed per worktree, so the parked copy of this worktree keeps the
+      // synced layout too: switching away and back must not fall back to a stale tab set.
+      const worktreeLayouts = localWorktreePath
+        ? { ...(current.worktreeLayouts ?? {}), [worktreeLayoutKey(current.worktreeLayouts, localWorktreePath)]: layout }
+        : current.worktreeLayouts;
       // The baseline is what this layout publishes, so applying a document can never replay as
       // a local change (a server-side ratio clamp included) and echo straight back out.
-      const applied = JSON.stringify(toSharedLayout(layout, sessions));
+      const applied = JSON.stringify(readShared(layout, sessions));
       const unchanged = applied === snapshotRef.current;
       snapshotRef.current = applied;
       // A document that already matches the local layout is not a change: dispatching it would
       // replace every tab object on each poll.
       if (unchanged && minted.size === 0) return;
-      dispatchRef.current({ type: "RESTORE_WORKSPACE", state: { ...current, layout, sessions } });
-      if (minted.size > 0) enrichDetached([...minted.keys()]);
+      const next: WorkspaceState = { ...current, layout, sessions, worktreeLayouts };
+      dispatchRef.current({ type: "RESTORE_WORKSPACE", state: next });
+      if (minted.size > 0) enrichDetached(minted, next);
     };
 
     const loop = createLayoutSyncLoop({
       transport,
       isPaired,
-      readLocal: () => toSharedLayout(stateRef.current.layout, stateRef.current.sessions),
+      readLocal: () => readShared(stateRef.current.layout, stateRef.current.sessions),
       applyRemote,
-      onError: (error) => errorRef.current?.(error),
+      onError: (error) => {
+        if (!cancelled) errorRef.current?.(error);
+      },
       debounceMs,
     });
     loopRef.current = loop;
-    snapshotRef.current = JSON.stringify(toSharedLayout(stateRef.current.layout, stateRef.current.sessions));
+    snapshotRef.current = JSON.stringify(readShared(stateRef.current.layout, stateRef.current.sessions));
     void loop.start();
     return () => {
+      cancelled = true;
       loopRef.current = null;
       loop.stop();
     };
-  }, [adapter, debounceMs, enabled, isPaired, remoteWorkspaceId, workspaceId]);
+  }, [adapter, debounceMs, enabled, isPaired, project.repoRoot, remoteWorkspaceId, wireKey, workspaceId, localWorktreePath]);
 
   useEffect(() => {
     const loop = loopRef.current;
     if (!loop) return;
-    const shared: SharedTab[] = toSharedLayout(state.layout, state.sessions);
+    const shared: SharedTab[] = toSharedLayout(state.layout, state.sessions, undefined, project.repoRoot);
     const key = JSON.stringify(shared);
     if (key === snapshotRef.current) return;
     snapshotRef.current = key;
     loop.localChanged();
-  }, [state.layout, state.sessions]);
+  }, [state.layout, state.sessions, project.repoRoot]);
 }

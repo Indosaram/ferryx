@@ -2,6 +2,7 @@
 // and `panel.session` frames the panel renders. The badge and the desktop notifications count
 // from it; a session the daemon reports no attention for (an older peer) is absent here.
 import { getSupervisorPanel, onSupervisorPanelEvent } from "./tauri";
+import { subscribePairedHostReachability } from "./pairedHostReachability";
 import type { AttentionGroup, FleetSession, PanelEvent } from "./supervisorPanel/contract";
 
 export type DaemonAttention = {
@@ -21,6 +22,8 @@ const byBackendSessionId = new Map<string, DaemonAttention>();
 type AttentionListener = (changes: readonly AttentionChange[], baseline: boolean) => void;
 const listeners = new Set<AttentionListener>();
 let started: Promise<void> | null = null;
+let subscribedEvents = false;
+let stopReachabilityWatch: (() => void) | null = null;
 
 /** `<hostId>:<backendSessionId>` -> backend id; a relay host id (`https://.../host/<id>`) keeps its colons. */
 export function backendSessionIdOfRef(sessionRef: string): string | null {
@@ -38,6 +41,11 @@ export function backendSessionIdOfRef(sessionRef: string): string | null {
 
 export function getDaemonAttention(backendSessionId: string | undefined | null): DaemonAttention | undefined {
   return backendSessionId ? byBackendSessionId.get(backendSessionId) : undefined;
+}
+
+/** Snapshot of all backend sessions currently judged by the daemon (local and paired hosts). */
+export function listDaemonAttentions(): readonly (readonly [string, DaemonAttention])[] {
+  return [...byBackendSessionId.entries()];
 }
 
 export function subscribeDaemonAttention(listener: AttentionListener): () => void {
@@ -75,16 +83,36 @@ export function applyAttentionEvent(event: PanelEvent): AttentionChange[] {
   return event.type === "panel.session" ? applyDaemonSessions([event.session]) : [];
 }
 
+/** Reloads the panel snapshot so paired hosts that come online after boot populate attention. */
+export async function refreshDaemonAttentionFeed(baseline = false): Promise<void> {
+  try {
+    const snapshot = await getSupervisorPanel();
+    if (Array.isArray(snapshot.sessions)) applyDaemonSessions(snapshot.sessions, baseline);
+  } catch (error) {
+    console.warn("daemon attention refresh failed", error);
+  }
+}
+
 /** Loads the snapshot and follows `panel.session` frames, once per app. */
 export function startDaemonAttentionFeed(): Promise<void> {
   if (started) return started;
   started = (async () => {
     try {
       // Subscribe first so a frame racing the load is not lost; the load never replaces it.
-      await onSupervisorPanelEvent((event) => { applyAttentionEvent(event); });
+      if (!subscribedEvents) {
+        await onSupervisorPanelEvent((event) => { applyAttentionEvent(event); });
+        subscribedEvents = true;
+      }
+      if (!stopReachabilityWatch) {
+        stopReachabilityWatch = subscribePairedHostReachability(() => {
+          void refreshDaemonAttentionFeed(false);
+        });
+      }
       const snapshot = await getSupervisorPanel();
       if (Array.isArray(snapshot.sessions)) applyDaemonSessions(snapshot.sessions, true);
     } catch (error) {
+      // Allow a later retry if the daemon or paired inventory was not ready at startup.
+      started = null;
       // A build or peer without the supervisor panel: every pane keeps its own state mapping.
       console.warn("daemon attention feed unavailable", error);
     }
@@ -96,4 +124,7 @@ export function resetDaemonAttentionForTest(): void {
   byBackendSessionId.clear();
   listeners.clear();
   started = null;
+  subscribedEvents = false;
+  stopReachabilityWatch?.();
+  stopReachabilityWatch = null;
 }

@@ -1,14 +1,56 @@
 import React, { useState } from "react";
+import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
+import { normalizeAccountOrigin } from "./accountSession";
 import { suggestDeviceName } from "./deviceIdentity";
 import { userFacingError } from "./userFacingError";
 
 /** Path of the phone pairing entry; the desktop's QR code opens it. */
 export const PAIR_ROUTE_PATH = "/pair";
 
+/** The account API's health route; the same path `resolveAccountOrigin` probes. */
+export const ACCOUNT_ORIGIN_HEALTH_PATH = "/api/account/v1/health";
+
 export function isPairRoute(pathname: string): boolean {
   return pathname.replace(/\/+$/, "") === PAIR_ROUTE_PATH;
 }
+
+/** `?relay=1` marks a link the desktop generated for a relay; a direct gateway never adds it. */
+export function relayEntryRequested(search: string): boolean {
+  return new URLSearchParams(search).get("relay") === "1";
+}
+
+/** True only for the product relay origin: a desktop's own gateway origin is never the relay. */
+export function isDefaultRelayOrigin(origin: string): boolean {
+  return normalizeAccountOrigin(origin) === DEFAULT_RELAY_ORIGIN;
+}
+
+/**
+ * Positive relay classification of a page origin: a relay serves the account API and answers its
+ * health route with JSON. A 404 (the desktop gateway's SPA fallback), an HTML answer, or a network
+ * failure all mean "not a relay" - a transient probe failure must never reclassify the page.
+ */
+export async function servesAccountApi(origin: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${origin}${ACCOUNT_ORIGIN_HEALTH_PATH}`, { headers: { Accept: "application/json" } });
+    if (!res.ok) return false;
+    const contentType = (res.headers.get("content-type") ?? "").split(";")[0] ?? "";
+    return contentType.trim().toLowerCase() === "application/json";
+  } catch {
+    return false;
+  }
+}
+
+/** A 2xx exchange that answered without the host identity this origin needs to store a host. */
+export class PairingCompletionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PairingCompletionError";
+  }
+}
+
+export const RELAY_PAIRING_INCOMPLETE =
+  "That code paired, but the relay didn't say which computer it belongs to. Get a new code from Ferryx on your computer and try again.";
 
 /** The structured fields of a refused pair exchange: the machine `code` and `details.remainingAttempts`. */
 async function pairingFailure(res: Response): Promise<{ code: string | null; remainingAttempts: number | null }> {
@@ -39,7 +81,7 @@ function pairingRefusalMessage(status: number, code: string | null, remaining: n
 }
 
 type PairingPageProps = {
-  onPaired: (token: string, metadata?: { machineId?: unknown; displayName?: unknown }) => void;
+  onPaired: (token: string, metadata?: { machineId?: unknown; displayName?: unknown }) => void | Promise<void>;
   transportUrl?: string;
   /** Leaves the pairing entry for account sign-in. */
   onUseAccount?: () => void;
@@ -80,8 +122,13 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       }
 
       const data = await res.json();
-      onPaired(data.token, { machineId: data.machineId, displayName: data.displayName });
+      await onPaired(data.token, { machineId: data.machineId, displayName: data.displayName });
     } catch (err: unknown) {
+      if (err instanceof PairingCompletionError) {
+        // The exchange itself succeeded; the answer just cannot become a stored host here.
+        setError(err.message);
+        return;
+      }
       console.warn("Pair exchange failed", err);
       setError(userFacingError(err, { action: "pair this phone" }));
     } finally {

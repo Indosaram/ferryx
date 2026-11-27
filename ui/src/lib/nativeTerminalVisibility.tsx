@@ -29,7 +29,13 @@ const FORCE_YIELD_SELECTOR = '[data-native-terminal-force-yield="true"]';
 // This applies to the marked surface only; it never exempts a separate modal.
 const KEEP_VISIBLE_SELECTOR = '[data-native-terminal-keep-visible="true"]';
 
-function getOverlayState(): { inputOwned: boolean; occluding: boolean } {
+type OverlayState = { inputOwned: boolean; occluding: boolean };
+
+const overlaySubscribers = new Set<(state: OverlayState) => void>();
+let overlayObserver: MutationObserver | null = null;
+let lastReportedInputOwner: boolean | undefined;
+
+function getOverlayState(): OverlayState {
   if (typeof document === "undefined") {
     return { inputOwned: false, occluding: false };
   }
@@ -61,9 +67,47 @@ function getOverlayState(): { inputOwned: boolean; occluding: boolean } {
  * overlay tells the host to hand those events back to WebKit instead.
  */
 function reportDomOverlayInputOwner(active: boolean): void {
+  if (lastReportedInputOwner === active) return;
+  lastReportedInputOwner = active;
   void setNativeTerminalDomOverlayInput(active).catch((error: unknown) => {
     console.warn("Failed to report DOM overlay input ownership to the native terminal host:", error);
   });
+}
+
+function updateOverlayState(): void {
+  const next = getOverlayState();
+  reportDomOverlayInputOwner(next.inputOwned);
+  for (const subscriber of overlaySubscribers) subscriber(next);
+}
+
+function subscribeOverlayState(subscriber: (state: OverlayState) => void): () => void {
+  overlaySubscribers.add(subscriber);
+  if (!overlayObserver) {
+    overlayObserver = new MutationObserver(updateOverlayState);
+    overlayObserver.observe(document.body, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: [
+        "role", "data-native-terminal-yield", "data-native-terminal-keep-visible",
+        "data-native-terminal-force-yield", "aria-hidden", "hidden",
+      ],
+    });
+  }
+  updateOverlayState();
+  return () => {
+    overlaySubscribers.delete(subscriber);
+    if (overlaySubscribers.size === 0) {
+      overlayObserver?.disconnect();
+      overlayObserver = null;
+      lastReportedInputOwner = undefined;
+    }
+  };
+}
+
+export function resetNativeTerminalVisibilityForTests(): void {
+  overlayObserver?.disconnect();
+  overlayObserver = null;
+  overlaySubscribers.clear();
+  lastReportedInputOwner = undefined;
 }
 
 export function NativeTerminalVisibilityProvider({
@@ -92,23 +136,10 @@ export function useNativeTerminalVisibilityState(): { readonly visible: boolean;
       return;
     }
 
-    const update = () => {
-      const next = getOverlayState();
-      reportDomOverlayInputOwner(next.inputOwned);
+    return subscribeOverlayState((next) => {
       setOverlay((current) => (current.inputOwned === next.inputOwned && current.occluding === next.occluding
         ? current : next));
-    };
-    update();
-
-    const observer = new MutationObserver(update);
-    observer.observe(document.body, {
-      childList: true, subtree: true, attributes: true,
-      attributeFilter: [
-        "role", "data-native-terminal-yield", "data-native-terminal-keep-visible",
-        "data-native-terminal-force-yield", "aria-hidden", "hidden",
-      ],
     });
-    return () => observer.disconnect();
   }, []);
 
   const occluded = owner.occluded || overlay.occluding;

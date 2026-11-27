@@ -2,6 +2,8 @@ export const PROJECTS_STORAGE_KEY = "ferryx.projects";
 export const ACTIVE_PROJECT_STORAGE_KEY = "ferryx.active-project";
 export const SIDEBAR_OPEN_STORAGE_KEY = "ferryx.sidebar.open";
 export const SIDEBAR_WIDTH_STORAGE_KEY = "ferryx.sidebar.width";
+/** The desktop Activity Bar's last selected mode (`supervisor`, `worktrees`, `browser`, `remoteDesktop`). */
+export const ACTIVITY_MODE_STORAGE_KEY = "ferryx.activity.mode";
 export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedProjects";
 export const SIDEBAR_WORKTREE_ORDER_STORAGE_KEY = "ferryx.sidebar.worktreeOrder";
 export const TERMINAL_SETTINGS_STORAGE_KEY = "ferryx.terminal.settings";
@@ -14,6 +16,14 @@ export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabl
 export const BROWSER_SCROLL_STORAGE_KEY = "ferryx.browser.scroll-positions";
 /** Per-tab back/forward stacks (browser id -> entries), restored with the tab; never private tabs. */
 export const BROWSER_TAB_NAVIGATION_STORAGE_KEY = "ferryx.browser.tab-navigation";
+/** Today auto-archive idle window in hours (default 12); invalid values fall back to the default. */
+export const BROWSER_AUTO_ARCHIVE_HOURS_STORAGE_KEY = "ferryx.browser.autoArchiveHours";
+/** Global browser store: Spaces, folders, favorites/pinned/today tabs, archive, MRU, split refs. */
+export const BROWSER_STORE_STORAGE_KEY = "ferryx.browser.store:v1";
+/** One-shot guard: legacy worktree browser tabs have been copied into the global store. */
+export const BROWSER_STORE_MIGRATION_KEY = "ferryx.browser.store.migrated:v1";
+/** Browser mode's 2-way split ratio (0.25-0.75), persisted so the divider keeps its place. */
+export const BROWSER_SPLIT_RATIO_STORAGE_KEY = "ferryx.browser.splitRatio";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
 export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";
@@ -37,6 +47,17 @@ export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
 /** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */
 export const ADVANCED_FEATURES_STORAGE_KEY = "ferryx.ui.advancedFeatures";
+
+/**
+ * The per-mode sidebar width key: `ferryx.sidebar.width.<mode>`.
+ *
+ * The mode is passed in rather than imported so this module keeps owning every key string while
+ * `sidebarPersistence.ts` owns what a mode is; a per-mode key is never a legacy counterpart of the
+ * shared `SIDEBAR_WIDTH_STORAGE_KEY`, so it stays out of `LEGACY_STORAGE_KEY_MAP`.
+ */
+export function sidebarWidthStorageKey(mode: string): string {
+  return `${SIDEBAR_WIDTH_STORAGE_KEY}.${mode}`;
+}
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],

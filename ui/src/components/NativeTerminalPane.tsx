@@ -1364,15 +1364,31 @@ export function NativeTerminalPane({
         const focused = document.activeElement;
         if (focused && focused !== inputRef.current && isEditableElement(focused)) return;
         inputRef.current?.focus();
+        if (targetSessionId && isTauri()) {
+          acknowledgeAgentOutcome(targetSessionId).catch((error: unknown) => {
+            console.warn("Could not acknowledge the agent outcome on focus", { sessionId: targetSessionId, error });
+          });
+        }
+      };
+      const handleSessionInteracted = (event: Event) => {
+        const interactedSessionId = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+        if (!interactedSessionId || interactedSessionId !== sessionRef.current?.id) return;
+        if (targetSessionId && isTauri()) {
+          acknowledgeAgentOutcome(targetSessionId).catch((error: unknown) => {
+            console.warn("Could not acknowledge the agent outcome on input", { sessionId: targetSessionId, error });
+          });
+        }
       };
       window.addEventListener("focus", handleWindowFocus);
       window.addEventListener("ferryx:window-focused", handleWindowFocus);
+      window.addEventListener("ferryx:session-interacted", handleSessionInteracted);
 
       return () => {
         cancelAnimationFrame(frame);
         clearTimeout(timer);
         window.removeEventListener("focus", handleWindowFocus);
         window.removeEventListener("ferryx:window-focused", handleWindowFocus);
+        window.removeEventListener("ferryx:session-interacted", handleSessionInteracted);
       };
     } else {
       if (isTauri() && previousOwner.active && previousOwner.targetSessionId === targetSessionId) {

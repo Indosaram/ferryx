@@ -116,6 +116,8 @@ function isSessionSignals(value: unknown): boolean {
   const s = objectOf(value);
   return s !== null && isFlagRecord(s.unreadWorktreePaths) && isAgentStateRecord(s.agentStateByPath) &&
     (s.activityByWorktreePath === undefined || isActivityRecord(s.activityByWorktreePath)) &&
+    (s.activityByWorktreeKey === undefined || isActivityRecord(s.activityByWorktreeKey)) &&
+    (s.unreadWorktreeKeys === undefined || isFlagRecord(s.unreadWorktreeKeys)) &&
     (s.attentionRows === undefined ||
       (Array.isArray(s.attentionRows) && s.attentionRows.length <= PUBLISHED_ATTENTION_ROWS_CAP && s.attentionRows.every(isAttentionRow)));
 }

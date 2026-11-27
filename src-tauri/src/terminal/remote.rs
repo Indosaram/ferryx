@@ -167,6 +167,8 @@ pub struct RemoteExportState {
 pub(crate) trait AgentStateSink: Send + Sync {
     /// Synchronously accept an agent state update. Returns true if accepted (or already in that state).
     fn accept(&self, state: crate::daemon::agent_state::AgentState) -> bool;
+    /// Release retained remote agent activity when the remote target exits or disconnects permanently.
+    fn release(&self, _session_id: &str) {}
 }
 
 impl AgentStateSink for crate::daemon::agent_state::AgentStateHub {
@@ -178,6 +180,10 @@ impl AgentStateSink for crate::daemon::agent_state::AgentStateHub {
         }
         self.publish_canonical(state);
         true
+    }
+
+    fn release(&self, session_id: &str) {
+        self.release_remote(session_id);
     }
 }
 
@@ -1636,6 +1642,10 @@ async fn run(
                 .unwrap_or_else(|| RemoteFailure::from_bridge(&error));
             fail(&mut s, failure.clone());
             if failure.kind != RemoteFailureKind::Transport {
+                drop(s);
+                if let Some(sink) = sink.read().as_ref() {
+                    sink.release(&d.backend_session_id);
+                }
                 return;
             }
             attempts = attempts.saturating_add(1);
@@ -1643,6 +1653,13 @@ async fn run(
             s.details.generation += 1;
             generation = s.details.generation;
             Entry::notify(&s);
+            let release_after_retries = attempts >= 3;
+            drop(s);
+            if release_after_retries {
+                if let Some(sink) = sink.read().as_ref() {
+                    sink.release(&d.backend_session_id);
+                }
+            }
         }
         connector.delay(attempts - 1).await;
     }

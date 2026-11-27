@@ -238,6 +238,21 @@ describe("sshHosts library and useSshHosts hook", () => {
       expect(result).toEqual([mockHost1]);
     });
 
+    it("forwards a candidate password when testing an unsaved credential", async () => {
+      // Given: an unsaved password host and a failed authentication result.
+      const host: SshHost = { ...mockHost1, authMethod: "password" };
+      invokeMock.mockResolvedValueOnce({ host, reachable: false, checkedAt: 1 });
+
+      // When: probing the candidate without storing it.
+      await testSshConnection(host, "secret");
+
+      // Then: only the probe receives the candidate.
+      expect(invokeMock).toHaveBeenCalledExactlyOnceWith("cmd_ssh_test_connection", {
+        host,
+        candidatePassword: "secret",
+      });
+    });
+
     it("testSshConnection invokes cmd_ssh_test_connection and returns summary", async () => {
       const summary = {
         host: mockHost1,

@@ -276,6 +276,68 @@ fn rows_digest(rows: &[Worktree], manager: &WorktreeManager) -> Result<String, S
         Sha256::digest(serde_json::to_vec(&(rows, observed)).map_err(|_| "INVALID_WORKTREE")?)
     ))
 }
+/// Cross-platform ancestry test for a session working directory inside a managed
+/// worktree checkout. Paths are canonicalized (or lexically folded when absent)
+/// and compared at separator boundaries, so a sibling such as `/ws/foo-bar` never
+/// counts as living inside `/ws/foo` while `/ws/foo/sub` does.
+fn path_is_within_worktree(cwd: &std::path::Path, worktree_root: &std::path::Path) -> bool {
+    within_normalized(&normalized_path(cwd), &normalized_path(worktree_root))
+}
+
+fn within_normalized(cwd: &str, root: &str) -> bool {
+    if cwd == root {
+        return true;
+    }
+    let Some(rest) = cwd.strip_prefix(root) else {
+        return false;
+    };
+    // A filesystem root keeps its separator (`/`, `C:/`); every other root must be
+    // followed by a separator so `foo-2` is not treated as a child of `foo`.
+    !rest.is_empty() && (rest.starts_with('/') || root.ends_with('/'))
+}
+
+/// Canonical form when the path exists, otherwise a lexical form: verbatim Windows
+/// prefixes stripped, `\` folded to `/`, `.`/trailing separators removed and case
+/// folded where the filesystem is case-insensitive by default.
+fn normalized_path(path: &std::path::Path) -> String {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => fold_path_text(canonical.to_string_lossy().as_ref()),
+        Err(_) => fold_path_text(path.to_string_lossy().as_ref()),
+    }
+}
+
+fn fold_path_text(raw: &str) -> String {
+    let mut text = raw.replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/UNC/") {
+        text = format!("//{rest}");
+    } else if let Some(rest) = text.strip_prefix("//?/") {
+        text = rest.to_owned();
+    }
+    let rooted = text.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in text.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                let pop = parts.last().is_some_and(|last| *last != "..");
+                if pop {
+                    parts.pop();
+                } else if !rooted {
+                    parts.push("..");
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    let cleaned = if rooted { format!("/{joined}") } else { joined };
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        cleaned.to_lowercase()
+    } else {
+        cleaned
+    }
+}
+
 fn sessions(state: &RemoteGatewayState, path: &std::path::Path) -> Result<Vec<String>, String> {
     let backend = &state.machine_services.as_ref().expect("services").sessions;
     tokio::runtime::Handle::current().block_on(async {
@@ -289,7 +351,7 @@ fn sessions(state: &RemoteGatewayState, path: &std::path::Path) -> Result<Vec<St
                 && details
                     .worktree_path
                     .as_ref()
-                    .is_some_and(|cwd| cwd.starts_with(path))
+                    .is_some_and(|cwd| path_is_within_worktree(cwd, path))
             {
                 live.push(id);
             }
@@ -1180,5 +1242,92 @@ mod publication_tests {
             assert!(matches!(record.operation, Operation::OutcomeUnknown { .. }));
             eprintln!("A08 publication revoke={revoke} git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true");
         }
+    }
+}
+
+#[cfg(test)]
+mod ancestry_tests {
+    use super::*;
+
+    fn real(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        root.join(name)
+    }
+
+    #[test]
+    fn exact_worktree_root_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = real(temp.path(), "ws-foo");
+        assert!(path_is_within_worktree(&root, &root));
+    }
+
+    #[test]
+    fn nested_subdirectory_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = real(temp.path(), "ws-foo");
+        let nested = real(&root, "sub/deep");
+        assert!(path_is_within_worktree(&nested, &root));
+        let plain = real(temp.path(), "unrelated");
+        assert!(!path_is_within_worktree(&plain, &root));
+    }
+
+    #[test]
+    fn sibling_prefix_is_not_a_descendant() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = real(temp.path(), "repo");
+        let sibling = real(temp.path(), "repo-2");
+        assert!(!path_is_within_worktree(&sibling, &root));
+        // Lexical fallback (paths do not exist) must agree with the canonical path.
+        assert!(!path_is_within_worktree(
+            std::path::Path::new("/tmp/ws-foo-bar"),
+            std::path::Path::new("/tmp/ws-foo")
+        ));
+        assert!(path_is_within_worktree(
+            std::path::Path::new("/tmp/ws-foo/sub/"),
+            std::path::Path::new("/tmp/ws-foo")
+        ));
+    }
+
+    #[test]
+    fn windows_separators_and_verbatim_prefixes_normalize() {
+        let root = std::path::Path::new("C:\\Repo");
+        assert!(path_is_within_worktree(
+            std::path::Path::new("C:\\Repo\\sub"),
+            root
+        ));
+        assert!(path_is_within_worktree(
+            std::path::Path::new("C:/Repo/sub/"),
+            root
+        ));
+        assert!(!path_is_within_worktree(
+            std::path::Path::new("C:\\Repo-2\\sub"),
+            root
+        ));
+        assert!(path_is_within_worktree(
+            std::path::Path::new("//?/C:/Repo/sub"),
+            root
+        ));
+        assert!(path_is_within_worktree(
+            std::path::Path::new("\\\\?\\UNC\\server\\share\\ws"),
+            std::path::Path::new("//server/share/ws")
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn case_insensitive_filesystems_match_regardless_of_case() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = real(temp.path(), "ws-foo");
+        // Uppercase the canonical form so the check is about case folding alone,
+        // not about `/var` vs `/private/var` aliasing.
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let upper = std::path::PathBuf::from(canonical.to_string_lossy().to_uppercase());
+        assert!(path_is_within_worktree(&upper, &canonical));
+        assert!(path_is_within_worktree(&real(&canonical, "Sub"), &canonical));
+        // Lexical fallback agrees for Windows paths that do not exist here.
+        assert!(path_is_within_worktree(
+            std::path::Path::new("c:\\Repo\\sub"),
+            std::path::Path::new("C:\\REPO")
+        ));
     }
 }

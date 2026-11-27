@@ -274,6 +274,39 @@ describe("SshTunnelsGate", () => {
       expect(invokeMock).not.toHaveBeenCalledWith(SSH_TUNNEL_COMMANDS.list);
     });
 
+    it("keeps the capability gate ahead of an in-flight mutation", () => {
+      // The editor's body reads `pendingAction` to disable its controls. The gate must be
+      // decided first, so a section that is mid-mutation on a capable daemon can never leak a
+      // control onto a surface whose daemon does not advertise `sshTunnelV1`.
+      const onRefresh = vi.fn();
+      render(
+        <SshTunnelsEditor
+          host={host}
+          busy={false}
+          capabilities={[]}
+          list={null}
+          loading={false}
+          error={null}
+          resetPath={null}
+          conflict={null}
+          pendingAction="start"
+          onRefresh={onRefresh}
+          onSave={vi.fn()}
+          onStart={vi.fn()}
+          onStop={vi.fn()}
+          onReset={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId("ssh-tunnels-section")).toHaveAttribute("data-capability", "absent");
+      expect(screen.getByTestId("ssh-tunnels-capability")).toHaveTextContent(TUNNELS_CAPABILITY_MESSAGE);
+      expect(screen.queryByRole("button", { name: `Add tunnel to ${host.label}` })).toBeNull();
+      expect(screen.queryByRole("list", { name: `Saved tunnels on ${host.label}` })).toBeNull();
+      // The body never mounted, so its on-mount read never ran either.
+      expect(onRefresh).not.toHaveBeenCalled();
+      expect(tunnelCalls()).toHaveLength(0);
+    });
+
     it("blocked_state_message_renders", () => {
       // Windows: the platform cannot carry a control socket, so the explanation names that reason
       // and never the daemon's age — Todo 14 keeps `sshTunnelV1` unadvertised on Windows, which

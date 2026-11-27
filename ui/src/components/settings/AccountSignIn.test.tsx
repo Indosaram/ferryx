@@ -158,6 +158,36 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
     expect(onSignIn).not.toHaveBeenCalled();
   });
 
+  it("resends a fresh link from the expired screen without retyping the email", async () => {
+    const requestSpy = vi
+      .spyOn(accountSessionModule, "requestLogin")
+      .mockResolvedValue({ loginHandle: "d".repeat(64) });
+    vi.spyOn(accountSessionModule, "pollLogin").mockResolvedValue({ status: "pending" });
+    vi.spyOn(accountSessionModule, "storeAccountSessionToken").mockImplementation(() => {});
+
+    render(<AccountSignIn onSignIn={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Email Address"), { target: { value: "user@example.com" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send Magic Link" }));
+    });
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Send a new link" })).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    });
+    // The screen names the terminal reason structurally; the click below proves it is actionable.
+    expect(screen.getByTestId("account-signin-error")).toHaveAttribute("data-code", "EXPIRED");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send a new link" }));
+    });
+    expect(requestSpy).toHaveBeenCalledTimes(2);
+    expect(requestSpy).toHaveBeenLastCalledWith("https://relay.ferryx.dev", "user@example.com");
+    expect(screen.queryByTestId("account-signin-error")).toBeNull();
+    expect(screen.getByTestId("account-signin-info")).toHaveTextContent("user@example.com");
+  });
+
   it("pasting the emailed link signs in with the code it carries", async () => {
     vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle: "b".repeat(64) });
     vi.spyOn(accountSessionModule, "pollLogin").mockResolvedValue({ status: "pending" });

@@ -102,6 +102,8 @@ function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean 
       return sessionId;
     }),
     getTerminalCwd: vi.fn(async () => "/repo/main/packages/api"),
+    // No orphan sessions by default: a click spawns as before unless a test seeds a live one.
+    listTerminalSessions: vi.fn(async () => []),
     closeTerminal: vi.fn(async (sessionId) => {
       const deferred = getExit(sessionId);
       if (autoConfirmExit) queueMicrotask(() => confirmExit(sessionId));
@@ -1571,6 +1573,106 @@ describe("worktree tab and session isolation", () => {
     expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([newTabId]);
   });
 
+  it("re-attaches a session the daemon still runs in the clicked worktree instead of spawning a second shell", async () => {
+    const { services } = createServices();
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([
+      { sessionId: "backend-orphan", worktreePath: featureWorktree.path, daemonEpoch: "9", incarnation: "life-9", running: true },
+    ]);
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    let tabId: string | null = null;
+    await act(async () => {
+      tabId = await result.current.ensureTabForWorktree(featureWorktree);
+    });
+
+    expect(tabId).toBeTruthy();
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(services.splitCreate).not.toHaveBeenCalled();
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+    const adopted = Object.values(result.current.state.sessions).find(
+      (session) => session.backendSessionId === "backend-orphan",
+    );
+    expect(adopted).toBeDefined();
+    expect(adopted?.incarnation).toBe("life-9");
+    expect(adopted?.daemonEpoch).toBe("9");
+    expect(result.current.state.layout.tabs.map((tab) => tab.id)).toEqual([tabId]);
+  });
+
+  it("spawns as before when no live session of the clicked worktree exists", async () => {
+    const { services } = createServices();
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([
+      { sessionId: "backend-other", worktreePath: worktree.path, running: true },
+    ]);
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+
+    await act(async () => {
+      await result.current.ensureTabForWorktree(featureWorktree);
+    });
+
+    expect(services.spawnTerminal).toHaveBeenCalledTimes(1);
+    expect(Object.values(result.current.state.sessions).map((session) => session.backendSessionId)).toEqual([
+      "backend-1",
+    ]);
+  });
+
+  it("keeps a running session's tab when its worktree disappears from the listing", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+    await act(async () => {
+      await result.current.openTab(worktree);
+      await result.current.openTab(featureWorktree);
+    });
+    const featureBackend = Object.values(result.current.state.sessions).find(
+      (session) => session.cwd === featureWorktree.path,
+    )?.backendSessionId;
+    expect(featureBackend).toBeTruthy();
+
+    // The daemon still runs the feature shell even though the listing no longer names it.
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([
+      { sessionId: featureBackend!, worktreePath: featureWorktree.path, running: true },
+    ]);
+    await act(async () => {
+      await result.current.syncWorktrees([worktree]);
+    });
+
+    expect(result.current.state.worktrees.map((entry) => entry.path)).toEqual([worktree.path]);
+    expect(
+      Object.values(result.current.state.sessions).some((session) => session.backendSessionId === featureBackend),
+    ).toBe(true);
+    expect(services.closeTerminal).not.toHaveBeenCalledWith(featureBackend);
+    expect(services.closeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("still prunes a session the daemon no longer runs when its worktree disappears", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services }),
+    );
+    await act(async () => {
+      await result.current.openTab(worktree);
+      await result.current.openTab(featureWorktree);
+    });
+    const featureBackend = Object.values(result.current.state.sessions).find(
+      (session) => session.cwd === featureWorktree.path,
+    )?.backendSessionId;
+
+    vi.mocked(services.listTerminalSessions!).mockResolvedValue([]);
+    await act(async () => {
+      await result.current.syncWorktrees([worktree]);
+    });
+
+    expect(
+      Object.values(result.current.state.sessions).some((session) => session.backendSessionId === featureBackend),
+    ).toBe(false);
+    expect(services.closeTerminal).toHaveBeenCalledWith(featureBackend);
+  });
+
   it("maintains independent tabs and sessions per worktree when switching between worktrees", async () => {
     const { services } = createServices();
     const { result } = renderHook(() =>
@@ -2506,5 +2608,116 @@ describe("canonicalWorktreeKey and SET_WORKTREES verbatim prefix tolerance", () 
     });
     expect(next.sessions["session-1"]?.backendSessionId).toBe("backend-1");
     expect(next.layout.tabs).toHaveLength(1);
+  });
+});
+
+describe("bell unread badge lifecycle", () => {
+  /** Two terminal tabs in two tab groups, both carrying a bell badge. */
+  function bellState(): WorkspaceState {
+    const primary: TerminalTab = { id: "tab-primary", label: "primary", sessionId: "session-1" };
+    const secondary: TerminalTab = { id: "tab-secondary", label: "secondary", sessionId: "session-2" };
+    return {
+      worktrees: [worktree],
+      activeWorktreePath: worktree.path,
+      sessions: {
+        "session-1": restoredSession("session-1", "restored-backend-1"),
+        "session-2": restoredSession("session-2", "restored-backend-2"),
+      },
+      layout: {
+        tabs: [primary, secondary],
+        activeTabId: primary.id,
+        layoutsByTabId: {
+          [primary.id]: {
+            root: { type: "leaf", leafId: "leaf-primary" },
+            activeLeafId: "leaf-primary",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-primary": "session-1" },
+          },
+          [secondary.id]: {
+            root: { type: "leaf", leafId: "leaf-secondary" },
+            activeLeafId: "leaf-secondary",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-secondary": "session-2" },
+          },
+        },
+        tabGroups: {
+          G1: { id: "G1", tabIds: [primary.id], activeTabId: primary.id },
+          G2: { id: "G2", tabIds: [secondary.id], activeTabId: secondary.id },
+        },
+        tabGroupLayout: {
+          type: "split", direction: "horizontal", ratio: 0.5,
+          first: { type: "group", groupId: "G1" },
+          second: { type: "group", groupId: "G2" },
+        },
+        focusedGroupId: "G1",
+      },
+      unreadTabIds: {},
+      bellUnreadTabIds: { "tab-primary": true, "tab-secondary": true },
+      unreadWorktreePaths: {},
+      activityBySessionId: {},
+    };
+  }
+
+  it("clears the closed tab's bell and leaves the surviving tab's badge", () => {
+    const next = workspaceReducer(bellState(), { type: "CLOSE_TAB", tabId: "tab-secondary" });
+
+    expect(next.layout.tabs.map((tab) => tab.id)).toEqual(["tab-primary"]);
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab is activated", () => {
+    const next = workspaceReducer(bellState(), { type: "ACTIVATE_TAB", tabId: "tab-secondary" });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab moves to another group", () => {
+    const next = workspaceReducer(bellState(), {
+      type: "MOVE_TAB_TO_GROUP",
+      sourceTabId: "tab-secondary",
+      targetGroupId: "G1",
+    });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab moves into a split group", () => {
+    const next = workspaceReducer(bellState(), {
+      type: "MOVE_TAB_TO_SPLIT",
+      sourceTabId: "tab-secondary",
+      targetGroupId: "G1",
+      direction: "horizontal",
+    });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when a tab moves into a pane split", () => {
+    const next = workspaceReducer(bellState(), {
+      type: "MOVE_TAB_TO_PANE_SPLIT",
+      sourceTabId: "tab-secondary",
+      targetTabId: "tab-primary",
+      targetLeafId: "leaf-primary",
+      direction: "horizontal",
+    });
+
+    expect(next.layout.tabs.map((tab) => tab.id)).toEqual(["tab-primary"]);
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
+  });
+
+  it("clears the bell when focusing an existing session", () => {
+    const next = workspaceReducer(bellState(), { type: "FOCUS_EXISTING_SESSION", sessionId: "session-2" });
+
+    expect(next.layout.activeTabId).toBe("tab-secondary");
+    expect(next.bellUnreadTabIds?.["tab-secondary"]).toBeUndefined();
+    expect(next.bellUnreadTabIds?.["tab-primary"]).toBe(true);
   });
 });

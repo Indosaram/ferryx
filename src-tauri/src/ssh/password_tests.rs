@@ -52,6 +52,112 @@ fn credentials_are_transient_endpoint_scoped_and_redacted() {
 }
 
 #[test]
+fn candidate_restores_saved_credential_when_probe_fails() {
+    // Given: a saved endpoint credential with a stable broker capability.
+    let host = host();
+    set(&host, Password::new("saved".into())).unwrap();
+    let saved = generation(&host).unwrap();
+    // When: a candidate probe returns an authentication error.
+    let result = (|| -> Result<(), IpcError> {
+        let _candidate = push_candidate(&host, Password::new("wrong".into()))?;
+        let candidate_generation = generation(&host)?.unwrap();
+        assert_ne!(Some(candidate_generation.clone()), saved);
+        // runtime::detect clears only the failed generation before returning.
+        assert!(clear_generation(&host, &candidate_generation)?);
+        Err(error("authentication failed"))
+    })();
+    // Then: the original password and capability are restored.
+    assert!(result.is_err());
+    assert_eq!(generation(&host).unwrap(), saved);
+    assert_eq!(store().lock().unwrap().get(&key(&host)).unwrap().password.0, "saved");
+    clear(&host).unwrap();
+}
+
+#[test]
+fn candidate_restores_saved_credential_when_probe_panics() {
+    // Given: a saved credential before a probe starts.
+    let host = host();
+    set(&host, Password::new("saved".into())).unwrap();
+    let saved = generation(&host).unwrap();
+    // When: a probe unwinds after installing its candidate.
+    let result = std::panic::catch_unwind(|| {
+        let _candidate = push_candidate(&host, Password::new("candidate".into())).unwrap();
+        panic!("probe panic");
+    });
+    // Then: unwinding restored the exact original capability.
+    assert!(result.is_err());
+    assert_eq!(generation(&host).unwrap(), saved);
+    clear(&host).unwrap();
+}
+
+#[test]
+fn candidate_restores_same_endpoint_when_duplicate_host_is_dropped() {
+    // Given: two host IDs referring to the same endpoint.
+    let host = host();
+    set(&host, Password::new("saved".into())).unwrap();
+    let saved = generation(&host).unwrap();
+    let duplicate = SshHost { id: uuid::Uuid::new_v4().to_string(), ..host.clone() };
+    // When: an add-host candidate is dropped without adoption.
+    let candidate = push_candidate(&duplicate, Password::new("candidate".into())).unwrap();
+    drop(candidate);
+    // Then: the endpoint's saved credential remains usable.
+    assert_eq!(generation(&host).unwrap(), saved);
+    assert_eq!(store().lock().unwrap().get(&key(&host)).unwrap().password.0, "saved");
+    clear(&host).unwrap();
+}
+
+#[tokio::test]
+async fn candidate_restores_saved_credential_when_probe_is_cancelled() {
+    // Given: a saved endpoint and a probe that signals after installing its candidate.
+    let host = host();
+    set(&host, Password::new("saved".into())).unwrap();
+    let saved = generation(&host).unwrap();
+    let probe_host = host.clone();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let probe = tokio::spawn(async move {
+        let _candidate = push_candidate(&probe_host, Password::new("candidate".into())).unwrap();
+        ready_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), ready_rx).await.unwrap().unwrap();
+    // When: cancellation drops the suspended probe future.
+    probe.abort();
+    assert!(tokio::time::timeout(Duration::from_secs(5), probe).await.unwrap().unwrap_err().is_cancelled());
+    // Then: its RAII guard has restored the saved capability.
+    assert_eq!(generation(&host).unwrap(), saved);
+    clear(&host).unwrap();
+}
+
+#[test]
+fn candidate_is_removed_when_no_saved_credential_exists() {
+    // Given: an endpoint with no stored credential.
+    let host = host();
+    // When: a successful candidate is released and explicitly adopted.
+    let candidate = push_candidate(&host, Password::new("candidate".into())).unwrap();
+    drop(candidate);
+    // Then: probing alone did not persist a password; explicit set can adopt it.
+    assert_eq!(generation(&host).unwrap(), None);
+    set(&host, Password::new("candidate".into())).unwrap();
+    assert!(require(&host).is_ok());
+    clear(&host).unwrap();
+}
+
+#[test]
+fn invalid_candidate_leaves_saved_credential_unchanged() {
+    // Given: an existing saved endpoint credential.
+    let host = host();
+    set(&host, Password::new("saved".into())).unwrap();
+    let saved = generation(&host).unwrap();
+    // When: invalid candidates cross the password boundary.
+    for value in ["".to_owned(), "line\nbreak".into(), "carriage\rreturn".into(), "nul\0byte".into(), "x".repeat(4097)] {
+        assert!(push_candidate(&host, Password::new(value)).is_err());
+    }
+    // Then: no invalid candidate replaced the saved capability.
+    assert_eq!(generation(&host).unwrap(), saved);
+    clear(&host).unwrap();
+}
+
+#[test]
 fn stale_generation_cannot_clear_replacement() {
     let host = host();
     set(&host, Password::new("first".into())).unwrap();

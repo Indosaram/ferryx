@@ -4160,16 +4160,19 @@ impl DaemonClient {
     }
 
     /// Reads one workspace's layout document. With `after_revision` the daemon parks until the
-    /// stored revision is newer (long-poll), then answers with whatever it has.
+    /// stored revision is newer (long-poll), then answers with whatever it has. `worktree_key`
+    /// selects one worktree bucket; `None` is the workspace-level document.
     pub async fn layout_get(
         &self,
         workspace_id: &str,
+        worktree_key: Option<&str>,
         after_revision: Option<u64>,
     ) -> Result<crate::remote::machine_protocol::SharedLayout, IpcError> {
         // One shot: a long-poll parks up to 25 s and must not hold the shared connection.
         match self
             .send_request_one_shot(DaemonRequest::LayoutGet {
                 workspace_id: workspace_id.to_owned(),
+                worktree_key: worktree_key.map(str::to_owned),
                 after_revision,
             })
             .await?
@@ -4187,12 +4190,14 @@ impl DaemonClient {
     pub async fn layout_put(
         &self,
         workspace_id: &str,
+        worktree_key: Option<&str>,
         base_revision: u64,
         tabs: Vec<crate::remote::machine_protocol::SharedTab>,
     ) -> Result<crate::remote::machine_protocol::LayoutPutOutcome, IpcError> {
         match self
             .send_request(DaemonRequest::LayoutPut {
                 workspace_id: workspace_id.to_owned(),
+                worktree_key: worktree_key.map(str::to_owned),
                 base_revision,
                 tabs,
             })

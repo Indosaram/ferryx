@@ -122,7 +122,8 @@ mod tailscale_sync_tests {
         save_store(&path, &store).unwrap();
         let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
-        let result = sync_tailscale_peers_with(path, peers, Vec::new(), move |host, _| {
+        let status = crate::remote::discovery::tailscale::TailscaleSshStatus { peers: peers.clone(), self_ipv4: None };
+        let result = sync_tailscale_peers_with(path, status, Some(Vec::new()), move |host, _| {
             let calls = recorded.clone();
             async move {
                 calls.lock().unwrap().push(host.id.clone());
@@ -131,9 +132,119 @@ mod tailscale_sync_tests {
         }).await.unwrap();
         let mut called = calls.lock().unwrap().clone(); called.sort();
         assert_eq!(called, vec!["tailscale:online-a", "tailscale:online-b"]);
-        assert_eq!(result.hosts.len(), 8);
-        assert_eq!(result.targets.len(), 4);
+        // The offline peer's row is pruned, so it no longer has a host row to report against:
+        // 7 rows survive (4 disabled + 2 online + the unsupported mobile peer) and the target
+        // list is one unreachable mobile peer plus the two online provisions.
+        assert_eq!(result.hosts.len(), 7);
+        assert_eq!(result.targets.len(), 3);
         assert!(result.targets.iter().filter(|t| !t.reachable).all(|t| t.diagnostic.is_some()));
+    }
+
+    #[test]
+    fn pruning_drops_vanished_peers_but_keeps_manual_disabled_and_self_rows() {
+        let live = peer("live", true);
+        let gone = peer("gone", false);
+        let mut store = SshHostStore {
+            hosts: vec![
+                host("tailscale:live", &live.hostname, crate::ssh::SshHostSource::Tailscale),
+                host("tailscale:gone", &gone.hostname, crate::ssh::SshHostSource::Tailscale),
+                host("manual-box", "manual-box", crate::ssh::SshHostSource::Manual),
+                host("ssh-stale-alias", "stale-alias", crate::ssh::SshHostSource::Config),
+                host("self-address", "100.78.73.127", crate::ssh::SshHostSource::Tailscale),
+            ],
+            tombstones: Vec::new(),
+        };
+        // "omarchy2" is stored under a tailscale id because discovery adopted the alias and login
+        // the user wrote in ~/.ssh/config. The box is not in the tailnet right now, but the user
+        // still owns the entry, so pruning must keep it while dropping the row nobody owns.
+        let mut config_owned = host("tailscale:omarchy2", "100.106.164.55", crate::ssh::SshHostSource::Tailscale);
+        config_owned.label = "omarchy2".into();
+        let mut discovered_junk = host("tailscale:codex-2", "100.102.43.7", crate::ssh::SshHostSource::Tailscale);
+        discovered_junk.label = "codex-environment-2".into();
+        store.hosts.push(config_owned);
+        store.hosts.push(discovered_junk);
+        let mut config_entry = host("ssh-omarchy2", "100.106.164.55", crate::ssh::SshHostSource::Config);
+        config_entry.label = "omarchy2".into();
+        retain_vanished_hosts(&mut store, &[live, gone], Some("100.78.73.127"), Some(&[config_entry]));
+        let ids: Vec<&str> = store.hosts.iter().map(|host| host.id.as_str()).collect();
+        assert_eq!(ids, vec!["tailscale:live", "manual-box", "self-address", "tailscale:omarchy2"]);
+
+        // An unreadable config must not be treated as an empty one.
+        let mut store = SshHostStore {
+            hosts: vec![host("ssh-kept", "kept", crate::ssh::SshHostSource::Config)],
+            tombstones: Vec::new(),
+        };
+        retain_vanished_hosts(&mut store, &[], None, None);
+        assert_eq!(store.hosts.len(), 1);
+
+        // ...and the same holds for a discovered row: an unreadable config keeps it, because the
+        // sync cannot prove the user does not own it.
+        let mut store = SshHostStore {
+            hosts: vec![host("tailscale:maybe-ours", "100.102.43.7", crate::ssh::SshHostSource::Tailscale)],
+            tombstones: Vec::new(),
+        };
+        retain_vanished_hosts(&mut store, &[], None, None);
+        assert_eq!(store.hosts.len(), 1, "an unreadable config must not prune discovered rows either");
+
+        // Disabling a row is an explicit decision to keep it out of use, not to forget it.
+        let mut disabled = host("tailscale:sleeping", "sleeping", crate::ssh::SshHostSource::Tailscale);
+        disabled.disabled = Some(true);
+        let mut store = SshHostStore { hosts: vec![disabled], tombstones: Vec::new() };
+        retain_vanished_hosts(&mut store, &[], None, Some(&[]));
+        assert_eq!(store.hosts.len(), 1);
+    }
+
+    #[test]
+    fn dedupe_drops_only_discovered_rows_shadowed_by_a_user_row() {
+        let manual = host("mine", "100.65.239.35", crate::ssh::SshHostSource::Manual);
+        let imported = host("ssh-maho-mac", "100.65.239.35", crate::ssh::SshHostSource::Config);
+        let discovered = host("tailscale:node-mac", "100.65.239.35", crate::ssh::SshHostSource::Tailscale);
+        let mut store = SshHostStore { hosts: vec![discovered, imported.clone(), manual.clone()], tombstones: Vec::new() };
+        dedupe_tailscale_rows(&mut store);
+        assert_eq!(store.hosts, vec![imported, manual], "the discovered row goes; both user rows stay");
+
+        // A discovered row shadowed by a config alias is redundant.
+        let imported = host("ssh-maho-mac", "100.65.239.35", crate::ssh::SshHostSource::Config);
+        let discovered = host("tailscale:node-mac", "100.65.239.35", crate::ssh::SshHostSource::Tailscale);
+        let mut store = SshHostStore { hosts: vec![discovered, imported.clone()], tombstones: Vec::new() };
+        dedupe_tailscale_rows(&mut store);
+        assert_eq!(store.hosts, vec![imported]);
+
+        // A discovered row nothing shadows is the only row for that machine, so it stays.
+        let lonely = host("tailscale:node-lonely", "100.99.99.99", crate::ssh::SshHostSource::Tailscale);
+        let mut store = SshHostStore { hosts: vec![lonely.clone()], tombstones: Vec::new() };
+        dedupe_tailscale_rows(&mut store);
+        assert_eq!(store.hosts, vec![lonely]);
+
+        // Same address, two logins: distinct machines to the user, so both stay.
+        let mut root = host("ssh-maho-mac-root", "100.65.239.35", crate::ssh::SshHostSource::Config);
+        root.username = Some("root".into());
+        let mut store = SshHostStore { hosts: vec![host("ssh-maho-mac", "100.65.239.35", crate::ssh::SshHostSource::Config), root.clone()], tombstones: Vec::new() };
+        dedupe_tailscale_rows(&mut store);
+        assert_eq!(store.hosts.len(), 2);
+        assert!(store.hosts.contains(&root));
+    }
+
+    #[test]
+    fn dedupe_never_folds_two_config_aliases_of_the_same_machine() {
+        // A real ~/.ssh/config carries several aliases for one box - maho-win, maho-scalper and
+        // maho-steam all resolve to the same address and login. They are names the user wrote on
+        // purpose, so discovery must not delete two of them as duplicates.
+        let mut scalper = host("ssh-maho-scalper", "100.68.224.49", crate::ssh::SshHostSource::Config);
+        scalper.username = Some("sook".into());
+        let mut steam = host("ssh-maho-steam", "100.68.224.49", crate::ssh::SshHostSource::Config);
+        steam.username = Some("sook".into());
+        let mut primary = host("ssh-maho-win", "100.68.224.49", crate::ssh::SshHostSource::Config);
+        primary.username = Some("sook".into());
+        // Discovery reports no login for a peer, so the discovered row has no username to match
+        // the aliases' login. That mismatch is exactly why a discovered row must not be folded
+        // into an alias: they are not provably the same entry.
+        let discovered = host("tailscale:node-win", "100.68.224.49", crate::ssh::SshHostSource::Tailscale);
+        let mut store = SshHostStore { hosts: vec![primary.clone(), scalper.clone(), steam.clone(), discovered.clone()], tombstones: Vec::new() };
+        dedupe_tailscale_rows(&mut store);
+        assert_eq!(store.hosts.len(), 4, "all three config aliases survive and the discovered row is not folded into them");
+        assert!(store.hosts.contains(&primary) && store.hosts.contains(&scalper) && store.hosts.contains(&steam));
+        assert!(store.hosts.contains(&discovered));
     }
 
     #[tokio::test]
@@ -475,10 +586,9 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 }
 
 /// Build a live SSH target summary for a host. Shared by the Tauri command and
-/// integration QA tests; performs the credential-transaction-guarded probe and
-/// helper check without touching daemon-stored passwords.
+/// integration QA tests; callers hold the credential transaction when probing
+/// mutable credentials. This never touches daemon-stored passwords.
 pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
-    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
     let result = crate::ssh::runtime::detect(&host).await;
     let reachable = result.is_ok();
     let (environment, diagnostic) = match result {
@@ -507,7 +617,15 @@ pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
 pub async fn cmd_ssh_test_connection(
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
     host: SshHost,
+    candidate_password: Option<crate::ssh::password::Password>,
 ) -> Result<SshTargetSummary, IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    if let Some(password) = candidate_password {
+        let candidate = crate::ssh::password::push_candidate(&host, password)?;
+        let summary = ssh_test_connection_summary(host.clone()).await;
+        drop(candidate);
+        return Ok(summary);
+    }
     let summary = ssh_test_connection_summary(host.clone()).await;
     let authentication_stage_failed = summary
         .diagnostic
@@ -1018,7 +1136,7 @@ pub async fn ensure_qualified_ssh_helper(
 pub async fn cmd_ssh_sync_tailscale<R: Runtime>(app: AppHandle<R>) -> Result<SshTailscaleSyncResult, IpcError> {
     let _sync = SSH_TAILSCALE_SYNC.lock().await;
     let path = get_ssh_store_path(&app)?;
-    match crate::remote::discovery::tailscale::TailscaleDiscoveryProvider::new().discover_ssh_peers_async().await {
+    match crate::remote::discovery::tailscale::TailscaleDiscoveryProvider::new().discover_ssh_status_async().await {
         Err(crate::remote::discovery::tailscale::TailscaleDiscoveryError::Timeout) => {
             let hosts = run_blocking(move || Ok(load_store(&path)?.hosts)).await?;
             Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(IpcErrorCode::Timeout, "Tailscale status discovery timed out").with_details(serde_json::json!({"stage":"discovery"}))) })
@@ -1028,27 +1146,34 @@ pub async fn cmd_ssh_sync_tailscale<R: Runtime>(app: AppHandle<R>) -> Result<Ssh
             let (code, stage) = match &error { crate::remote::discovery::tailscale::TailscaleDiscoveryError::Command(_) => (IpcErrorCode::CliExecutableNotFound, "command"), crate::remote::discovery::tailscale::TailscaleDiscoveryError::Parse(_) => (IpcErrorCode::InvalidRequest, "parse"), crate::remote::discovery::tailscale::TailscaleDiscoveryError::Timeout => unreachable!() };
             Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(code, error.to_string()).with_details(serde_json::json!({"stage":stage}))) })
         }
-        Ok(peers) => sync_tailscale_peers(path, peers).await,
+        Ok(status) => sync_tailscale_peers(path, status).await,
     }
 }
 
-async fn sync_tailscale_peers(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>) -> Result<SshTailscaleSyncResult, IpcError> {
+async fn sync_tailscale_peers(path: PathBuf, status: crate::remote::discovery::tailscale::TailscaleSshStatus) -> Result<SshTailscaleSyncResult, IpcError> {
     let config_hosts = run_blocking(|| Ok(system_ssh_config_for_sync())).await?;
-    sync_tailscale_peers_with(path, peers, config_hosts, sync_tailscale_target).await
+    sync_tailscale_peers_with(path, status, config_hosts, sync_tailscale_target).await
 }
 
-async fn sync_tailscale_peers_with<F, Fut>(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>, config_hosts: Vec<SshHost>, provision: F) -> Result<SshTailscaleSyncResult, IpcError>
+async fn sync_tailscale_peers_with<F, Fut>(path: PathBuf, status: crate::remote::discovery::tailscale::TailscaleSshStatus, config_snapshot: Option<Vec<SshHost>>, provision: F) -> Result<SshTailscaleSyncResult, IpcError>
 where
     F: Fn(SshHost, Option<String>) -> Fut + Clone,
     Fut: std::future::Future<Output = Result<SshTargetSummary, IpcError>> + Send + 'static,
 {
+    let self_ip = status.self_ipv4.clone();
+    let peers = status.peers;
+    let config_hosts = config_snapshot.clone().unwrap_or_default();
     let provisioning_peers: Vec<_> = peers.iter().filter(|peer| peer.online && !matches!(peer.os.as_deref().map(str::to_ascii_lowercase).as_deref(), Some("android" | "ios" | "ipados"))).cloned().collect();
     let merge_path = path.clone();
     let merge_peers = peers.clone();
+    let merge_config_known = config_snapshot;
+    let merge_self_ip = self_ip;
     let hosts = run_blocking(move || {
         let _guard = lock_ssh_store();
         let mut store = load_store(&merge_path)?;
         merge_tailscale_peers(&mut store, &merge_peers, &config_hosts);
+        retain_vanished_hosts(&mut store, &merge_peers, merge_self_ip.as_deref(), merge_config_known.as_deref());
+        dedupe_tailscale_rows(&mut store);
         save_store(&merge_path, &store)?;
         Ok(store.hosts)
     }).await?;
@@ -1085,12 +1210,14 @@ where
     Ok(SshTailscaleSyncResult { hosts, targets, discovery_error: None })
 }
 
-fn system_ssh_config_for_sync() -> Vec<SshHost> {
-    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else { return Vec::new(); };
-    let path = PathBuf::from(home).join(".ssh/config");
-    std::fs::read_to_string(path)
-        .map(|text| crate::ssh::config::import_aliases(&parse_ssh_config(&text), &[]))
-        .unwrap_or_default()
+// The aliases currently declared in the user's `~/.ssh/config`.
+//
+// `None` means the file could not be read at all, which is not the same as "the user has no
+// aliases": pruning config rows against an unreadable file would erase every imported alias.
+fn system_ssh_config_for_sync() -> Option<Vec<SshHost>> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let text = std::fs::read_to_string(PathBuf::from(home).join(".ssh/config")).ok()?;
+    Some(crate::ssh::config::import_aliases(&parse_ssh_config(&text), &[]))
 }
 
 async fn sync_tailscale_target(host: SshHost, os: Option<String>) -> Result<SshTargetSummary, IpcError> {
@@ -1163,6 +1290,122 @@ fn merge_tailscale_peers(store: &mut SshHostStore, peers: &[crate::remote::disco
             store.hosts.push(host);
         }
     }
+}
+
+// Drops rows whose upstream no longer reports the machine.
+//
+// Merging alone only ever adds, so every host that once existed kept sitting in the picker
+// forever: a laptop that left the tailnet, an offline peer, an alias deleted from
+// ~/.ssh/config. Nothing on the row itself distinguishes "configured but asleep" from "gone",
+// so the upstream truth decides:
+//
+// - Manual rows are the user's own entries and are never pruned.
+// - Config rows survive while their alias is still declared, while a live peer claims them, or
+//   when the config could not be read at all (None) - an unreadable file is not an empty one.
+// - Tailscale rows survive only while an online peer still answers to them; a disabled row is
+//   kept because disabling is an explicit "keep this, do not use it" decision. This machine's own
+//   tailnet address also survives: a row naming our own IP describes us, not a vanished peer. So
+//   does a row whose address or label the user still wrote in ~/.ssh/config, and every row when
+//   the config could not be read: discovery keeps the peer id when it adopts a user alias, so
+//   "omarchy2" is stored as a Tailscale row even though the user owns the entry.
+fn retain_vanished_hosts(
+    store: &mut SshHostStore,
+    peers: &[crate::remote::discovery::tailscale::TailscaleSshPeer],
+    self_ipv4: Option<&str>,
+    config_hosts: Option<&[SshHost]>,
+) {
+    let config_ids: std::collections::HashSet<&str> = config_hosts
+        .iter()
+        .flat_map(|hosts| hosts.iter().map(|host| host.id.as_str()))
+        .collect();
+    let live_peer = |host: &SshHost| {
+        peers.iter().any(|peer| {
+            peer.online
+                && (host.id == format!("tailscale:{}", peer.node_id) || tailnet_host_matches(host, peer))
+        })
+    };
+    store.hosts.retain(|host| match host.source {
+        crate::ssh::SshHostSource::Manual => true,
+        crate::ssh::SshHostSource::Config => {
+            config_hosts.is_none() || config_ids.contains(host.id.as_str()) || live_peer(host)
+        }
+        crate::ssh::SshHostSource::Tailscale => {
+            // An unreadable config must not be treated as an empty one: without it we cannot tell
+            // a user-written alias from stale discovery junk, and dropping the row can delete a
+            // host the user still expects to reach.
+            config_hosts.is_none()
+                || host.disabled == Some(true)
+                || live_peer(host)
+                || self_ipv4.is_some_and(|ip| host.hostname.eq_ignore_ascii_case(ip))
+                || config_hosts.is_some_and(|entries| config_owns(host, entries))
+        }
+    });
+}
+
+// True when the user's ~/.ssh/config still names this machine, by address or by alias.
+//
+// A discovered row can also stand for a config host: merge_tailscale_peers keeps the peer's id
+// when it adopts the alias and login the user wrote, so "omarchy2" or "dots" is stored with a
+// tailscale id even though the user owns the entry. Pruning it because the tailnet does not
+// report the box right now would delete a host the user still reaches by name, so config
+// ownership outranks liveness.
+fn config_owns(host: &SshHost, config_hosts: &[SshHost]) -> bool {
+    config_hosts.iter().any(|entry| {
+        entry.hostname.eq_ignore_ascii_case(&host.hostname)
+            || entry.label.eq_ignore_ascii_case(&host.label)
+    })
+}
+
+// Collapses several rows that describe the same machine into one.
+//
+// A single box is regularly present three times - once hand-added, once imported from
+// ~/.ssh/config, once discovered over Tailscale - because each source stores its own row and
+// merge updates rows in place instead of removing the losers. The surviving row is the richest
+// identity (Manual, then Config, then Tailscale), because a hand-written alias carries the label
+// and credentials a bare peer address does not.
+//
+// Two rows imported from ~/.ssh/config are NEVER folded into each other, even when they share an
+// address and a login: those are aliases the user wrote on purpose. A real config carries
+// "maho-win", "maho-scalper" and "maho-steam" on one machine, and collapsing them would delete two
+// of the user's own entries the first time Tailscale discovery ran. Only a discovered row is ever
+// absorbed, and only into a stronger row.
+//
+// Rows with two different explicit usernames are kept apart: "box" and "box-root" are different
+// logins to the same address, not duplicates.
+fn dedupe_tailscale_rows(store: &mut SshHostStore) {
+    // Only a discovered row is ever folded away. A hand-added row and a ~/.ssh/config alias are
+    // the user's own entries: several aliases may name one machine on purpose, so collapsing them
+    // would delete rows the user wrote.
+    //
+    // A discovered row is folded when *any* row the user owns names the same machine. Testing only
+    // the rows kept so far made the outcome depend on insertion order, so a refresh that stored
+    // discovery output first kept a duplicate that an earlier pass had removed.
+    let hosts = std::mem::take(&mut store.hosts);
+    let discovered = |host: &SshHost| matches!(host.source, crate::ssh::SshHostSource::Tailscale);
+    let mut kept: Vec<SshHost> = Vec::with_capacity(hosts.len());
+    for index in 0..hosts.len() {
+        let host = &hosts[index];
+        if !discovered(host) {
+            kept.push(host.clone());
+            continue;
+        }
+        let shadowed_by_user = hosts.iter().enumerate().any(|(other, candidate)| {
+            other != index && !discovered(candidate) && same_machine(candidate, host)
+        });
+        let shadowed_by_kept = kept.iter().any(|existing| same_machine(existing, host));
+        if !shadowed_by_user && !shadowed_by_kept {
+            kept.push(host.clone());
+        }
+    }
+    store.hosts = kept;
+}
+
+fn same_machine(left: &SshHost, right: &SshHost) -> bool {
+    left.hostname.eq_ignore_ascii_case(&right.hostname)
+        && match (left.username.as_deref(), right.username.as_deref()) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        }
 }
 
 fn tailnet_host_matches(host: &SshHost, peer: &crate::remote::discovery::tailscale::TailscaleSshPeer) -> bool {
@@ -1368,6 +1611,22 @@ pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
         crate::ipc::worktree::WorktreeChangeKind::Created,
     )?;
     Ok(created)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_preview_remote_worktree_delete<R: Runtime>(
+    app: AppHandle<R>,
+    workspace_id: String,
+    path: String,
+) -> Result<crate::worktree::BranchDeletionPreview, IpcError> {
+    let store = get_ssh_store_path(&app)?;
+    let (project, host) = crate::ipc::run_blocking(move || {
+        crate::ssh::projects::resolve(&store, &workspace_id)
+    }).await?;
+    let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
+    crate::ssh::worktree::validate_path_inside_root(environment.platform, &project.repo_root, &path)?;
+    crate::ssh::worktree::preview_remote_delete(&host, &environment, &project.repo_root, &path).await
 }
 
 #[cfg(feature = "desktop")]

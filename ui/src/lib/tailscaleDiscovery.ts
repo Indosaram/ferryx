@@ -40,6 +40,7 @@ let inflight: Promise<TailscaleSyncResult> | null = null;
 let rerunRequested = false;
 let lifecycleUsers = 0;
 let inventoryEpoch = 0;
+let lifecycle = 0;
 let stopLifecycle: (() => void) | null = null;
 let observedInventory = "[]";
 let publishingInventory = false;
@@ -69,6 +70,7 @@ function errorMessage(error: unknown): string {
 function syncOnce(): Promise<TailscaleSyncResult> {
   if (!isTauri()) return Promise.resolve({ hosts: [], targets: [], discoveryError: null });
   const requestEpoch = inventoryEpoch;
+  const requestLifecycle = lifecycle;
   publish({ ...state, status: state.status === "idle" ? "discovering" : state.status, refreshing: true, lastError: null });
   return invoke<TailscaleSyncResult>("cmd_ssh_sync_tailscale").then((result) => {
     if (requestEpoch === inventoryEpoch) {
@@ -88,7 +90,7 @@ function syncOnce(): Promise<TailscaleSyncResult> {
         refreshing: false,
       });
     } else {
-      publish({ ...state, refreshing: false });
+      if (requestLifecycle === lifecycle) publish({ ...state, refreshing: false });
       return { hosts: state.hosts, targets: state.targets, discoveryError: state.discoveryError };
     }
     return result;
@@ -114,12 +116,18 @@ async function runSync(): Promise<TailscaleSyncResult> {
   try {
     return await current;
   } finally {
-    if (inflight === current) inflight = null;
-    if (rerunRequested) {
-      rerunRequested = false;
-      void runSync().catch(() => undefined);
+    if (inflight === current) {
+      inflight = null;
+      if (rerunRequested) {
+        rerunRequested = false;
+        void runSync().catch(() => undefined);
+      }
     }
   }
+}
+
+function connectionFingerprint(host: SshHost): string {
+  return JSON.stringify([host.hostname, host.port, host.username, host.authMethod, host.identityFile, host.jumpHost, host.disabled]);
 }
 
 function onInventoryChanged(hosts: SshHost[]): void {
@@ -131,8 +139,17 @@ function onInventoryChanged(hosts: SshHost[]): void {
   observedInventory = fingerprint;
   const inventory = getCachedSshHosts() ?? hosts;
   const currentTailnet = inventory.filter((host) => host.source === "tailscale");
-  const targets = state.targets.filter((target) => inventory.some((host) => JSON.stringify(host) === JSON.stringify(target.host)));
+  const byId = new Map(inventory.map((host) => [host.id, host]));
+  const connectionChanged = state.hosts.some((previous) => {
+    const host = byId.get(previous.id);
+    return host && connectionFingerprint(host) !== connectionFingerprint(previous);
+  });
+  const targets = state.targets.flatMap((target) => {
+    const host = byId.get(target.host.id);
+    return host && connectionFingerprint(host) === connectionFingerprint(target.host) ? [{ ...target, host }] : [];
+  });
   publish({ ...state, hosts: currentTailnet, targets, targetsByHost: new Map(targets.map((target) => [target.host.id, target])) });
+  if (connectionChanged && !publishingInventory && !inflight) void runSync().catch(() => undefined);
 }
 
 export function startTailscaleDiscovery(): () => void {
@@ -178,12 +195,13 @@ export function useTailscaleTargetsByHost(): ReadonlyMap<string, SshTargetSummar
 }
 
 export function resetTailscaleDiscoveryForTests(): void {
+  lifecycle += 1;
   stopLifecycle?.();
   stopLifecycle = null;
   lifecycleUsers = 0;
   inflight = null;
   rerunRequested = false;
-  inventoryEpoch = 0;
+  inventoryEpoch += 1;
   observedInventory = "[]";
   publishingInventory = false;
   publish(initialState);

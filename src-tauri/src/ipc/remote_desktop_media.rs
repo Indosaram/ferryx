@@ -90,13 +90,25 @@ impl RdAudioPlayer {
         )
     }
 
+    /// The mute flag the meta reports back to the renderer.
+    pub fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    /// The last volume applied, so a mute toggle can preserve it.
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
     pub fn stop(&mut self) {
         let _ = self.queue.clear();
         self.output = None;
     }
 }
 
-pub const FRAME_KIND_CURSOR: u8 = 0x03;
+/// `0x06` on the frame channel; `0x03`-`0x05` belong to the meta, audio and clipboard
+/// messages the host toolbars added, so the cursor payload moved past them.
+pub const FRAME_KIND_CURSOR: u8 = 0x06;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

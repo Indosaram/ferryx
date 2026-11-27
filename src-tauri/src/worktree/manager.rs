@@ -102,17 +102,28 @@ pub struct WorktreeManager {
 
 /// Whether the root is a Git checkout, re-probed only when its `.git` entry appears or
 /// disappears, so the steady state costs one `stat` and never a `git` subprocess.
+///
+/// The observation pair lives behind a mutex instead of atomics: reading the marker and
+/// confirming it with `git rev-parse` must be one step, otherwise a second caller reads the
+/// stale `backed` an in-flight probe on another thread has not written yet.
 #[derive(Debug)]
 struct GitBacking {
-    backed: std::sync::atomic::AtomicBool,
-    marker_present: std::sync::atomic::AtomicBool,
+    observed: Mutex<GitBackingObservation>,
+}
+
+#[derive(Debug)]
+struct GitBackingObservation {
+    backed: bool,
+    marker_present: bool,
 }
 
 impl GitBacking {
     fn new(backed: bool, marker_present: bool) -> Self {
         Self {
-            backed: std::sync::atomic::AtomicBool::new(backed),
-            marker_present: std::sync::atomic::AtomicBool::new(marker_present),
+            observed: Mutex::new(GitBackingObservation {
+                backed,
+                marker_present,
+            }),
         }
     }
 }
@@ -121,6 +132,83 @@ impl GitBacking {
 fn git_top_level(path: &Path) -> Option<PathBuf> {
     let top_level = run_git(path, &["rev-parse", "--show-toplevel"]).ok()?;
     fs::canonicalize(PathBuf::from(top_level.trim())).ok()
+}
+
+/// Probes whether `path` is itself the top level of a checkout.
+///
+/// `Some(backed)` is a definitive answer and may be cached; `None` means the probe did not
+/// complete (git unavailable, transient failure, half-written checkout) and proves nothing.
+fn probe_git_backing(path: &Path) -> Option<bool> {
+    git_top_level(path).map(|top_level| top_level == path)
+}
+
+/// Whether two paths denote the same location despite platform spelling differences:
+/// Windows verbatim prefixes (`\\?\`, `\\.\`), `/` versus `\` separators, repeated or
+/// trailing separators, and - on the case-insensitive default filesystems of macOS and
+/// Windows - letter case. A missing leaf is compared through its nearest existing ancestor,
+/// so a prunable record (whose checkout is already gone) still matches the managed path.
+fn paths_refer_to_same_location(a: &Path, b: &Path) -> bool {
+    fn identity(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        let text = raw.as_ref();
+        let text = text
+            .strip_prefix(r"\\?\")
+            .or_else(|| text.strip_prefix(r"\\.\"))
+            .unwrap_or(text);
+        // A backslash is a legal file-name character on Unix, so only Windows folds it.
+        let text = if cfg!(windows) {
+            text.replace('\\', "/")
+        } else {
+            text.to_owned()
+        };
+        let mut collapsed = String::with_capacity(text.len());
+        let mut previous_separator = false;
+        for character in text.chars() {
+            if character == '/' {
+                if previous_separator {
+                    continue;
+                }
+                previous_separator = true;
+            } else {
+                previous_separator = false;
+            }
+            collapsed.push(character);
+        }
+        let trimmed = collapsed.trim_end_matches('/');
+        let trimmed = if trimmed.is_empty() { "/" } else { trimmed };
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed.to_owned()
+        }
+    }
+
+    fn with_existing_ancestor(path: &Path) -> PathBuf {
+        if let Ok(canonical) = fs::canonicalize(path) {
+            return canonical;
+        }
+        let mut missing: Vec<std::ffi::OsString> = Vec::new();
+        let mut cursor = path;
+        loop {
+            let Some(name) = cursor.file_name() else {
+                return path.to_path_buf();
+            };
+            missing.push(name.to_os_string());
+            let Some(parent) = cursor.parent() else {
+                return path.to_path_buf();
+            };
+            if let Ok(canonical) = fs::canonicalize(parent) {
+                let mut rebuilt = canonical;
+                for segment in missing.iter().rev() {
+                    rebuilt.push(segment);
+                }
+                return rebuilt;
+            }
+            cursor = parent;
+        }
+    }
+
+    identity(&with_existing_ancestor(a)) == identity(&with_existing_ancestor(b))
 }
 
 impl WorktreeManager {
@@ -168,7 +256,9 @@ impl WorktreeManager {
         let marker_present = repo_root.join(".git").exists();
         Ok(Self {
             repo_root,
-            git_backing: Arc::new(GitBacking::new(git_backed, marker_present)),
+            // `marker_present` records a marker we already confirmed: a bare `.git` entry that
+            // failed the probe must be re-probed by the next `is_git_backed` call.
+            git_backing: Arc::new(GitBacking::new(git_backed, git_backed && marker_present)),
             settings_path: naming::settings_path(),
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
@@ -263,15 +353,27 @@ impl WorktreeManager {
     /// require it). Plain-folder workspaces are terminal-only. Tracks the live
     /// root: a later `git init` or a removed `.git` takes effect on the next call.
     pub fn is_git_backed(&self) -> bool {
-        use std::sync::atomic::Ordering;
-        let backing = &self.git_backing;
         let marker_present = self.repo_root.join(".git").exists();
-        if backing.marker_present.swap(marker_present, Ordering::AcqRel) != marker_present {
-            // Only a checkout rooted exactly here can serve this root jail.
-            let backed = git_top_level(&self.repo_root).as_deref() == Some(self.repo_root.as_path());
-            backing.backed.store(backed, Ordering::Release);
+        // One guard covers the read, the probe and the write: a second caller must never
+        // observe the marker change before the `backed` answer that belongs with it.
+        let mut observed = self.git_backing.observed.lock();
+        if observed.marker_present == marker_present {
+            return observed.backed;
         }
-        backing.backed.load(Ordering::Acquire)
+        match probe_git_backing(&self.repo_root) {
+            Some(backed) => {
+                observed.backed = backed;
+                observed.marker_present = marker_present;
+                backed
+            }
+            None => {
+                // Nothing was proven, so record nothing: leaving the marker unconfirmed makes
+                // the next call re-probe instead of caching `backed == false` forever.
+                observed.backed = false;
+                observed.marker_present = false;
+                false
+            }
+        }
     }
 
     fn require_git_backed(&self) -> Result<(), WorktreeError> {
@@ -795,13 +897,17 @@ impl WorktreeManager {
             }
         }
         for record in git_worktree_list(&self.repo_root)? {
-            if record.path != path || record.prunable.is_none() {
+            if !paths_refer_to_same_location(&record.path, path) || record.prunable.is_none() {
                 continue;
             }
             if let Some(info) = record.orca_info() {
                 Self::format_branch_name(&info.ws_id, &info.slug)?;
-                let managed = naming::all_worktree_dirs()
-                    .any(|dir| self.managed_path_in(dir, &info.ws_id, &info.slug) == path);
+                let managed = naming::all_worktree_dirs().any(|dir| {
+                    paths_refer_to_same_location(
+                        &self.managed_path_in(dir, &info.ws_id, &info.slug),
+                        path,
+                    )
+                });
                 if managed {
                     return Ok(record);
                 }
@@ -839,10 +945,14 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// The single deletion critical section. The status probe runs here and only here, so one
+    /// removal never runs `git status` twice; `reject_dirty` decides whether a dirty checkout
+    /// aborts (safe delete) or is removed anyway (destructive delete).
     fn remove_worktree_locked(
         &self,
         worktree_path: &Path,
         force: bool,
+        reject_dirty: bool,
     ) -> Result<bool, WorktreeError> {
         let canonical = self.deletion_record(worktree_path)?.path;
         let missing = !canonical.try_exists()?;
@@ -857,7 +967,7 @@ impl WorktreeManager {
         } else {
             self.check_dirty(&canonical)?
         };
-        if !force && dirty_state.is_dirty {
+        if reject_dirty && dirty_state.is_dirty {
             let count = dirty_state.files.len();
             let files = dirty_state
                 .files
@@ -900,23 +1010,13 @@ impl WorktreeManager {
 
     pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
+        // Keep the existing-path and writer contracts ahead of the dirty gate; the gate
+        // itself runs once inside `remove_worktree_locked`.
         let canonical = self.canonical_worktree_path(worktree_path)?;
         self.ensure_no_writer(&canonical)?;
-        let dirty_state = self.check_dirty(&canonical)?;
-        if dirty_state.is_dirty {
-            let count = dirty_state.files.len();
-            let files = dirty_state
-                .files
-                .into_iter()
-                .map(|file| file.path)
-                .collect();
-            return Err(WorktreeError::DirtyWorktree {
-                path: canonical,
-                count,
-                files,
-            });
-        }
-        self.remove_worktree_locked(worktree_path, force)
+        // `force` only reaches `git worktree remove`; a dirty checkout is always refused here,
+        // so callers that want a dirty removal use the destructive delete path.
+        self.remove_worktree_locked(worktree_path, force, true)
             .map(|_| ())
     }
 
@@ -1039,7 +1139,7 @@ impl WorktreeManager {
             None
         };
 
-        let pruned = self.remove_worktree_locked(worktree_path, destructive)?;
+        let pruned = self.remove_worktree_locked(worktree_path, destructive, !destructive)?;
         if let Some(branch) = branch {
             git_branch_delete(&self.repo_root, &branch, destructive)?;
         }
@@ -1111,5 +1211,173 @@ mod host_scoped_session_id_tests {
         let round_tripped: DevServerPortForward =
             serde_json::from_str(&json).expect("deserialize DevServerPortForward");
         assert_eq!(forward, round_tripped);
+    }
+}
+
+#[cfg(test)]
+mod git_backing_and_delete_tests {
+    use super::*;
+    use crate::worktree::git::with_git_observer;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use tempfile::TempDir;
+
+    fn git(dir: &Path, args: &[&str]) {
+        crate::worktree::git::run_git(dir, args).expect("git command");
+    }
+
+    fn repo_with_commit() -> (TempDir, WorktreeManager) {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.name", "Orca Test"]);
+        git(root, &["config", "user.email", "test@orca.dev"]);
+        fs::write(root.join("README.md"), "# Test\n").expect("write README");
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-m", "Initial commit"]);
+        let settings = root.join(".git").join("ferryx-test-worktree-settings.json");
+        let manager = WorktreeManager::new(root).with_settings_path(Some(settings));
+        (dir, manager)
+    }
+
+    fn count_status_calls<T>(work: impl FnOnce() -> T) -> (T, usize) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let result = with_git_observer(
+            Arc::new(move |_cwd: &Path, args: &[&str]| {
+                if args.first() == Some(&"status") {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+            work,
+        );
+        (result, calls.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn concurrent_is_git_backed_after_a_later_git_init_agrees() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let manager = WorktreeManager::try_new(root).expect("plain folder registers");
+        assert!(!manager.is_git_backed());
+
+        git(root, &["init"]);
+
+        // Every racing caller must observe the initialized repository. The first caller runs
+        // the probe; the rest must not read the pre-probe `backed` value it replaced.
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    manager.is_git_backed()
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert!(
+                handle.join().expect("probe thread"),
+                "a concurrent caller must not read a stale `backed == false`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transient_probe_failure_does_not_poison_later_probes() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        // A `.git` entry git cannot read: the marker exists, so the probe itself fails.
+        fs::write(root.join(".git"), "not a gitdir\n").expect("write marker");
+        let manager = WorktreeManager::try_new(root).expect("plain folder registers");
+        assert!(!manager.is_git_backed(), "an unreadable marker is not a checkout");
+        assert!(!manager.is_git_backed(), "the failure is repeatable");
+
+        fs::remove_file(root.join(".git")).expect("remove marker");
+        git(root, &["init"]);
+        assert!(
+            manager.is_git_backed(),
+            "a failed probe must not be cached as a permanent plain folder"
+        );
+    }
+
+    #[test]
+    fn paths_refer_to_same_location_folds_separators_and_trailing_slashes() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("nested/worktree")).expect("mkdir");
+
+        let exact = root.join("nested/worktree");
+        assert!(paths_refer_to_same_location(&exact, &exact));
+        assert!(paths_refer_to_same_location(
+            &exact,
+            &PathBuf::from(format!("{}/", exact.display()))
+        ));
+        assert!(paths_refer_to_same_location(
+            &exact,
+            &root.join("nested/./worktree")
+        ));
+
+        // A missing leaf (a pruned checkout) matches through its nearest existing ancestor.
+        let missing = root.join("nested/worktree/gone");
+        assert!(paths_refer_to_same_location(
+            &missing,
+            &root.join("nested/./worktree/gone")
+        ));
+
+        assert!(!paths_refer_to_same_location(&exact, &root.join("nested/other")));
+    }
+
+    #[test]
+    fn paths_refer_to_same_location_strips_windows_verbatim_prefixes() {
+        let plain = PathBuf::from(r"C:\repo\wt\feature");
+        assert!(paths_refer_to_same_location(
+            &PathBuf::from(r"\\?\C:\repo\wt\feature"),
+            &plain
+        ));
+        assert!(paths_refer_to_same_location(
+            &PathBuf::from(r"\\.\C:\repo\wt\feature"),
+            &plain
+        ));
+
+        // Only the case-insensitive default filesystems fold letter case.
+        let folded = paths_refer_to_same_location(
+            Path::new("/Repo/WT/Feature"),
+            Path::new("/repo/wt/feature/"),
+        );
+        assert_eq!(folded, cfg!(any(target_os = "macos", target_os = "windows")));
+    }
+
+    #[test]
+    fn safe_delete_probes_dirty_state_once() {
+        let (_dir, manager) = repo_with_commit();
+        let path = manager.worktree_path_for("ws", "clean").expect("path");
+        manager
+            .create_worktree(CreateWorktreeOptions::new("ws", "clean", &path))
+            .expect("create worktree");
+
+        let (result, status_calls) = count_status_calls(|| manager.safe_delete(&path));
+        result.expect("safe delete of a clean worktree");
+        assert_eq!(
+            status_calls, 1,
+            "one removal must run git status exactly once"
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn safe_delete_still_refuses_a_dirty_worktree_with_one_probe() {
+        let (_dir, manager) = repo_with_commit();
+        let path = manager.worktree_path_for("ws", "dirty").expect("path");
+        manager
+            .create_worktree(CreateWorktreeOptions::new("ws", "dirty", &path))
+            .expect("create worktree");
+        fs::write(path.join("untracked.txt"), "dirty\n").expect("write dirty file");
+
+        let (result, status_calls) = count_status_calls(|| manager.safe_delete(&path));
+        assert!(matches!(result, Err(WorktreeError::DirtyWorktree { .. })));
+        assert_eq!(status_calls, 1, "the refusal must cost one status probe");
+        assert!(path.exists(), "a refused delete leaves the checkout in place");
     }
 }
