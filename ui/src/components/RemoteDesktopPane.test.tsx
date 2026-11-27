@@ -503,7 +503,8 @@ describe("RemoteDesktopPane", () => {
 
     act(() => channels[0].onmessage(statusFrame("ended")));
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
-    const alert = await screen.findByRole("alert");
+    // The toolbar notice also carries role="alert", so target the status line itself.
+    const alert = await screen.findByTestId("remote-desktop-status");
     expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-state", "error");
     expect(alert).toHaveClass("text-red-300");
     expect(screen.getByTestId("remote-desktop-overlay")).toHaveAttribute("data-scrim", "true");

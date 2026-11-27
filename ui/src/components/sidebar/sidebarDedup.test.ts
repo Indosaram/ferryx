@@ -24,6 +24,7 @@ const remoteState: RemoteHostState = {
     },
   },
   activeHostId: proHostId,
+  discovering: false,
   nativeStatus: "ready",
   machineFeaturesEnabled: true,
 };
@@ -34,7 +35,11 @@ const sshHosts: SshHost[] = [
   { id: "ssh-omarchy", label: "omarchy", hostname: "100.91.254.71", username: "indo", source: "manual", authMethod: "agent" },
 ];
 
-const project = (workspaceId: string, repoRoot: string, target: RegisteredProject["target"]): RegisteredProject => ({
+// The pairedDaemon variant requires a sibling remoteWorkspaceId, so this helper builds only the
+// target shapes that stand on their own; pairedProject() below adds the remote id.
+type StandaloneTarget = Extract<RegisteredProject, { remoteWorkspaceId?: never }>["target"];
+
+const project = (workspaceId: string, repoRoot: string, target: StandaloneTarget): RegisteredProject => ({
   workspaceId,
   repoRoot,
   gitRoot: repoRoot,
@@ -43,6 +48,15 @@ const project = (workspaceId: string, repoRoot: string, target: RegisteredProjec
 });
 
 describe("sidebarDedup", () => {
+  const pairedProject = (workspaceId: string, repoRoot: string, remoteWorkspaceId: string): RegisteredProject => ({
+    workspaceId,
+    repoRoot,
+    gitRoot: repoRoot,
+    gitCommonDir: `${repoRoot}/.git`,
+    target: { kind: "pairedDaemon", hostId: proHostId },
+    remoteWorkspaceId,
+  });
+
   it("normalizes .local and Tailscale DNS suffixes", () => {
     expect(normalizeMachineToken("Indoui-MacBookPro-3.local")).toBe("indoui-macbookpro-3");
     expect(normalizeMachineToken("indoui-macbookpro-3.taila0cef2.ts.net")).toBe("indoui-macbookpro-3");
@@ -57,7 +71,7 @@ describe("sidebarDedup", () => {
 
   it("drops duplicate SSH projects that match a paired project on the same host and path", () => {
     const projects: RegisteredProject[] = [
-      project("daemon:noveling", "/Volumes/T9-Mac/Noveling/noveling", { kind: "pairedDaemon", hostId: proHostId, remoteWorkspaceId: "w1" }),
+      pairedProject("daemon:noveling", "/Volumes/T9-Mac/Noveling/noveling", "w1"),
       project("ssh:noveling", "/Volumes/T9-Mac/Noveling/noveling/", { kind: "ssh", hostId: "ssh-macbook-pro" }),
       project("ssh:only-on-ssh", "/Volumes/T9-Mac/only-ssh", { kind: "ssh", hostId: "ssh-macbook-pro" }),
       project("ssh:omarchy", "/home/indo/ferryx", { kind: "ssh", hostId: "ssh-omarchy" }),
@@ -78,7 +92,7 @@ describe("sidebarDedup", () => {
       },
     };
     const projects: RegisteredProject[] = [
-      project("daemon:ferryx", "/Volumes/T9-Mac/project/ferryx", { kind: "pairedDaemon", hostId: proHostId, remoteWorkspaceId: "w2" }),
+      pairedProject("daemon:ferryx", "/Volumes/T9-Mac/project/ferryx", "w2"),
       project("ssh:ferryx", "/Volumes/T9-Mac/project/ferryx", { kind: "ssh", hostId: "ssh-macbook-pro" }),
     ];
     expect(deduplicateSidebarProjects(projects, sshHosts, explicitState).map((p) => p.workspaceId)).toEqual(["daemon:ferryx"]);
@@ -86,7 +100,7 @@ describe("sidebarDedup", () => {
 
   it("buildSidebarModel renders one merged row and displays the active route badge (SSH/Direct/Relay)", () => {
     const projects: RegisteredProject[] = [
-      project("daemon:ferryx", "/Volumes/T9-Mac/project/ferryx", { kind: "pairedDaemon", hostId: proHostId, remoteWorkspaceId: "w2" }),
+      pairedProject("daemon:ferryx", "/Volumes/T9-Mac/project/ferryx", "w2"),
       project("ssh:ferryx", "/Volumes/T9-Mac/project/ferryx", { kind: "ssh", hostId: "ssh-macbook-pro" }),
     ];
     const model = buildSidebarModel({

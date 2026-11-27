@@ -261,6 +261,7 @@ mod tests {
         assert_eq!(outcome.unwrap_err().code, "SOCKET_PROBE_FAILED");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_listener_that_never_answers_times_out() {
         let dir = tempfile::tempdir().unwrap();
@@ -350,6 +351,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_json_reply_proves_the_far_end() {
         let dir = tempfile::tempdir().unwrap();

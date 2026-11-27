@@ -19,6 +19,7 @@ import { join } from "node:path";
 
 import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
 import { writeSurvivalFixture } from "./fixtures/survival-fixture.mjs";
+import { writeSymbolicationFixture } from "./fixtures/symbolication-fixture.mjs";
 
 const SCRIPT_PATH = join(process.cwd(), "scripts", "release-local.mjs");
 
@@ -437,6 +438,11 @@ test("publish: full pipeline with fake gh executable and byte verification", asy
     const sums = `${hash1}  Ferryx_aarch64.dmg\n${hash2}  latest.json\n`;
     writeFileSync(join(publishDir, "SHA256SUMS.txt"), sums);
 
+    // The publish gate refuses a release with no crash-symbolication evidence, so the fixture
+    // writes the packaged artifact, its dSYM archive manifest, and a report bound to those bytes.
+    // It must run before writeIntegrityState: that snapshot digests artifacts/, and the darwin
+    // tarball this writes is part of it.
+    writeSymbolicationFixture(runDir);
     writeIntegrityState(runDir, plan, publishDir);
     writeSurvivalFixture(runDir, plan.commitSha);
 
