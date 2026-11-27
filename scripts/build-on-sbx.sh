@@ -103,7 +103,7 @@ provision=$(cat <<'PROVISION'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential pkg-config libssl-dev curl git unzip \
+sudo apt-get install -y -qq build-essential cmake pkg-config libssl-dev curl git unzip \
   libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
   libxdo-dev libasound2-dev protobuf-compiler clang libclang-dev \
   libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev \
@@ -131,6 +131,7 @@ if ! { command -v zig >/dev/null 2>&1 && [ "$(zig version)" = 0.17.0 ]; }; then
   zig version
 fi
 # $1 = repo url, $2 = revision
+sudo mkdir -p /work && sudo chown "$(id -u):$(id -g)" /work
 git clone --quiet "$1" /work && cd /work
 # A clone has every remote branch, so the plain rev is enough; fetch only as a fallback.
 # (Do not rely on a branch name: FERRYX_SBX_REV may be a raw SHA with no branch.)

@@ -1548,6 +1548,59 @@ impl ProcessHost {
         }
         None
     }
+    /// Whether `runtime_dir` holds a valid, unexpired handover request naming this generation and
+    /// its live predecessor. Read-only: leaves `handover-request.json` intact so the spawned
+    /// `--daemon` child consumes it through `handover_request::take_startup_request`.
+    fn has_authorized_handover_request(
+        runtime_dir: &Path,
+        own_generation_key: Option<&str>,
+        now_unix_ms: u64,
+        start_time_of: &dyn Fn(u32) -> Option<u64>,
+    ) -> bool {
+        use crate::daemon::handover_request::{
+            request_path, startup_role, HandoverRequest, StartupRole,
+        };
+        use crate::daemon::owner_admission::read_record;
+
+        let request = read_record::<HandoverRequest>(&request_path(runtime_dir));
+        matches!(
+            startup_role(request, own_generation_key, now_unix_ms, start_time_of),
+            StartupRole::Candidate { .. }
+        )
+    }
+
+    fn is_authorized_handover_successor(&self) -> bool {
+        let own_key = crate::daemon::handover_request::own_generation_key();
+        let now_ms = crate::daemon::owner_admission::unix_now_ms();
+        let start_time_of = &crate::daemon::owner_admission::process_start_time;
+        if Self::has_authorized_handover_request(
+            &self.runtime_dir,
+            own_key.as_deref(),
+            now_ms,
+            start_time_of,
+        ) {
+            return true;
+        }
+        if let Some(legacy_dir) = crate::daemon::server::get_legacy_runtime_dir()
+            .filter(|legacy| *legacy != self.runtime_dir)
+        {
+            return Self::has_authorized_handover_request(
+                &legacy_dir,
+                own_key.as_deref(),
+                now_ms,
+                start_time_of,
+            );
+        }
+        false
+    }
+
+    fn try_reclaim_supervisor_lock(&mut self) {
+        if self.claim.is_none() {
+            if let Ok(lock) = SupervisorLock::acquire(&self.runtime_dir) {
+                self.claim = Some(lock);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1556,11 +1609,29 @@ impl SupervisedHost for ProcessHost {
         if self.claim.is_some() {
             return Ok(());
         }
-        self.claim = Some(SupervisorLock::acquire(&self.runtime_dir)?);
-        Ok(())
+        match SupervisorLock::acquire(&self.runtime_dir) {
+            Ok(lock) => {
+                self.claim = Some(lock);
+                Ok(())
+            }
+            Err(SupervisorClaimError::AlreadyRunning { path }) => {
+                // During a RequestUpgrade rolling handover, the predecessor generation's crash
+                // supervisor holds `daemon-supervisor.lock` until the successor daemon commits
+                // handover and the predecessor finishes retiring. Admit the authorized successor
+                // generation without consuming `handover-request.json`, then claim the lock in
+                // `wait()` once the predecessor releases it.
+                if self.is_authorized_handover_successor() {
+                    Ok(())
+                } else {
+                    Err(SupervisorClaimError::AlreadyRunning { path })
+                }
+            }
+            Err(other) => Err(other),
+        }
     }
 
     fn spawn_daemon(&mut self) -> Result<u32, String> {
+        self.try_reclaim_supervisor_lock();
         self.spawn()
     }
 
@@ -1574,9 +1645,21 @@ impl SupervisedHost for ProcessHost {
         let Some(mut child) = self.child.take() else {
             return Err("supervised daemon was not spawned by this supervisor".to_string());
         };
-        let status = child
-            .wait()
-            .map_err(|e| format!("Failed to wait for the daemon: {e}"))?;
+        let status = loop {
+            if self.claim.is_some() {
+                break child
+                    .wait()
+                    .map_err(|e| format!("Failed to wait for the daemon: {e}"))?;
+            }
+            self.try_reclaim_supervisor_lock();
+            if let Some(exited) = child
+                .try_wait()
+                .map_err(|e| format!("Failed to wait for the daemon: {e}"))?
+            {
+                break exited;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
         Ok(match status.signal() {
             Some(signal) => ExitObservation::signaled(signal),
             None => ExitObservation::code(status.code().unwrap_or(-1)),
@@ -2653,5 +2736,91 @@ mod tests {
             Some(banner),
             "the newest banner line wins and is not reworded by the reader"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handover_successor_is_admitted_without_consuming_request_and_rejects_foreign_or_expired() {
+        use crate::daemon::handover_request::{request_path, write_request, HandoverRequest};
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path();
+        let _predecessor_lock = SupervisorLock::acquire(runtime).unwrap();
+
+        let key = "2026.1127.2-deadbeef";
+        let req = HandoverRequest::new(
+            runtime.join("legacy-4242.sock"),
+            4242,
+            1_000,
+            7,
+            key.to_string(),
+            runtime.join("ferryx"),
+            5_000,
+        );
+        write_request(runtime, &req).unwrap();
+
+        let alive = |pid: u32| (pid == 4242).then_some(1_000);
+        let dead = |_pid: u32| None;
+
+        // Valid request for this generation admits the handover successor and leaves the file
+        // intact for the child `--daemon` to consume via `take_startup_request`.
+        assert!(ProcessHost::has_authorized_handover_request(
+            runtime,
+            Some(key),
+            6_000,
+            &alive,
+        ));
+        assert!(
+            request_path(runtime).exists(),
+            "supervisor must not consume handover-request.json before spawning --daemon"
+        );
+
+        // Wrong generation, expired request, or dead predecessor must still be refused.
+        assert!(!ProcessHost::has_authorized_handover_request(
+            runtime,
+            Some("2026.1127.2-other"),
+            6_000,
+            &alive,
+        ));
+        assert!(!ProcessHost::has_authorized_handover_request(
+            runtime,
+            Some(key),
+            req.expires_at_unix_ms,
+            &alive,
+        ));
+        assert!(!ProcessHost::has_authorized_handover_request(
+            runtime,
+            Some(key),
+            6_000,
+            &dead,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handover_successor_reclaims_supervisor_lock_after_predecessor_retires() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path();
+        let predecessor_lock = SupervisorLock::acquire(runtime).unwrap();
+
+        let mut successor = ProcessHost {
+            exe: runtime.join("ferryx"),
+            runtime_dir: runtime.to_path_buf(),
+            child: None,
+            claim: None,
+        };
+        // While predecessor holds the lock, try_reclaim_supervisor_lock stays None.
+        successor.try_reclaim_supervisor_lock();
+        assert!(successor.claim.is_none());
+
+        // Once predecessor supervisor retires and drops its lock, successor claims it and blocks
+        // any third supervisor from taking ownership.
+        drop(predecessor_lock);
+        successor.try_reclaim_supervisor_lock();
+        assert!(successor.claim.is_some());
+        assert!(matches!(
+            SupervisorLock::acquire(runtime),
+            Err(SupervisorClaimError::AlreadyRunning { .. })
+        ));
     }
 }
