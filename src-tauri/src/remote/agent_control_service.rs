@@ -333,8 +333,16 @@ async fn observe_entry(
     if failed {
         entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
     }
+    // A provider's own reading on this run's bus is an agent signal even when the screen has
+    // moved on since (hook readings carry no screen revision, so `status` cannot adopt them).
+    // Persisted seeds never reach `latest`, so an empty shell from a previous run still has none.
+    let provider_reported = state
+        .agent_events
+        .latest(session_id)
+        .is_some_and(|seen| seen.state_source == AgentStateSource::Provider);
     let has_agent_signal = agent.is_some()
         || provider_outcome.is_some()
+        || provider_reported
         || status.state != AgentControlState::Unknown
         || status.source != AgentStateSource::None;
     let completed = has_agent_signal

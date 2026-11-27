@@ -1232,8 +1232,12 @@ fn test_launchd_plist_generation_and_identity_contract() {
         "Must contain executable path"
     );
     assert!(
-        plist.contains("<string>--daemon</string>"),
-        "Must configure --daemon flag in ProgramArguments"
+        plist.contains(&format!("<string>{}</string>", ferryx_lib::daemon::crash_supervisor::SUPERVISOR_ARG)),
+        "ProgramArguments must launch the crash supervisor, which owns the daemon's restarts"
+    );
+    assert!(
+        !plist.contains("<string>--daemon</string>"),
+        "launchd must not run the daemon directly: supervision belongs to the job"
     );
 }
 

@@ -601,14 +601,14 @@ async fn fan_out_follows_session_visibility_per_access_scope() {
     // machine journal.
     let remote_ref = "https://relay.ferryx.dev/host/peer-1:remote-sess-1".to_string();
     assert_eq!(state.dispatch_decision_push(&[remote_ref]).await, 1);
+    // `received()` drains, so each count is what arrived since the previous check.
     assert_eq!(
         machine_mock.received().len(),
-        2,
+        1,
         "a Machine Control device receives paired-host decision pushes"
     );
-    assert_eq!(
-        mirror_mock.received().len(),
-        1,
+    assert!(
+        mirror_mock.received().is_empty(),
         "a Mirror device does not receive paired-host decision pushes"
     );
 }
