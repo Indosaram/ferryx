@@ -113,6 +113,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   const pressedKeysRef = useRef(new Set<string>());
   const capturedPointersRef = useRef(new Set<number>());
   const visibleRef = useRef(visible);
+  const hasFrameRef = useRef(false);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const rdSessionId = session?.rdSessionId ?? null;
@@ -120,6 +121,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   sessionIdRef.current = rdSessionId;
 
   const [hasFrame, setHasFrame] = useState(false);
+  hasFrameRef.current = hasFrame;
   const [frameSize, setFrameSize] = useState<{ width: number; height: number } | null>(null);
   const [meta, setMeta] = useState<RdSessionMeta | null>(() =>
     rdSessionId ? (lastMetaBySessionId.get(rdSessionId) ?? null) : null,
@@ -170,10 +172,23 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
       }
       return;
     }
+    // A lost session (wire "ended" or a failed reconnect) nulls the id, but the last decoded
+    // frame is still what the user was looking at: keep it under the reconnect scrim instead of
+    // blanking the pane. Only an explicit Disconnect drops it, via clearFrozenFrame().
+    if (hasFrameRef.current) return;
     setHasFrame(false);
     setMeta(null);
     setAudioMuted(false);
   }, [rdSessionId]);
+
+  // The frozen frame survives a dropped session so the user keeps their bearings under the
+  // reconnect scrim, which makes the explicit Disconnect the only path that drops it.
+  const clearFrozenFrame = useCallback(() => {
+    pendingFrameRef.current = null;
+    frameSizeRef.current = null;
+    setFrameSize(null);
+    setHasFrame(false);
+  }, []);
 
   const drawLatestFrame = useCallback(() => {
     if (decodingRef.current) return;
@@ -534,6 +549,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     setOpenMenu(null);
     releasePointerCapture();
     releasePressedKeys();
+    clearFrozenFrame();
     const sid = sessionIdRef.current;
     if (sid) lastMetaBySessionId.delete(sid);
     void remoteDesktopStore.disconnect(hostId);

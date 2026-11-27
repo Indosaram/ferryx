@@ -61,13 +61,16 @@ beforeEach(() => {
 });
 
 async function setup(onError = vi.fn()) {
+  const base = { selected: selection, leader: true, enabled: true };
   const hook = renderHook(({ selected = selection, leader = true, enabled = true }: {
     selected?: CommittedDesktopSelection; leader?: boolean; enabled?: boolean;
   }) => useDesktopContinuity({
     enabled, leader, selection: selected, onError,
-  }), { initialProps: { selected: selection, leader: true, enabled: true } });
+  }), { initialProps: base });
   await act(async () => {});
-  return hook;
+  // Every rerender here changes one or two fields; merge them onto the mounted props so callers
+  // never have to restate the whole object.
+  return { ...hook, rerender: (patch: Partial<typeof base>) => hook.rerender({ ...base, ...patch }) };
 }
 
 /** Installs the real publisher so CAS baselines and generations are the shipped ones, with the

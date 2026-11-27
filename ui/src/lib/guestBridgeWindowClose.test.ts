@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 // as sloppy-mode script, as the engines do, against a fake window, location and console.
 const GUEST_PATH = resolve(__dirname, '../../../src-tauri/src/browser/guest.rs');
 const NOTIFICATION_SHIM_PATH = resolve(__dirname, '../../../crates/browser-engine-protocol/src/notification_shim.js');
+const MEDIA_SESSION_PATH = resolve(__dirname, '../../../crates/browser-engine-protocol/src/media_session.js');
 
 function between(source: string, start: string, end: string): string {
   const from = source.indexOf(start);
@@ -26,13 +27,18 @@ function nonPopupBridgeScript(): string {
   // post placeholder gets the route expression passed to notification_shim().
   const notifyPost = JSON.parse(between(source, 'ferryx_browser_engine_protocol::notification_shim(\n        ', ',\n    )'));
   const notificationShim = readFileSync(NOTIFICATION_SHIM_PATH, 'utf8').replaceAll('__FERRYX_NOTIFY_POST__', notifyPost);
+  // guest.rs fills this placeholder with the protocol crate's media-session function invoked with
+  // the guest's own post callback; the reporter returns early on any non-top frame, so the fake
+  // window only needs a throwaway callback here.
+  const mediaReporter = `(${readFileSync(MEDIA_SESSION_PATH, 'utf8')})(() => {});`;
   return template
     .replaceAll(PLACEHOLDERS[0], JSON.stringify('test-nonce'))
     .replaceAll(PLACEHOLDERS[1], '')
     .replaceAll(PLACEHOLDERS[2], closeBody)
     .replaceAll(PLACEHOLDERS[3], 'false')
     .replaceAll(PLACEHOLDERS[4], 'false')
-    .replaceAll(PLACEHOLDERS[5], notificationShim);
+    .replaceAll(PLACEHOLDERS[5], notificationShim)
+    .replaceAll(PLACEHOLDERS[7], mediaReporter);
 }
 
 const PLACEHOLDERS = [
@@ -43,6 +49,7 @@ const PLACEHOLDERS = [
   '__FERRYX_BROWSER_BRIDGE_NATIVE_OPEN__',
   '__FERRYX_NOTIFICATION_SHIM__',
   '__FERRYX_NOTIFY_POST__',
+  '__FERRYX_MEDIA_REPORTER__',
 ];
 
 type Ring = { level: string; text: string }[];
