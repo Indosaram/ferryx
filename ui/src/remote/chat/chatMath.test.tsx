@@ -73,14 +73,18 @@ $$
     expect(code).toContain("$z$");
   });
 
-  it("shows the exact raw source when disabled, and responds to a setting change", async () => {
+  it("shows the math source when disabled, and responds to a setting change", async () => {
     const content = String.raw`**Result:** $x^2$ and $$\int_0^1 x\,dx$$`;
     const { container } = await renderWithMath({ content });
     // A store update notifies the subscribed prose even when the message's props
     // stay identical and React.memo skips rerendering the parent message.
     act(() => { saveAppearanceSettings({ renderMath: false }); });
     expect(container.querySelector(".katex, .katex-display")).toBeNull();
-    expect(screen.getByTestId("assistant-message-body").textContent).toBe(content);
+    // Math off stops the math and nothing else: the body is still markdown, and the
+    // formula stays readable as its own source.
+    const body = screen.getByTestId("assistant-message-body");
+    expect(body.querySelector("strong")).not.toBeNull();
+    expect(body.textContent).toContain("$x^2$");
   });
 
   it("preserves unterminated expressions without throwing", () => {

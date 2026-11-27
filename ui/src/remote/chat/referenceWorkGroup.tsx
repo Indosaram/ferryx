@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { ChevronRight, SquarePen } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { DiffStatLabel } from "./messages/diffStatLabel";
 import type { ReferencePart, ReferencePayloadRef, ReferenceTaskResult, ReferenceTurnMeta } from "./referenceTypes";
 
 /**
@@ -42,6 +43,8 @@ export interface ReferenceWorkNesting {
 export interface ReferencePayloadLoadContext {
   onLoadPayload?: (payload: ReferencePayloadRef) => void;
   loadingPayloadRef?: string | null;
+  /** Open a recorded file change as a reviewable diff. */
+  onOpenDiff?: (part: Extract<ReferencePart, { kind: "diff" }>) => void;
 }
 
 const CODEX_FILE = /^\*\*\* (?:Update|Add|Delete) File: (.+)$/;
@@ -208,6 +211,75 @@ export function referenceWorkGroupSharedStatus(members: readonly ReferenceWorkMe
   return statuses.every((status) => status === first) ? first : null;
 }
 
+/**
+ * The activity summary the reference's timeline shows (docs/user/activity-log.md):
+ * up to two specific action categories and a count of the remaining actions, with
+ * commands, file changes, and orchestration changes taking priority over reads and
+ * status checks. Null when the members hold nothing countable.
+ */
+export type ReferenceActionCategory = "commands" | "fileChanges" | "orchestration" | "reads" | "other";
+
+const COMMAND_TOOLS = new Set(["bash", "cmd", "command", "exec", "shell", "eval", "run"]);
+const FILE_CHANGE_TOOLS = new Set(["edit", "write", "apply_patch", "applypatch", "patch", "multiedit", "notebookedit", "str_replace"]);
+const ORCHESTRATION_TOOLS = new Set(["task", "agent", "agents", "workpool", "subagent", "spawn", "delegate"]);
+const READ_TOOLS = new Set(["read", "view", "cat", "look_at", "grep", "glob", "search", "find", "list"]);
+
+export function referenceActionCategoryOfTool(name: string): ReferenceActionCategory {
+  const lower = (name || "").toLowerCase();
+  if (COMMAND_TOOLS.has(lower) || lower.startsWith("lsp_")) {
+    return lower.startsWith("lsp_") ? "reads" : "commands";
+  }
+  if (FILE_CHANGE_TOOLS.has(lower)) return "fileChanges";
+  if (ORCHESTRATION_TOOLS.has(lower)) return "orchestration";
+  if (READ_TOOLS.has(lower)) return "reads";
+  return "other";
+}
+
+const CATEGORY_PHRASES: Record<ReferenceActionCategory, { verb: string; noun: string }> = {
+  commands: { verb: "Ran", noun: "command" },
+  fileChanges: { verb: "Edited", noun: "file" },
+  orchestration: { verb: "Ran", noun: "task" },
+  reads: { verb: "Read", noun: "file" },
+  other: { verb: "Used", noun: "tool" },
+};
+
+function categoryPhrase(category: ReferenceActionCategory, count: number): string {
+  const { verb, noun } = CATEGORY_PHRASES[category];
+  return `${verb} ${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+export function referenceWorkActivitySummary(
+  members: readonly ReferenceWorkMember[],
+  nesting: ReferenceWorkNesting,
+): string | null {
+  const counts = new Map<ReferenceActionCategory, number>();
+  const bump = (category: ReferenceActionCategory, count: number) => {
+    if (count <= 0) return;
+    counts.set(category, (counts.get(category) ?? 0) + count);
+  };
+  for (const { part, index } of members) {
+    if (part.kind === "tool") {
+      bump(referenceActionCategoryOfTool(part.name), 1);
+    } else if (part.kind === "diff") {
+      bump("fileChanges", 1);
+    } else if (part.kind === "taskResult") {
+      bump("orchestration", (nesting.localTasks.get(index) ?? part.tasks).length);
+    }
+  }
+  if (counts.size === 0) return null;
+  const priority: ReferenceActionCategory[] = ["commands", "fileChanges", "orchestration", "reads", "other"];
+  const named = priority.filter((category) => counts.has(category));
+  const shown = named.slice(0, 2);
+  const remaining = named.slice(2).reduce((sum, category) => sum + counts.get(category)!, 0);
+  const phrases = shown.map((category, position) => {
+    const phrase = categoryPhrase(category, counts.get(category)!);
+    // Sentence case on the first phrase, lowercase after "and", like the reference copy.
+    return position === 0 ? phrase : phrase.charAt(0).toLowerCase() + phrase.slice(1);
+  });
+  if (remaining > 0) phrases.push(`${remaining} more action${remaining === 1 ? "" : "s"}`);
+  return phrases.join(" and ");
+}
+
 export function referenceWorkGroupLabel(
   members: readonly ReferenceWorkMember[],
   nesting: ReferenceWorkNesting,
@@ -324,9 +396,8 @@ export function referenceDiffSummaryText(
   if (body !== null) {
     const summary = summarizeReferenceDiff(body);
     const named = summary.files.filter((file) => file.path.length > 0);
-    const fileLabel =
-      named.length === 1 ? named[0].path : named.length > 1 ? `${named.length} files` : "Diff";
-    return `${fileLabel} +${summary.additions} -${summary.deletions}`;
+    // The counts are DiffStatLabel's own labelled group; this text names what changed.
+    return named.length === 1 ? named[0]!.path : named.length > 1 ? `${named.length} files` : "Diff";
   }
   const bits = ["Diff", formatPayloadBytes(part.patch.byteLength)].filter((bit) => bit.length > 0);
   if (part.patch.truncated) bits.push("truncated");
@@ -365,6 +436,7 @@ export function ReferenceTurnUsage({ meta }: { meta?: ReferenceTurnMeta | null }
 export function ReferenceWorkGroup({
   groupKey,
   label,
+  summary,
   running,
   completed,
   status,
@@ -373,6 +445,8 @@ export function ReferenceWorkGroup({
 }: {
   groupKey: string;
   label: string;
+  /** The activity-log summary, e.g. "Ran 2 commands and edited 3 files"; label stays as the fallback. */
+  summary?: string | null;
   running: boolean;
   completed: boolean;
   status?: string | null;
@@ -410,7 +484,16 @@ export function ReferenceWorkGroup({
             expanded && "rotate-90",
           )}
         />
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {summary ? (
+            <>
+              <span data-testid="reference-work-group-summary">{summary}</span>
+              <span className="ml-2 text-xs text-chat-foreground-tertiary">{label}</span>
+            </>
+          ) : (
+            label
+          )}
+        </span>
         {running && <span className="sr-only">Running</span>}
         {status ? <ReferenceStatusBadge status={status} /> : null}
       </button>
@@ -448,6 +531,9 @@ export function ReferenceDiffPart({
         <span data-testid="reference-diff-summary" className="min-w-0 flex-1 truncate">
           {referenceDiffSummaryText(part, body)}
         </span>
+        {summary !== null && (
+          <DiffStatLabel additions={summary.additions} deletions={summary.deletions} layout="inline" />
+        )}
         {canLoad && (
           <button
             type="button"
@@ -460,12 +546,23 @@ export function ReferenceDiffPart({
             {loading ? "Loading details…" : "Load details"}
           </button>
         )}
+        {context?.onOpenDiff && (
+          <button
+            type="button"
+            data-testid="reference-open-diff"
+            onClick={() => context.onOpenDiff?.(part)}
+            className="min-h-11 shrink-0 rounded-md border border-chat-border bg-chat-surface-raised px-3 text-sm text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Open diff
+          </button>
+        )}
       </div>
       {named.length > 1 && (
         <ul data-testid="reference-diff-files" className="ml-7 space-y-0.5 text-xs text-chat-foreground-secondary">
           {named.slice(0, REFERENCE_DIFF_FILE_CAP).map((file) => (
-            <li key={file.path} className="truncate font-mono">
-              {file.path} +{file.additions} -{file.deletions}
+            <li key={file.path} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
+              <DiffStatLabel additions={file.additions} deletions={file.deletions} layout="inline" />
             </li>
           ))}
           {extraFiles > 0 && <li>{extraFiles} more files</li>}

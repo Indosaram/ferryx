@@ -114,6 +114,30 @@ describe("desktopChatLane staged file delivery", () => {
     expect(stage).not.toHaveBeenCalled();
   });
 
+  it("stages a prompt's answer file without touching the draft or the composer's staged files", async () => {
+    const { result, file, stage } = setup();
+    act(() => result.current.setDraft("Read this"));
+    let receipts: readonly { mentionText: string }[] = [];
+    await act(async () => { receipts = await result.current.attachAnswerFiles([file]); });
+    expect(stage).toHaveBeenCalledTimes(1);
+    // The answer text carries this mention; the card composes the answer, not this hook.
+    expect(receipts.map((each) => each.mentionText)).toEqual(["@notes.txt "]);
+    expect(result.current.draft).toBe("Read this");
+    expect(result.current.stagedFiles).toHaveLength(0);
+    expect(result.current.attachError).toBeNull();
+  });
+
+  it("refuses an answer file with a typed error where no staging route exists", async () => {
+    const { result, file, stage } = setup(null);
+    await act(async () => {
+      await expect(result.current.attachAnswerFiles([file])).rejects.toMatchObject({
+        name: "ReferenceFileError",
+        code: "UNSUPPORTED",
+      });
+    });
+    expect(stage).not.toHaveBeenCalled();
+  });
+
   it("keeps the mention and receipt after a known failed submit without deleting the file", async () => {
     const { result, file, submit, fileStaging } = setup();
     let finish!: () => void;

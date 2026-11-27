@@ -140,7 +140,10 @@ const CORE_ENTRIES = {
   // The Supervisor panel is the sidebar's default view; it is not behind advanced features.
   sidebarViews: ["Supervisor", "Worktrees"],
   // Voice is a core entry point: SettingsDialog renders it outside the advanced gate.
-  settingsSections: ["General", "Appearance", "Terminal", "Keyboard Shortcuts", "Agents", "Permissions", "Voice", "Remote"],
+  // Chat is a core entry point: SettingsDialog renders it outside the advanced gate, right after
+  // Keyboard Shortcuts. It holds the pane chat preferences (tool-call visibility, announcement
+  // level) that every chat pane reads, so it must be reachable on a fresh install.
+  settingsSections: ["General", "Appearance", "Terminal", "Keyboard Shortcuts", "Chat", "Agents", "Permissions", "Voice", "Remote"],
   newBrowserTab: false,
   dagBadge: false,
 };
@@ -153,6 +156,7 @@ const ALL_ENTRIES = {
     "Appearance",
     "Terminal",
     "Keyboard Shortcuts",
+    "Chat",
     "Agents",
     "Browser",
     "Notifications",

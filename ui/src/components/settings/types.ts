@@ -6,6 +6,7 @@ export type SectionId =
   | "appearance"
   | "terminal"
   | "shortcuts"
+  | "chat"
   | "agents"
   | "browser"
   | "notifications"
