@@ -37,7 +37,7 @@ use axum::{
     },
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -9804,6 +9804,600 @@ async fn reference_chat_control(
     }
 }
 
+// =============================================================================================
+// Structured agent chat (lane G1, chat-t3-parity plan) — the routes
+// =============================================================================================
+//
+// Every route runs on the same listener as the rest of `create_remote_router`, behind the same
+// bearer token as `authenticate_machine_request`, and with Control permission required for every
+// mutation. Sessions are independent of terminal panes: POST /sessions spawns the provider
+// (`codex app-server`) as a child of THIS gateway process, so a GUI restart never kills it and
+// DELETE /sessions (or gateway exit) does.
+//
+//   POST   /api/v1/structured-chat/sessions                          {provider, cwd, model?, effort?, permissionMode}
+//   GET    /api/v1/structured-chat/sessions
+//   POST   /api/v1/structured-chat/sessions/{sessionId}/turns        {text, attachments?: [{path}]}
+//   GET    /api/v1/structured-chat/sessions/{sessionId}/history?after=<seq>
+//   GET    /api/v1/structured-chat/sessions/{sessionId}/events?after=<seq>   (long-poll)
+//   POST   /api/v1/structured-chat/sessions/{sessionId}/steer        {text}
+//   POST   /api/v1/structured-chat/sessions/{sessionId}/interrupt
+//   POST   /api/v1/structured-chat/sessions/{sessionId}/rollback     {turns: n}
+//   POST   /api/v1/structured-chat/sessions/{sessionId}/approvals/{requestId} {decision}
+//   PUT    /api/v1/structured-chat/sessions/{sessionId}/settings     {model?, effort?, permissionMode?}
+//   GET    /api/v1/structured-chat/sessions/{sessionId}/capabilities
+//   POST   /api/v1/structured-chat/sessions/{sessionId}/clear
+//   POST   /api/v1/structured-chat/sessions/{sessionId}/compact
+//   DELETE /api/v1/structured-chat/sessions/{sessionId}
+
+use crate::structured_chat::{
+    store::StructuredChatStore, ApprovalBody, CreateSessionBody, RollbackBody, SessionSettings,
+    SteerBody, TurnBody,
+};
+
+/// The largest structured-chat body a route reads off the wire. Text and attachment paths only;
+/// file bytes are never uploaded here.
+const STRUCTURED_CHAT_BODY_MAX: usize = 256 * 1024;
+
+/// The store every structured-chat route shares, opened lazily on the async path.
+async fn structured_chat_store() -> Result<&'static Arc<StructuredChatStore>, Refusal> {
+    static STORE: tokio::sync::OnceCell<Arc<StructuredChatStore>> =
+        tokio::sync::OnceCell::const_new();
+    STORE
+        .get_or_try_init(StructuredChatStore::open)
+        .await
+        // `Refusal` is pointer-sized, so the route handlers keep a small error type.
+        .map_err(|error| Refusal::from(structured_chat_error(error)))
+}
+
+/// The HTTP status a structured-chat failure maps to.
+fn structured_chat_status(error: &crate::structured_chat::StructuredChatError) -> StatusCode {
+    use crate::structured_chat::StructuredChatError;
+    match error {
+        StructuredChatError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+        StructuredChatError::NotFound => StatusCode::NOT_FOUND,
+        StructuredChatError::Conflict(_) | StructuredChatError::Unsupported(_) => {
+            StatusCode::CONFLICT
+        }
+        StructuredChatError::Provider(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn structured_chat_error(error: crate::structured_chat::StructuredChatError) -> Response {
+    machine_error_with_details(
+        structured_chat_status(&error),
+        error.code(),
+        error.message(),
+        serde_json::Map::new(),
+    )
+}
+
+fn structured_chat_ok(data: serde_json::Value) -> Response {
+    (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], Json(data)).into_response()
+}
+
+/// The device a structured-chat request runs as, with Control required for mutations.
+fn structured_chat_admit_mutation(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+) -> Result<DeviceInfo, Refusal> {
+    let device = authenticate_machine_request(state, headers).map_err(|response| *response)?;
+    if device.permission != DevicePermission::Control {
+        return Err(machine_error(StatusCode::FORBIDDEN, "FORBIDDEN").into());
+    }
+    Ok(device)
+}
+
+async fn structured_chat_body<B: serde::de::DeserializeOwned>(
+    request: axum::extract::Request,
+) -> Result<B, Refusal> {
+    use axum::extract::FromRequest;
+    let bytes = axum::body::Bytes::from_request(request, &())
+        .await
+        .map_err(|error| {
+            let too_large = error.status() == StatusCode::PAYLOAD_TOO_LARGE;
+            Refusal::from(machine_error(
+                if too_large {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                if too_large {
+                    "PAYLOAD_TOO_LARGE"
+                } else {
+                    "INVALID_REQUEST"
+                },
+            ))
+        })?;
+    serde_json::from_slice::<B>(&bytes)
+        .map_err(|_| Refusal::from(machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST")))
+}
+
+/// POST /api/v1/structured-chat/sessions
+async fn structured_chat_create(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: CreateSessionBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    let summary = store.create_session(&body).await.map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::to_value(summary).expect("summary serializes")))
+}
+
+/// GET /api/v1/structured-chat/sessions
+async fn structured_chat_list_sessions(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let store = structured_chat_store().await?;
+    Ok(structured_chat_ok(serde_json::json!({"sessions": store.list_sessions().await})))
+}
+
+/// POST /api/v1/structured-chat/sessions/{sessionId}/turns
+async fn structured_chat_turn(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: TurnBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    let seq = store
+        .start_turn(&session_id, &body)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"seq": seq})))
+}
+
+/// GET /api/v1/structured-chat/sessions/{sessionId}/history?after=<seq>&before=<seq>&limit=<n>
+///
+/// A bounded page, plus `hasOlder`/`nextBefore` so the transcript can page backwards. The query
+/// extractor's outcome is bound rather than destructured so a malformed cursor (`?after=abc`)
+/// answers with this surface's typed JSON envelope instead of axum's plain-text rejection.
+async fn structured_chat_history(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    query: Result<
+        axum::extract::Query<crate::structured_chat::store::HistoryQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let query = structured_chat_query(query)?;
+    let store = structured_chat_store().await?;
+    let page = store
+        .history(&session_id, &query)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(page).expect("history page serializes"),
+    ))
+}
+
+/// The shared `?after=<seq>` query of the history and events reads.
+#[derive(Debug, Deserialize)]
+pub(crate) struct StructuredChatEventsQuery {
+    #[serde(default)]
+    after: Option<u64>,
+}
+
+/// A structured-chat query, or the typed refusal a malformed one earns.
+///
+/// Axum's own `QueryRejection` is a plain-text 400. This surface answers every other refusal with
+/// the frozen machine envelope, so a bad cursor must not be the one exception a client cannot
+/// parse.
+fn structured_chat_query<T>(
+    query: Result<axum::extract::Query<T>, axum::extract::rejection::QueryRejection>,
+) -> Result<T, Refusal> {
+    query.map(|axum::extract::Query(query)| query).map_err(|rejection| {
+        Refusal::from(structured_chat_error(
+            crate::structured_chat::StructuredChatError::InvalidRequest(format!(
+                "the query is not readable: {rejection}"
+            )),
+        ))
+    })
+}
+
+/// GET /api/v1/structured-chat/sessions/{sessionId}/events?after=<seq>
+///
+/// A bounded long-poll, the same pattern the reference-chat watch serves: resolves immediately
+/// when a part past `after` exists, otherwise waits up to
+/// [`StructuredChatStore::EVENTS_LONG_POLL_TIMEOUT`] for the next one.
+async fn structured_chat_events(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    query: Result<
+        axum::extract::Query<StructuredChatEventsQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let query = structured_chat_query(query)?;
+    let store = structured_chat_store().await?;
+    let parts = store
+        .wait_for_events(&session_id, query.after.unwrap_or(0))
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"parts": parts})))
+}
+
+/// POST /api/v1/structured-chat/sessions/{sessionId}/steer
+async fn structured_chat_steer(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: SteerBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    let seq = store
+        .steer(&session_id, &body)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"seq": seq})))
+}
+
+/// POST /api/v1/structured-chat/sessions/{sessionId}/interrupt
+async fn structured_chat_interrupt(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let store = structured_chat_store().await?;
+    store.interrupt(&session_id).await.map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+/// POST /api/v1/structured-chat/sessions/{sessionId}/rollback
+async fn structured_chat_rollback(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: RollbackBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    store
+        .rollback_turns(&session_id, body.turns, body.revert_files)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+/// POST /api/v1/structured-chat/sessions/{sessionId}/approvals/{requestId}
+async fn structured_chat_answer_approval(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path((session_id, request_id)): axum::extract::Path<(String, String)>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: ApprovalBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    store
+        .answer_approval(&session_id, &request_id, body.decision)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+/// PUT /api/v1/structured-chat/sessions/{sessionId}/settings
+async fn structured_chat_update_settings(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: SessionSettings = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    let settings = store
+        .update_settings(&session_id, &body)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(settings).expect("settings serializes"),
+    ))
+}
+
+/// GET /api/v1/structured-chat/sessions/{sessionId}/capabilities
+async fn structured_chat_capabilities(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let store = structured_chat_store().await?;
+    let capabilities = store
+        .capabilities(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(capabilities).expect("capabilities serializes"),
+    ))
+}
+
+/// POST /api/v1/structured-chat/sessions/{sessionId}/clear
+async fn structured_chat_clear(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let store = structured_chat_store().await?;
+    let seq = store.clear(&session_id).await.map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"seq": seq})))
+}
+
+async fn structured_chat_compact(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: crate::structured_chat::CompactBody =
+        structured_chat_body(request).await.unwrap_or_default();
+    let store = structured_chat_store().await?;
+    store
+        .compact_with_instructions(&session_id, body.custom_instructions.as_deref())
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+async fn structured_chat_commands(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let store = structured_chat_store().await?;
+    let commands = store
+        .commands(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"commands": commands})))
+}
+
+async fn structured_chat_answer_extension_ui(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path((session_id, request_id)): axum::extract::Path<(String, String)>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: crate::structured_chat::ExtensionUiResponseBody =
+        structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    store
+        .answer_extension_ui(&session_id, &request_id, body)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+async fn structured_chat_tree(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let store = structured_chat_store().await?;
+    let tree = store
+        .tree(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(tree).expect("tree serializes"),
+    ))
+}
+
+async fn structured_chat_navigate_tree(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: crate::structured_chat::NavigateTreeBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    store
+        .navigate_tree(&session_id, &body)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+async fn structured_chat_fork(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: crate::structured_chat::ForkBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    let result = store
+        .fork(&session_id, &body.entry_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(result).expect("fork result serializes"),
+    ))
+}
+
+async fn structured_chat_clone(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let store = structured_chat_store().await?;
+    let result = store
+        .clone_session(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(result).expect("clone result serializes"),
+    ))
+}
+
+async fn structured_chat_edit_message(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: crate::structured_chat::EditMessageBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    store
+        .edit_message(&session_id, &body)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+async fn structured_chat_rename(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: crate::structured_chat::RenameSessionBody = structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    store
+        .rename_session(&session_id, &body.name)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+async fn structured_chat_stats(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let store = structured_chat_store().await?;
+    let stats = store
+        .stats(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(stats).expect("stats serializes"),
+    ))
+}
+
+async fn structured_chat_reload(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let store = structured_chat_store().await?;
+    store
+        .reload(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+async fn structured_chat_media(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path((session_id, tool_call_id, content_index)): axum::extract::Path<(
+        String,
+        String,
+        u32,
+    )>,
+) -> Result<Response, Refusal> {
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
+    let store = structured_chat_store().await?;
+    let media = store
+        .get_media(&session_id, &tool_call_id, content_index)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(
+        serde_json::to_value(media).expect("media serializes"),
+    ))
+}
+
+async fn structured_chat_clear_queue(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let store = structured_chat_store().await?;
+    store
+        .clear_queue(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+async fn structured_chat_model_preferences(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let body: crate::structured_chat::ModelPreferencesBody =
+        structured_chat_body(request).await?;
+    let store = structured_chat_store().await?;
+    store
+        .set_model_preferences(&session_id, &body)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+/// POST /api/v1/structured-chat/sessions/{sessionId}/resume
+///
+/// The composer's "Resume" after a stop (t3code composer.md): continue the stopped run through
+/// the provider's native continuation, without sending a new prompt. 409
+/// `RESUME_UNSUPPORTED` when the provider advertises `resume: false`.
+async fn structured_chat_resume(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let store = structured_chat_store().await?;
+    store
+        .resume(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
+/// DELETE /api/v1/structured-chat/sessions/{sessionId}
+async fn structured_chat_close_session(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Response, Refusal> {
+    structured_chat_admit_mutation(&state, &headers)?;
+    let store = structured_chat_store().await?;
+    store
+        .close_session(&session_id)
+        .await
+        .map_err(|error| Refusal::from(structured_chat_error(error)))?;
+    Ok(structured_chat_ok(serde_json::json!({"ok": true})))
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors_state = Arc::clone(&state);
     let cors = CorsLayer::new()
@@ -9900,6 +10494,130 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/reference-chat/{sessionId}/files/{fileId}",
             get(reference_chat_preview_file).delete(reference_chat_delete_file),
+        )
+        // Structured agent chat (lane G1). Same gateway, listener, and bearer policy as every
+        // route above; sessions own their provider processes, not a terminal pane.
+        .route(
+            "/api/v1/structured-chat/sessions",
+            get(structured_chat_list_sessions).post(structured_chat_create).layer(
+                axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX),
+            ),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/turns",
+            post(structured_chat_turn)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/history",
+            get(structured_chat_history),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/events",
+            get(structured_chat_events),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/steer",
+            post(structured_chat_steer)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/interrupt",
+            post(structured_chat_interrupt),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/rollback",
+            post(structured_chat_rollback)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/approvals/{requestId}",
+            post(structured_chat_answer_approval)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/settings",
+            put(structured_chat_update_settings)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/capabilities",
+            get(structured_chat_capabilities),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/clear",
+            post(structured_chat_clear),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/compact",
+            post(structured_chat_compact)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/resume",
+            post(structured_chat_resume),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/commands",
+            get(structured_chat_commands),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/extension-ui/{requestId}",
+            post(structured_chat_answer_extension_ui)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/tree",
+            get(structured_chat_tree),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/navigate-tree",
+            post(structured_chat_navigate_tree)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/fork",
+            post(structured_chat_fork)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/clone",
+            post(structured_chat_clone),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/edit-message",
+            post(structured_chat_edit_message)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/name",
+            put(structured_chat_rename)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/stats",
+            get(structured_chat_stats),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/reload",
+            post(structured_chat_reload),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/media/{toolCallId}/{contentIndex}",
+            get(structured_chat_media),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/queue/clear",
+            post(structured_chat_clear_queue),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}/models/preferences",
+            put(structured_chat_model_preferences)
+                .layer(axum::extract::DefaultBodyLimit::max(STRUCTURED_CHAT_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/structured-chat/sessions/{sessionId}",
+            delete(structured_chat_close_session),
         )
         .route(
             "/api/v1/agent-control/sessions",
