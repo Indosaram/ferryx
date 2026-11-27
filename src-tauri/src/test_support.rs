@@ -30,7 +30,7 @@ fn cli_next_to_test(exe: &Path) -> Option<PathBuf> {
 }
 
 /// Stages an executable at `destination` without this process ever holding a
-/// write descriptor on it.
+/// write descriptor on it and without sharing an inode with `source`.
 ///
 /// `std::fs::copy` creates the target in-process. It closes that descriptor
 /// before returning, but a parallel test's `fork` can inherit it while it is
@@ -40,18 +40,13 @@ fn cli_next_to_test(exe: &Path) -> Option<PathBuf> {
 /// count rather than the code under test, and closing the descriptor on our
 /// side cannot fix it: the one that blocks the exec lives in another process.
 ///
-/// A hard link reuses the source's already-closed inode and copies nothing.
-/// Cross-device staging (the usual case when `TMPDIR` is a tmpfs and the build
-/// tree is not) falls back to a child process that writes the bytes and exits
-/// before the destination is executed, so no concurrent fork of this process
-/// can inherit its descriptor.
+/// Always staging through a short-lived child `cp` process both prevents any
+/// concurrent fork of this process from inheriting a write descriptor AND keeps
+/// the staged destination on its own inode, so a test that `chmod`s or mutates
+/// `destination` can never alter a shared Cargo build artifact.
 #[cfg(unix)]
 pub(crate) fn stage_executable(source: &Path, destination: &Path) {
     use std::os::unix::fs::PermissionsExt;
-
-    if std::fs::hard_link(source, destination).is_ok() {
-        return;
-    }
 
     // `sh -c 'script' name "$1" "$2"`: `name` becomes $0 and the paths arrive as
     // positional parameters, so nothing in them is parsed as shell syntax.
@@ -117,5 +112,27 @@ mod tests {
     fn custom_profile_and_target_directory_names_are_not_guessed_as_triples() {
         assert_layout("my-target-dir/custom/deps/tests", "my-target-dir/custom");
         assert!(cli_next_to_test(Path::new("foreign/custom/out/tests")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_executable_does_not_share_inode_with_source() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src-bin");
+        let dst = dir.path().join("dst-bin");
+        std::fs::write(&src, b"#!/bin/sh\nexit 0\n").expect("write src");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).expect("chmod src");
+
+        stage_executable(&src, &dst);
+
+        let src_meta = std::fs::metadata(&src).expect("stat src");
+        let dst_meta = std::fs::metadata(&dst).expect("stat dst");
+        assert_ne!(
+            (src_meta.dev(), src_meta.ino()),
+            (dst_meta.dev(), dst_meta.ino()),
+            "staged copy must not hard-link the source build artifact"
+        );
+        assert_eq!(dst_meta.permissions().mode() & 0o777, 0o755);
     }
 }

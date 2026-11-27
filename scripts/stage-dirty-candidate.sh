@@ -14,8 +14,11 @@ repo=$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null) || die "not i
 
 file_mode() {
   local m
-  m=$(stat -f %Lp "$1" 2>/dev/null) || m=$(stat -c %a "$1" 2>/dev/null) || return 1
-  printf '%04d\n' "$m"
+  m=$(stat -f %Lp "$1" 2>/dev/null)
+  case "$m" in ''|*[!0-9]*) m=$(stat -c %a "$1" 2>/dev/null || true) ;; esac
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
+  # 10# forces base 10: a mode like 0755 must never be re-read as octal.
+  printf '%04d\n' "$((10#$m))"
 }
 
 file_sha256() {

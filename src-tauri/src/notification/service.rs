@@ -24,6 +24,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub trait NativeNotificationBackend: Send + Sync {
     fn submit(&self, content: &NotificationContent) -> Result<(), String>;
 
+    /// Submit one notification the order fence already claimed for a sequence.
+    ///
+    /// `superseded` answers whether a withdrawal at or above this dispatch's sequence has settled
+    /// since. A backend whose platform can only withdraw a banner it already holds a slot for
+    /// (Linux) asks it *after* registering that slot and *before* showing, so a withdrawal that
+    /// landed between the fence claim and the registration is honoured instead of leaving a
+    /// banner the fence already records as withdrawn. Backends that cannot race this way keep the
+    /// default, which is plain [`submit`](Self::submit).
+    fn submit_fenced(
+        &self,
+        content: &NotificationContent,
+        _superseded: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<(), String> {
+        self.submit(content)
+    }
+
     /// Remove the delivered notification for `target`, if the platform can.
     ///
     /// Defaults to a no-op: a backend with no withdrawal primitive still has to
@@ -95,6 +111,28 @@ impl NotificationOrderFence {
     pub fn next_seq(&self) -> u64 {
         self.next_seq.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// Has a withdrawal at or above `seq` already settled for `key`?
+    ///
+    /// Asked by a backend after it registers its banner slot and before it shows: a `true` answer
+    /// means the withdrawal found no slot to close, so this dispatch has to close its own.
+    fn superseded(&self, key: &TargetKey, seq: u64) -> bool {
+        self.targets
+            .lock()
+            .get(key)
+            .is_some_and(|entry| entry.last_withdrawn_seq >= seq)
+    }
+
+    /// Record a withdrawal's watermark without a backend call, for tests that drive the ordering
+    /// between the fence claim and the banner registration.
+    #[cfg(test)]
+    fn withdraw_for_test(&self, target: &NotificationTarget, seq: u64) {
+        let mut targets = self.targets.lock();
+        let entry = fence_entry(&mut targets, target_key(target));
+        if entry.last_submitted_seq <= seq {
+            entry.last_withdrawn_seq = entry.last_withdrawn_seq.max(seq);
+        }
+    }
 }
 
 /// Insert-or-get the fence entry for `key`, keeping the map bounded.
@@ -105,7 +143,9 @@ impl NotificationOrderFence {
 /// longest ago.
 fn fence_entry(targets: &mut HashMap<TargetKey, TargetFence>, key: TargetKey) -> &mut TargetFence {
     if !targets.contains_key(&key) && targets.len() >= FENCE_CAPACITY {
-        targets.retain(|_, entry| entry.is_live());
+        // Withdrawal-only entries (`last_submitted_seq == 0`) stay: dropping one
+        // would forget a watermark an older queued dispatch still has to lose to.
+        targets.retain(|_, entry| entry.is_live() || entry.last_submitted_seq == 0);
         if targets.len() >= FENCE_CAPACITY {
             let oldest = targets
                 .iter()
@@ -279,19 +319,27 @@ impl NotificationService {
         }
 
         let content = format_notification(request);
-        if let Some(key) = key {
+        if let Some(key) = &key {
             // Re-check and claim the sequence under the lock so the submit
             // below can never be ordered behind a withdrawal that already
             // settled, and a later dispatch can never claim a lower sequence.
             let mut targets = fence.targets.lock();
-            let entry = fence_entry(&mut targets, key);
+            let entry = fence_entry(&mut targets, key.clone());
             if seq <= entry.watermark() {
                 return DispatchNotificationResult::suppressed();
             }
             entry.last_submitted_seq = entry.last_submitted_seq.max(seq);
         }
 
-        match self.backend.submit(&content) {
+        // A withdrawal can settle between that claim and the backend's banner registration, and a
+        // slot registered after it would never be closed. The backend re-asks this once its slot
+        // exists and before the banner is shown.
+        let superseded = || match &key {
+            Some(key) => fence.superseded(key, seq),
+            None => false,
+        };
+
+        match self.backend.submit_fenced(&content, &superseded) {
             Ok(()) => DispatchNotificationResult::submitted(),
             Err(error) => {
                 tracing::warn!("native notification submission failed: {error}");
@@ -470,7 +518,7 @@ mod tests {
     use super::test_support::*;
     use super::*;
     use crate::notification::model::{NotificationAuthorization, NotificationPlatform};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn agent_request() -> DispatchNotificationRequest {
@@ -897,6 +945,74 @@ mod tests {
     }
 
     #[test]
+    fn a_withdrawal_that_settles_before_the_banner_shows_suppresses_it() {
+        // The fence claims the dispatch, then a withdrawal settles, then the backend registers its
+        // banner slot. Without the post-register check the banner would outlive the fence.
+        struct RacingBackend {
+            fence: Arc<NotificationOrderFence>,
+            target: NotificationTarget,
+            seq: u64,
+            shown: Arc<AtomicUsize>,
+        }
+        impl NativeNotificationBackend for RacingBackend {
+            fn submit(&self, _content: &NotificationContent) -> Result<(), String> {
+                self.shown.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn submit_fenced(
+                &self,
+                _content: &NotificationContent,
+                superseded: &(dyn Fn() -> bool + Send + Sync),
+            ) -> Result<(), String> {
+                // The withdrawal lands exactly between the fence claim and this registration.
+                self.fence.withdraw_for_test(&self.target, self.seq + 1);
+                if superseded() {
+                    return Ok(());
+                }
+                self.submit(_content)
+            }
+        }
+
+        let shown = Arc::new(AtomicUsize::new(0));
+        let fence = Arc::new(NotificationOrderFence::default());
+        let target = target_of("ws-1", "fe-1");
+        let request = targeted_request("ws-1", "fe-1");
+        let seq = fence.next_seq();
+        let backend = RacingBackend {
+            fence: Arc::clone(&fence),
+            target: target.clone(),
+            seq,
+            shown: Arc::clone(&shown),
+        };
+        let service = NotificationService::new(
+            Box::new(FakePermissionProvider::new(macos_status(
+                NotificationAuthorization::Authorized,
+            ))),
+            Box::new(backend),
+        );
+
+        let result = service.dispatch_sequenced(&request, &fence, seq);
+
+        assert!(result.submitted, "a withdrawn dispatch is not a failure");
+        assert_eq!(shown.load(Ordering::SeqCst), 0, "the banner was never shown");
+    }
+
+    #[test]
+    fn an_unwithdrawn_dispatch_still_shows_through_the_fenced_seam() {
+        let backend = Arc::new(FakeBackend::default());
+        let service = service_with(
+            macos_status(NotificationAuthorization::Authorized),
+            Arc::clone(&backend),
+        );
+        let fence = NotificationOrderFence::default();
+
+        let result = service.dispatch_sequenced(&targeted_request("ws-1", "fe-1"), &fence, fence.next_seq());
+
+        assert!(result.submitted);
+        assert_eq!(backend.count(), 1, "the default seam forwards to submit");
+    }
+
+    #[test]
     fn fence_prunes_settled_targets_before_live_ones_at_capacity() {
         // An unbounded map would grow with every pane ever notified. Settled
         // entries go first: they can never block a future operation.
@@ -924,6 +1040,33 @@ mod tests {
 
         assert_eq!(entry.last_submitted_seq, 0);
         assert!(targets.contains_key(&live_key));
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn fence_keeps_withdrawal_only_watermarks_at_capacity() {
+        let mut targets: HashMap<TargetKey, TargetFence> = HashMap::new();
+        for index in 0..FENCE_CAPACITY - 1 {
+            targets.insert(
+                (format!("ws-{index}"), "fe".to_string()),
+                TargetFence {
+                    last_submitted_seq: index as u64 + 1,
+                    last_withdrawn_seq: index as u64 + 1,
+                },
+            );
+        }
+        let withdrawn_key = ("ws-withdrawn".to_string(), "fe".to_string());
+        targets.insert(
+            withdrawn_key.clone(),
+            TargetFence {
+                last_submitted_seq: 0,
+                last_withdrawn_seq: 9_999,
+            },
+        );
+
+        fence_entry(&mut targets, ("ws-new".to_string(), "fe".to_string()));
+
+        assert_eq!(targets.get(&withdrawn_key).map(|e| e.last_withdrawn_seq), Some(9_999));
         assert_eq!(targets.len(), 2);
     }
 }

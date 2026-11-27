@@ -107,7 +107,10 @@ export interface UseAccountWorktreesResult {
    */
   acquireConnection: (machineId: string) => Promise<ActiveMachineConnection | null>;
   /** Same ownership transfer, preserving the reason when a connection cannot be acquired. */
-  readonly acquireConnectionDetailed: (machineId: string) => Promise<AcquireConnectionOutcome>;
+  readonly acquireConnectionDetailed: (
+    machineId: string,
+    options?: { readonly force?: boolean },
+  ) => Promise<AcquireConnectionOutcome>;
   closeAllExcept: (machineId: string | null) => void;
   /**
    * The pooled discovery tunnel to a machine without taking ownership, for read-only side
@@ -733,7 +736,7 @@ export function useAccountWorktrees(
   );
 
   const acquireConnectionDetailed = useCallback(
-    async (machineId: string): Promise<AcquireConnectionOutcome> => {
+    async (machineId: string, options?: { readonly force?: boolean }): Promise<AcquireConnectionOutcome> => {
       if (!accountSessionToken) {
         return { ok: false, code: "UNAUTHORIZED", message: userFacingError({ code: "UNAUTHORIZED" }) };
       }
@@ -754,7 +757,8 @@ export function useAccountWorktrees(
       if (!machine) {
         return { ok: false, code: "MISSING_MACHINE", message: userFacingError({ code: "NOT_FOUND" }) };
       }
-      if (machine.online === false) {
+      // A user-forced retry must attempt the connection even when the cached presence is stale.
+      if (machine.online === false && options?.force !== true) {
         return { ok: false, code: "MACHINE_OFFLINE", message: userFacingError({ code: "MACHINE_OFFLINE" }) };
       }
 

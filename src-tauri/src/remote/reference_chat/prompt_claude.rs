@@ -1188,6 +1188,7 @@ fn finish(
             queued: None,
             steps: Vec::new(),
             fallback: None,
+            answer_status: None,
         },
         responder: responder.to_string(),
         menu_labels,

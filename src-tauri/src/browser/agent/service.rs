@@ -681,14 +681,24 @@ pub async fn controller_summary(auth: &ControllerAuth) -> Result<Vec<ControllerS
 }
 
 /// A controller revokes itself (`browser controllers revoke`).
+///
+/// Its staged uploads are swept like the desktop revoke path does: `revoke` drops the controller's
+/// leases, so the tabs it held have to be collected *before* that call or the files stay on disk,
+/// unreachable until the tab closes.
 pub async fn revoke_self<R: tauri::Runtime>(app: &AppHandle<R>, auth: &ControllerAuth) -> Result<(), IpcError> {
     ensure_loaded().await?;
-    {
+    let leased_tabs = {
         let mut service = SERVICE.lock();
         let Principal::LocalController { id, .. } = service.state.authenticate(&auth.id, &auth.secret)? else {
             return Err(AuthorityError::PairingRequired.into());
         };
+        let leased_tabs = service.state.leased_tabs(&id);
         service.state.revoke(&id, Instant::now());
+        leased_tabs
+    };
+    // After the guard drops: `cleanup_upload_staging` takes the staging lock.
+    for browser_id in &leased_tabs {
+        super::page::cleanup_upload_staging(browser_id);
     }
     persist().await?;
     notify_approvals(app);
@@ -710,10 +720,16 @@ pub fn desktop_touched(browser_id: &str) {
 /// An agent explicitly hands control of `browser_id` back to the desktop user without closing
 /// the tab. Reclaims the tab (ending any active agent lease and blocking further agent mutations
 /// until desktop chrome resumes) and notifies app chrome.
-pub fn request_help<R: tauri::Runtime>(app: &AppHandle<R>, browser_id: &str, reason: Option<&str>) {
+pub fn request_help<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    browser_id: &str,
+    reason: Option<&str>,
+) -> Result<(), IpcError> {
+    // An admitted controller runs under a fence; desktop and token-only callers have none.
+    let caller = ACT_FENCE.try_with(|fence| fence.controller).ok();
     {
         let mut service = SERVICE.lock();
-        service.state.reclaim(browser_id);
+        reclaim_for_help(&mut service.state, caller, browser_id, Instant::now())?;
         CREDENTIAL_GRANTS.bump_generation();
     }
     super::page::cleanup_upload_staging(browser_id);
@@ -725,6 +741,27 @@ pub fn request_help<R: tauri::Runtime>(app: &AppHandle<R>, browser_id: &str, rea
             "reason": reason,
         }),
     );
+    Ok(())
+}
+
+/// Reclaims `browser_id` for the desktop user. A controller (`Some`) may only do so for a tab it
+/// currently leases; the desktop user (`None`) reclaims unconditionally.
+fn reclaim_for_help(
+    state: &mut AuthorityState,
+    caller: Option<ControllerId>,
+    browser_id: &str,
+    now: Instant,
+) -> Result<(), AuthorityError> {
+    if let Some(caller) = caller {
+        if state.lease_holder(browser_id, now).map(|(holder, _)| holder) != Some(caller) {
+            return Err(AuthorityError::Forbidden {
+                tool: Some(ToolId::RequestHelp),
+                reason: "only the controller holding this tab's lease can hand it to the user",
+            });
+        }
+    }
+    state.reclaim(browser_id);
+    Ok(())
 }
 
 /// Forgets a closed tab's lease and reclaim mark.
@@ -785,13 +822,21 @@ pub async fn cmd_browser_agent_revoke<R: tauri::Runtime>(
     desktop_only(&webview)?;
     ensure_loaded().await?;
     let controller = ControllerId::parse(&controller_id)?;
-    let changed = {
+    let (changed, leased_tabs) = {
         let mut service = SERVICE.lock();
-        match origin.as_deref() {
+        // Collected before `revoke` drops the controller's leases.
+        let leased_tabs = service.state.leased_tabs(&controller);
+        let changed = match origin.as_deref() {
             Some(origin) => service.state.revoke_grant(&controller, origin),
             None => service.state.revoke(&controller, Instant::now()),
-        }
+        };
+        (changed, leased_tabs)
     };
+    if origin.is_none() {
+        for browser_id in &leased_tabs {
+            super::page::cleanup_upload_staging(browser_id);
+        }
+    }
     CREDENTIAL_HANDLES.revoke_all();
     CREDENTIAL_GRANTS.revoke_all();
     persist().await?;
@@ -808,11 +853,16 @@ pub async fn cmd_browser_agent_reclaim<R: tauri::Runtime>(
 ) -> Result<(), IpcError> {
     desktop_only(&webview)?;
     ensure_loaded().await?;
-    let mut service = SERVICE.lock();
+    {
+        let mut service = SERVICE.lock();
+        if reclaim {
+            service.state.reclaim(&browser_id);
+        } else {
+            service.state.resume(&browser_id);
+        }
+    }
     if reclaim {
-        service.state.reclaim(&browser_id);
-    } else {
-        service.state.resume(&browser_id);
+        super::page::cleanup_upload_staging(&browser_id);
     }
     Ok(())
 }
@@ -902,6 +952,74 @@ mod tests {
         };
         assert!(token_only_admission(&AgentSettings { require_pairing: false }, &request).is_none());
         assert!(token_only_admission(&AgentSettings { require_pairing: true }, &request).is_none());
+    }
+
+    #[test]
+    fn request_help_needs_the_lease_for_a_controller_but_not_for_the_desktop_user() {
+        let now = Instant::now();
+        let (mut state, a) = granted_state(now);
+        let b = ControllerId::generate();
+        state.lease_for_test(a, "tab", now).unwrap();
+        // Controller B does not hold the lease: refused, and A's lease survives.
+        assert!(matches!(
+            reclaim_for_help(&mut state, Some(b), "tab", now),
+            Err(AuthorityError::Forbidden { tool: Some(ToolId::RequestHelp), .. })
+        ));
+        assert_eq!(state.lease_holder("tab", now).map(|(holder, _)| holder), Some(a));
+        // A controller with no lease at all is refused too.
+        assert!(reclaim_for_help(&mut state, Some(a), "untouched", now).is_err());
+        // The holder hands the tab back.
+        assert_eq!(reclaim_for_help(&mut state, Some(a), "tab", now), Ok(()));
+        assert_eq!(state.lease_holder("tab", now), None);
+        // The desktop user (no controller) reclaims unconditionally.
+        state.resume("tab");
+        state.lease_for_test(a, "tab", now).unwrap();
+        assert_eq!(reclaim_for_help(&mut state, None, "tab", now), Ok(()));
+        assert_eq!(state.lease_holder("tab", now), None);
+    }
+
+    #[test]
+    fn a_self_revoke_sweeps_the_staging_of_every_tab_it_held() {
+        // `revoke` drops the leases, so the tab list has to be read *before* it or the staged
+        // files stay on disk until the tab closes. This pins that ordering against the sweep.
+        let now = Instant::now();
+        let (mut state, a) = granted_state(now);
+        let other = ControllerId::generate();
+        state.lease_for_test(a, "tab-a", now).unwrap();
+        state.lease_for_test(other, "tab-other", now).unwrap();
+        for tab in ["tab-a", "tab-other"] {
+            let dir = std::env::temp_dir()
+                .join(format!("ferryx-revoke-staging-{}-{tab}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("upload");
+            std::fs::write(&path, b"x").unwrap();
+            crate::browser::agent::page::register_staged_for_test(tab, path, 1);
+        }
+        let leased = state.leased_tabs(&a);
+        state.revoke(&a, now);
+        for browser_id in &leased {
+            crate::browser::agent::page::cleanup_upload_staging(browser_id);
+        }
+        assert_eq!(leased, vec!["tab-a".to_string()], "only the revoked controller's tabs");
+        assert_eq!(crate::browser::agent::page::staged_count_for_test("tab-a"), 0);
+        assert_eq!(
+            crate::browser::agent::page::staged_count_for_test("tab-other"),
+            1,
+            "another controller's staging is untouched"
+        );
+        crate::browser::agent::page::cleanup_upload_staging("tab-other");
+    }
+
+    #[test]
+    fn leased_tabs_lists_only_the_controllers_own_tabs() {
+        let now = Instant::now();
+        let (mut state, a) = granted_state(now);
+        let b = ControllerId::generate();
+        state.lease_for_test(a, "t1", now).unwrap();
+        state.lease_for_test(b, "t2", now).unwrap();
+        assert_eq!(state.leased_tabs(&a), vec!["t1".to_string()]);
+        state.revoke(&a, now);
+        assert!(state.leased_tabs(&a).is_empty());
     }
 
     const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";

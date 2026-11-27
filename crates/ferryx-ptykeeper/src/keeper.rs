@@ -39,9 +39,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use crate::budget::{BudgetRefusal, MemoryBudget};
 use crate::checkpoint::{CheckpointInfo, CheckpointStore};
@@ -87,6 +87,24 @@ pub const MAX_WRITE_BYTES: usize = 64 * 1024;
 
 /// Buffer for one read from a session master.
 const PUMP_BUFFER_BYTES: usize = 32 * 1024;
+
+/// How long a `WRITE` may spend waiting for the PTY queue to drain before it is refused.
+///
+/// `MAX_WRITE_BYTES` bounds how much one request may write; this bounds how long it may wait doing
+/// it. A stopped child plus a full queue would otherwise park the request - and the session's
+/// `ownership` gate every rescue verb needs - for as long as the child stays stopped.
+#[cfg(unix)]
+const WRITE_DEADLINE_MILLIS: u64 = 2_000;
+
+/// How long the keeper waits for a killed child to be collectable before escalating to `SIGKILL`.
+#[cfg(unix)]
+const KILL_GRACE_MILLIS: u64 = 500;
+
+/// How long the keeper waits for a child to exit after the master reached EOF before escalating.
+const EOF_GRACE_MILLIS: u64 = 200;
+
+/// Step of the bounded reap loop that sits between "ask the child to stop" and "kill it".
+const REAP_STEP_MILLIS: u64 = 10;
 
 /// Signals a `SIGNAL` frame may name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +216,26 @@ pub struct Session {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// The child handle itself, shared with the pump thread. `clone_killer` carries only a pid, so
+    /// this is the one handle that can `wait()`: without it a successful spawn leaves a zombie for
+    /// the keeper's whole life, because dropping a `std::process::Child` closes the handle without
+    /// collecting the exit status.
+    ///
+    /// Shared rather than owned so the thread that observes EOF is the thread that reaps, and the
+    /// mutex makes "already reaped" a state instead of a race between the pump and a teardown.
+    reaper: Arc<ChildReaper>,
+    /// The master's descriptor, used to poll for readability and writability without a blocking call
+    /// on the PTY. `None` on platforms where `MasterPty` exposes no descriptor.
+    #[cfg(unix)]
+    master_fd: Option<std::os::fd::RawFd>,
+    /// The self-pipe that ends the pump's wait the moment a teardown asks it to.
+    ///
+    /// The pump parks in `poll` on the master and this pipe's read end with no deadline, so an idle
+    /// session is woken zero times per second instead of fifty. [`Session::interrupt_reader`] - which
+    /// every teardown path calls - writes the single byte that makes that wait return. Shared with
+    /// the pump thread by `Arc`, so the descriptors outlive this struct exactly as long as the thread
+    /// that reads them does.
+    wake: Arc<PumpWake>,
     /// The replay log is shared with this session's pump thread, which appends every byte the
     /// master produces: one `Arc`, two holders, so the pump never reaches into the session.
     replay: Arc<Mutex<ReplayLog>>,
@@ -304,16 +342,73 @@ impl Session {
         }
     }
 
+    /// Copies at most `limit` bytes of the suffix after `after`, refusing to keep answering once the
+    /// child is gone.
+    ///
+    /// A reaped child produces nothing more, so a reader that has already drained the log has nothing
+    /// left to learn and must be told the session is over rather than handed an empty page for ever:
+    /// that is what turns an exited shell into `UNKNOWN_SESSION` at the daemon instead of a pane that
+    /// reports `running: true` until it is closed by hand. The bytes still buffered are drained
+    /// first - a reader at or below the head gets them - and only a reader that has caught up with
+    /// an exited session is retired.
+    fn replay_page_checked(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> KeeperResult<ReplayPage> {
+        let page = self.replay_page(after, limit);
+        if self.has_exited() && after >= page.head && page.data.is_empty() {
+            return Err(KeeperError::unknown_session(&self.session_id));
+        }
+        Ok(page)
+    }
+
     /// How many bytes a read from `after` would return, without copying any. `None` when the range
     /// is a gap, so a caller can refuse before it allocates anything.
     fn covered_len(&self, after: u64) -> Option<usize> {
         lock(&self.replay).covered_len(after)
     }
 
+    /// Whether the child has been reaped, so its output can no longer grow.
+    fn has_exited(&self) -> bool {
+        self.reaper.has_exited()
+    }
+
+    /// Ends the child and collects it, escalating on Unix so a child that ignores `SIGHUP` cannot
+    /// keep the session - and every verb that joins its pump - alive.
+    fn terminate_and_reap(&self) {
+        // The portable kill first: on Windows it is the only one there is, and on Unix it is the same
+        // `SIGHUP` the saved killer has always sent. The reaper then escalates where it can.
+        if let Ok(mut killer) = self.killer.lock() {
+            let _ = killer.kill();
+        }
+        self.reaper.terminate_and_reap();
+    }
+
+    /// Writes `data` to the master, bounded in time as well as size.
+    ///
+    /// A blocking `write_all` on a PTY whose slave is not draining parks forever, and every rescue
+    /// verb takes this session's `ownership` gate - so the write is what a stopped child could use to
+    /// keep `KILL`, `signal continue` and `shutdown` from ever running. On Unix the wait is therefore
+    /// a `poll` loop with a deadline that checks the reaper's stop flag, and a write that cannot make
+    /// room in time is reported as a timeout instead of hanging the caller.
     fn write(&self, data: &[u8]) -> std::io::Result<usize> {
         let mut writer = lock(&self.writer);
-        writer.write_all(data)?;
-        writer.flush()?;
+        #[cfg(unix)]
+        {
+            write_bounded(
+                &mut **writer,
+                data,
+                &self.reaper,
+                self.master_fd,
+                Duration::from_millis(WRITE_DEADLINE_MILLIS),
+            )?;
+        }
+        #[cfg(not(unix))]
+        {
+            writer.write_all(data)?;
+            writer.flush()?;
+        }
         self.touch();
         Ok(data.len())
     }
@@ -396,8 +491,11 @@ impl Session {
         ))
     }
 
-    /// Ends the read in flight, so the pump thread can be joined instead of leaked.
+    /// Ends the wait in flight, so the pump thread can be joined instead of leaked.
     fn interrupt_reader(&self) {
+        // The wake pipe first: on Unix that is what actually ends the pump's `poll`, and it is a
+        // single best-effort byte rather than a state a thread parked in `poll` could miss.
+        self.wake.wake();
         // Cloned out of the slot before it is used: a blocking request must never be issued while
         // the lock that guards the slot is held.
         let interrupt = lock(&self.interrupt).clone();
@@ -422,6 +520,159 @@ impl Session {
     }
 }
 
+/// The child handle a session owns, shared with its pump thread.
+///
+/// Two facts make this type necessary rather than a plain `Mutex<Box<dyn Child + Send + Sync>>`:
+///
+/// * the child must be **reaped** ("waited"), and dropping the handle does not do that, so a
+///   successful spawn that is never reaped leaves a zombie for the keeper's whole life;
+/// * the pump is the thread that observes EOF, so it is the thread that has to do the reaping - and
+///   it must do it without the keeper holding any lock a verb needs.
+///
+/// `stopping` is the pump's cancellation flag: a teardown sets it and then writes the wake pipe, so
+/// the pump's `poll` returns at once and `join_pump` never blocks behind a read that no child will
+/// ever end.
+pub struct ChildReaper {
+    child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
+    /// The child's process group, when the platform reports one. Signalling the group is what ends a
+    /// shell's descendants; signalling only the leader leaves them holding the slave.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pgid: Option<i32>,
+    /// Set once the child has been waited for. Read by [`Session::has_exited`] and the pump.
+    exited: AtomicBool,
+    /// Set by every teardown, so the pump's bounded `poll` can leave its loop.
+    stopping: AtomicBool,
+}
+
+impl ChildReaper {
+    fn new(child: Box<dyn Child + Send + Sync>, pgid: Option<i32>) -> Self {
+        Self {
+            child: Mutex::new(Some(child)),
+            pgid,
+            exited: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
+        }
+    }
+
+    fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
+
+    fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
+    }
+
+    /// Marks the session as exited without reaping: used by the pump's EOF arm, which then reaps
+    /// through [`Self::reap_if_exited`].
+    fn mark_exited(&self) {
+        self.exited.store(true, Ordering::Release);
+    }
+
+    /// Reaps the child if it has exited, without blocking. `true` when a status was collected.
+    fn reap_if_exited(&self) -> bool {
+        let mut slot = lock(&self.child);
+        let Some(child) = slot.as_mut() else {
+            self.exited.store(true, Ordering::Release);
+            return false;
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // Drop the handle now the status is collected: keeping it only holds a closed pid.
+                *slot = None;
+                self.exited.store(true, Ordering::Release);
+                true
+            }
+            Ok(None) => false,
+            Err(_) => {
+                *slot = None;
+                self.exited.store(true, Ordering::Release);
+                true
+            }
+        }
+    }
+
+    /// Waits up to `grace` for the child to become collectable, then ends it.
+    ///
+    /// The bounded loop is what keeps the pump's EOF arm from blocking: a child that exited but whose
+    /// status is not yet collectable is waited for a moment, and one that never becomes collectable is
+    /// escalated to [`Self::terminate_and_reap`] rather than waited on indefinitely.
+    fn reap_within(&self, grace: Duration) -> bool {
+        let deadline = Instant::now() + grace;
+        loop {
+            if self.reap_if_exited() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(REAP_STEP_MILLIS));
+        }
+        self.terminate_and_reap();
+        true
+    }
+
+    /// On Unix, asks the process group to stop, then kills it if it has not.
+    ///
+    /// `ChildKiller::kill` on this platform is a bare `SIGHUP` to the child's pid: a child that
+    /// ignores it, or a descendant that holds the slave, survives it. The group gets `SIGHUP`, then
+    /// `SIGTERM`, then `SIGKILL` after a short bounded grace - which is what actually ends a shell
+    /// that trapped the first two.
+    #[cfg(unix)]
+    fn signal_group_escalating(&self) {
+        let pid = {
+            let slot = lock(&self.child);
+            slot.as_ref().and_then(|child| child.process_id()).map(|pid| pid as i32)
+        };
+        let Some(pid) = pid else {
+            return;
+        };
+        // The group first: a shell's descendants hold the slave, so ending only the leader leaves the
+        // PTY open and the pump waiting. `-pgid` reaches them all; a group the kernel no longer knows
+        // (or a session that never became a leader) falls back to the leader's own pid.
+        let targets: Vec<i32> = match self.pgid {
+            Some(pgid) if pgid > 0 && pgid != pid => vec![-pgid, pid],
+            _ => vec![pid],
+        };
+        // The pid may already be gone; every failure here is "already ended", which is the outcome
+        // this function exists to produce, so none of them is reported.
+        for signal in [libc::SIGHUP, libc::SIGTERM] {
+            for target in &targets {
+                unsafe { libc::kill(*target, signal) };
+            }
+            let deadline = Instant::now() + Duration::from_millis(KILL_GRACE_MILLIS / 2);
+            while Instant::now() < deadline {
+                if self.reap_if_exited() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(REAP_STEP_MILLIS));
+            }
+        }
+        for target in &targets {
+            unsafe { libc::kill(*target, libc::SIGKILL) };
+        }
+    }
+
+    /// Ends the child and collects it. Every teardown path uses this one entry point, so no path can
+    /// leave a zombie and none can hang behind a child that refuses to die.
+    fn terminate_and_reap(&self) {
+        self.stopping.store(true, Ordering::Release);
+        if self.reap_if_exited() {
+            return;
+        }
+        // Escalate first, so a child that traps the polite signal is already on its way out before the
+        // blocking `wait` below. The wait then cannot park on a process that never intends to exit.
+        #[cfg(unix)]
+        self.signal_group_escalating();
+        let mut slot = lock(&self.child);
+        if let Some(child) = slot.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *slot = None;
+        self.exited.store(true, Ordering::Release);
+    }
+}
+
 #[cfg(test)]
 struct WatchedInterrupt {
     inner: Option<Arc<dyn portable_pty::ReaderInterrupt>>,
@@ -440,12 +691,10 @@ impl portable_pty::ReaderInterrupt for WatchedInterrupt {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // A session that leaves the registry must not leave a child behind, and must not leave the
-        // pump thread blocked on a master nobody reads any more.
+        // A session that leaves the registry must not leave a child behind, must not leave a zombie,
+        // and must not leave the pump thread blocked on a master nobody reads any more.
+        self.reaper.terminate_and_reap();
         self.interrupt_reader();
-        if let Ok(killer) = self.killer.get_mut() {
-            let _ = killer.kill();
-        }
         if let Ok(pump) = self.pump.get_mut() {
             if let Some(handle) = pump.take() {
                 let _ = handle.join();
@@ -470,8 +719,14 @@ pub struct Keeper {
     checkpoints: Mutex<CheckpointStore>,
     epochs: Mutex<EpochFence>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    /// Session ids a spawn is currently creating. A second `SPAWN` for the same id waits on
-    /// [`Keeper::admission_done`] instead of racing the first to the PTY.
+    /// Session ids and request ids a spawn is currently creating. A second `SPAWN` for the same id
+    /// waits on [`Keeper::admission_done`] instead of racing the first to the PTY.
+    ///
+    /// Request ids are reserved here too, not only session ids: the retired-request table is written
+    /// at commit, so two peers presenting one `requestId` under two different session ids both miss
+    /// it and both fork, leaving one id pointing at whichever committed last. Reserving the id for
+    /// the duration of the spawn makes the second one wait and then answer from the first's session,
+    /// which is what idempotence on a request id has to mean.
     admissions: Mutex<HashSet<String>>,
     admission_done: Condvar,
     /// The newest epoch each retired session id was attached at. `EpochFence::forget` drops the
@@ -683,15 +938,32 @@ impl Keeper {
         loop {
             let mut admissions = lock(&self.admissions);
             if let Some(info) = self.existing_spawn(&request)? {
+                // A hit can come from the retired-request table, which is keyed by request id alone.
+                // A peer that reused someone else's request id under a different session id must not
+                // be handed a handle to a pane it never asked for, so the answer is checked against
+                // the id this call named. An identical id keeps the idempotent answer that the
+                // sequential tests assert; a different one is a typed refusal, not an aliased
+                // success. Both the sequential and the concurrent path reach this same check, so
+                // they cannot disagree.
+                if info.session_id != request.session_id {
+                    return Err(KeeperError::new(
+                        KeeperErrorCode::InvalidSpawn,
+                        format!(
+                            "SPAWN_REQUEST_CONFLICT: request {} already forked session {}, but this spawn names {}; a request id is bound to the session it created",
+                            request.request_id, info.session_id, request.session_id
+                        ),
+                    ));
+                }
                 return Ok(info);
             }
-            if !admissions.contains(&request.session_id) {
-                admissions.insert(request.session_id.clone());
+            let keys = AdmissionKeys::for_request(&request);
+            if !keys.any_held(&admissions) {
+                keys.hold(&mut admissions);
                 break;
             }
-            // Another thread is creating exactly this id. It removes the admission and notifies on
-            // both outcomes, so this thread either answers from its session or retries the whole
-            // spawn; it never races it to a second PTY.
+            // Another thread is creating exactly this id, or forking exactly this request. It
+            // removes its admission and notifies on both outcomes, so this thread either answers
+            // from its session or retries the whole spawn; it never races it to a second PTY.
             let waiting = self
                 .admission_done
                 .wait(admissions)
@@ -705,7 +977,7 @@ impl Keeper {
             }
         }
 
-        let _admission = SpawnAdmission { keeper: self, session_id: &request.session_id };
+        let _admission = SpawnAdmission { keeper: self, keys: AdmissionKeys::for_request(&request) };
         self.create_session(&request)
     }
 
@@ -901,12 +1173,10 @@ impl Keeper {
     }
 
     /// Tears down a session that was opened but never committed to the registry: the child is
-    /// killed, the pump ends, and the reservation returns when the last `Arc` drops.
+    /// killed, collected and the pump ended, and the reservation returns when the last `Arc` drops.
     fn abandon_spawn(&self, session: Arc<Session>) {
+        session.terminate_and_reap();
         session.interrupt_reader();
-        if let Ok(mut killer) = session.killer.lock() {
-            let _ = killer.kill();
-        }
         session.join_pump();
         drop(session);
     }
@@ -979,12 +1249,57 @@ impl Keeper {
         let process_start_time = pid.and_then(process_start_time);
         let killer = child.clone_killer();
         let interrupt = pair.master.interrupt_handle();
+        #[cfg(unix)]
+        let master_fd = pair.master.as_raw_fd();
 
         let replay = Arc::new(Mutex::new(ReplayLog::new(
             request.session_id.clone(),
             crate::replay::REPLAY_SESSION_BYTES,
         )));
-        let pump = spawn_pump(request.session_id.clone(), reader, Arc::clone(&replay));
+        // The wake pipe is created before the pump and shared with it, so the teardown that sets the
+        // stop flag can also end the pump's wait instead of leaving it to a poll tick.
+        #[cfg(unix)]
+        let wake = match PumpWake::new() {
+            Ok(wake) => Arc::new(wake),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(KeeperError::new(
+                    KeeperErrorCode::InvalidSpawn,
+                    format!("cannot create the wake pipe for {}: {error}", request.session_id),
+                ));
+            }
+        };
+        #[cfg(not(unix))]
+        let wake = Arc::new(PumpWake);
+        // The child is handed to a reaper the pump shares, so the thread that sees EOF is the thread
+        // that collects the exit status. From here the handle is no longer ours to drop: a failed
+        // pump means no thread will ever reap it, so the spawn is taken down explicitly below.
+        let reaper = Arc::new(ChildReaper::new(child, pgid));
+        #[cfg(unix)]
+        let pump_master_fd = master_fd;
+        #[cfg(not(unix))]
+        let pump_master_fd: Option<i32> = None;
+        let pump = match spawn_pump(
+            request.session_id.clone(),
+            reader,
+            Arc::clone(&replay),
+            Arc::clone(&reaper),
+            pump_master_fd,
+            Arc::clone(&wake),
+        ) {
+            Ok(pump) => pump,
+            Err(error) => {
+                // No pump thread exists to reap the child, so it is killed and waited for here.
+                // Dropping the handle instead would leave the child running, holding the slave, with
+                // nothing in this process able to address it.
+                reaper.terminate_and_reap();
+                return Err(KeeperError::new(
+                    KeeperErrorCode::InvalidSpawn,
+                    format!("cannot start the pump for {}: {error}", request.session_id),
+                ));
+            }
+        };
 
         Ok(Arc::new(Session {
             session_id: request.session_id.clone(),
@@ -997,6 +1312,10 @@ impl Keeper {
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
             killer: Mutex::new(killer),
+            reaper,
+            #[cfg(unix)]
+            master_fd,
+            wake,
             replay,
             pump: Mutex::new(Some(pump)),
             interrupt: Mutex::new(interrupt),
@@ -1055,6 +1374,12 @@ impl Keeper {
 
     /// `ATTACH` with an explicit page bound, so a caller that wants a smaller inline answer does not
     /// pay for a page it will not use.
+    ///
+    /// The epoch check and the snapshot are one step: the `ownership` gate is held across the fence,
+    /// the checkpoint read and the replay copy. Releasing it after the fence - as this used to - let
+    /// an attach fenced at epoch 2 copy state produced after epoch 3 took over, and pair a successor's
+    /// checkpoint with a predecessor's replay page. The copy is bounded by `limit`, so the gate is
+    /// never held across an unbounded wait.
     pub fn attach_page(
         &self,
         session_id: &str,
@@ -1063,22 +1388,21 @@ impl Keeper {
         limit: usize,
     ) -> KeeperResult<AttachOutcome> {
         let session = self.session(session_id)?;
-        // The gate covers only the fence, so a successor attaching waits for an in-flight write to
-        // land and no longer for the replay copy below.
-        let epoch = {
+        let (epoch, checkpoint, page) = {
             let _ownership = lock(&session.ownership);
-            lock(&self.epochs).fence(session_id, epoch)?
-        };
-        session.touch();
-        // Checkpoints then replay, under the store guard, exactly as the commit path takes them: a
-        // committer that has trimmed the replay has also already stored its checkpoint, so this
-        // reader can never see the checkpoint beside bytes that checkpoint already covers.
-        let (checkpoint, page) = {
-            let checkpoints = lock(&self.checkpoints);
+            let epoch = lock(&self.epochs).fence(session_id, epoch)?;
+            // Checkpoints then replay, under the store guard, exactly as the commit path takes them:
+            // a committer that has trimmed the replay has also already stored its checkpoint, so
+            // this reader can never see the checkpoint beside bytes that checkpoint already covers.
+            let mut checkpoints = lock(&self.checkpoints);
+            // The fence that just succeeded proves the previous daemon is gone, so the uploads it
+            // opened can never commit. Released here, while the advance is still ours to act on.
+            checkpoints.retire_uploads_before_epoch(session_id, epoch);
             let checkpoint = checkpoints.stored(session_id);
             let page = session.replay_page(after, limit);
-            (checkpoint, page)
+            (epoch, checkpoint, page)
         };
+        session.touch();
         Ok(AttachOutcome {
             session_id: session_id.to_owned(),
             epoch,
@@ -1110,7 +1434,14 @@ impl Keeper {
     /// spending budget on a page it cannot deliver. A length probe only: it never copies session
     /// output, so it is the one replay read that is not gated by the epoch.
     pub fn page_len(&self, session_id: &str, after: u64) -> KeeperResult<Option<usize>> {
-        Ok(self.session(session_id)?.covered_len(after))
+        let session = self.session(session_id)?;
+        match session.covered_len(after) {
+            // Nothing left to send *and* the child is gone: the tap would otherwise idle for ever on
+            // a session whose output can no longer grow. Reporting it as unknown is what lets the
+            // daemon's pump reach its own `UNKNOWN_SESSION` arm instead of polling a dead session.
+            Some(0) if session.has_exited() => Err(KeeperError::unknown_session(session_id)),
+            other => Ok(other),
+        }
     }
 
     /// An unfenced `REPLAY` page, for the legacy wire form that carries no epoch.
@@ -1140,7 +1471,10 @@ impl Keeper {
 
     fn replay_page(&self, session_id: &str, from: u64, limit: usize) -> KeeperResult<ReplayOutcome> {
         let session = self.session(session_id)?;
-        let page = session.replay_page(from, limit);
+        // The checked copy, not the raw one: a legacy `REPLAY` from a peer that presents no epoch must
+        // also learn that an exited session is over, or the daemon's output pump would poll a dead
+        // session for ever. Draining buffered bytes first keeps the last output reachable.
+        let page = session.replay_page_checked(from, limit)?;
         Ok(ReplayOutcome {
             sequence_offset: page.head,
             data: page.data,
@@ -1175,7 +1509,11 @@ impl Keeper {
         let session = self.session(session_id)?;
         let _ownership = lock(&session.ownership);
         lock(&self.epochs).verify(session_id, epoch)?;
-        let page = session.replay_page(from, limit);
+        // The checked copy refuses once the child is gone and the reader has caught up with the
+        // head: an exited session answers `UNKNOWN_SESSION` instead of an empty page for ever, which
+        // is what lets the daemon's pump reach its own `UNKNOWN_SESSION` arm and end. Bytes still
+        // buffered are drained first - the check only fires when the reader is already at the head.
+        let page = session.replay_page_checked(from, limit)?;
         Ok(ReplayOutcome {
             sequence_offset: page.head,
             data: page.data,
@@ -1228,10 +1566,20 @@ impl Keeper {
                 // successor must not record the successor's epoch as retired or forget its fence:
                 // that leaves a live session no verb can address (verify answers from an absent
                 // fence) and no respawn can re-fence below the floor just raised.
+                //
+                // The checkpoint store is cleared here, under the same registry guard and before
+                // the entry is removed, rather than after the gate is released. A replacement
+                // incarnation is published through `fence_spawn`, which needs this registry guard to
+                // insert, and its checkpoint mutations need `session()` - which reads this guard -
+                // to find the session at all. Holding it is therefore what proves the state being
+                // deleted is this incarnation's: the window in which a successor's committed
+                // checkpoint could be erased by its predecessor's retirement is closed by
+                // construction, not by timing.
                 {
                     let mut sessions = lock(&self.sessions);
                     match sessions.get(session_id) {
                         Some(current) if Arc::ptr_eq(current, &session) => {
+                            lock(&self.checkpoints).forget_session(session_id);
                             sessions.remove(session_id);
                         }
                         _ => {
@@ -1251,12 +1599,12 @@ impl Keeper {
                 }
                 epochs.forget(session_id);
             }
-            lock(&self.checkpoints).forget_session(session_id);
         }
+        // Ends the child (escalating on Unix) and collects it, then stops the pump: the stop flag is
+        // what makes the pump's bounded `poll` leave its loop, so the join cannot hang behind a child
+        // that ignored `SIGHUP` or a descendant that still holds the slave.
+        session.terminate_and_reap();
         session.interrupt_reader();
-        if let Ok(mut killer) = session.killer.lock() {
-            let _ = killer.kill();
-        }
         session.join_pump();
         // The session's own `Drop` returns its reservation, and only once the last `Arc` clone is
         // gone: a clone still reading replay bytes out of this session is still using the memory.
@@ -1293,7 +1641,10 @@ impl Keeper {
         epoch: u64,
     ) -> KeeperResult<crate::checkpoint::CheckpointProgress> {
         self.with_fenced_checkpoints(session_id, epoch, |checkpoints| {
-            Ok((checkpoints.begin(session_id, checkpoint_id, sequence_offset, total_bytes)?, None))
+            Ok((
+                checkpoints.begin(session_id, checkpoint_id, sequence_offset, total_bytes, epoch)?,
+                None,
+            ))
         })
     }
 
@@ -1326,10 +1677,23 @@ impl Keeper {
 
     /// Abandons a chunked upload. Idempotent: a commit that already landed is left alone.
     ///
-    /// Fenced by its originating epoch: this runs on the connection-teardown path, where the id may
-    /// already name a successor's upload. A fence that no longer matches reports `false` and touches
-    /// nothing, which is the fail-closed answer for a caller that cannot report an error.
-    pub fn abort_checkpoint(&self, session_id: &str, checkpoint_id: &str, epoch: u64) -> bool {
+    /// Matched by the attempt's own `upload_token`, which the `CHECKPOINT_ACK` of the `begin` returned
+    /// and the connection recorded. The epoch alone cannot identify an attempt: two connections on
+    /// one epoch that begin the same `checkpoint_id` are indistinguishable by it, so an abort fenced
+    /// only by the epoch released whichever attempt was live - a successor's upload, when a retry had
+    /// superseded the caller's own. A token names exactly one attempt, so a teardown can only ever
+    /// release the one it opened.
+    ///
+    /// Still fenced by the epoch as well, so a teardown from a daemon that has been superseded cannot
+    /// reach a live session's store at all. A fence that no longer matches reports `false` and
+    /// touches nothing, which is the fail-closed answer for a caller that cannot report an error.
+    pub fn abort_checkpoint(
+        &self,
+        session_id: &str,
+        checkpoint_id: &str,
+        epoch: u64,
+        upload_token: u64,
+    ) -> bool {
         // A session that is already gone holds no upload to abort. `false` is the fail-closed answer
         // this teardown-only path can report.
         let Ok(session) = self.session(session_id) else {
@@ -1343,7 +1707,7 @@ impl Keeper {
             return false;
         }
         let mut checkpoints = lock(&self.checkpoints);
-        checkpoints.abort(session_id, checkpoint_id)
+        checkpoints.abort(session_id, checkpoint_id, upload_token)
     }
 
     pub fn checkpoint_info(&self, session_id: &str) -> KeeperResult<CheckpointInfo> {
@@ -1375,20 +1739,56 @@ impl Keeper {
             .map(|checkpoint| checkpoint.bytes().to_vec())
     }
 
-    /// Pins the committed checkpoint's identity for a paged download. Byte-free: opening a download
-    /// costs the budget nothing, and every chunk re-verifies the identity it was pinned at.
-    pub fn checkpoint_pin(&self, session_id: &str) -> Option<crate::checkpoint::CheckpointRef> {
-        lock(&self.checkpoints).pin(session_id)
-    }
-
-    /// Copies one bounded slice of a pinned checkpoint into the caller's buffer.
-    pub fn checkpoint_read_chunk(
+    /// Pins the committed checkpoint and copies one page of it, as one step.
+    ///
+    /// The identity check and the copy have to be atomic with the caller's epoch, or a
+    /// `CHECKPOINT_COMMIT` landing between them replaces the pin: the caller then receives the
+    /// replacement's bytes labelled with the identity it asked for, and its own identity check passes
+    /// on a recovery point that never existed. Holding `ownership` across the verify, the pin, the
+    /// identity comparison and the bounded copy is what makes the answer describe one checkpoint.
+    ///
+    /// The page is copied straight into `out`, so the gate is never held across an allocation: the
+    /// buffer is the caller's and its size is the caller's bound.
+    pub fn checkpoint_fetch_page(
         &self,
-        pinned: &crate::checkpoint::CheckpointRef,
-        offset: u64,
+        session_id: &str,
+        checkpoint_id: &str,
+        sequence_offset: u64,
+        epoch: u64,
+        from_byte: u64,
         out: &mut [u8],
     ) -> KeeperResult<crate::checkpoint::CheckpointChunk> {
-        lock(&self.checkpoints).read_chunk(pinned, offset, out)
+        let session = self.session(session_id)?;
+        let _ownership = lock(&session.ownership);
+        lock(&self.epochs).verify(session_id, epoch)?;
+        let checkpoints = lock(&self.checkpoints);
+        let pinned = checkpoints.pin(session_id).ok_or_else(|| {
+            // A download that was open when the checkpoint went away reports the offset the session
+            // is actually committed at, not 0: `STALE_CHECKPOINT` is documented as carrying the
+            // newest committed offset so the caller can restart from there. `stored` is read under
+            // the same guard as the pin, so the number describes the state that refused.
+            let committed = checkpoints.stored(session_id).sequence_offset;
+            KeeperError::at(
+                KeeperErrorCode::StaleCheckpoint,
+                format!(
+                    "session {session_id}: checkpoint {checkpoint_id} was retired while it was being read"
+                ),
+                committed,
+            )
+        })?;
+        // The identity is compared to the request, not merely re-verified per chunk: a pin that names
+        // a different checkpoint is exactly the replacement this verb must refuse.
+        if pinned.checkpoint_id != checkpoint_id || pinned.sequence_offset != sequence_offset {
+            return Err(KeeperError::at(
+                KeeperErrorCode::StaleCheckpoint,
+                format!(
+                    "session {session_id}: download pinned checkpoint {} at offset {}, but {checkpoint_id} at offset {sequence_offset} was requested",
+                    pinned.checkpoint_id, pinned.sequence_offset
+                ),
+                pinned.sequence_offset,
+            ));
+        }
+        checkpoints.read_chunk(&pinned, from_byte, out)
     }
 
     /// Authoritative discovery: every live session with its pid, start time and size.
@@ -1460,10 +1860,8 @@ impl Keeper {
                     drop(retired);
                     lock(&self.checkpoints).forget_session(&session_id);
                 }
+                session.terminate_and_reap();
                 session.interrupt_reader();
-                if let Ok(mut killer) = session.killer.lock() {
-                    let _ = killer.kill();
-                }
                 session.join_pump();
                 // The reservation returns with the last `Arc`; a clone still reading replay bytes is
                 // still holding the memory it was charged for.
@@ -1522,16 +1920,57 @@ impl Keeper {
 
 }
 
-/// Holds one session id's spawn admission. Dropped on every path, including an unwind, so a panic
-/// inside a spawn can never leave later spawns for that id waiting forever.
+/// Holds one spawn's admissions. Dropped on every path, including an unwind, so a panic inside a
+/// spawn can never leave later spawns for that id waiting forever.
+///
+/// The keys are owned rather than borrowed so the guard can hold both a session id and a request id
+/// without the caller having to keep two borrows alive.
 struct SpawnAdmission<'a> {
     keeper: &'a Keeper,
-    session_id: &'a str,
+    keys: AdmissionKeys,
+}
+
+/// The admission keys one spawn reserves: its session id, and - when it carries one - its request id.
+///
+/// Prefixed so a session id that happens to read like a request id cannot collide with one: the two
+/// are different namespaces and a shared one would let a session id block an unrelated request.
+struct AdmissionKeys {
+    session: String,
+    request: Option<String>,
+}
+
+impl AdmissionKeys {
+    fn for_request(request: &SpawnRequest) -> Self {
+        Self {
+            session: format!("session:{}", request.session_id),
+            request: (!request.request_id.is_empty())
+                .then(|| format!("request:{}", request.request_id)),
+        }
+    }
+
+    fn any_held(&self, admissions: &HashSet<String>) -> bool {
+        admissions.contains(&self.session)
+            || self.request.as_ref().is_some_and(|key| admissions.contains(key))
+    }
+
+    fn hold(&self, admissions: &mut HashSet<String>) {
+        admissions.insert(self.session.clone());
+        if let Some(request) = &self.request {
+            admissions.insert(request.clone());
+        }
+    }
+
+    fn release(&self, admissions: &mut HashSet<String>) {
+        admissions.remove(&self.session);
+        if let Some(request) = &self.request {
+            admissions.remove(request);
+        }
+    }
 }
 
 impl Drop for SpawnAdmission<'_> {
     fn drop(&mut self) {
-        lock(&self.keeper.admissions).remove(self.session_id);
+        self.keys.release(&mut lock(&self.keeper.admissions));
         self.keeper.admission_done.notify_all();
     }
 }
@@ -1554,29 +1993,337 @@ impl SpawnRequest {
     }
 }
 
+/// The self-pipe that ends a pump's wait without a deadline.
+///
+/// One read end and one write end, both `O_NONBLOCK` and `FD_CLOEXEC`, created by `libc::pipe`. The
+/// pump waits in `poll` on `[master_fd, wake_rd]` with `-1` as its timeout, so an idle session issues
+/// no syscall at all; a teardown writes one byte to `wake_wr` and that wait returns immediately.
+///
+/// Both ends are owned by this struct rather than borrowed, because the pump thread holds an `Arc`
+/// and must keep reading a descriptor that stays valid even if the session itself is being dropped.
+#[cfg(unix)]
+struct PumpWake {
+    read: std::os::fd::RawFd,
+    write: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl PumpWake {
+    /// Creates the pipe. Both ends are non-blocking, so neither a full pipe nor an empty one can park
+    /// the thread that touches it, and both are close-on-exec, so a spawned child never inherits them.
+    fn new() -> std::io::Result<Self> {
+        let mut fds = [0 as std::os::fd::RawFd; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let wake = Self { read: fds[0], write: fds[1] };
+        for fd in [wake.read, wake.write] {
+            set_nonblocking(fd)?;
+            set_cloexec_fd(fd)?;
+        }
+        Ok(wake)
+    }
+
+    /// Asks a pump waiting on this pipe to look at its stop flag. Best effort by design: a write that
+    /// cannot be delivered means the pipe is already full, which is itself a pending wakeup, and the
+    /// caller is on a teardown path that cannot report an error.
+    fn wake(&self) {
+        let byte = 1u8;
+        unsafe { libc::write(self.write, &byte as *const u8 as *const libc::c_void, 1) };
+    }
+
+    /// Drains every pending wakeup byte, so the next `poll` waits instead of spinning on a stale one.
+    fn drain(&self) {
+        let mut buffer = [0u8; 64];
+        loop {
+            let n = unsafe {
+                libc::read(self.read, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len())
+            };
+            if n <= 0 {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PumpWake {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.read);
+            libc::close(self.write);
+        }
+    }
+}
+
+/// A wake handle on a platform whose pump needs none: the reader terminates when the stream ends, so
+/// every operation is a no-op and the pump keeps its bounded `poll`.
+#[cfg(not(unix))]
+#[derive(Default)]
+struct PumpWake;
+
+#[cfg(not(unix))]
+impl PumpWake {
+    fn wake(&self) {}
+}
+
+/// Sets `FD_CLOEXEC` on a descriptor the keeper owns.
+#[cfg(unix)]
+fn set_cloexec_fd(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Reads a master until the child closes it, appending every byte to the replay log untouched.
+///
+/// Returns the thread handle, or the reason no thread could be started. It must not panic: the caller
+/// has a live child at this point, and an unwind here would drop the only reap-capable handle without
+/// killing anything, leaving an orphan that holds the slave. The caller tears the child down on `Err`.
+///
+/// On Unix the read is cancellable without a deadline: the master is switched to non-blocking and
+/// the loop waits in `poll` on the master *and* a self-pipe, so a teardown wakes it in microseconds
+/// instead of being blocked behind a read that never returns, and an idle session issues no wakeup
+/// at all. That is what makes `join_pump` terminate even when a descendant still holds the slave
+/// open. A reader that exposes no descriptor keeps the bounded-poll fallback.
 fn spawn_pump(
     session_id: String,
     mut reader: Box<dyn std::io::Read + Send>,
     replay: Arc<Mutex<ReplayLog>>,
-) -> JoinHandle<()> {
+    reaper: Arc<ChildReaper>,
+    master_fd: Option<i32>,
+    wake: Arc<PumpWake>,
+) -> std::io::Result<JoinHandle<()>> {
+    #[cfg(unix)]
+    if let Some(fd) = master_fd {
+        set_nonblocking(fd)?;
+    }
+    #[cfg(not(unix))]
+    let _ = (&master_fd, &wake);
     std::thread::Builder::new()
         .name(format!("pty-pump-{session_id}"))
         .spawn(move || {
             let mut buffer = vec![0u8; PUMP_BUFFER_BYTES];
             loop {
+                if reaper.is_stopping() {
+                    return;
+                }
+                #[cfg(unix)]
+                {
+                    // The wait has no deadline when the master's descriptor is available: the wake
+                    // pipe is what ends it, so a quiet session costs one blocked `poll` and nothing
+                    // else. The bounded fallback covers a reader the platform gave us no fd for.
+                    match wait_for_pump(master_fd, &wake, PUMP_FALLBACK_POLL_MILLIS) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            // A wakeup arrived. The stop flag is the reason to leave; anything else
+                            // (a non-teardown interrupt) just re-arms the wait.
+                            if reaper.is_stopping() {
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(_) => {
+                            // The descriptor is gone (the master was closed under us), which is
+                            // the same end state as EOF.
+                            reaper.mark_exited();
+                            reaper.reap_if_exited();
+                            return;
+                        }
+                    }
+                }
                 match reader.read(&mut buffer) {
-                    Ok(0) => return,
+                    Ok(0) => {
+                        // The child closed the master: it is finished. Mark and collect it here, so
+                        // the session is reaped on the thread that observed the exit rather than
+                        // leaving a zombie for the keeper's life. A child that exited but whose
+                        // status is not yet collectable is waited for with a bound, then killed.
+                        reaper.mark_exited();
+                        reaper.reap_within(Duration::from_millis(EOF_GRACE_MILLIS));
+                        return;
+                    }
                     Ok(count) => {
                         let mut replay = lock(&replay);
                         replay.push(&buffer[..count]);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => return,
+                    // A non-blocking descriptor with no data ready is not an error: the next poll
+                    // waits again.
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(_) => {
+                        reaper.mark_exited();
+                        reaper.reap_if_exited();
+                        return;
+                    }
                 }
             }
         })
-        .expect("the keeper cannot run without its pty pump threads")
+}
+
+/// Waits for the master to become readable, or for a teardown to write the wake pipe.
+///
+/// With a master descriptor the wait has **no deadline** (`-1`): it returns when either descriptor is
+/// ready, so an idle session executes zero syscalls per second and a teardown is observed in
+/// microseconds rather than at the next tick.
+///
+/// Without one - a platform whose `MasterPty` hands back a `Box<dyn Read>` with no raw fd - the wake
+/// pipe is still what carries cancellation, but it is waited on with a bounded timeout and `true` is
+/// returned afterwards so the read is *still attempted*: the reader there is blocking, and skipping
+/// the read to honour a poll tick would stop the pump delivering output at all. `false` is therefore
+/// returned only when a wakeup actually arrived.
+#[cfg(unix)]
+fn wait_for_pump(
+    master_fd: Option<std::os::fd::RawFd>,
+    wake: &PumpWake,
+    fallback_millis: i32,
+) -> std::io::Result<bool> {
+    let Some(master_fd) = master_fd else {
+        let mut poll_fd = libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 };
+        loop {
+            let ready = unsafe { libc::poll(&mut poll_fd, 1, fallback_millis) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if ready == 0 {
+                // Nothing woke us: go and read. The reader itself blocks, so this is the only way
+                // output still reaches the log on this platform.
+                return Ok(true);
+            }
+            wake.drain();
+            return Ok(false);
+        }
+    };
+    let mut fds = [
+        libc::pollfd { fd: master_fd, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: wake.read, events: libc::POLLIN, revents: 0 },
+    ];
+    loop {
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if fds[1].revents != 0 {
+            // Consume the wakeup so the next wait blocks again, then let the caller look at the stop
+            // flag. A teardown that raced this drain leaves a byte behind, which the next wait sees
+            // at once - never a lost wakeup.
+            wake.drain();
+            return Ok(false);
+        }
+        return Ok(fds[0].revents != 0);
+    }
+}
+
+/// How long the wake pipe is waited on when the reader exposed no descriptor to poll.
+///
+/// Only reachable on a platform whose `MasterPty` hands back a `Box<dyn Read>` with no raw fd; the
+/// Unix path waits on the self-pipe with no deadline and never takes this bound.
+#[cfg(unix)]
+const PUMP_FALLBACK_POLL_MILLIS: i32 = 250;
+
+/// Sets `O_NONBLOCK` on a descriptor the keeper owns.
+#[cfg(unix)]
+fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Writes `data` to a non-blocking PTY writer, waiting at most [`WRITE_DEADLINE_MILLIS`] for room.
+///
+/// A stopped child leaves the slave undrained, so a blocking `write_all` parks until it is continued -
+/// while holding the session's `ownership` gate that `signal continue` itself needs. The deadline
+/// turns that into a typed timeout instead of a deadlock, and the stop flag makes a teardown end it
+/// immediately. `WouldBlock` is a normal step, not a failure: the loop waits for the descriptor and
+/// retries.
+#[cfg(unix)]
+fn write_bounded(
+    writer: &mut (dyn Write + Send),
+    data: &[u8],
+    reaper: &ChildReaper,
+    fd: Option<std::os::fd::RawFd>,
+    budget: Duration,
+) -> std::io::Result<usize> {
+    let deadline = Instant::now() + budget;
+    let mut written = 0usize;
+    while written < data.len() {
+        if reaper.is_stopping() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "session is being torn down",
+            ));
+        }
+        match writer.write(&data[written..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "the pty accepted no bytes",
+                ));
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "the pty did not accept {written} of {} bytes within {:?}; the child may be stopped",
+                            data.len(),
+                            budget
+                        ),
+                    ));
+                }
+                // Wait on the descriptor when there is one, so the retry is driven by the PTY draining
+                // rather than by a fixed sleep; the stop flag is re-checked at the top of the loop, so
+                // the wait is bounded by the deadline either way.
+                match fd {
+                    Some(fd) => {
+                        let wait = left.min(Duration::from_millis(REAP_STEP_MILLIS));
+                        wait_writable_fd(fd, wait.as_millis().min(i32::MAX as u128) as i32)?;
+                    }
+                    None => std::thread::sleep(Duration::from_millis(REAP_STEP_MILLIS)),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    writer.flush()?;
+    Ok(written)
+}
+
+/// Waits up to `millis` for `fd` to accept a write. `false` means the wait expired.
+#[cfg(unix)]
+fn wait_writable_fd(fd: std::os::fd::RawFd, millis: i32) -> std::io::Result<bool> {
+    let mut poll_fd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+    loop {
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Ok(ready > 0);
+    }
 }
 
 /// Process start time in microseconds since the epoch, so `(pid, start time)` identifies one
@@ -1991,22 +2738,48 @@ mod tests {
 
     #[test]
     fn a_stale_abort_leaves_a_successors_upload_intact() {
+        // The epoch is not an attempt's identity: two attempts on one `checkpoint_id` under one
+        // epoch are indistinguishable by it, so an abort fenced only by the epoch released whichever
+        // attempt happened to be live. A token names exactly one attempt.
         let keeper = keeper();
         keeper.spawn(request("s1")).expect("spawn");
-        keeper
+        let first = keeper
             .begin_checkpoint("s1", "shared", 9, 4096, 1)
             .expect("the epoch that owns the session opens the upload");
         assert!(keeper.budget().checkpoint_pending_bytes() > 0);
 
+        // A successor attaches: the predecessor's upload can never commit, so it is retired and its
+        // charge returned there and then rather than held until the session dies.
         keeper.attach("s1", 2, 0).expect("a successor takes the session");
-        assert!(
-            !keeper.abort_checkpoint("s1", "shared", 1),
-            "the retired epoch must not release the upload it no longer owns"
+        assert_eq!(
+            keeper.budget().checkpoint_pending_bytes(),
+            0,
+            "the attach retires the predecessor's upload and releases its charge"
         );
+
+        // The successor opens an upload under the same id, and gets a token of its own.
+        let second = keeper
+            .begin_checkpoint("s1", "shared", 9, 4096, 2)
+            .expect("the successor opens its own upload");
+        let charged = keeper.budget().checkpoint_pending_bytes();
+        assert!(charged > 0);
+        assert_ne!(first.upload_token, second.upload_token, "a token names one attempt");
+
         assert!(
-            keeper.budget().checkpoint_pending_bytes() > 0,
+            !keeper.abort_checkpoint("s1", "shared", 2, first.upload_token),
+            "an abort by the retired attempt's token must not match the live upload"
+        );
+        assert_eq!(
+            keeper.budget().checkpoint_pending_bytes(),
+            charged,
             "a stale abort must leave the charge, and so the upload, in place"
         );
+
+        assert!(
+            keeper.abort_checkpoint("s1", "shared", 2, second.upload_token),
+            "the attempt that owns the token aborts"
+        );
+        assert_eq!(keeper.budget().checkpoint_pending_bytes(), 0);
 
         keeper.kill("s1").expect("kill");
         assert_eq!(keeper.budget().used(), 0);
@@ -2121,6 +2894,31 @@ mod tests {
         assert_eq!(keeper.session_count(), 1);
         keeper.kill("s1").expect("kill");
         assert_eq!(keeper.session_count(), 0);
+    }
+
+    #[test]
+    fn a_request_id_reused_for_a_different_session_is_refused_rather_than_aliased() {
+        // The tombstone is keyed by request id alone, so a second peer presenting one request id
+        // under a different session id used to receive a success carrying the *first* session: a
+        // handle to a pane it never asked for. The id stays bound to the session it created.
+        let keeper = keeper();
+        let first = keeper.spawn(request("s1")).expect("spawn");
+
+        let mut other = request("s2");
+        other.request_id = "request-s1".to_owned();
+        let error = keeper
+            .spawn(other)
+            .expect_err("one request id cannot name two sessions");
+        assert_eq!(error.code, KeeperErrorCode::InvalidSpawn);
+        assert!(
+            error.message.contains("SPAWN_REQUEST_CONFLICT"),
+            "the refusal names itself: {}",
+            error.message
+        );
+        assert_eq!(keeper.session_count(), 1, "no second child was created");
+        assert!(!keeper.contains("s2"), "the other session id was not published");
+        assert!(first.pid.is_some());
+        keeper.kill("s1").expect("kill");
     }
 
     #[test]
@@ -2527,10 +3325,13 @@ mod tests {
         let base = keeper.budget().used();
 
         // Open, then abort.
-        keeper.begin_checkpoint("s1", "a", 1, 1024, 1).expect("begin");
-        let opened = keeper.budget().checkpoint_pending_bytes();
-        assert!(opened > 0);
-        assert!(keeper.abort_checkpoint("s1", "a", 1), "the owning epoch aborts");
+        let opened = keeper.begin_checkpoint("s1", "a", 1, 1024, 1).expect("begin");
+        let pending = keeper.budget().checkpoint_pending_bytes();
+        assert!(pending > 0);
+        assert!(
+            keeper.abort_checkpoint("s1", "a", 1, opened.upload_token),
+            "the attempt that owns the token aborts"
+        );
         assert_eq!(keeper.budget().checkpoint_pending_bytes(), 0, "abort returns the charge");
         assert_eq!(keeper.budget().used(), base, "abort returns the charge and nothing else");
 
@@ -2773,5 +3574,144 @@ mod tests {
             still_owns_process(own, None),
             "without a recorded identity the keeper does not refuse on a guess"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_exits_is_reaped_by_the_pump_not_left_a_zombie() {
+        // The pump is the thread that observes EOF, so it is the thread that has to collect the
+        // status: dropping a `Child` closes the handle without reaping, and the previous keeper
+        // discarded the only reap-capable handle at spawn. `echo` exits on its own here.
+        let keeper = keeper();
+        let mut request = request("s1");
+        request.argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), "echo done".to_owned()];
+        keeper.spawn(request).expect("spawn");
+        let session = keeper.session("s1").expect("session");
+        let pid = session.pid().expect("pid");
+
+        // The signal that EOF was observed is the reaper's own flag, not a sleep: the pump sets it
+        // before it returns, so waiting on it is waiting on the exact event under test.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !session.has_exited() {
+            assert!(Instant::now() < deadline, "the pump never observed the child's exit");
+            std::thread::sleep(Duration::from_millis(REAP_STEP_MILLIS));
+        }
+        // And the child is gone, not a zombie: `kill(pid, 0)` succeeds for a zombie, so the proof is
+        // that the keeper's own registry can retire the session without waiting on anything.
+        keeper.kill("s1").expect("kill an already-exited session");
+        drop(session);
+        assert!(!keeper.contains("s1"));
+        assert_eq!(keeper.budget().used(), 0, "every charge is returned");
+        assert!(pid > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_session_stops_answering_replay_once_its_bytes_are_drained() {
+        // An exited shell used to keep answering successful empty pages for ever, so the daemon's
+        // output pump never reached its `UNKNOWN_SESSION` arm and the pane reported `running: true`.
+        // Buffered bytes are still delivered; only a reader that has caught up is retired.
+        let keeper = keeper();
+        let mut request = request("s1");
+        request.argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), "printf hello".to_owned()];
+        keeper.spawn(request).expect("spawn");
+        let session = keeper.session("s1").expect("session");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !session.has_exited() {
+            assert!(Instant::now() < deadline, "the pump never observed the child's exit");
+            std::thread::sleep(Duration::from_millis(REAP_STEP_MILLIS));
+        }
+
+        // Drain: every byte the child produced arrives before the session is retired.
+        let mut collected = Vec::new();
+        loop {
+            match keeper.replay("s1", collected.len() as u64) {
+                Ok(page) => {
+                    assert!(page.replay_gap.is_none());
+                    if page.data.is_empty() {
+                        break;
+                    }
+                    collected.extend_from_slice(&page.data);
+                }
+                Err(error) => {
+                    assert_eq!(error.code, KeeperErrorCode::UnknownSession);
+                    break;
+                }
+            }
+        }
+        assert!(collected.windows(5).any(|window| window == b"hello"), "the output was delivered");
+
+        let error = keeper
+            .replay("s1", collected.len() as u64)
+            .expect_err("a drained, exited session is over");
+        assert_eq!(error.code, KeeperErrorCode::UnknownSession);
+        let error = keeper
+            .page_len("s1", collected.len() as u64)
+            .expect_err("the output tap must learn it is done, not poll for ever");
+        assert_eq!(error.code, KeeperErrorCode::UnknownSession);
+
+        keeper.kill("s1").expect("kill");
+        drop(session);
+        assert_eq!(keeper.budget().used(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_that_the_pty_cannot_take_is_refused_by_its_deadline() {
+        // A stopped child stops draining the slave, so the PTY queue fills and a blocking write_all
+        // would park for ever while holding the `ownership` gate that `signal continue` needs. The
+        // write must answer, and answer with a timeout.
+        let mut writer = StalledWriter;
+        let reaper = ChildReaper::new(Box::new(std::process::Command::new("/bin/sh").arg("-c").arg("sleep 30").spawn().expect("spawn a live child")), None);
+        let started = Instant::now();
+        let error = write_bounded(&mut writer, b"typed input", &reaper, None, Duration::from_millis(60))
+            .expect_err("a queue that never drains must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline bounds the wait, not the attempt count"
+        );
+        reaper.terminate_and_reap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_in_flight_is_ended_by_a_teardown_rather_than_waiting_out_its_deadline() {
+        let mut writer = StalledWriter;
+        let reaper = ChildReaper::new(
+            Box::new(std::process::Command::new("/bin/sh").arg("-c").arg("sleep 30").spawn().expect("spawn a live child")),
+            None,
+        );
+        let reaper = Arc::new(reaper);
+        let stopper = Arc::clone(&reaper);
+        let started = Instant::now();
+        let handle = std::thread::spawn(move || {
+            write_bounded(&mut writer, b"typed input", &stopper, None, Duration::from_secs(30))
+        });
+        // A teardown, not a sleep: the flag is what the loop checks between attempts.
+        std::thread::sleep(Duration::from_millis(50));
+        reaper.terminate_and_reap();
+        let error = handle.join().expect("write thread").expect_err("a teardown ends the write");
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the teardown ends the wait immediately instead of at the deadline"
+        );
+    }
+
+    /// A writer that never accepts a byte, standing in for a PTY whose slave is not draining.
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct StalledWriter;
+
+    #[cfg(unix)]
+    impl Write for StalledWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "queue full"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

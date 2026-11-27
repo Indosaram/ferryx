@@ -432,8 +432,13 @@ unsafe fn call_decrypt_data(
         });
     }
 
+    if plaintext_raw.is_null() {
+        return Err(AppBoundKeyError::Malformed(
+            "COM DecryptData returned null or empty output".into(),
+        ));
+    }
     let size = SysStringByteLen(&plaintext) as usize;
-    if plaintext_raw.is_null() || size == 0 {
+    if size == 0 {
         return Err(AppBoundKeyError::Malformed(
             "COM DecryptData returned null or empty output".into(),
         ));

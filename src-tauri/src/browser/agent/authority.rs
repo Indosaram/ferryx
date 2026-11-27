@@ -573,6 +573,15 @@ impl AuthorityState {
         self.leases.get(browser_id).map(|lease| lease.epoch)
     }
 
+    /// Tabs currently leased (unexpired or not yet swept) by `controller`.
+    pub fn leased_tabs(&self, controller: &ControllerId) -> Vec<String> {
+        self.leases
+            .iter()
+            .filter(|(_, lease)| lease.controller == *controller)
+            .map(|(browser_id, _)| browser_id.clone())
+            .collect()
+    }
+
     /// The controller and epoch of the unexpired lease on a tab, if any.
     pub fn lease_holder(&self, browser_id: &str, now: Instant) -> Option<(ControllerId, u64)> {
         self.leases

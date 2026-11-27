@@ -50,11 +50,57 @@ impl<R: Runtime> TauriNotificationBackend<R> {
 
 impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
     fn submit(&self, content: &NotificationContent) -> Result<(), String> {
+        self.submit_inner(content, &|| false)
+    }
+
+    /// A fenced dispatch: the `notify-rust` path re-checks the order fence after its banner slot
+    /// exists, so a withdrawal that landed before that registration still closes the banner.
+    fn submit_fenced(
+        &self,
+        content: &NotificationContent,
+        superseded: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<(), String> {
+        self.submit_inner(content, superseded)
+    }
+
+    /// Remove the delivered notification for `target`, if the platform can.
+    ///
+    /// macOS addresses the delivered request by its stable pane identifier.
+    /// Windows/Linux route through the `notify-rust` waiter registry, where a
+    /// withdrawal closes the banner still waiting for that pane and routes no
+    /// activation, so a superseded notification cannot steal focus later.
+    fn withdraw(&self, target: &NotificationTarget) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::notification::permission::macos::withdraw_notification(target)
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            crate::notification::notify_rust_adapter::withdraw_routed_notification(target)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = target;
+            Ok(())
+        }
+    }
+}
+
+impl<R: Runtime> TauriNotificationBackend<R> {
+    fn submit_inner(
+        &self,
+        content: &NotificationContent,
+        superseded: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<(), String> {
         // macOS refuses to serve one process over both notification APIs, and our permission
         // query already registers us as a modern UNUserNotificationCenter client, so the plugin's
         // legacy bridge would be denied. Submit over the same API we query.
         #[cfg(target_os = "macos")]
         {
+            // macOS delivers through UNUserNotificationCenter, which has no order fence to
+            // re-check after its banner slot exists: the withdrawal path closes the banner itself.
+            // Named so a macOS build is warning-free under `-D warnings`.
+            let _ = superseded;
             crate::notification::permission::macos::submit_notification(content)
         }
         // Windows/Linux: route clicks through notify-rust when the notification
@@ -77,6 +123,7 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
                     content,
                     &app_id,
                     Arc::clone(self.app.state::<Arc<NotificationActivations>>().inner()),
+                    superseded,
                 );
             }
             let builder = self
@@ -100,6 +147,9 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
+            // No platform-specific fence on this target either, so name the closure rather than
+            // leave the parameter unused.
+            let _ = superseded;
             self.app
                 .notification()
                 .builder()
@@ -107,28 +157,6 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
                 .body(&content.body)
                 .show()
                 .map_err(|error| error.to_string())
-        }
-    }
-
-    /// Remove the delivered notification for `target`, if the platform can.
-    ///
-    /// macOS addresses the delivered request by its stable pane identifier.
-    /// Windows/Linux route through the `notify-rust` waiter registry, where a
-    /// withdrawal closes the banner still waiting for that pane and routes no
-    /// activation, so a superseded notification cannot steal focus later.
-    fn withdraw(&self, target: &NotificationTarget) -> Result<(), String> {
-        #[cfg(target_os = "macos")]
-        {
-            crate::notification::permission::macos::withdraw_notification(target)
-        }
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        {
-            crate::notification::notify_rust_adapter::withdraw_routed_notification(target)
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-        {
-            let _ = target;
-            Ok(())
         }
     }
 }

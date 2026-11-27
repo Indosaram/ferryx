@@ -51,6 +51,10 @@ use std::path::{Path, PathBuf};
 
 use crate::daemon::launchd::{self, generation};
 
+/// Name of the install-tree lock file. A dotfile, so `generations_in` never mistakes it for a
+/// generation (it is a file, not a directory, but the name rule keeps the tree unambiguous).
+pub const INSTALL_LOCK_NAME: &str = ".keeper-install.lock";
+
 /// Label of the production keeper job. Distinct from [`launchd::PLIST_LABEL`]
 /// (`com.ferryx.daemon`): one launchd job, one lifecycle.
 pub const PLIST_LABEL: &str = "com.ferryx.ptykeeper";
@@ -513,6 +517,58 @@ fn looks_like_version(name: &str) -> bool {
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+/// Whether `version` is a version string that can be joined onto an install root **safely**.
+///
+/// [`looks_like_version`] alone is not enough for that: it validates only the numeric prefix, so
+/// `1.2.3/../../etc` and `1.2.3-../../x` both pass it and then escape the root when joined. The
+/// version reaches the installer from `CARGO_PKG_VERSION` today, which makes the escape unreachable
+/// in practice -- but both functions are `pub` and take a caller's string, so the boundary is
+/// validated here rather than trusted from the caller.
+///
+/// The rule is the whole string, not a prefix: exactly one normal path component, with a numeric
+/// `major.minor.patch` core and a suffix made only of the characters a semver pre-release/build may
+/// contain. Deliberately separate from [`looks_like_version`], which stays the traversal rule for
+/// names already on disk.
+fn is_safe_version(version: &str) -> bool {
+    if version.is_empty() || version == "." || version == ".." {
+        return false;
+    }
+    // A separator of any kind would make the join escape or descend, and a leading dot could name
+    // a hidden directory the traversal rules skip.
+    if version.starts_with('.')
+        || version.contains('/')
+        || version.contains('\\')
+        || version.contains('\0')
+    {
+        return false;
+    }
+    if version.contains("..") {
+        return false;
+    }
+    looks_like_version(version) && version_suffix_is_safe(version)
+}
+
+/// Whether everything after the numeric core is a semver pre-release/build suffix.
+fn version_suffix_is_safe(version: &str) -> bool {
+    let mut seen = 0usize;
+    for part in version.split(['-', '+']) {
+        seen += 1;
+        if seen == 1 {
+            continue;
+        }
+        if part.is_empty() {
+            return false;
+        }
+        if !part
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Orders two versions by numeric components, then lexically for stability across pre-release
 /// suffixes. Mirrors `ferryx_ptykeeper::install::compare_versions`, which retention depends on.
 fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
@@ -681,15 +737,25 @@ pub struct KeeperPruneReport {
 ///
 /// Identical bytes at that version are a no-op; different bytes are a typed refusal, because a
 /// generation name is an identity and two binaries behind one identity make "which keeper owns this
-/// session" unanswerable. The write lands through a `.partial` file and a rename, so a crash never
-/// leaves a half-written binary under its final name.
+/// session" unanswerable.
+///
+/// Two independent app instances reach this at startup, so the write is serialized and the publish
+/// is atomic *without replacement*:
+///
+/// * a lock file under the root serializes the whole check-then-write sequence across processes;
+/// * the staging file is unique per installer (pid plus a process-wide counter) and created with
+///   `create_new`, so two installers can never share -- or mutate -- one staging inode;
+/// * the publish is a `hard_link`, which fails with `EEXIST` instead of overwriting. A plain
+///   `rename` replaced whatever was there, so a loser of the race silently destroyed the winner's
+///   freshly published binary. The winner is then compared byte-for-byte, so a genuine content
+///   conflict still surfaces as [`KeeperServiceError::GenerationImmutable`].
 pub fn install_keeper_generation(
     root: &Path,
     version: &str,
     source_binary: &Path,
     digest: Option<&str>,
 ) -> Result<KeeperInstallOutcome, KeeperServiceError> {
-    if !looks_like_version(version) {
+    if !is_safe_version(version) {
         return Err(KeeperServiceError::NotAVersion {
             version: version.to_string(),
         });
@@ -698,6 +764,9 @@ pub fn install_keeper_generation(
         path: source_binary.display().to_string(),
         detail: error.to_string(),
     })?;
+    // Taken before the existence check: the check and the publish are one decision, and an
+    // unlocked pair lets two installers both observe "absent" and both try to publish.
+    let _lock = InstallLock::acquire(root)?;
     let dir = root.join(version);
     let binary = dir.join(BINARY_NAME);
     let generation = KeeperGeneration {
@@ -727,15 +796,53 @@ pub fn install_keeper_generation(
     }
 
     create_private_dir(&dir)?;
-    let staging = dir.join(format!("{BINARY_NAME}.partial"));
-    let write = fs::write(&staging, &incoming)
-        .and_then(|()| set_mode(&staging, 0o755))
-        .and_then(|()| fs::rename(&staging, &binary));
+    let staging = staging_path(&dir);
+    let write = (|| -> io::Result<()> {
+        use std::io::Write as _;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o755);
+        }
+        let mut file = options.open(&staging)?;
+        file.write_all(&incoming)?;
+        file.sync_all()
+    })();
     if let Err(error) = write {
         let _ = fs::remove_file(&staging);
         return Err(KeeperServiceError::Install {
-            detail: format!("cannot plant {}: {error}", binary.display()),
+            detail: format!("cannot stage {}: {error}", binary.display()),
         });
+    }
+    let _ = set_mode(&staging, 0o755);
+    let published = fs::hard_link(&staging, &binary);
+    let _ = fs::remove_file(&staging);
+    match published {
+        Ok(()) => {}
+        // `EEXIST`: another installer published between the read above and this link. The lock
+        // makes that unreachable inside this process family, but the publish is still written to
+        // be safe against a writer that does not take it. Identical bytes are the same no-op the
+        // read would have returned; different bytes are the immutable-generation refusal.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            match fs::read(&binary) {
+                Ok(existing) if existing == incoming => {
+                    return Ok(KeeperInstallOutcome::AlreadyPresent(generation))
+                }
+                _ => {
+                    return Err(KeeperServiceError::GenerationImmutable {
+                        version: version.to_string(),
+                        dir: dir.display().to_string(),
+                    })
+                }
+            }
+        }
+        Err(error) => {
+            return Err(KeeperServiceError::Install {
+                detail: format!("cannot plant {}: {error}", binary.display()),
+            })
+        }
     }
     if let Some(digest) = digest {
         fs::write(dir.join(DIGEST_NAME), format!("{}\n", digest.trim().to_ascii_lowercase())).map_err(
@@ -745,6 +852,80 @@ pub fn install_keeper_generation(
         )?;
     }
     Ok(KeeperInstallOutcome::Installed(generation))
+}
+
+/// A staging name no other installer can produce: pid plus a process-wide counter.
+fn staging_path(dir: &Path) -> PathBuf {
+    static STAGING_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticket = STAGING_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!(
+        "{BINARY_NAME}.partial-{}-{ticket}",
+        std::process::id()
+    ))
+}
+
+/// The install-tree lock, held for one `install_keeper_generation` call.
+///
+/// A separate flock from the startup pass's own lock (which lives in `keeper_startup`): this one
+/// guards the generation tree itself, so any writer of `install_keeper_generation` serializes even
+/// when it is not a startup pass. A writer that never takes it is not fenced -- the keeper crate's
+/// own installer is such a writer today -- but every path in this process is.
+struct InstallLock {
+    file: fs::File,
+}
+
+impl InstallLock {
+    fn acquire(root: &Path) -> Result<Self, KeeperServiceError> {
+        let fail = |detail: String| KeeperServiceError::Install { detail };
+        fs::create_dir_all(root).map_err(|error| {
+            fail(format!("cannot create {}: {error}", root.display()))
+        })?;
+        let path = root.join(INSTALL_LOCK_NAME);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| fail(format!("cannot open {}: {error}", path.display())))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: `as_raw_fd` borrows a descriptor from `file`, which stays open and valid for
+            // the call; `flock` only sets a lock flag on that descriptor and touches no memory.
+            //
+            // `EINTR` is retried rather than reported: a signal delivered while this thread is
+            // parked in `flock` is not another installer holding the tree, and treating it as one
+            // would refuse a healthy install.
+            loop {
+                let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+                if locked == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(fail(format!(
+                    "cannot lock {}: another installer holds it ({error})",
+                    path.display()
+                )));
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: same descriptor invariant as acquisition; releasing a lock this process holds.
+            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+        let _ = &self.file;
+    }
 }
 
 /// Applies retention: the newest [`RETAINED_GENERATIONS`] stay, and anything older is removed only
@@ -828,6 +1009,14 @@ pub fn ensure_keeper_service(
             })
         }
     };
+    // The same boundary check `install_keeper_generation` applies, done here too because this
+    // function joins the version onto the root itself (for the plist program and the prune list)
+    // before the installer ever sees it.
+    if !is_safe_version(version) {
+        return Err(KeeperServiceError::NotAVersion {
+            version: version.to_string(),
+        });
+    }
     let target = KeeperGeneration {
         version: version.to_string(),
         dir: root.join(version),
@@ -1761,6 +1950,103 @@ mod tests {
         assert!(
             !root.join("2026.1116.1").exists(),
             "nothing is planted when the job cannot be described"
+        );
+    }
+
+    #[test]
+    fn only_one_normal_numeric_version_component_may_be_joined_onto_the_root() {
+        // F-R1-missed-1: `looks_like_version` validated only the numeric prefix, so these all
+        // passed it and then escaped the install root when joined.
+        for escaped in [
+            "1.2.3/../../etc",
+            "1.2.3-../../x",
+            "1.2.3/..",
+            "../1.2.3",
+            "..",
+            ".",
+            "",
+            ".1.2.3",
+            "1.2.3\\..\\x",
+            "1.2.3/0",
+        ] {
+            assert!(!is_safe_version(escaped), "{escaped:?} must be refused");
+        }
+        // A suffix made of semver characters is still a version.
+        for accepted in ["1.2.3", "0.4.0", "1.2.3-pre", "1.2.3-pre.1", "1.2.3+build.5", "2026.1115.1"] {
+            assert!(is_safe_version(accepted), "{accepted:?} must be accepted");
+        }
+        // A non-numeric core is not a version, whatever else is true of it.
+        for rejected in ["v1.2.3", "1.2", "1.2.3.4", "1.x.3", "1.2.3_"] {
+            assert!(!is_safe_version(rejected), "{rejected:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn an_unsafe_version_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("keeper");
+        let built = source(dir.path(), b"binary");
+        for escaped in ["1.2.3/../../etc", "..", "1.2.3-../../x"] {
+            match install_keeper_generation(&root, escaped, &built, None) {
+                Err(KeeperServiceError::NotAVersion { version }) => {
+                    assert_eq!(version, escaped)
+                }
+                other => panic!("{escaped:?} must be refused as not a version, got {other:?}"),
+            }
+        }
+        // The refusal is before the read of the source and before the root is created, so nothing
+        // escaped and nothing was planted.
+        assert!(!root.exists() || fs::read_dir(&root).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_repeated_install_publishes_once_and_leaves_no_staging_file() {
+        // The publish is a no-replace link from a unique `create_new` staging file, so an identical
+        // second install is `AlreadyPresent` rather than a second overwrite of the published inode.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("keeper");
+        let built = source(dir.path(), b"binary-bytes");
+        let first = install_keeper_generation(&root, "1.0.0", &built, None).expect("install");
+        assert!(matches!(first, KeeperInstallOutcome::Installed(_)));
+        let second = install_keeper_generation(&root, "1.0.0", &built, None).expect("reinstall");
+        assert!(matches!(second, KeeperInstallOutcome::AlreadyPresent(_)));
+
+        let leftovers: Vec<String> = fs::read_dir(root.join("1.0.0"))
+            .expect("generation dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".partial"))
+            .collect();
+        assert!(leftovers.is_empty(), "no staging file survives a publish: {leftovers:?}");
+        assert_eq!(
+            fs::read(root.join("1.0.0").join(BINARY_NAME)).unwrap(),
+            b"binary-bytes".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_concurrent_install_never_overwrites_a_published_generation() {
+        // Two installers that both observe "absent" must not both publish: the no-replace link
+        // makes the loser fail and then compare bytes, which is the immutable-generation rule.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("keeper");
+        let first_dir = dir.path().join("src-first");
+        let second_dir = dir.path().join("src-second");
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let first = source(&first_dir, b"first-writer");
+        let second = source(&second_dir, b"second-writer");
+        install_keeper_generation(&root, "1.0.0", &first, None).expect("first install");
+        match install_keeper_generation(&root, "1.0.0", &second, None) {
+            Err(KeeperServiceError::GenerationImmutable { version, .. }) => {
+                assert_eq!(version, "1.0.0")
+            }
+            other => panic!("different bytes at a published version must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read(root.join("1.0.0").join(BINARY_NAME)).unwrap(),
+            b"first-writer".to_vec(),
+            "the published bytes are never replaced"
         );
     }
 }

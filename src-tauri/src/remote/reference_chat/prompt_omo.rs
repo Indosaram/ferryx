@@ -1616,6 +1616,7 @@ fn finish_omo_card(parts: OmoCardParts<'_>) -> OmoCard {
         queued: None,
         steps: parts.steps,
         fallback: None,
+        answer_status: None,
     };
     register_omo_card(OmoCard {
         prompt,
@@ -2379,6 +2380,7 @@ mod tests {
             queued: None,
             steps: Vec::new(),
             fallback: None,
+            answer_status: None,
         };
         assert_eq!(reference_omo_answer_keys(&stranger, &option_answer(0)), Err(ScopeErrorCode::InvalidRequest));
         // A parsed card resolves through the same entry point.

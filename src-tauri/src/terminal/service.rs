@@ -28,24 +28,48 @@ fn end_output(output_hub: &Arc<TerminalOutputHub>, session_id: &str) {
 
 /// Writes OSC 7501 support query replies the session's screen mirror produced to its PTY, on a
 /// blocking worker so the output pump never waits for the PTY input queue.
+///
+/// The writer is the whole [`TerminalService`], not a `PtyManager`: `PtyManager::write_input`
+/// resolves a direct `PtySession` first and a keeper-owned session has none, so routing replies
+/// through it dropped every answer a keeper-hosted program asked for. `TerminalService::write_input`
+/// has the keeper arm, and this runs on a blocking worker, so it calls the off-reactor form that
+/// does not ask for a second hand-off.
 fn spawn_program_status_replies(
-    pty_manager: &Arc<PtyManager>,
+    service: &TerminalService,
     session_id: &str,
     replies: Vec<Vec<u8>>,
 ) {
     if replies.is_empty() {
         return;
     }
-    let pty_manager = Arc::clone(pty_manager);
+    let service = service.clone();
     let session_id = session_id.to_string();
     tokio::task::spawn_blocking(move || {
         for reply in replies {
-            if let Err(error) = pty_manager.write_input(&session_id, &reply) {
+            if let Err(error) = service.write_input_off_reactor(&session_id, &reply) {
                 tracing::debug!(session_id, %error, "program status query reply not written");
                 return;
             }
         }
     });
+}
+
+/// Runs one keeper verb without stalling the Tokio worker that called it.
+///
+/// Every keeper verb is a socket round trip behind a bounded pool: the pool waits on a condvar for
+/// up to 30 s for a permit and the verb has its own 30 s deadline. Issued directly from an async
+/// caller that pins a reactor worker for the length of the wait, and enough simultaneous keystrokes
+/// stall output pumping and timers on the same runtime. On a multi-thread runtime the executor is
+/// told to hand the worker off first; a current-thread runtime has no other worker to hand off to,
+/// so the call runs inline rather than panicking.
+#[cfg(unix)]
+fn run_keeper_io<T>(operation: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+        handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+    }) {
+        return tokio::task::block_in_place(operation);
+    }
+    operation()
 }
 
 #[derive(Clone)]
@@ -292,18 +316,21 @@ impl TerminalService {
     }
 
     /// Applies a checkpoint's bytes to a recovered session, replacing whatever the hub held.
+    ///
+    /// Fallible because the caller's next step depends on it: a restore that only logs leaves the
+    /// pump to queue the retained suffix onto parser state that never saw the checkpoint, and then
+    /// commits that incomplete state back over the good one. The error refuses the attach instead,
+    /// which keeps the durable record so the next startup pass retries with the checkpoint intact.
     #[cfg(unix)]
-    pub fn restore_checkpoint(&self, session_id: &str, bytes: &[u8]) {
-        let snapshot = match serde_json::from_slice(bytes) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::warn!(session_id, %error, "a checkpoint did not deserialize; keeping the hub state");
-                return;
-            }
-        };
-        if let Err(error) = self.output_hub.import_session_state(session_id, snapshot) {
-            tracing::warn!(session_id, %error, "a checkpoint was refused by the hub on restore");
-        }
+    pub fn restore_checkpoint(&self, session_id: &str, bytes: &[u8]) -> Result<(), String> {
+        let snapshot = serde_json::from_slice(bytes).map_err(|error| {
+            format!("a checkpoint for {session_id} did not deserialize: {error}")
+        })?;
+        self.output_hub
+            .import_session_state(session_id, snapshot)
+            .map_err(|error| {
+                format!("the hub refused a checkpoint for {session_id}: {error}")
+            })
     }
 
     /// Drains a reattached keeper session's bytes into the hub.
@@ -319,11 +346,16 @@ impl TerminalService {
     /// returns `None` for a session with no hub. Registering here is safe precisely because there is
     /// no earlier sequence to preserve, and the geometry comes from the keeper's own record for the
     /// child so the mirror starts at the real size instead of a guess.
+    ///
+    /// `history_starts_midstream` is true when the recovered prefix was skipped **or** the keeper
+    /// dropped bytes at a seam: either way this hub cannot serve a reader the session's first byte.
+    /// The seam itself arrives as a [`crate::daemon::keeper_session::KeeperOutput::Gap`] item in the
+    /// channel, so it is applied exactly where it belongs in the byte order.
     #[cfg(unix)]
     pub fn pump_keeper_output(
         &self,
         session_id: &str,
-        mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        mut rx: tokio::sync::mpsc::Receiver<crate::daemon::keeper_session::KeeperOutput>,
         history_starts_midstream: bool,
     ) {
         self.lifecycle.lock().mark_running(session_id.to_string());
@@ -344,16 +376,39 @@ impl TerminalService {
             // telling a reader otherwise would report a hole that is not there.
             self.output_hub.mark_history_gap(session_id);
         }
+        // A recovered keeper session answers its program-status queries like a fresh one: this
+        // daemon is the terminal that renders it. The opt-in is not inferable, so without this call
+        // the mirror keeps `program_status: None` for the session's whole life and every report the
+        // child sends is discarded.
+        self.output_hub.enable_program_status(session_id);
         let output_hub = Arc::clone(&self.output_hub);
         let lifecycle = Arc::clone(&self.lifecycle);
+        let reply_service = self.clone();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
-            while let Some(chunk) = rx.recv().await {
-                let read_unix_micros = crate::terminal::metrics::take_pty_read_timestamp(
-                    &session_id,
-                    chunk.len(),
-                );
-                output_hub.publish_with_read_timestamp(&session_id, chunk, read_unix_micros);
+            while let Some(item) = rx.recv().await {
+                match item {
+                    crate::daemon::keeper_session::KeeperOutput::Gap => {
+                        // The seam arrived in-band, so it is applied here, between the bytes before
+                        // it and the bytes after. `publish_gap` puts the `ReplayGap` on the hub's
+                        // own sequence axis, so a reader resyncs instead of assuming it missed
+                        // nothing.
+                        output_hub.publish_gap(&session_id);
+                    }
+                    crate::daemon::keeper_session::KeeperOutput::Bytes(chunk) => {
+                        let read_unix_micros = crate::terminal::metrics::take_pty_read_timestamp(
+                            &session_id,
+                            chunk.len(),
+                        );
+                        if let Some((_chunk, replies)) = output_hub.publish_with_replies(
+                            &session_id,
+                            chunk,
+                            read_unix_micros,
+                        ) {
+                            spawn_program_status_replies(&reply_service, &session_id, replies);
+                        }
+                    }
+                }
             }
             end_output(&output_hub, &session_id);
             let mut registry = lifecycle.lock();
@@ -454,15 +509,25 @@ impl TerminalService {
             return Ok(Box::pin(async move { pending.await.map_err(PtyError::RemoteInput) }));
         }
         // A keeper-owned session has no master here, so the write is the keeper's. It is a socket
-        // round trip rather than a queue push, so it stays in this synchronous position where the
-        // direct arm below also resolves its session: an unknown id still fails at call time with
-        // `SessionNotFound` instead of on await.
+        // round trip rather than a queue push -- the pool may wait 30 s for a permit and the verb
+        // has its own deadline -- so it runs on a blocking worker and the returned future is what
+        // reports delivery. Issuing it here synchronously pinned a reactor worker for the length of
+        // that wait, which is what stalled output pumping and timers under concurrent input.
+        //
+        // Resolution stays synchronous: which owner serves the id is a map lookup, so an unknown id
+        // still fails at call time with `SessionNotFound` exactly like the direct arm below.
         #[cfg(unix)]
         if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(id)) {
-            keeper
-                .write_input(id, &data)
-                .map_err(|error| PtyError::Other(error.to_string()))?;
-            return Ok(Box::pin(async { Ok(()) }));
+            let id = id.to_string();
+            return Ok(Box::pin(async move {
+                crate::ipc::run_blocking(move || {
+                    keeper
+                        .write_input(&id, &data)
+                        .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))
+                })
+                .await
+                .map_err(|error| PtyError::Other(error.to_string()))
+            }));
         }
         // Resolve session synchronously so missing IDs fail immediately with SessionNotFound.
         let session = self
@@ -795,7 +860,7 @@ impl TerminalService {
         let (lifecycle_tx, lifecycle_rx) = watch::channel(());
         // Spawn output pump task from PTY reader to OutputHub
         let output_hub = Arc::clone(&self.output_hub);
-        let pty_manager = Arc::clone(&self.pty_manager);
+        let reply_service = self.clone();
         let lifecycle = Arc::clone(&self.lifecycle);
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
@@ -808,7 +873,7 @@ impl TerminalService {
                 if let Some((_chunk, replies)) =
                     output_hub.publish_with_replies(&session_id_clone, chunk, read_unix_micros)
                 {
-                    spawn_program_status_replies(&pty_manager, &session_id_clone, replies);
+                    spawn_program_status_replies(&reply_service, &session_id_clone, replies);
                 }
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id_clone);
@@ -840,7 +905,7 @@ impl TerminalService {
         // The imported mirror was seeded muted; from here on it answers like a fresh session.
         self.output_hub.enable_program_status(&session_id);
         let output_hub = Arc::clone(&self.output_hub);
-        let pty_manager = Arc::clone(&self.pty_manager);
+        let reply_service = self.clone();
         let lifecycle = Arc::clone(&self.lifecycle);
         tokio::spawn(async move {
             while let Some(chunk) = pty_rx.recv().await {
@@ -851,7 +916,7 @@ impl TerminalService {
                 if let Some((_chunk, replies)) =
                     output_hub.publish_with_replies(&session_id, chunk, read_unix_micros)
                 {
-                    spawn_program_status_replies(&pty_manager, &session_id, replies);
+                    spawn_program_status_replies(&reply_service, &session_id, replies);
                 }
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id);
@@ -978,6 +1043,28 @@ impl TerminalService {
         }
         #[cfg(unix)]
         if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
+            return run_keeper_io(|| {
+                keeper
+                    .write_input(session_id, data)
+                    .map_err(|error| PtyError::Other(error.to_string()))
+            });
+        }
+        self.pty_manager.write_input(session_id, data)
+    }
+
+    /// [`Self::write_input`] for a caller that is **already** on a blocking worker, so the keeper
+    /// verb must not ask the executor to hand that worker off again.
+    ///
+    /// The OSC 7501 reply path is the one such caller: it answers a query from an output pump on a
+    /// dedicated blocking task, and a second hand-off there would only queue the reply behind other
+    /// blocking work. Off unix there is no keeper, so this is the direct PTY write.
+    pub(crate) fn write_input_off_reactor(
+        &self,
+        session_id: &str,
+        data: &[u8],
+    ) -> Result<(), PtyError> {
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
             return keeper
                 .write_input(session_id, data)
                 .map_err(|error| PtyError::Other(error.to_string()));
@@ -993,9 +1080,11 @@ impl TerminalService {
         }
         #[cfg(unix)]
         if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
-            keeper
-                .resize(session_id, cols, rows)
-                .map_err(|error| PtyError::Other(error.to_string()))?;
+            run_keeper_io(|| {
+                keeper
+                    .resize(session_id, cols, rows)
+                    .map_err(|error| PtyError::Other(error.to_string()))
+            })?;
             self.output_hub.record_resize(session_id, cols, rows);
             return Ok(());
         }
@@ -1015,9 +1104,11 @@ impl TerminalService {
         }
         #[cfg(unix)]
         if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
-            return keeper
-                .signal(session_id, signal)
-                .map_err(|error| PtyError::Other(error.to_string()));
+            return run_keeper_io(|| {
+                keeper
+                    .signal(session_id, signal)
+                    .map_err(|error| PtyError::Other(error.to_string()))
+            });
         }
         self.pty_manager.signal(session_id, signal)
     }
@@ -1057,9 +1148,14 @@ impl TerminalService {
         }
         #[cfg(unix)]
         if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
-            keeper
-                .close(session_id)
-                .map_err(|error| PtyError::Other(error.to_string()))?;
+            let id = session_id.to_string();
+            crate::ipc::run_blocking(move || {
+                keeper
+                    .close(&id)
+                    .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))
+            })
+            .await
+            .map_err(|error| PtyError::Other(error.to_string()))?;
             self.output_hub.remove_session(session_id);
             self.lifecycle.lock().remove(session_id);
             return Ok(());
@@ -1234,11 +1330,14 @@ impl TerminalService {
         #[cfg(unix)]
         if let Some(keeper) = self.keeper() {
             for status in keeper.statuses() {
+                // The keeper holds the master, so a reader is open for as long as the keeper's
+                // status exists. Reporting `reader_finished = true` claimed every live keeper
+                // session had a dead reader, i.e. `reader_open: false` while it was running.
                 out.push(local_live_info(
                     status.session_id,
                     Some(status.pid),
                     keeper_start_time_ms(status.process_start_time),
-                    true,
+                    false,
                 ));
             }
         }
@@ -1576,6 +1675,44 @@ mod keeper_install_tests {
     }
 
     #[test]
+    fn a_live_keeper_session_reports_its_reader_open() {
+        // F-R2-missed-1: `describe_live_sessions` built keeper entries with
+        // `reader_finished = true`, so every running keeper session reported `reader_open: false`.
+        // The defect lived in `describe_live_sessions`, which chose that literal, so this drives
+        // the production path instead of calling `local_live_info` with the corrected argument: a
+        // regression at that call site must fail here.
+        let dir = tempfile::tempdir().expect("isolated runtime directory");
+        let service = TerminalService::default();
+        let keeper = keeper_runtime(dir.path());
+        keeper.install_status_for_test(crate::daemon::keeper_session::KeeperSessionStatus {
+            session_id: "k".into(),
+            epoch: 9,
+            parser_reset_required: false,
+            sequence_offset: 512,
+            pid: 10,
+            process_start_time: Some(1_700_000_000_000_000),
+        });
+        service.install_keeper(Arc::clone(&keeper));
+
+        let live = service.describe_live_sessions();
+        let info = live
+            .iter()
+            .find(|info| info.backend_id == "k")
+            .expect("the keeper status is reported as a live session");
+        assert!(info.reader_open, "a live keeper session has an open reader");
+        assert!(
+            info.connected,
+            "a local session is connected exactly while its reader runs"
+        );
+        assert_eq!(info.local_child_pid, Some(10));
+        assert_eq!(
+            info.local_child_start_time,
+            Some(1_700_000_000_000),
+            "the keeper's microsecond start time reaches the wire as milliseconds"
+        );
+    }
+
+    #[test]
     fn an_installed_keeper_claims_only_the_sessions_it_holds() {
         let dir = tempfile::tempdir().expect("isolated runtime directory");
         let service = TerminalService::default();
@@ -1585,6 +1722,94 @@ mod keeper_install_tests {
         assert!(!service.keeper_owns("unstarted-session"));
         assert!(!service.list_sessions().contains(&"unstarted-session".to_string()));
         assert!(service.describe_live_sessions().is_empty());
+    }
+
+    #[test]
+    fn a_checkpoint_the_hub_cannot_import_is_a_refusal_not_a_silent_no_op() {
+        // F-R2-02: `restore_checkpoint` only logged, so the pump queued the post-checkpoint suffix
+        // onto parser state that never saw the checkpoint and then committed that incomplete state
+        // over the good one. The error is what refuses the attach.
+        let service = TerminalService::default();
+        let refused = service
+            .restore_checkpoint("never-registered", b"not json at all")
+            .expect_err("a checkpoint that does not deserialize must be refused");
+        assert!(
+            refused.contains("never-registered"),
+            "the refusal names the session: {refused}"
+        );
+        // A second, distinct failure source: bytes that are valid JSON but not a snapshot.
+        assert!(
+            service.restore_checkpoint("never-registered", b"{}").is_err(),
+            "a JSON value that is not a snapshot is refused, not applied as an empty state"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_keeper_pump_answers_program_status_queries() {
+        // F-R3-07: a recovered keeper session never opted into program status, so the mirror kept
+        // `program_status: None` for the session's whole life and every report the child sent was
+        // discarded. The opt-in lives in `pump_keeper_output`, so this drives the pump with real
+        // query bytes on its own channel: deleting the `enable_program_status` call there leaves
+        // the mirror opted out and the assertion below fails.
+        use crate::daemon::keeper_session::KeeperOutput;
+        const QUERY: &[u8] = b"\x1b]7501;?\x1b\\";
+
+        let dir = tempfile::tempdir().expect("isolated runtime directory");
+        let service = TerminalService::default();
+        service.install_keeper(keeper_runtime(dir.path()));
+        let hub = service.output_hub();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<KeeperOutput>(8);
+        service.pump_keeper_output("recovered-1", rx, false);
+        // Subscribed before any byte is queued: registration is synchronous inside the pump, so
+        // this receiver cannot miss the chunk the pump publishes below.
+        let (attachment, _ranges) = service
+            .attach_with_sequence_ranges("recovered-1", None)
+            .expect("the pump registered the hub");
+
+        tx.send(KeeperOutput::Bytes(QUERY.to_vec()))
+            .await
+            .expect("the pump is still reading");
+        let mut receiver = attachment.receiver;
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
+            .await
+            .expect("the pump forwards the query within the bound")
+            .expect("the pump published a chunk");
+        assert_eq!(
+            chunk.bytes.as_ref(),
+            QUERY,
+            "the pump published exactly the bytes the keeper sent"
+        );
+
+        // The mirror is opted in, so a query reaching it now produces a reply. This is the state
+        // `pump_keeper_output` is responsible for; without its `enable_program_status` call the
+        // replies are empty and the child never hears an answer.
+        let (_chunk, replies) = hub
+            .publish_with_replies("recovered-1", QUERY.to_vec(), None)
+            .expect("the session is registered");
+        assert!(
+            replies.iter().any(|reply| reply.starts_with(b"\x1b]7501;?:")),
+            "a recovered keeper session answers its program status query: {replies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_keeper_pump_registers_its_hub_as_beginning_midstream() {
+        // F-R2-03: a recovery whose prefix was skipped or whose keeper dropped bytes must register
+        // a hub that reports an incomplete history. The registration and the mark both happen
+        // synchronously, before the drain task exists, so a reader attaching immediately is told
+        // the history has a hole rather than being served a seamless-looking splice.
+        use crate::daemon::keeper_session::KeeperOutput;
+        let service = TerminalService::default();
+        let (_tx, rx) = tokio::sync::mpsc::channel::<KeeperOutput>(8);
+        service.pump_keeper_output("gapped-1", rx, true);
+        let (attachment, _ranges) = service
+            .attach_with_sequence_ranges("gapped-1", None)
+            .expect("the pump registered the hub");
+        assert!(
+            attachment.snapshot.history_incomplete,
+            "a recovery with a skipped prefix or a gap must not report a complete history"
+        );
     }
 }
 

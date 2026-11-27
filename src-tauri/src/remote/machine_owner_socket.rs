@@ -44,7 +44,7 @@ async fn owner_handshake<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         let websocket = headers.get(header::UPGRADE).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
         let upgrade = headers.get_all(header::CONNECTION).iter().filter_map(|v| v.to_str().ok())
             .flat_map(|v| v.split(',')).any(|v| v.trim().eq_ignore_ascii_case("upgrade"));
-        if !websocket || !upgrade || !headers.get(header::SEC_WEBSOCKET_ACCEPT).is_some_and(|v| v.as_bytes() == accept.as_bytes())
+        if !websocket || !upgrade || headers.get(header::SEC_WEBSOCKET_ACCEPT).is_none_or(|v| v.as_bytes() != accept.as_bytes())
             || headers.contains_key(header::SEC_WEBSOCKET_PROTOCOL) || headers.contains_key(header::SEC_WEBSOCKET_EXTENSIONS)
         {
             return Err(unavailable());

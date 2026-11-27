@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteApp } from "./RemoteApp";
 import { isDefaultRelayOrigin, RELAY_PAIRING_INCOMPLETE, servesAccountApi } from "./PairingPage";
@@ -184,6 +184,24 @@ describe("RemoteApp pairing entry", () => {
     expect(Object.keys(remoteHostStore.getState().hosts)).toEqual([]);
     expect(localStorage.getItem(`ferryx_remote_token_local:${window.location.origin}`)).toBeNull();
     expect(window.location.pathname).toBe("/pair");
+  });
+
+  it("a relay exchange that omits the cosmetic display name still pairs under the machine id", async () => {
+    // Given a relay exchange answering with a machine id but no display name
+    window.history.replaceState(null, "", "/pair?relay=1");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      if (String(input).includes("/api/v1/pair/exchange")) return Response.json({ token: "tok", machineId: "m-1" });
+      return new Response("{}", { status: 404 });
+    }));
+    await act(async () => { render(<RemoteApp />); });
+
+    // When the person submits a valid-looking code
+    await submitCode("482913");
+
+    // Then the host is stored with the machine id as its label
+    await waitFor(() => expect(Object.values(remoteHostStore.getState().hosts)).toHaveLength(1));
+    expect(Object.values(remoteHostStore.getState().hosts)[0]).toMatchObject({ machineId: "m-1", displayName: "m-1" });
+    expect(screen.queryByText(RELAY_PAIRING_INCOMPLETE)).toBeNull();
   });
 
   it("going back from the pairing entry returns to sign-in", async () => {

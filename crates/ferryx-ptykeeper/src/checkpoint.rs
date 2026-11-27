@@ -218,6 +218,14 @@ pub struct CheckpointUpload {
     charged_bytes: u64,
     next_chunk_index: u32,
     chunks: Vec<u8>,
+    /// The epoch that opened this upload. An `ATTACH` that advances the fence retires every upload
+    /// below the new epoch: those attempts belong to a daemon that can no longer commit them, and
+    /// leaving them charged would strand budget no peer could ever release.
+    epoch: u64,
+    /// Opaque, monotonically increasing identity for this one attempt. The epoch names the daemon;
+    /// the token names the attempt, which is what a teardown has to abort. Two connections on the
+    /// same epoch that begin the same `checkpoint_id` are distinguishable only by this.
+    upload_token: u64,
 }
 
 impl CheckpointUpload {
@@ -231,6 +239,16 @@ impl CheckpointUpload {
 
     pub fn sequence_offset(&self) -> u64 {
         self.sequence_offset
+    }
+
+    /// The epoch that opened this upload.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The opaque token that identifies this attempt, and the only handle an abort may use.
+    pub fn upload_token(&self) -> u64 {
+        self.upload_token
     }
 
     pub fn received_bytes(&self) -> u64 {
@@ -276,6 +294,9 @@ pub struct CheckpointProgress {
     /// Bytes the upload declared at `begin`.
     pub total_bytes: u64,
     pub complete: bool,
+    /// The attempt's opaque token. A peer echoes it on abort so a teardown can only ever release the
+    /// attempt it opened, never a later attempt that reused the same ids.
+    pub upload_token: u64,
 }
 
 impl CheckpointProgress {
@@ -287,6 +308,7 @@ impl CheckpointProgress {
             received_bytes: upload.received_bytes(),
             total_bytes: upload.declared_total,
             complete: upload.is_complete(),
+            upload_token: upload.upload_token,
         }
     }
 }
@@ -360,12 +382,22 @@ pub struct CheckpointStore {
     /// Shared with the keeper: the aggregate cap every checkpoint charge lands on.
     budget: Arc<Mutex<MemoryBudget>>,
     sessions: HashMap<String, SessionCheckpoints>,
+    /// Source of [`CheckpointUpload::upload_token`]. Monotonic for the store's life, so a token is
+    /// never handed out twice and an abort can never match a later attempt by accident.
+    next_upload_token: u64,
 }
 
 impl CheckpointStore {
     /// A store that charges the keeper's aggregate budget.
     pub fn new(budget: Arc<Mutex<MemoryBudget>>) -> Self {
-        Self { budget, sessions: HashMap::new() }
+        Self { budget, sessions: HashMap::new(), next_upload_token: 0 }
+    }
+
+    /// The next attempt token. Saturating rather than wrapping: a token must never be reused, and a
+    /// store that somehow issued `u64::MAX` of them has bigger problems than a repeated identity.
+    fn issue_upload_token(&mut self) -> u64 {
+        self.next_upload_token = self.next_upload_token.saturating_add(1);
+        self.next_upload_token
     }
 
     /// Bytes held by uploads that have neither committed nor aborted: the budget's pending bucket.
@@ -506,6 +538,10 @@ impl CheckpointStore {
         total_bytes: u64,
         bytes: Vec<u8>,
     ) -> KeeperResult<CheckpointInfo> {
+        // An empty id is the `Default` sentinel for "nothing committed", so a checkpoint stored
+        // under it is unaddressable: `stored()` would report no checkpoint while the replay prefix
+        // this install trims is already gone. Refused before any charge or trim.
+        check_checkpoint_id(checkpoint_id)?;
         // The declared size is checked before the carried bytes: a size over the cap is refused
         // for that reason, whatever the frame happens to contain.
         self.check_per_checkpoint_cap(checkpoint_id, total_bytes)
@@ -608,7 +644,9 @@ impl CheckpointStore {
         checkpoint_id: &str,
         sequence_offset: u64,
         total_bytes: u64,
+        epoch: u64,
     ) -> KeeperResult<CheckpointProgress> {
+        check_checkpoint_id(checkpoint_id)?;
         self.check_per_checkpoint_cap(checkpoint_id, total_bytes)
             .map_err(|error| self.note_committed_offset(session_id, error))?;
         if let Err(stale) = self.check_stale(session_id, checkpoint_id, sequence_offset) {
@@ -616,6 +654,11 @@ impl CheckpointStore {
             return Err(stale);
         }
 
+        // Presence, not charge: a zero-byte retry charges nothing, and gating the removal on the
+        // charge left the first attempt in place to shadow the retry - `push_chunk`, `commit` and
+        // `abort` all select the *first* match, so the real upload could never take a chunk and the
+        // stale metadata accumulated without bound.
+        let supersedes = self.upload(session_id, checkpoint_id).is_some();
         let superseded_pending = self
             .upload(session_id, checkpoint_id)
             .map_or(0, CheckpointUpload::charged_bytes);
@@ -626,16 +669,21 @@ impl CheckpointStore {
         // freed bytes are only counted once they are actually free.
         Self::check_peak_fit(&budget, checkpoint_id, total_bytes, superseded_pending)
             .map_err(|error| self.note_committed_offset(session_id, error))?;
-        if superseded_pending > 0 {
+        if supersedes {
             if let Some(entry) = self.sessions.get_mut(session_id) {
                 if let Some(index) = entry
                     .uploads
                     .iter()
                     .position(|upload| upload.checkpoint_id == checkpoint_id)
                 {
+                    // Destruct first, release second: the ledger must never call a byte free while
+                    // the allocation behind it is still held.
                     let superseded = entry.uploads.remove(index);
+                    let charged = superseded.charged_bytes as usize;
                     drop(superseded);
-                    budget.abort_checkpoint_chunk(superseded_pending as usize);
+                    if charged > 0 {
+                        budget.abort_checkpoint_chunk(charged);
+                    }
                 }
             }
         }
@@ -685,6 +733,7 @@ impl CheckpointStore {
         }
         drop(budget);
 
+        let upload_token = self.issue_upload_token();
         let entry = self.sessions.entry(session_id.to_owned()).or_default();
         entry.uploads.push(CheckpointUpload {
             session_id: session_id.to_owned(),
@@ -694,6 +743,8 @@ impl CheckpointStore {
             charged_bytes: capacity as u64,
             next_chunk_index: 0,
             chunks,
+            epoch,
+            upload_token,
         });
         let upload = entry.uploads.last().expect("the upload was just pushed");
         Ok(CheckpointProgress::new(upload))
@@ -831,17 +882,21 @@ impl CheckpointStore {
         Ok(self.replace_committed(session_id, checkpoint_id, sequence_offset, removed.chunks))
     }
 
-    /// Abandons an upload and returns its charge. The committed checkpoint is untouched.
+    /// Abandons one upload attempt and returns its charge. The committed checkpoint is untouched.
     ///
-    /// Idempotent: an upload that already committed, or one that was never opened, reports `false`
-    /// and changes nothing. A caller that retries an abort after a lost reply still sees success
-    /// for its own upload.
-    pub fn abort(&mut self, session_id: &str, checkpoint_id: &str) -> bool {
+    /// Matched by `upload_token`, never by `(session, checkpoint_id)`: the epoch cannot tell two
+    /// attempts apart, so a teardown that matched on it aborted whichever attempt happened to be
+    /// live - a successor's, when a retry had superseded the caller's own. A token only its opener
+    /// knows cannot name anyone else's attempt.
+    ///
+    /// Idempotent: an attempt that already committed, was superseded, or was never opened reports
+    /// `false` and changes nothing. A caller that retries an abort after a lost reply still sees
+    /// success for its own upload.
+    pub fn abort(&mut self, session_id: &str, checkpoint_id: &str, upload_token: u64) -> bool {
         let removed = self.sessions.get_mut(session_id).and_then(|entry| {
-            let index = entry
-                .uploads
-                .iter()
-                .position(|upload| upload.checkpoint_id == checkpoint_id)?;
+            let index = entry.uploads.iter().position(|upload| {
+                upload.checkpoint_id == checkpoint_id && upload.upload_token == upload_token
+            })?;
             Some(entry.uploads.remove(index))
         });
         match removed {
@@ -853,6 +908,39 @@ impl CheckpointStore {
             }
             None => false,
         }
+    }
+
+    /// Retires every upload a predecessor epoch opened, returning each charge.
+    ///
+    /// An `ATTACH` that advances the fence proves the previous daemon is gone, so its in-flight
+    /// uploads can never commit: their `epoch` no longer verifies. Keeping them would hold budget
+    /// until the session died, and a later abort from that daemon must not be the only thing that
+    /// could free it. Uploads opened at `epoch` or above - the successor's own - are untouched.
+    ///
+    /// Returns how many attempts were retired, so a caller can tell "nothing to do" from "released".
+    pub fn retire_uploads_before_epoch(&mut self, session_id: &str, epoch: u64) -> usize {
+        let mut dead = Vec::new();
+        if let Some(entry) = self.sessions.get_mut(session_id) {
+            let mut index = 0;
+            while index < entry.uploads.len() {
+                if entry.uploads[index].epoch < epoch {
+                    dead.push(entry.uploads.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        if dead.is_empty() {
+            return 0;
+        }
+        let retired = dead.len();
+        let mut budget = lock(&self.budget);
+        for upload in dead {
+            let charged = upload.charged_bytes as usize;
+            drop(upload);
+            budget.abort_checkpoint_chunk(charged);
+        }
+        retired
     }
 
     /// Drops every upload for `session_id` whose offset can no longer be committed, returning each
@@ -1015,6 +1103,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Refuses a checkpoint id that cannot address a stored checkpoint.
+///
+/// The empty string is the [`CheckpointInfo::default`] sentinel for "nothing committed", so a
+/// checkpoint stored under it is invisible to every reader (`stored`, `pin`, `checkpoint_fetch_run`)
+/// while the install that wrote it has already charged its bytes and trimmed the replay prefix it
+/// covers. That is a recovery point nobody can ask for, produced by a frame that was accepted. The
+/// refusal is typed and happens before any allocation, charge or trim.
+pub fn check_checkpoint_id(checkpoint_id: &str) -> KeeperResult<()> {
+    if checkpoint_id.is_empty() {
+        return Err(KeeperError::new(
+            KeeperErrorCode::BadFrame,
+            "checkpointId must not be empty: the empty id is the \"nothing committed\" sentinel",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1049,7 +1154,7 @@ mod tests {
         bytes: &[u8],
     ) -> CheckpointInfo {
         let total = bytes.len() as u64;
-        store.begin("s1", id, offset, total).expect("begin");
+        store.begin("s1", id, offset, total, 0).expect("begin");
         let (head, tail) = bytes.split_at(bytes.len() / 2);
         store.push_chunk("s1", id, 0, head).expect("chunk 0");
         store.push_chunk("s1", id, 1, tail).expect("chunk 1");
@@ -1092,7 +1197,7 @@ mod tests {
     #[test]
     fn a_begin_charges_the_declared_size_before_any_chunk_arrives() {
         let mut store = store();
-        let progress = store.begin("s1", "cp1", 10, 64).expect("begin");
+        let progress = store.begin("s1", "cp1", 10, 64, 0).expect("begin");
 
         assert_eq!(progress.received_bytes, 0);
         assert_eq!(progress.total_bytes, 64);
@@ -1126,7 +1231,7 @@ mod tests {
             assert_eq!(error.offset, Some(100), "the newest committed offset is reported");
 
             let error = store
-                .begin("s1", id, offset, 4)
+                .begin("s1", id, offset, 4, 0)
                 .expect_err("stale begin must be refused");
             assert_eq!(error.code, KeeperErrorCode::StaleCheckpoint);
         }
@@ -1141,7 +1246,7 @@ mod tests {
 
         let over = MAX_CHECKPOINT_BYTES + 1;
         let error = store
-            .begin("s1", "cp2", 20, over)
+            .begin("s1", "cp2", 20, over, 0)
             .expect_err("the per-checkpoint cap must refuse");
         assert_eq!(error.code, KeeperErrorCode::CheckpointBudgetExhausted);
         assert!(error.message.contains("per-checkpoint cap"));
@@ -1164,7 +1269,7 @@ mod tests {
         install(&mut store, "cp1", 10, b"aaaa");
 
         let error = store
-            .begin("s1", "cp2", 20, 64)
+            .begin("s1", "cp2", 20, 64, 0)
             .expect_err("the aggregate ceiling must refuse the second upload");
         assert_eq!(error.code, KeeperErrorCode::CheckpointBudgetExhausted);
         assert_eq!(store.checkpoint("s1").expect("preserved").bytes(), &b"aaaa"[..]);
@@ -1190,13 +1295,13 @@ mod tests {
 
         for error in [
             store
-                .begin("s1", "cp2", 20, 64)
+                .begin("s1", "cp2", 20, 64, 0)
                 .expect_err("the aggregate ceiling must refuse the second upload"),
             store
                 .install("s1", "cp2", 20, 8, vec![b'b'; 8])
                 .expect_err("the peak allocation must be refused"),
             store
-                .begin("s1", "cp2", 20, MAX_CHECKPOINT_BYTES + 1)
+                .begin("s1", "cp2", 20, MAX_CHECKPOINT_BYTES + 1, 0)
                 .expect_err("the per-checkpoint cap must refuse"),
         ] {
             assert_eq!(error.code, KeeperErrorCode::CheckpointBudgetExhausted);
@@ -1215,7 +1320,7 @@ mod tests {
         // fabricated answer the daemon would resume from into a log that starts somewhere else.
         let mut store = store_with_cap(8);
         let error = store
-            .begin("s1", "cp1", 20, 64)
+            .begin("s1", "cp1", 20, 64, 0)
             .expect_err("the aggregate ceiling must refuse the first upload");
         assert_eq!(error.code, KeeperErrorCode::CheckpointBudgetExhausted);
         assert_eq!(error.offset, None);
@@ -1224,7 +1329,7 @@ mod tests {
     #[test]
     fn a_chunk_out_of_order_is_a_mismatch_and_does_not_advance_the_upload() {
         let mut store = store();
-        store.begin("s1", "cp1", 1, 6).expect("begin");
+        store.begin("s1", "cp1", 1, 6, 0).expect("begin");
         store.push_chunk("s1", "cp1", 0, b"abc").expect("chunk 0");
 
         let error = store
@@ -1244,7 +1349,7 @@ mod tests {
     #[test]
     fn a_chunk_that_overruns_the_declared_total_is_a_mismatch() {
         let mut store = store();
-        store.begin("s1", "cp1", 1, 4).expect("begin");
+        store.begin("s1", "cp1", 1, 4, 0).expect("begin");
         store.push_chunk("s1", "cp1", 0, b"ab").expect("fits");
 
         let error = store.push_chunk("s1", "cp1", 1, b"cde").expect_err("overrun");
@@ -1255,7 +1360,7 @@ mod tests {
     #[test]
     fn committing_an_incomplete_upload_is_refused() {
         let mut store = store();
-        store.begin("s1", "cp1", 1, 8).expect("begin");
+        store.begin("s1", "cp1", 1, 8, 0).expect("begin");
         store.push_chunk("s1", "cp1", 0, b"ab").expect("partial");
 
         let error = store.commit("s1", "cp1", 1).expect_err("incomplete");
@@ -1266,7 +1371,7 @@ mod tests {
     #[test]
     fn committing_at_an_offset_the_upload_did_not_declare_is_a_mismatch() {
         let mut store = store();
-        store.begin("s1", "cp1", 7, 2).expect("begin");
+        store.begin("s1", "cp1", 7, 2, 0).expect("begin");
         store.push_chunk("s1", "cp1", 0, b"ab").expect("chunk");
 
         let error = store.commit("s1", "cp1", 9).expect_err("offset drift");
@@ -1288,7 +1393,11 @@ mod tests {
                 KeeperErrorCode::UnknownCheckpointUpload
             );
         }
-        assert!(!store.abort("s1", "nope"), "an abort of nothing reports false");
+        assert!(
+            !store.abort("s1", "nope", 0),
+            "an abort of nothing reports false"
+        );
+        assert!(!store.abort("s1", "nope", 1), "a token cannot name an upload that never existed");
         assert!(store.stored("s1").is_empty(), "an unknown session stores nothing");
     }
 
@@ -1309,10 +1418,14 @@ mod tests {
         install(&mut store, "cp1", 10, b"aaaa");
         let charged_after_commit = store.committed_bytes() + store.pending_bytes();
 
-        store.begin("s1", "cp2", 20, 32).expect("begin");
+        store.begin("s1", "cp2", 20, 32, 0).expect("begin");
         assert!(store.pending_bytes() > 0);
-        assert!(store.abort("s1", "cp2"), "the open upload aborts");
-        assert!(!store.abort("s1", "cp2"), "a second abort is a no-op");
+        let token = store.upload("s1", "cp2").expect("upload").upload_token();
+        assert!(store.abort("s1", "cp2", token), "the open upload aborts");
+        assert!(
+            !store.abort("s1", "cp2", token),
+            "a second abort is a no-op"
+        );
         assert_eq!(
             store.committed_bytes() + store.pending_bytes(),
             charged_after_commit
@@ -1323,7 +1436,7 @@ mod tests {
     #[test]
     fn a_commit_that_lost_the_race_releases_its_upload_instead_of_stranding_the_charge() {
         let mut store = store();
-        store.begin("s1", "cp2", 200, 16).expect("begin");
+        store.begin("s1", "cp2", 200, 16, 0).expect("begin");
         store.push_chunk("s1", "cp2", 0, &[0u8; 16]).expect("a complete upload");
         let pending = store.upload("s1", "cp2").expect("upload").charged_bytes();
         assert_eq!(store.pending_bytes() as u64, pending);
@@ -1348,16 +1461,16 @@ mod tests {
     #[test]
     fn a_stale_frame_for_a_live_upload_id_releases_only_the_dead_upload() {
         let mut store = store();
-        store.begin("s1", "cpA", 200, 8).expect("upload A");
-        store.begin("s1", "cpB", 400, 8).expect("upload B");
+        store.begin("s1", "cpA", 200, 8, 0).expect("upload A");
+        store.begin("s1", "cpB", 400, 8, 0).expect("upload B");
         let live = store.upload("s1", "cpB").expect("upload").charged_bytes();
 
-        store.begin("s1", "cpC", 300, 8).expect("upload C");
+        store.begin("s1", "cpC", 300, 8, 0).expect("upload C");
         store.push_chunk("s1", "cpC", 0, &[0u8; 8]).expect("complete");
         store.commit("s1", "cpC", 300).expect("commit at 300");
 
         let error = store
-            .begin("s1", "cpA", 150, 8)
+            .begin("s1", "cpA", 150, 8, 0)
             .expect_err("offset 150 is behind the committed 300");
         assert_eq!(error.code, KeeperErrorCode::StaleCheckpoint);
         assert!(
@@ -1372,7 +1485,7 @@ mod tests {
     #[test]
     fn an_install_under_an_open_upload_id_moves_that_uploads_charge_to_committed() {
         let mut store = store();
-        store.begin("s1", "cp1", 10, 8).expect("begin");
+        store.begin("s1", "cp1", 10, 8, 0).expect("begin");
         store.push_chunk("s1", "cp1", 0, b"abcd").expect("partial chunk");
         assert!(store.pending_bytes() > 0);
 
@@ -1393,15 +1506,15 @@ mod tests {
         // first charge is returned before the second is taken. With headroom above that, a retry
         // that charged twice would still pass and prove nothing.
         let mut probe = store();
-        probe.begin("s1", "cp1", 10, 32).expect("measure the charge");
+        probe.begin("s1", "cp1", 10, 32, 0).expect("measure the charge");
         let charge = probe.upload("s1", "cp1").expect("upload").charged_bytes();
         assert!(charge >= 32);
 
         let mut store = store_with_cap(charge);
-        store.begin("s1", "cp1", 10, 32).expect("first attempt");
+        store.begin("s1", "cp1", 10, 32, 0).expect("first attempt");
         assert_eq!(store.pending_bytes() as u64, charge, "the whole cap is one attempt");
 
-        let progress = store.begin("s1", "cp1", 10, 32).expect("the retry reclaims the first charge");
+        let progress = store.begin("s1", "cp1", 10, 32, 0).expect("the retry reclaims the first charge");
         assert_eq!(progress.received_bytes, 0);
         let second = store.upload("s1", "cp1").expect("upload").charged_bytes();
         assert_eq!(store.pending_bytes() as u64, second, "one upload, one charge");
@@ -1411,11 +1524,11 @@ mod tests {
     #[test]
     fn a_retried_begin_under_the_same_id_does_not_charge_twice() {
         let mut store = store();
-        store.begin("s1", "cp1", 10, 32).expect("begin");
+        store.begin("s1", "cp1", 10, 32, 0).expect("begin");
         let first = store.upload("s1", "cp1").expect("upload").charged_bytes();
         assert_eq!(store.pending_bytes() as u64, first);
 
-        let progress = store.begin("s1", "cp1", 10, 32).expect("retried begin");
+        let progress = store.begin("s1", "cp1", 10, 32, 0).expect("retried begin");
         assert_eq!(progress.received_bytes, 0);
         let again = store.upload("s1", "cp1").expect("upload").charged_bytes();
         assert_eq!(store.pending_bytes() as u64, again, "one charge for one upload");
@@ -1449,7 +1562,7 @@ mod tests {
     fn forgetting_a_session_returns_every_charge_it_held() {
         let mut store = store();
         install(&mut store, "cp1", 10, b"aaaa");
-        store.begin("s1", "cp2", 20, 8).expect("begin");
+        store.begin("s1", "cp2", 20, 8, 0).expect("begin");
         let committed = store.checkpoint("s1").expect("committed").allocated_bytes();
         let pending = store.upload("s1", "cp2").expect("upload").charged_bytes();
         assert_eq!(store.committed_bytes(), committed);
@@ -1538,7 +1651,7 @@ mod tests {
         // Headroom above the declared size, so the allocator rounding a 64 byte reservation cannot
         // itself make `begin` fail and turn this into a test of the round-up path.
         let mut store = store_with_cap(128);
-        store.begin("s1", "cp1", 10, 64).expect("begin");
+        store.begin("s1", "cp1", 10, 64, 0).expect("begin");
         let upload = store.upload("s1", "cp1").expect("upload");
         assert!(upload.allocated_bytes() >= 64, "the declared size is allocated up front");
         assert_eq!(upload.charged_bytes(), expected_charge(upload));
@@ -1566,7 +1679,7 @@ mod tests {
     fn an_upload_the_budget_cannot_allocate_is_refused_and_stores_nothing() {
         let mut store = store_with_cap(32);
         let error = store
-            .begin("s1", "cp1", 10, 64)
+            .begin("s1", "cp1", 10, 64, 0)
             .expect_err("the declared size must be admissible before it is allocated");
         assert_eq!(error.code, KeeperErrorCode::CheckpointBudgetExhausted);
 
@@ -1665,5 +1778,96 @@ mod tests {
             .read_chunk(&pinned, 5, &mut buffer)
             .expect_err("offset past the end");
         assert_eq!(error.code, KeeperErrorCode::CheckpointChunkMismatch);
+    }
+
+    #[test]
+    fn an_empty_checkpoint_id_is_refused_before_anything_is_charged_or_trimmed() {
+        // The empty id is `CheckpointInfo::default`'s "nothing committed" sentinel. A checkpoint
+        // stored under it is unaddressable - `stored()` reports none - while the replay prefix the
+        // install trimmed is already gone. Both entry points refuse it before allocating.
+        let mut store = store();
+        install(&mut store, "cp1", 100, b"aaaa");
+        let committed = store.committed_bytes();
+
+        let error = store
+            .install("s1", "", 200, 4, b"bbbb".to_vec())
+            .expect_err("an empty id is not a checkpoint id");
+        assert_eq!(error.code, KeeperErrorCode::BadFrame);
+        assert_eq!(store.pending_bytes(), 0, "nothing was charged");
+        assert_eq!(store.committed_bytes(), committed, "the commit is untouched");
+
+        let error = store
+            .begin("s1", "", 300, 64, 0)
+            .expect_err("an empty id cannot open an upload");
+        assert_eq!(error.code, KeeperErrorCode::BadFrame);
+        assert_eq!(store.pending_bytes(), 0, "a refused begin charges nothing");
+        assert!(store.upload("s1", "").is_none(), "no upload was recorded");
+    }
+
+    #[test]
+    fn an_abort_only_releases_the_attempt_its_token_names() {
+        // Two attempts on one `checkpoint_id`: the second supersedes the first, so the second's token
+        // names the live buffer. An abort carrying the first token must not release it - that is the
+        // wrong-victim failure the epoch alone could not prevent.
+        let mut store = store();
+        let first = store.begin("s1", "cp1", 10, 32, 1).expect("first attempt");
+        let second = store.begin("s1", "cp1", 10, 32, 1).expect("retry supersedes it");
+        assert_ne!(first.upload_token, second.upload_token);
+        assert_eq!(store.upload("s1", "cp1").expect("upload").upload_token(), second.upload_token);
+
+        let live = store.pending_bytes();
+        assert!(live > 0);
+        assert!(!store.abort("s1", "cp1", first.upload_token), "the superseded attempt is gone");
+        assert_eq!(store.pending_bytes(), live, "the live attempt keeps its charge");
+        assert!(store.abort("s1", "cp1", second.upload_token), "the live attempt aborts");
+        assert_eq!(store.pending_bytes(), 0);
+    }
+
+    #[test]
+    fn an_epoch_advance_retires_the_predecessors_uploads_and_spares_the_successors() {
+        let mut store = store();
+        store.begin("s1", "old", 10, 64, 1).expect("epoch 1 upload");
+        let retired_charge = store.pending_bytes();
+        assert!(retired_charge > 0);
+
+        // The successor's own upload is opened at the new epoch and must survive.
+        store.begin("s1", "new", 20, 64, 2).expect("epoch 2 upload");
+        let both = store.pending_bytes();
+        assert!(both > retired_charge);
+
+        assert_eq!(store.retire_uploads_before_epoch("s1", 2), 1, "one attempt was retired");
+        assert!(store.upload("s1", "old").is_none(), "the predecessor's upload is gone");
+        assert!(store.upload("s1", "new").is_some(), "the successor's upload is untouched");
+        assert_eq!(store.pending_bytes(), both - retired_charge, "exactly the retired charge returned");
+
+        assert_eq!(store.retire_uploads_before_epoch("s1", 2), 0, "nothing left below epoch 2");
+        assert_eq!(store.pending_bytes(), both - retired_charge, "a no-op retires nothing");
+    }
+
+    #[test]
+    fn a_zero_byte_retry_supersedes_on_presence_not_on_charge() {
+        // A zero-byte retry charges nothing, so a `charged_bytes > 0` gate left the first attempt in
+        // place to shadow it: `push_chunk`, `commit` and `abort` all select the first match, so the
+        // real upload could never take a chunk and the stale metadata accumulated without bound.
+        let mut store = store();
+        let first = store.begin("s1", "cp1", 10, 0, 0).expect("zero-byte attempt");
+        let second = store.begin("s1", "cp1", 10, 0, 0).expect("zero-byte retry");
+
+        assert_ne!(first.upload_token, second.upload_token);
+        assert_eq!(
+            store.upload("s1", "cp1").expect("upload").upload_token(),
+            second.upload_token,
+            "the retry is the upload the store keeps"
+        );
+        assert_eq!(store.pending_bytes(), 0, "a zero-byte attempt charges nothing either way");
+        assert!(
+            !store.abort("s1", "cp1", first.upload_token),
+            "the superseded attempt is gone, not merely uncharged"
+        );
+        assert!(
+            store.abort("s1", "cp1", second.upload_token),
+            "the retry is addressable by its own token"
+        );
+        assert!(store.upload("s1", "cp1").is_none());
     }
 }

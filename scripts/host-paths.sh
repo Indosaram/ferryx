@@ -13,7 +13,7 @@
 #   scripts/host-paths.sh env              # export statements for eval
 #
 # Overrides (all optional):
-#   FERRYX_CANONICAL_ROOT  parent holding the canonical clone
+#   FERRYX_CANONICAL_ROOT  path of the canonical clone
 #   FERRYX_WORKTREE_ROOT   parent holding worktrees
 #   FERRYX_TARGET_DIR      shared cargo target
 #
@@ -33,7 +33,21 @@ os_kind() {
 }
 
 canonical() {
-  git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel 2>/dev/null && return
+  if [ -n "${FERRYX_CANONICAL_ROOT:-}" ]; then
+    printf '%s\n' "${FERRYX_CANONICAL_ROOT%/}"
+    return
+  fi
+  # --git-common-dir names the main repo's .git even from a linked worktree
+  # (--show-toplevel would return the current worktree). It may be relative.
+  local here gc
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+  if gc="$(git -C "$here" rev-parse --git-common-dir 2>/dev/null)"; then
+    case "$gc" in /*) ;; *) gc="$here/$gc" ;; esac
+    if gc="$(cd "$gc" 2>/dev/null && pwd -P)" && [ "$(basename "$gc")" = .git ]; then
+      dirname "$gc"
+      return
+    fi
+  fi
   case "$(os_kind)" in
     macos)   printf '%s/project/ferryx\n' "$HOME" ;;
     linux)   printf '%s/code/ferryx\n' "$HOME" ;;

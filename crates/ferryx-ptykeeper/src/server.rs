@@ -340,10 +340,12 @@ fn acked(frame: &Frame, payload: serde_json::Value) -> Frame {
 /// A `CHECKPOINT_FETCH` page: one slice of the committed checkpoint, bound to the identity the
 /// caller asked for.
 ///
-/// The committed checkpoint is read twice -- once to bind the answer, once after the copy -- so a
-/// commit that lands mid-read is reported as stale instead of paging one checkpoint's bytes under
-/// another's id. A reader that pages can therefore detect a replacement or an ABA reuse and restart
-/// rather than concatenating two commits into one recovery point.
+/// The identity is not read first and re-verified later: every read goes through
+/// [`Keeper::checkpoint_fetch_page`], which takes the epoch check, the pin, the identity comparison
+/// and the bounded copy under one `ownership` hold. The earlier shape read the committed info, then
+/// the pin, then each chunk separately, so a `CHECKPOINT_COMMIT` landing in between made the answer
+/// describe a checkpoint that was never the one asked for. Here a replacement at any point in the
+/// page is `STALE_CHECKPOINT`, never a stitched recovery point.
 #[allow(clippy::too_many_arguments)]
 fn checkpoint_fetch_run(
     keeper: &Keeper,
@@ -356,42 +358,21 @@ fn checkpoint_fetch_run(
     from_byte: u64,
     max_bytes: u64,
 ) -> KeeperResult<Reply> {
-    let before = keeper.checkpoint_info_fenced(session_id, epoch)?;
-    // "Nothing is committed" and "something else is committed" are the same answer to a caller that
-    // asked for a specific checkpoint: its identity is not the committed one, and the committed
-    // offset is reported so it can restart from there. A fetch never silently returns zero bytes,
-    // which a reader could mistake for a legitimately empty checkpoint.
-    if !before.has_checkpoint()
-        || before.checkpoint_id != checkpoint_id
-        || before.sequence_offset != sequence_offset
-    {
-        return Err(KeeperError::at(
-            KeeperErrorCode::StaleCheckpoint,
-            format!(
-                "session {session_id}: checkpoint {checkpoint_id} at offset {sequence_offset} is not the committed one (committed: {})",
-                if before.has_checkpoint() {
-                    format!("{} at {}", before.checkpoint_id, before.sequence_offset)
-                } else {
-                    "none".to_owned()
-                }
-            ),
-            before.sequence_offset,
-        ));
-    }
-    // The answer copies one page into a stack-free scratch buffer that the store fills directly, so
-    // a fetch allocates the page and its base64 text and nothing else - never the whole checkpoint.
-    // The pinned identity is re-verified per chunk, so a replacement mid-download is still reported
-    // as stale rather than stitching two commits together.
-    let pinned = keeper.checkpoint_pin(session_id).ok_or_else(|| {
-        KeeperError::at(
-            KeeperErrorCode::StaleCheckpoint,
-            format!(
-                "session {session_id}: checkpoint {checkpoint_id} was retired while it was being read"
-            ),
-            before.sequence_offset,
-        )
-    })?;
-    let total_bytes = pinned.total_bytes;
+    // A zero-length page, not a second read path: it answers the identity and the total for exactly
+    // this checkpoint (refusing a pin that is not the committed one) without copying a byte. The
+    // page length has to be known before the scratch buffer and its charge exist. It probes from 0
+    // rather than from `from_byte`, so a request past the end is reported as the `BAD_FRAME` it is
+    // instead of the store's chunk mismatch.
+    let mut probe: [u8; 0] = [];
+    let head = keeper.checkpoint_fetch_page(
+        session_id,
+        checkpoint_id,
+        sequence_offset,
+        epoch,
+        0,
+        &mut probe,
+    )?;
+    let total_bytes = head.total_bytes;
     if from_byte > total_bytes {
         return Err(bad(format!(
             "checkpoint {checkpoint_id} is {total_bytes} bytes; fromByte {from_byte} is past its end"
@@ -406,22 +387,30 @@ fn checkpoint_fetch_run(
     // two coexist during the socket write.
     let charge =
         Charge::try_reserve(keeper.budget_handle(), page_charge_bound(page_len, chunks + 1))
-    .ok_or_else(|| {
-        let available = keeper.budget().available();
-        KeeperError::new(
-            KeeperErrorCode::CheckpointBudgetExhausted,
-            format!(
-                "session {session_id}: fetching {page_len} bytes of checkpoint {checkpoint_id} does not fit the keeper budget ({available} bytes available)"
-            ),
-        )
-    })?;
+            .ok_or_else(|| {
+                let available = keeper.budget().available();
+                KeeperError::new(
+                    KeeperErrorCode::CheckpointBudgetExhausted,
+                    format!(
+                        "session {session_id}: fetching {page_len} bytes of checkpoint {checkpoint_id} does not fit the keeper budget ({available} bytes available)"
+                    ),
+                )
+            })?;
     let mut scratch = vec![0u8; page_len];
     let mut frames = Vec::with_capacity(chunks + 1);
     let mut at = from_byte;
     for index in 0..chunks {
-        let want = CHECKPOINT_FETCH_CHUNK_BYTES.min(scratch.len() - (index * CHECKPOINT_FETCH_CHUNK_BYTES));
-        let slice = &mut scratch[index * CHECKPOINT_FETCH_CHUNK_BYTES..][..want];
-        let chunk = keeper.checkpoint_read_chunk(&pinned, at, slice)?;
+        let start = index * CHECKPOINT_FETCH_CHUNK_BYTES;
+        let want = CHECKPOINT_FETCH_CHUNK_BYTES.min(scratch.len() - start);
+        let slice = &mut scratch[start..][..want];
+        let chunk = keeper.checkpoint_fetch_page(
+            session_id,
+            checkpoint_id,
+            sequence_offset,
+            epoch,
+            at,
+            slice,
+        )?;
         let data = base64_encode(&slice[..chunk.filled]);
         frames.push(Frame::new(
             Kind::CheckpointFetchChunk,
@@ -429,9 +418,9 @@ fn checkpoint_fetch_run(
             seq,
             serde_json::json!({
                 "sessionId": session_id,
-                "checkpointId": checkpoint_id,
-                "sequenceOffset": sequence_offset,
-                "totalBytes": total_bytes,
+                "checkpointId": chunk.checkpoint_id,
+                "sequenceOffset": chunk.sequence_offset,
+                "totalBytes": chunk.total_bytes,
                 "fromByte": at,
                 "chunkIndex": index,
                 "data": data,
@@ -644,6 +633,11 @@ fn dispatch_verb(state: &ServerState, frame: &Frame) -> KeeperResult<Reply> {
                 "sessionId": outcome.session_id.clone(),
                 "epoch": outcome.epoch,
                 "sequenceOffset": outcome.sequence_offset,
+                // The offset the page began at and how many bytes it actually carried. The head alone
+                // cannot say where an inline page ended: a page capped at `REPLY_PAGE_BYTES` ends
+                // before the head, and a tap that took the head would skip the remainder for good.
+                "afterSequence": after,
+                "dataBytes": outcome.data.len(),
                 "checkpointId": optional_checkpoint_id(&outcome.checkpoint),
                 "checkpointSequenceOffset": outcome.checkpoint.sequence_offset,
                 "storedBytes": outcome.checkpoint.stored_bytes,
@@ -813,6 +807,10 @@ fn dispatch_verb(state: &ServerState, frame: &Frame) -> KeeperResult<Reply> {
                             "storedBytes": progress.received_bytes,
                             "totalBytes": progress.total_bytes,
                             "complete": progress.complete,
+                            // The attempt's own handle. The connection records it and aborts by it on
+                            // teardown, so a disconnect releases this upload and never one a retry
+                            // opened over the same ids.
+                            "uploadToken": progress.upload_token,
                         }),
                     )]));
                 }
@@ -1236,22 +1234,20 @@ fn next_attachment(
                 .find(|frame| frame.kind == Kind::ReplayEnd)
                 .and_then(|frame| frame.payload.get("sequenceOffset"))
                 .and_then(|value| value.as_u64());
-            // After a lossy attach the client holds nothing past the resume point, so the tap starts
-            // there and re-sends the retained suffix instead of leaving a hole only a manual
-            // `REPLAY` could fill.
+            // An inline ack delivered the page it copied in its own frame, so the cursor is where
+            // that page ended: `afterSequence + dataBytes`. Reading `sequenceOffset` (the session
+            // head) instead claims bytes the page never carried whenever it was capped, and the
+            // unsent remainder would sit behind the cursor for the connection's life.
             let sent = reply
                 .payload
                 .get("replayGap")
                 .and_then(|gap| gap.get("availableFromSequence"))
                 .and_then(|value| value.as_u64())
                 .or(delivered)
-                // An inline ack delivered the whole suffix in its own frame, so the head is exact.
                 .or_else(|| {
-                    reply
-                        .payload
-                        .get("data")
-                        .and(reply.payload.get("sequenceOffset"))
-                        .and_then(|value| value.as_u64())
+                    let from = reply.payload.get("afterSequence")?.as_u64()?;
+                    let bytes = reply.payload.get("dataBytes")?.as_u64()?;
+                    Some(from.saturating_add(bytes))
                 })?;
             Some(Attachment {
                 session_id: reply.payload.get("sessionId")?.as_str()?.to_owned(),
@@ -1307,12 +1303,19 @@ struct OpenUploads<'a> {
     ids: Vec<OpenUpload>,
 }
 
-/// One chunked upload this connection opened, with the epoch it was opened at: the abort that
-/// releases its charge must not touch an upload a successor opened under the same ids.
+/// One chunked upload this connection opened, with the epoch it was opened at and the token the
+/// `CHECKPOINT_ACK` returned.
+///
+/// Both are needed on the abort. The epoch is the fence (a teardown from a superseded daemon must not
+/// reach a live session's store at all), and the token is the identity: two connections on one epoch
+/// can begin the same `checkpoint_id`, so only the token says which attempt this one is. Without it,
+/// a disconnect aborted whichever attempt was live - a successor's, when a retry had replaced this
+/// connection's own.
 struct OpenUpload {
     session_id: String,
     checkpoint_id: String,
     epoch: u64,
+    token: u64,
 }
 
 impl<'a> OpenUploads<'a> {
@@ -1339,17 +1342,36 @@ impl<'a> OpenUploads<'a> {
             return;
         };
         match request.kind {
-            Kind::CheckpointInstall if request.payload.get("data").is_none() => {
+            // A `data` that is absent *or* null opens a chunked upload, so both have to be recognised
+            // here. Testing only for absence made a null-carrying install look like a commit, and the
+            // connection then never recorded the upload it had just opened - so its charge survived
+            // the disconnect and only the session's death returned it.
+            Kind::CheckpointInstall
+                if request
+                    .payload
+                    .get("data")
+                    .is_none_or(serde_json::Value::is_null) =>
+            {
                 self.settle(session_id, checkpoint_id);
                 // The epoch the install presented is the upload's, and answering it succeeded, so it
-                // is the newest one in force for the session.
+                // is the newest one in force for the session. The token comes from the reply, because
+                // only the store issued it.
                 let Some(epoch) = request.payload.get("epoch").and_then(|value| value.as_u64()) else {
+                    return;
+                };
+                let Some(token) = reply
+                    .frames()
+                    .first()
+                    .and_then(|frame| frame.payload.get("uploadToken"))
+                    .and_then(|value| value.as_u64())
+                else {
                     return;
                 };
                 self.ids.push(OpenUpload {
                     session_id: session_id.to_owned(),
                     checkpoint_id: checkpoint_id.to_owned(),
                     epoch,
+                    token,
                 });
             }
             Kind::CheckpointInstall | Kind::CheckpointCommit => {
@@ -1368,8 +1390,12 @@ impl<'a> OpenUploads<'a> {
 impl Drop for OpenUploads<'_> {
     fn drop(&mut self) {
         for open in self.ids.drain(..) {
-            self.keeper
-                .abort_checkpoint(&open.session_id, &open.checkpoint_id, open.epoch);
+            self.keeper.abort_checkpoint(
+                &open.session_id,
+                &open.checkpoint_id,
+                open.epoch,
+                open.token,
+            );
         }
     }
 }
@@ -2848,5 +2874,139 @@ mod tests {
         );
         keeper.kill(&session_id).expect("kill");
         assert_eq!(keeper.budget().used(), 0);
+    }
+
+    #[test]
+    fn an_install_carrying_data_null_opens_an_upload_the_disconnect_can_release() {
+        // `data: null` is accepted wire input and dispatch treats it as absent (`bytes_at` maps
+        // `None | Some(Null)` to `None`), so it opens a chunked upload and charges the declared
+        // total. A tracker that only tested for the key's absence saw a commit and recorded nothing,
+        // leaving the charge to survive the disconnect until the session died.
+        let (keeper, session_id) = spawned_keeper();
+        let state = ServerState::new(Arc::clone(&keeper), unsafe { libc::getuid() });
+        let used_before_upload = keeper.budget().used();
+
+        {
+            let mut uploads = OpenUploads::new(&keeper);
+            let install = frame(
+                Kind::CheckpointInstall,
+                3,
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "checkpointId": "cp-null",
+                    "sequenceOffset": 5,
+                    "totalBytes": 4096,
+                    "epoch": 1,
+                    "data": serde_json::Value::Null,
+                }),
+            );
+            let reply = dispatch(&state, &install);
+            assert_eq!(reply.frames()[0].kind, Kind::CheckpointAck);
+            assert!(
+                reply.frames()[0].payload["uploadToken"].as_u64().is_some(),
+                "the ack carries the attempt's token: {:?}",
+                reply.frames()[0].payload
+            );
+            uploads.track(&install, &reply);
+            assert!(keeper.budget().checkpoint_pending_bytes() >= 4096);
+        }
+
+        assert_eq!(
+            keeper.budget().checkpoint_pending_bytes(),
+            0,
+            "a null-data begin is tracked, so the disconnect releases it"
+        );
+        assert_eq!(keeper.budget().used(), used_before_upload);
+        keeper.kill(&session_id).expect("kill");
+        assert_eq!(keeper.budget().used(), 0);
+    }
+
+    #[test]
+    fn a_disconnect_aborts_its_own_attempt_not_the_retry_that_replaced_it() {
+        // Two connections, one epoch, one `checkpoint_id`. The retry supersedes the first attempt, so
+        // only the retry's token names the live buffer. A tracker keyed by `(session, id, epoch)`
+        // would abort the retry when the first connection dropped.
+        let (keeper, session_id) = spawned_keeper();
+        let state = ServerState::new(Arc::clone(&keeper), unsafe { libc::getuid() });
+        let install = frame(
+            Kind::CheckpointInstall,
+            3,
+            serde_json::json!({
+                "sessionId": session_id,
+                "checkpointId": "cp-shared",
+                "sequenceOffset": 5,
+                "totalBytes": 4096,
+                "epoch": 1,
+            }),
+        );
+
+        let first = {
+            let mut uploads = OpenUploads::new(&keeper);
+            let reply = dispatch(&state, &install);
+            uploads.track(&install, &reply);
+            uploads
+        };
+        let live = {
+            let mut uploads = OpenUploads::new(&keeper);
+            let reply = dispatch(&state, &install);
+            uploads.track(&install, &reply);
+            uploads
+        };
+        let charged = keeper.budget().checkpoint_pending_bytes();
+        assert!(charged > 0);
+
+        drop(first);
+        assert_eq!(
+            keeper.budget().checkpoint_pending_bytes(),
+            charged,
+            "the dropped connection must leave the retry's upload and its charge alone"
+        );
+
+        drop(live);
+        assert_eq!(
+            keeper.budget().checkpoint_pending_bytes(),
+            0,
+            "the connection that owns the live attempt releases it"
+        );
+        keeper.kill(&session_id).expect("kill");
+        assert_eq!(keeper.budget().used(), 0);
+    }
+
+    #[test]
+    fn an_inline_attach_arms_the_tap_where_its_page_ended_not_at_the_head() {
+        // An inline ack copies at most one `REPLY_PAGE_BYTES` page, so `sequenceOffset` (the head)
+        // can be past the bytes the frame actually carried. Arming at the head skipped the remainder
+        // with no gap event; `afterSequence + dataBytes` is where the page really ended.
+        let ack = Frame::new(
+            Kind::AttachAck,
+            "req",
+            1,
+            serde_json::json!({
+                "sessionId": "s1",
+                "epoch": 2,
+                "sequenceOffset": 900_000,
+                "afterSequence": 100_000,
+                "dataBytes": 524_288,
+                "dataChunked": false,
+                "liveOutput": true,
+                "data": "AAAA",
+            }),
+        );
+        let request = frame(
+            Kind::Attach,
+            1,
+            serde_json::json!({
+                "sessionId": "s1",
+                "epoch": 2,
+                "afterSequence": 100_000,
+                "liveOutput": true,
+            }),
+        );
+        let tap = next_attachment(None, &request, &[ack]).expect("tap armed");
+        assert_eq!(
+            tap.sent, 624_288,
+            "the cursor is the end of the page the ack delivered, not the session head"
+        );
+        assert!(tap.sent < 900_000, "the head would have skipped the remainder");
     }
 }

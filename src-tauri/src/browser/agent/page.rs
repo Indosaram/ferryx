@@ -20,15 +20,69 @@ use crate::ipc::error::IpcError;
 /// Maximum size for a single agent file upload (plan C2: 32 MiB).
 pub const MAX_UPLOAD_BYTES: u64 = 32 * 1024 * 1024;
 
-static STAGED_UPLOADS: LazyLock<Mutex<HashMap<String, Vec<PathBuf>>>> = LazyLock::new(Default::default);
+type StagedUploadsMap = HashMap<String, Vec<(PathBuf, u64)>>;
+
+static STAGED_UPLOADS: LazyLock<Mutex<StagedUploadsMap>> = LazyLock::new(Default::default);
 
 /// Removes owned upload staging files created for `browser_id` (called on tab close,
 /// reclaim/handoff, or controller revocation).
 pub fn cleanup_upload_staging(browser_id: &str) {
     let paths = STAGED_UPLOADS.lock().remove(browser_id).unwrap_or_default();
-    for path in paths {
+    for (path, _) in paths {
         let _ = std::fs::remove_file(&path);
     }
+}
+
+/// Most staged files kept per tab. An engine tab's file must outlive `DOM.setFileInputFiles`
+/// (Chromium reads it lazily on read or submit), so older ones are evicted instead of deleted
+/// right after the upload.
+///
+/// The cap is a leak bound, not a form limit: a page may carry a multi-input form whose inputs
+/// are filled by several `upload` calls before one submit, so the count is high enough that a
+/// real form survives and the byte budget below is what actually bounds the disk.
+const MAX_STAGED_PER_TAB: usize = 16;
+
+/// Bytes one tab may keep staged. Bounds the leak at 128 MiB per tab however many uploads run.
+const MAX_STAGED_BYTES_PER_TAB: u64 = 128 * 1024 * 1024;
+
+/// Records `(path, len)` for `browser_id`, deleting the oldest staged files beyond either budget.
+fn register_staged(
+    map: &mut HashMap<String, Vec<(PathBuf, u64)>>,
+    browser_id: &str,
+    path: PathBuf,
+    len: u64,
+) {
+    let staged = map.entry(browser_id.to_string()).or_default();
+    staged.push((path, len));
+    // Evict oldest first until both budgets hold. A single oversized entry is kept: it was
+    // already accepted by `MAX_UPLOAD_BYTES`, and dropping it would break the upload in flight.
+    while staged.len() > MAX_STAGED_PER_TAB
+        || (staged.len() > 1 && staged.iter().map(|(_, len)| len).sum::<u64>() > MAX_STAGED_BYTES_PER_TAB)
+    {
+        let (evicted, _) = staged.remove(0);
+        let _ = std::fs::remove_file(evicted);
+    }
+}
+
+#[derive(Debug)]
+enum BoundedReadError {
+    TooLarge,
+    Io(std::io::Error),
+}
+
+/// Reads at most `max` bytes; a source that yields more (a file that grew after it was
+/// checked) is refused without ever buffering more than `max + 1` bytes.
+fn read_bounded(reader: &mut impl std::io::Read, max: u64) -> Result<Vec<u8>, BoundedReadError> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    reader
+        .take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(BoundedReadError::Io)?;
+    if bytes.len() as u64 > max {
+        return Err(BoundedReadError::TooLarge);
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug)]
@@ -65,6 +119,16 @@ fn guess_mime(path: &Path) -> &'static str {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn register_staged_for_test(browser_id: &str, path: PathBuf, len: u64) {
+    register_staged(&mut STAGED_UPLOADS.lock(), browser_id, path, len);
+}
+
+#[cfg(test)]
+pub(crate) fn staged_count_for_test(browser_id: &str) -> usize {
+    STAGED_UPLOADS.lock().get(browser_id).map_or(0, Vec::len)
+}
+
 fn stage_upload_blocking(browser_id: &str, raw_path: &str) -> Result<StagedUpload, BrowserError> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
@@ -73,6 +137,9 @@ fn stage_upload_blocking(browser_id: &str, raw_path: &str) -> Result<StagedUploa
     let canonical = std::fs::canonicalize(trimmed).map_err(|error| {
         BrowserError::AutomationFailed(format!("cannot open upload file `{trimmed}`: {error}"))
     })?;
+    // Refuse a non-regular file *before* opening it: `open(2)` on a FIFO with no writer blocks
+    // until one appears, which would park this blocking-pool thread forever. The handle check
+    // below still runs, because the path can be swapped between the stat and the open.
     let meta = std::fs::metadata(&canonical).map_err(|error| {
         BrowserError::AutomationFailed(format!("cannot stat upload file `{trimmed}`: {error}"))
     })?;
@@ -81,21 +148,25 @@ fn stage_upload_blocking(browser_id: &str, raw_path: &str) -> Result<StagedUploa
             "upload target `{trimmed}` is not a regular file"
         )));
     }
-    if meta.len() > MAX_UPLOAD_BYTES {
-        return Err(BrowserError::AutomationFailed(format!(
-            "upload file exceeds 32 MiB limit ({} bytes)",
-            meta.len()
-        )));
-    }
-    let bytes = std::fs::read(&canonical).map_err(|error| {
-        BrowserError::AutomationFailed(format!("cannot read upload file `{trimmed}`: {error}"))
+    let mut file = std::fs::File::open(&canonical).map_err(|error| {
+        BrowserError::AutomationFailed(format!("cannot open upload file `{trimmed}`: {error}"))
     })?;
-    if (bytes.len() as u64) > MAX_UPLOAD_BYTES {
+    let meta = file.metadata().map_err(|error| {
+        BrowserError::AutomationFailed(format!("cannot stat upload file `{trimmed}`: {error}"))
+    })?;
+    if !meta.is_file() {
         return Err(BrowserError::AutomationFailed(format!(
-            "upload file exceeds 32 MiB limit ({} bytes)",
-            bytes.len()
+            "upload target `{trimmed}` is not a regular file"
         )));
     }
+    let bytes = read_bounded(&mut file, MAX_UPLOAD_BYTES).map_err(|error| match error {
+        BoundedReadError::TooLarge => {
+            BrowserError::AutomationFailed("upload file exceeds 32 MiB limit".into())
+        }
+        BoundedReadError::Io(error) => {
+            BrowserError::AutomationFailed(format!("cannot read upload file `{trimmed}`: {error}"))
+        }
+    })?;
     let sha256 = sha256_hex(&bytes);
     let file_name = canonical
         .file_name()
@@ -136,11 +207,12 @@ fn stage_upload_blocking(browser_id: &str, raw_path: &str) -> Result<StagedUploa
             BrowserError::AutomationFailed(format!("cannot write upload staging file: {error}"))
         })?;
     }
-    STAGED_UPLOADS
-        .lock()
-        .entry(browser_id.to_string())
-        .or_default()
-        .push(staged_path.clone());
+    register_staged(
+        &mut STAGED_UPLOADS.lock(),
+        browser_id,
+        staged_path.clone(),
+        bytes.len() as u64,
+    );
     Ok(StagedUpload {
         staged_path,
         file_name,
@@ -300,6 +372,92 @@ pub async fn native_input(
     Err(BrowserError::PlatformUnsupported(
         "trusted native input requires a Chromium engine tab; use request_help to hand off to the user".into(),
     ))
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_read_refuses_a_source_larger_than_the_cap_without_buffering_it_all() {
+        struct Endless(u64);
+        impl std::io::Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += buf.len() as u64;
+                buf.fill(7);
+                Ok(buf.len())
+            }
+        }
+        let mut endless = Endless(0);
+        assert!(matches!(read_bounded(&mut endless, 1024), Err(BoundedReadError::TooLarge)));
+        assert!(endless.0 <= 1024 + 1 + 8 * 1024, "read {} bytes", endless.0);
+        assert_eq!(read_bounded(&mut &b"abc"[..], 3).unwrap(), b"abc");
+        assert!(matches!(read_bounded(&mut &b"abcd"[..], 3), Err(BoundedReadError::TooLarge)));
+    }
+
+    #[test]
+    fn staging_is_capped_per_tab_and_evicts_the_oldest_file() {
+        let dir = std::env::temp_dir().join(format!("ferryx-staging-cap-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut map = HashMap::new();
+        let paths: Vec<PathBuf> = (0..MAX_STAGED_PER_TAB + 2)
+            .map(|i| {
+                let path = dir.join(format!("f{i}"));
+                std::fs::write(&path, b"x").unwrap();
+                register_staged(&mut map, "tab", path.clone(), 1);
+                path
+            })
+            .collect();
+        assert_eq!(map["tab"].len(), MAX_STAGED_PER_TAB);
+        assert!(!paths[0].exists() && !paths[1].exists(), "evicted files are removed");
+        assert!(paths[2..].iter().all(|path| path.exists()), "recent files stay for lazy reads");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_multi_input_form_survives_because_the_cap_is_not_a_form_limit() {
+        // Five file inputs on one page are five uploads before one submit: none may be evicted.
+        let dir = std::env::temp_dir().join(format!("ferryx-staging-form-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut map = HashMap::new();
+        let paths: Vec<PathBuf> = (0..5)
+            .map(|i| {
+                let path = dir.join(format!("input{i}"));
+                std::fs::write(&path, b"x").unwrap();
+                register_staged(&mut map, "tab", path.clone(), 1);
+                path
+            })
+            .collect();
+        assert_eq!(map["tab"].len(), 5);
+        assert!(paths.iter().all(|path| path.exists()), "every input of the form is still staged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staging_evicts_the_oldest_file_when_the_byte_budget_is_exceeded() {
+        let dir = std::env::temp_dir().join(format!("ferryx-staging-bytes-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut map = HashMap::new();
+        let budget = MAX_STAGED_BYTES_PER_TAB;
+        let first = dir.join("old");
+        std::fs::write(&first, b"x").unwrap();
+        register_staged(&mut map, "tab", first.clone(), budget / 2);
+        let second = dir.join("kept");
+        std::fs::write(&second, b"x").unwrap();
+        register_staged(&mut map, "tab", second.clone(), budget / 2 + 1);
+        assert!(!first.exists(), "the oldest entry is evicted to hold the byte budget");
+        assert!(second.exists());
+        assert_eq!(map["tab"].len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_upload_rejects_non_regular_files() {
+        let dir = std::env::temp_dir();
+        let error = stage_upload_blocking("tab-not-file", &dir.to_string_lossy()).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+    }
 }
 
 #[cfg(all(test, any(target_os = "windows", target_os = "macos", target_os = "linux")))]

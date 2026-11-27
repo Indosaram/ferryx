@@ -293,7 +293,7 @@ export function WorktreeDeleteDialog({
 
           {preview ? (
             <div className="overflow-hidden rounded-lg border border-border bg-background/45">
-              <PreviewRow label="Branch" value={preview.branch} icon={<GitBranch className="size-3" />} />
+              <PreviewRow label="Branch" value={preview.branch || "HEAD (detached)"} icon={<GitBranch className="size-3" />} />
               <PreviewRow label="HEAD" value={preview.head} mono />
               <PreviewRow label="Upstream" value={preview.upstream ?? "None"} />
               <PreviewRow

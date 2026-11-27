@@ -318,6 +318,7 @@ mod tests {
     #[test]
     fn a_group_or_world_writable_socket_parent_is_refused() {
         let temp = tempfile::tempdir().expect("tempdir");
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).expect("chmod 0700");
         let target = temp.path().join("keeper.sock");
         require_private_parent(&target, uid()).expect("a 0700 tempdir is private enough");
         for mode in [0o770, 0o757, 0o777] {

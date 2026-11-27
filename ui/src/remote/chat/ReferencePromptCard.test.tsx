@@ -518,3 +518,10 @@ describe("ReferencePromptCard existing shells and disclosures", () => {
     );
   });
 });
+
+describe("ReferencePromptCard ambiguous dismissal without a handler", () => {
+  it("renders no dismiss button when the caller passes no onDismissAmbiguous", () => {
+    renderCard({ prompt: prompt({ answerStatus: "outcomeUnknown" }) });
+    expect(screen.queryByTestId("reference-prompt-dismiss-ambiguous")).toBeNull();
+  });
+});
