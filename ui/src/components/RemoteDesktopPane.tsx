@@ -280,6 +280,9 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const rdSessionId = session?.rdSessionId ?? null;
+  // Derived above the session-id effect so that effect can read them without a temporal dead zone.
+  const status = session?.status ?? "connecting";
+  const wireState = session?.wireState ?? (status === "connected" ? "connected" : null);
 
   const [initialPreferences] = useState(readRdPreferences);
   const [playoutMode, setPlayoutMode] = useState<RdPlayoutMode>(initialPreferences.playoutMode);
@@ -355,6 +358,11 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     };
   }, [hostId]);
 
+  // A different host is a different desktop, so the previous host's frozen frame must go.
+  useEffect(() => {
+    setHasFrame(false);
+  }, [hostId]);
+
   useEffect(() => {
     if (rdSessionId) {
       const cached = lastMetaBySessionId.get(rdSessionId);
@@ -365,10 +373,23 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
       }
       return;
     }
-    setHasFrame(false);
+    // The painted frame is deliberately left alone: a null session id also covers a reconnect in
+    // flight and a reconnect that failed, and in both cases the frozen frame is still on screen.
     setMeta(null);
     setAudioMuted(initialPreferences.audioMuted);
   }, [rdSessionId, initialPreferences.audioMuted]);
+
+  /**
+   * Drops the frozen frame only on an explicit disconnect: `idle` with nothing left on the wire.
+   * Clearing it during a reconnect would flip the overlay's scrim off and downgrade the error text
+   * from the high-contrast palette to the plain one, over a frame that is still painted.
+   */
+  useEffect(() => {
+    if (rdSessionId) return;
+    if (status === "idle" && !wireState) {
+      setHasFrame(false);
+    }
+  }, [rdSessionId, status, wireState]);
 
   // Attach to the host's session. Reusing an existing connected session is what keeps the
   // connection alive across mounts; nothing here may disconnect.
@@ -728,8 +749,6 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);
 
-  const status = session?.status ?? "connecting";
-  const wireState = session?.wireState ?? (status === "connected" ? "connected" : null);
   const inputEnabled = status === "connected" && rdSessionId !== null && paneInteractive;
   const capturingKeys = inputEnabled && captureShortcuts && !openMenu;
 
