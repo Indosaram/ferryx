@@ -109,4 +109,24 @@ describe("listShortcutWorktrees", () => {
       "/repo/mahoquot/wt-1",
     ]);
   });
+
+  it("caps each project's share so one project cannot take every digit", () => {
+    const many = Array.from({ length: 12 }, (_, index) => worktree(`/repo/ferryx-wt/wt-${index + 1}`));
+    const ladder = listShortcutWorktrees({
+      projects: projects.slice(0, 2),
+      activeProjectId: "ferryx",
+      activeWorktrees: many,
+      inactiveProjectWorktrees: { mahoquot: [worktree("/repo/mahoquot")] },
+    });
+
+    expect(ladder.length).toBeLessThanOrEqual(9);
+    // Two projects share nine digits: four each, so mahoquot is still reachable at digit 5.
+    expect(ladder.map((row) => row.path)).toEqual([
+      "/repo/ferryx-wt/wt-1",
+      "/repo/ferryx-wt/wt-2",
+      "/repo/ferryx-wt/wt-3",
+      "/repo/ferryx-wt/wt-4",
+      "/repo/mahoquot",
+    ]);
+  });
 });

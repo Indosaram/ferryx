@@ -72,7 +72,7 @@ import {
   type BrowserModeShortcutDetail,
 } from "./components/browser/maho/MahoBrowserShell";
 import { useBrowserAgentActivity } from "./components/browser/maho/MahoAgentControl";
-import { useGeneralSettings } from "./lib/generalSettings";
+import { loadRevealOnWorktreeCreate, useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
 import { startDaemonAttentionFeed } from "./lib/attentionFeed";
@@ -222,6 +222,7 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
+import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume, startAgentAutoResumeWatcher } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler, setSessionSleeping } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
@@ -2814,6 +2815,8 @@ function WorkspaceApp({
       persistSidebarOpen(true);
     }
   }, [isSidebarOpen]);
+  const [revealGroupRequest, setRevealGroupRequest] = useState<{ groupId: string; id: number } | null>(null);
+  const revealGroupRequestIdRef = useRef(0);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
@@ -3684,9 +3687,30 @@ function WorkspaceApp({
   // Local projects supervisor setup maps (onboarding step and setup banner).
   const setupProjects = useMemo(() => setupProjectsFrom(projects), [projects]);
 
+  // Creating a worktree is a request to look at it: the sidebar opens (when the setting is on) and
+  // the owning project's group expands, so the new row is visible instead of hidden behind a
+  // collapsed group the user closed long ago. A worktree created while the sidebar is closed used
+  // to appear nowhere at all.
+  const handleRevealGroupHandled = useCallback(() => setRevealGroupRequest(null), []);
+
+  const revealWorktreeProject = useCallback((owner: RegisteredProject) => {
+    if (!loadRevealOnWorktreeCreate()) return;
+    const group = groupProjects(projectsRef.current).find((candidate) =>
+      candidate.memberProjects.some((member) => member.workspaceId === owner.workspaceId),
+    );
+    setIsSidebarOpen((current) => {
+      if (current) return current;
+      persistSidebarOpen(true);
+      return true;
+    });
+    revealGroupRequestIdRef.current += 1;
+    setRevealGroupRequest({ groupId: group?.groupId ?? owner.workspaceId, id: revealGroupRequestIdRef.current });
+  }, []);
+
   const handleWorktreeCreated = useCallback(
     async (owner: RegisteredProject, worktree: Worktree, launch?: WorktreeAgentLaunch) => {
       if (activeRemoteHostRef.current) return;
+      revealWorktreeProject(owner);
       if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
         // The project switch clears any pending worktree and its agent, so record the agent after it.
         handleSelectProject(owner);
@@ -3698,7 +3722,7 @@ function WorkspaceApp({
       await ensureTabForWorktree(worktree).catch(reportRuntimeError);
       if (launch) await launchAgentByIdInWorktree(worktree, launch.agentId);
     },
-    [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError],
+    [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError, revealWorktreeProject],
   );
 
   useEffect(() => {
@@ -5671,6 +5695,8 @@ function WorkspaceApp({
           onOpenResources={() => setIsResourcesOpen(true)}
 
           onFocusSupervisorSession={handleFocusSupervisorSession}
+          revealGroupRequest={revealGroupRequest}
+          onRevealGroupHandled={handleRevealGroupHandled}
           footerSlot={
             !activeRemoteHost && setupProgressCtx && !setupProgressDismissed ? (
               <SetupProgressPanel

@@ -47,6 +47,8 @@ export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
 /** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */
 export const ADVANCED_FEATURES_STORAGE_KEY = "ferryx.ui.advancedFeatures";
+/** General > "Reveal new worktrees in the sidebar": "true" or "false", absent means on. */
+export const SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY = "ferryx.sidebar.revealOnWorktreeCreate";
 
 /**
  * The per-mode sidebar width key: `ferryx.sidebar.width.<mode>`.

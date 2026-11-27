@@ -4,12 +4,18 @@ import {
   DEFAULT_GENERAL_SETTINGS,
   GENERAL_SETTINGS_EVENT,
   loadGeneralSettings,
+  loadRevealOnWorktreeCreate,
   loadSidebarOpenStartup,
   resetGeneralSettings,
   saveGeneralSettings,
+  saveRevealOnWorktreeCreate,
   saveSidebarOpenStartup,
 } from "./generalSettings";
-import { GENERAL_SETTINGS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY } from "./storageKeys";
+import {
+  GENERAL_SETTINGS_STORAGE_KEY,
+  SIDEBAR_OPEN_STORAGE_KEY,
+  SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY,
+} from "./storageKeys";
 
 describe("generalSettings", () => {
   beforeEach(() => {
@@ -102,5 +108,22 @@ describe("generalSettings", () => {
     localStorage.setItem("orca.sidebar.open", "false");
     expect(loadSidebarOpenStartup()).toBe(false);
     expect(localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY)).toBe("false");
+  });
+
+  it("loads and persists the reveal-on-worktree-create preference", () => {
+    expect(loadRevealOnWorktreeCreate()).toBe(true);
+
+    saveRevealOnWorktreeCreate(false);
+    expect(localStorage.getItem(SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY)).toBe("false");
+    expect(loadRevealOnWorktreeCreate()).toBe(false);
+
+    saveRevealOnWorktreeCreate(true);
+    expect(localStorage.getItem(SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY)).toBe("true");
+    expect(loadRevealOnWorktreeCreate()).toBe(true);
+  });
+
+  it("keeps reveal-on-worktree-create on when the stored value is unreadable", () => {
+    localStorage.setItem(SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY, "not-a-boolean");
+    expect(loadRevealOnWorktreeCreate()).toBe(true);
   });
 });
