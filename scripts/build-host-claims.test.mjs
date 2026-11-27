@@ -302,6 +302,28 @@ test("no-owner release never clears a live lease it did not write", async t => {
   }
 });
 
+// A lease names no process, so without its epoch the session that took it could only wait
+// it out. The epoch the picker printed is the token: it ends exactly that lease, and a
+// different epoch - another session's lease on the same name - is still refused.
+test("a live lease is released by its own epoch and refused for any other", async t => {
+  const { dir } = sandbox(t);
+  mkdirSync(dir, { recursive: true });
+  const future = Math.floor(Date.now() / 1000) + 3600;
+  writeFileSync(join(dir, "lease"), legacyPayload("until", future));
+  const wrong = await run(dir, `fx_claim_release lease - ${future + 1}`);
+  assert.equal(wrong.code, 5, "another lease's epoch is a refusal");
+  assert.equal(readFileSync(join(dir, "lease"), "utf8"), legacyPayload("until", future));
+  writeFileSync(join(dir, "pidclaim"), legacyPayload("pid", process.pid));
+  const pid = await run(dir, `fx_claim_release pidclaim - ${process.pid}`);
+  assert.equal(pid.code, 5, "an epoch never matches a pid claim");
+  assert.equal(existsSync(join(dir, "pidclaim")), true);
+  const own = await run(dir, `fx_claim_release lease - ${future}`);
+  assert.equal(own.code, 0);
+  assert.equal(existsSync(join(dir, "lease")), false);
+  const again = await run(dir, `fx_claim_release lease - ${future}`);
+  assert.equal(again.code, 0, "releasing a lease that is already gone is not an error");
+});
+
 // Not a fix: a legacy writer's check-then-truncate cannot be made safe from this
 // side. The best available property is that the overwrite is *detected* before
 // the build starts, so a second run fails closed instead of sharing the host.
@@ -480,6 +502,16 @@ test("picker --release maps each library outcome to its documented exit code", a
   }
   const noarg = await invoke(["--release"]);
   assert.equal(noarg.code, 2);
+  const future = Math.floor(Date.now() / 1000) + 3600;
+  writeFileSync(join(dir, "leased"), legacyPayload("until", future));
+  const bare = await invoke(["--release", "leased"]);
+  assert.equal(bare.code, 5, "a live lease without its epoch stays held");
+  assert.match(bare.err, /--lease <epoch>/, "the refusal names the way to release a lease");
+  const badLease = await invoke(["--release", "leased", "--lease", "soon"]);
+  assert.equal(badLease.code, 2, "a non-numeric epoch is a usage error");
+  const mine = await invoke(["--release", "leased", "--lease", String(future)]);
+  assert.equal(mine.code, 0);
+  assert.equal(existsSync(join(dir, "leased")), false);
 });
 
 // --- build-remote.sh, end to end over stub transports -------------------------
