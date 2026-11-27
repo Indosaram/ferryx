@@ -299,6 +299,27 @@ describe("remote path autocomplete", () => {
     expect(onSelect).toHaveBeenLastCalledWith("C:\\Users\\dev");
   });
 
+  it("clears the selection when the remote rejects the typed path but keeps it on a transient error", async () => {
+    // Given a mounted picker with a typed path selected.
+    const { input, onSelect } = await mount();
+    // When the remote answers the browse of it with a transient failure.
+    remote.listRemoteDirectories.mockRejectedValueOnce({ code: "IO_ERROR", message: "Connection failed" });
+    await act(async () => { fireEvent.change(input, { target: { value: "/home/dev/missing/" } }); });
+    // Then the typed path stays selected.
+    expect(onSelect).toHaveBeenLastCalledWith("/home/dev/missing/");
+
+    // When the remote explicitly rejects the path as nonexistent (paired DIRECTORY_NOT_FOUND or SSH NOT_FOUND).
+    remote.listRemoteDirectories.mockRejectedValueOnce({ code: "DIRECTORY_NOT_FOUND", message: "No such directory" });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh folders" })); });
+    // Then the selection is cleared.
+    expect(onSelect).toHaveBeenLastCalledWith(null);
+
+    // And SSH NOT_FOUND / PERMISSION_DENIED likewise clear the selection.
+    remote.listRemoteDirectories.mockRejectedValueOnce({ code: "NOT_FOUND", message: "Remote directory does not exist" });
+    await act(async () => { fireEvent.change(input, { target: { value: "/home/dev/gone/" } }); });
+    expect(onSelect).toHaveBeenLastCalledWith(null);
+  });
+
   it.each(["", "   ", " \t "])("emits no selection and asks nothing for the blank input %j", async (value) => {
     const { input, onSelect } = await mount();
     await act(async () => { fireEvent.change(input, { target: { value } }); });

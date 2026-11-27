@@ -53,6 +53,26 @@ pub struct JoinLink {
     pub key: String,
 }
 
+/// True only for an exact loopback host (`localhost`, `127.0.0.1`, `::1`), ignoring an
+/// optional `:port`. Prefix lookalikes such as `localhost.evil.tld` and subdomains such as
+/// `app.localhost` are not loopback: `account::origin::normalize_account_origin` accepts plain
+/// `http` for exactly these three hosts, so blessing a fourth would make the join link an
+/// origin the rest of the system refuses.
+fn is_loopback_host(origin_host: &str) -> bool {
+    let host = if let Some(rest) = origin_host.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inner, tail)) if tail.is_empty() || tail.starts_with(':') => inner,
+            _ => return false,
+        }
+    } else if origin_host.matches(':').count() > 1 {
+        origin_host // bare IPv6 literal
+    } else {
+        origin_host.split(':').next().unwrap_or_default()
+    };
+    let host = host.to_ascii_lowercase();
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
 impl JoinLink {
     pub fn parse(link: &str) -> Result<Self, String> {
         let trimmed = link.trim();
@@ -71,15 +91,14 @@ impl JoinLink {
         if origin_host.is_empty() {
             return Err("join link is missing the account origin".to_string());
         }
+        if origin_host.contains("://") || origin_host.chars().any(char::is_whitespace) {
+            return Err("join link account origin is malformed".to_string());
+        }
         let key = key.trim();
         if !key.starts_with(INSTALL_KEY_PREFIX) {
             return Err(format!("join link key must start with {INSTALL_KEY_PREFIX}"));
         }
-        let scheme = if origin_host.starts_with("localhost") || origin_host.starts_with("127.0.0.1") {
-            "http"
-        } else {
-            "https"
-        };
+        let scheme = if is_loopback_host(origin_host) { "http" } else { "https" };
         Ok(Self {
             origin: format!("{scheme}://{origin_host}"),
             key: key.to_string(),
@@ -329,5 +348,20 @@ mod tests {
     fn a_missing_group_is_a_usage_error() {
         assert!(parse_join_cli(["ferryx", "not-join", "ferryx://join/h/fxk_a"]).is_err());
         assert!(parse_join_cli(Vec::<String>::new()).is_err());
+    }
+
+    #[test]
+    fn only_exact_loopback_hosts_get_http() {
+        let key = format!("{INSTALL_KEY_PREFIX}abc");
+        let origin = |host: &str| JoinLink::parse(&format!("ferryx://join/{host}/{key}")).map(|link| link.origin);
+        assert_eq!(origin("localhost:8787").unwrap(), "http://localhost:8787");
+        assert_eq!(origin("127.0.0.1:8787").unwrap(), "http://127.0.0.1:8787");
+        assert_eq!(origin("[::1]:8787").unwrap(), "http://[::1]:8787");
+        // `*.localhost` is not loopback for the account origin normalizer, so it is not here.
+        assert_eq!(origin("app.localhost").unwrap(), "https://app.localhost");
+        assert_eq!(origin("localhost.evil.tld").unwrap(), "https://localhost.evil.tld");
+        assert_eq!(origin("127.0.0.1.attacker.example").unwrap(), "https://127.0.0.1.attacker.example");
+        assert_eq!(origin("relay.ferryx.dev").unwrap(), "https://relay.ferryx.dev");
+        assert!(origin("evil tld").is_err());
     }
 }

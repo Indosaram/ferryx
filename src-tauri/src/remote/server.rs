@@ -917,7 +917,7 @@ pub(crate) async fn get_active_running_sessions(
                 )
             });
 
-        if !is_live_remote && !(active.is_none() && is_live_local_pty) {
+        if !(is_live_remote || active.is_none() && is_live_local_pty) {
             continue;
         }
 
@@ -8648,6 +8648,47 @@ mod acknowledge_outcome_status_tests {
     }
 }
 
+/// `outcomeUnknown` when `attempt` is a claim whose write may not have happened: the daemon may
+/// have died between committing the intent and recording what the write did, so a second answer
+/// must not be offered. This is the same predicate `AgentPromptView::answer_status` uses
+/// (`agent_control_service::prompt_get`), so the phone and the desktop agree about one card.
+fn answer_status_from_attempt(
+    attempt: Option<&crate::agent_control::pending_input::PendingInputAttempt>,
+) -> Option<String> {
+    attempt
+        .filter(|attempt| {
+            attempt.outcome.is_none() || attempt.outcome.as_deref() == Some("outcomeUnknown")
+        })
+        .map(|_| "outcomeUnknown".to_string())
+}
+
+/// The durable row's `answer_status` for one card, read off the runtime (the journal is blocking
+/// file I/O under a lock). A gateway with no journal, a card with no row, or a row owned by
+/// another pane all answer `None`: nothing is durable here that would refuse a second answer.
+async fn reference_card_answer_status(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    prompt_id: &str,
+) -> Option<String> {
+    let services = Arc::clone(state.machine_services.as_ref()?);
+    let session_owned = session_id.to_string();
+    let prompt_owned = prompt_id.to_string();
+    let joined = tokio::task::spawn_blocking(move || {
+        crate::agent_control::pending_input::get_for_session(
+            &services.workspaces.journal,
+            &prompt_owned,
+            &session_owned,
+        )
+    })
+    .await;
+    match joined {
+        Ok(Ok(crate::agent_control::pending_input::PendingInputEntry::Owned(record))) => {
+            answer_status_from_attempt(record.attempt.as_ref())
+        }
+        _ => None,
+    }
+}
+
 /// GET /api/v1/reference-chat/{sessionId}/prompt
 ///
 /// The card is detected in the pane's own session record and remembered, so the answer route can
@@ -8725,6 +8766,14 @@ async fn reference_chat_prompt(
         prompt.as_ref(),
     )
     .await;
+    // The card carries the durable row's answer status, so a surface that shows live buttons can
+    // still refuse a second answer for a claim whose outcome is unknown. Read after the record
+    // above, so the row this read just wrote is the one consulted.
+    let mut prompt = prompt;
+    if let Some(card) = prompt.as_mut() {
+        card.answer_status =
+            reference_card_answer_status(&state, &session_id, &card.id).await;
+    }
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({
@@ -10813,6 +10862,37 @@ fn external_listener_bind_addr(address: SocketAddr) -> SocketAddr {
         (std::net::Ipv4Addr::LOCALHOST, 0).into()
     } else {
         address
+    }
+}
+
+#[cfg(test)]
+mod reference_card_answer_status_tests {
+    use super::*;
+    use crate::agent_control::pending_input::PendingInputAttempt;
+
+    fn attempt(outcome: Option<&str>) -> PendingInputAttempt {
+        PendingInputAttempt {
+            request_id: "req-1".into(),
+            claimed_at: 1,
+            answer_digest: "digest".into(),
+            answer: None,
+            outcome: outcome.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn only_an_unresolved_claim_reports_outcome_unknown() {
+        // The phone shows live buttons off this card, so it must be able to refuse a second
+        // answer: an unset outcome is the crash window, and `outcomeUnknown` is its name.
+        assert_eq!(answer_status_from_attempt(Some(&attempt(None))).as_deref(), Some("outcomeUnknown"));
+        assert_eq!(
+            answer_status_from_attempt(Some(&attempt(Some("outcomeUnknown")))).as_deref(),
+            Some("outcomeUnknown")
+        );
+        // A settled attempt and a card with no attempt at all offer the ordinary answer.
+        assert_eq!(answer_status_from_attempt(Some(&attempt(Some("typed")))), None);
+        assert_eq!(answer_status_from_attempt(Some(&attempt(Some("notTyped")))), None);
+        assert_eq!(answer_status_from_attempt(None), None);
     }
 }
 

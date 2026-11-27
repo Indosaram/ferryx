@@ -68,7 +68,7 @@
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -186,6 +186,11 @@ impl std::error::Error for StoreError {}
 struct AppendHandle {
     file: std::fs::File,
     bytes: u64,
+    /// Compaction is attempted once `bytes` reaches this. It starts at the store's threshold and
+    /// moves with failures: a successful compaction resets it, and a failed one doubles it, so a
+    /// persistent error (`ENOSPC`, a permissions change on the tmp path) cannot turn every
+    /// subsequent append into a full rewrite of the folded log.
+    next_compact_bytes: u64,
 }
 
 /// The durable reservation log.
@@ -198,6 +203,8 @@ pub struct AdmissionStore {
     /// Set when an append failed after the file may have been partly written, or when compaction
     /// detached the append handle from the path. Either way the tail is no longer trustworthy.
     poisoned: AtomicBool,
+    /// `append` compacts once the log grows past this many bytes.
+    compact_threshold: u64,
 }
 
 impl AdmissionStore {
@@ -212,8 +219,23 @@ impl AdmissionStore {
             std::fs::create_dir_all(parent).map_err(|e| io_err("create_dir", e))?;
         }
 
-        let existing = match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
+        // Bound the read before allocating: an oversized or hostile log must be rejected without
+        // pulling it into memory. `take(MAX + 1)` also covers a file that grows after the stat.
+        let existing = match std::fs::File::open(path) {
+            Ok(file) => {
+                let len = file.metadata().map_err(|e| io_err("metadata", e))?.len();
+                if len > MAX_STORE_BYTES as u64 {
+                    return Err(StoreError::Implausible {
+                        offset: 0,
+                        detail: "log exceeds MAX_STORE_BYTES",
+                    });
+                }
+                let mut bytes = Vec::with_capacity(len as usize);
+                file.take(MAX_STORE_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| io_err("read", e))?;
+                Some(bytes)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(io_err("read", error)),
         };
@@ -249,11 +271,17 @@ impl AdmissionStore {
             .map_err(|e| io_err("open_append", e))?;
         let bytes = file.metadata().map_err(|e| io_err("metadata", e))?.len();
 
+        let compact_threshold = (MAX_STORE_BYTES / 2) as u64;
         Ok(Self {
             path: path.to_path_buf(),
-            append: Mutex::new(AppendHandle { file, bytes }),
+            append: Mutex::new(AppendHandle {
+                file,
+                bytes,
+                next_compact_bytes: compact_threshold,
+            }),
             entries: RwLock::new(entries),
             poisoned: AtomicBool::new(false),
+            compact_threshold,
         })
     }
 
@@ -279,6 +307,17 @@ impl AdmissionStore {
         let mut header = [0u8; FRAME_HEADER_BYTES];
         header[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         header[4..8].copy_from_slice(&crc32(&payload).to_le_bytes());
+        let frame_len = (FRAME_HEADER_BYTES + payload.len()) as u64;
+        // Fail closed *before* growing the log past the ceiling. An append that crossed it would
+        // produce exactly the file this store's own `open` refuses, so the writer must stop here
+        // instead of writing it and only finding out on the next start.
+        if handle.bytes.saturating_add(frame_len) > MAX_STORE_BYTES as u64 {
+            self.poisoned.store(true, Ordering::Release);
+            return Err(StoreError::Implausible {
+                offset: handle.bytes as usize,
+                detail: "append would grow the log past MAX_STORE_BYTES",
+            });
+        }
 
         let written = handle
             .file
@@ -296,13 +335,39 @@ impl AdmissionStore {
             self.poisoned.store(true, Ordering::Release);
             return Err(error);
         }
-        handle.bytes += (FRAME_HEADER_BYTES + payload.len()) as u64;
-        drop(handle);
+        handle.bytes += frame_len;
+        // Publish while still holding the append mutex (append -> entries, the same order as
+        // `compact`), so a concurrent compaction can never snapshot a view that omits this
+        // already-fsynced frame.
         self.entries.write().insert(key.to_string(), state);
+        if handle.bytes >= handle.next_compact_bytes {
+            // The append itself is durable, so a failed compaction is not this call's error: the
+            // original log is intact and the tail still parses. The one failure that does matter
+            // is the compacted image being too large to open, because then the writer would go on
+            // producing a file its own next `open` rejects -- the invariant this store exists to
+            // keep. Fail closed (refuse new creates) rather than grow past the ceiling.
+            if let Err(error) = self.compact_locked(&mut handle) {
+                if matches!(error, StoreError::Implausible { .. }) {
+                    self.poisoned.store(true, Ordering::Release);
+                } else {
+                    // Back off instead of retrying the whole rewrite on the very next append: the
+                    // guard condition would otherwise stay true forever and every create would
+                    // pay a failed `create` + `write` + `sync` + `rename` sequence.
+                    handle.next_compact_bytes = handle
+                        .bytes
+                        .saturating_mul(2)
+                        .max(handle.bytes.saturating_add(4096));
+                }
+            }
+        }
         Ok(())
     }
 
-    /// Every folded record, sorted by key.
+    /// Every live folded record, sorted by key.
+    ///
+    /// Compaction drops `Ended` / `Abandoned` keys, so a terminal session's key is absent here
+    /// after a compaction even though the log mentioned it. Callers must not read this as "the log
+    /// never saw it".
     pub fn entries(&self) -> Vec<Entry> {
         self.entries
             .read()
@@ -336,7 +401,9 @@ impl AdmissionStore {
             .count()
     }
 
-    /// The folded state of one key, if the log mentions it.
+    /// The folded state of one live key, if the log still holds it.
+    ///
+    /// `None` means "not live", not "never mentioned": compaction drops terminal keys.
     pub fn state_of(&self, key: &str) -> Option<ReservationState> {
         self.entries.read().get(key).cloned()
     }
@@ -380,6 +447,28 @@ impl AdmissionStore {
         self.append.lock().bytes
     }
 
+    /// The byte count at which the next append attempts compaction. Test-only: production reads it
+    /// only through `append`, and the backoff it encodes is observable solely from outside.
+    #[cfg(test)]
+    fn next_compact_bytes(&self) -> u64 {
+        self.append.lock().next_compact_bytes
+    }
+
+    /// Lowers the threshold compaction resets to, so a test can force compaction without filling
+    /// the log. Sets the current handle's trigger too, since a fresh handle starts at the field.
+    #[cfg(test)]
+    fn set_compact_threshold(&mut self, bytes: u64) {
+        self.compact_threshold = bytes;
+        self.append.get_mut().next_compact_bytes = bytes;
+    }
+
+    /// Forces the handle's byte count, so the ceiling gate can be exercised without writing
+    /// `MAX_STORE_BYTES` to the disk.
+    #[cfg(test)]
+    fn set_append_bytes(&self, bytes: u64) {
+        self.append.lock().bytes = bytes;
+    }
+
     /// Rewrites the log as one frame per folded key, dropping superseded history.
     ///
     /// Holds the append mutex for the whole operation, so no append can land in the gap between
@@ -392,8 +481,24 @@ impl AdmissionStore {
             return Err(StoreError::Poisoned);
         }
         let mut handle = self.append.lock();
+        self.compact_locked(&mut handle)
+    }
 
-        let folded: BTreeMap<String, ReservationState> = self.entries.read().clone();
+    /// Compaction body; the caller holds the append mutex. Terminal (`Ended` / `Abandoned`)
+    /// entries are dropped so ordinary session churn cannot grow the log without bound.
+    fn compact_locked(&self, handle: &mut AppendHandle) -> Result<(), StoreError> {
+        let folded: BTreeMap<String, ReservationState> = self
+            .entries
+            .read()
+            .iter()
+            .filter(|(_, state)| {
+                !matches!(
+                    state,
+                    ReservationState::Ended { .. } | ReservationState::Abandoned { .. }
+                )
+            })
+            .map(|(key, state)| (key.clone(), state.clone()))
+            .collect();
         let mut bytes = Vec::with_capacity(MAGIC.len());
         bytes.extend_from_slice(MAGIC);
         for (key, state) in &folded {
@@ -435,7 +540,10 @@ impl AdmissionStore {
                 return Err(io_err("reopen_after_compact", error));
             }
         }
-        drop(handle);
+        // Keep the in-memory view equal to what a restart would load.
+        *self.entries.write() = folded;
+        // The log is small again, so the next append may compact at the configured threshold.
+        handle.next_compact_bytes = self.compact_threshold;
 
         // The rename created a new directory entry; make it durable. The handle is already
         // correct, so this failure costs durability of the rename, not the log's contents.
@@ -1137,6 +1245,114 @@ mod tests {
         let reopened = AdmissionStore::open(&path).expect("reopen");
         assert_eq!(reopened.pending_count(), 3);
         assert_eq!(reopened.entries().len(), 4);
+    }
+
+    #[test]
+    fn compaction_drops_terminal_entries_and_append_auto_compacts() {
+        let (_dir, path) = temp_path("admission.log");
+        let mut store = AdmissionStore::open(&path).expect("open");
+        store.set_compact_threshold(512);
+        store
+            .append("live", ReservationState::Reserved)
+            .expect("live");
+        for index in 0..64 {
+            let key = format!("churn-{index}");
+            store.append(&key, ReservationState::Reserved).expect("r");
+            store
+                .append(
+                    &key,
+                    ReservationState::Ended {
+                        session_id: format!("s-{index}"),
+                    },
+                )
+                .expect("end");
+        }
+        assert!(store.durable_bytes() < 1024, "churn stays bounded");
+        assert!(store.state_of("live").is_some());
+        drop(store);
+        let reopened = AdmissionStore::open(&path).expect("reopen");
+        assert_eq!(reopened.pending_count(), 1);
+    }
+
+    #[test]
+    fn a_failed_compaction_backs_off_instead_of_rewriting_on_every_append() {
+        // R2-F2b-01: `append` retried the whole `create` + `write` + `sync` + `rename` sequence on
+        // *every* subsequent append while the guard condition stayed true. A persistent ENOSPC on
+        // the staging path turned each create into a failed rewrite of the folded log.
+        let (_dir, path) = temp_path("admission.log");
+        let mut store = AdmissionStore::open(&path).expect("open");
+        store.set_compact_threshold(0);
+        // A directory where compaction's staging file goes: `File::create` fails with a persistent
+        // error that is not `Implausible`, which is the shape of the case this guards.
+        let blocked = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::create_dir_all(&blocked).expect("block the staging path");
+
+        store
+            .append("req-0", ReservationState::Reserved)
+            .expect("append");
+        let after_first = store.next_compact_bytes();
+        assert!(
+            after_first > 0,
+            "a failed compaction must raise the next attempt's threshold"
+        );
+        assert!(
+            !store.is_poisoned(),
+            "a retryable failure must not poison the store"
+        );
+
+        // The next append sits below the new threshold, so no compaction is attempted at all.
+        let before = store.durable_bytes();
+        store
+            .append("req-1", ReservationState::Reserved)
+            .expect("append");
+        assert!(store.durable_bytes() > before, "the append itself still lands");
+        assert_eq!(
+            store.next_compact_bytes(),
+            after_first,
+            "a skipped attempt leaves the backoff where it was"
+        );
+
+        // Clearing the obstruction lets compaction succeed, and success resets the threshold.
+        std::fs::remove_dir_all(&blocked).expect("clear the staging path");
+        store.compact().expect("compaction succeeds once the path is usable");
+        assert_eq!(
+            store.next_compact_bytes(),
+            store.compact_threshold,
+            "a successful compaction resets the backoff"
+        );
+        assert_eq!(store.pending_count(), 2);
+    }
+
+    #[test]
+    fn an_append_that_would_cross_the_ceiling_poisons_before_writing() {
+        // R2-F2b-01: nothing forced a poison at the ceiling, so a store whose compactions kept
+        // failing could still write a file its own next `open` rejects.
+        let (_dir, path) = temp_path("admission.log");
+        let store = AdmissionStore::open(&path).expect("open");
+        store.set_append_bytes(MAX_STORE_BYTES as u64 - 1);
+
+        let error = store
+            .append("req-ceiling", ReservationState::Reserved)
+            .expect_err("an append past the ceiling must be refused");
+        assert!(matches!(error, StoreError::Implausible { .. }), "{error}");
+        assert!(
+            store.is_poisoned(),
+            "the writer must refuse rather than produce a log `open` rejects"
+        );
+        assert_eq!(store.pending_count(), 0, "the refused record is not folded in");
+        AdmissionStore::open(&path).expect("what reached the disk is still openable");
+    }
+
+    #[test]
+    fn open_rejects_an_oversized_log_without_decoding() {
+        let (_dir, path) = temp_path("admission.log");
+        let file = std::fs::File::create(&path).expect("create");
+        file.set_len(MAX_STORE_BYTES as u64 + 1).expect("len");
+        drop(file);
+        assert!(matches!(
+            AdmissionStore::open(&path),
+            Err(StoreError::Implausible { .. })
+        ));
     }
 
     #[test]

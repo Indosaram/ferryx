@@ -133,7 +133,7 @@ fn catalog_tools() -> Vec<CatalogTool> {
                     "ref": { "type": "string" },
                     "generation": { "type": "integer", "minimum": 1 },
                 }),
-                &["tab_id", "path", "ref"],
+                &["tab_id", "path", "ref", "generation"],
             ),
         ),
         (

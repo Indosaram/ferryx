@@ -49,7 +49,9 @@ pub async fn bind_direct_socket(preferred: Option<u16>) -> std::io::Result<UdpSo
         match UdpSocket::bind(("0.0.0.0", port)).await {
             Ok(socket) => return Ok(socket),
             Err(error) => {
-                tracing::debug!(
+                // Warn, not debug: the configured port is what an operator forwards, so a
+                // silent fall back to an ephemeral port changes whether direct works at all.
+                tracing::warn!(
                     port,
                     %error,
                     "direct: preferred local UDP port unavailable, using ephemeral port"

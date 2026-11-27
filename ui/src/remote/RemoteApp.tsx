@@ -1260,7 +1260,7 @@ class ReferencePromptRefused extends Error {
 }
 
 /** The prompt the original pane is waiting on, or null. Anything unreadable is no prompt. */
-function parseChatPrompt(raw: unknown): ReferencePrompt | null {
+export function parseChatPrompt(raw: unknown): ReferencePrompt | null {
   if (raw === null || raw === undefined || typeof raw !== "object") return null;
   const body = raw as Record<string, unknown>;
   const inner = body.prompt === undefined ? body : body.prompt;
@@ -1303,6 +1303,7 @@ function parseChatPrompt(raw: unknown): ReferencePrompt | null {
     ...(typeof prompt.customOptionIndex === "number" ? { customOptionIndex: prompt.customOptionIndex } : {}),
     ...(prompt.queued === "open" || prompt.queued === "collapsed" ? { queued: prompt.queued } : {}),
     ...(prompt.fallback === true ? { fallback: true } : {}),
+    ...(prompt.answerStatus === "outcomeUnknown" ? { answerStatus: "outcomeUnknown" as const } : {}),
     ...(steps !== null ? { steps } : {}),
   };
 }
@@ -1626,17 +1627,18 @@ export const RemoteApp: React.FC = () => {
         }}
         onPaired={(token, metadata) => {
           const machineId = optionalString(metadata?.machineId);
+          // displayName is cosmetic: default it rather than failing after the single-use code is spent.
           const displayName = optionalString(metadata?.displayName);
-          if (viaRelay && (!machineId || !displayName)) {
+          if (viaRelay && !machineId) {
             /* A relay host is addressed as /host/<machineId>: storing the token under a
                page-origin slot would write a credential no host can ever use, so refuse and
                let PairingPage report it instead. */
             throw new PairingCompletionError(RELAY_PAIRING_INCOMPLETE);
           }
-          if (viaRelay && machineId && displayName) {
+          if (viaRelay && machineId) {
             remoteHostStore.upsertHost({
               machineId,
-              displayName,
+              displayName: displayName ?? machineId,
               relayOrigin: origin,
               deviceToken: token,
               lastSeenAt: Date.now(),
@@ -3876,7 +3878,7 @@ export const RemoteHostConnection: React.FC<{
       setTunnelResume("reconnecting");
       setTunnelResumeFailure(null);
       const machineId = current.machine.machineId;
-      const outcome = await accountDiscoveryRef.current.acquireConnectionDetailed(machineId);
+      const outcome = await accountDiscoveryRef.current.acquireConnectionDetailed(machineId, { force });
       if (!stillCurrent()) {
         if (outcome.ok) outcome.connection.close();
         setTunnelResume("idle");

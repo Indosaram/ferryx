@@ -534,6 +534,7 @@ fn finish_pi_prompt(draft: PiDraft<'_>) -> PiParsedPrompt {
         queued: None,
         steps: Vec::new(),
         fallback: None,
+        answer_status: None,
     };
     PiParsedPrompt {
         prompt,

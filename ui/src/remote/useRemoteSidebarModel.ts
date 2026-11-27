@@ -158,18 +158,11 @@ export function useRemoteSidebarModel({ machines, supervisors, attention }: Remo
       const unsubscribe = machine.subscribe((frame) => {
         const event = parsePanelFrame(frame);
         if (event?.type === "panel.lanes") {
-          const rows = new Map(lifecycle?.sections.flatMap((section) => section.rows.map((row) => [row.worktreeKey, row] as const)));
-          for (const section of event.model.sections) {
-            for (const row of section.rows) {
-              if ((row.revision ?? -Infinity) >= (rows.get(row.worktreeKey)?.revision ?? -Infinity)) rows.set(row.worktreeKey, row);
-            }
-          }
-          const sections = new Map<string, LaneLifecycleModel["sections"][number]>();
-          for (const row of rows.values()) {
-            if (!sections.has(row.workspaceId)) sections.set(row.workspaceId, { workspaceId: row.workspaceId, rows: [] });
-            sections.get(row.workspaceId)!.rows.push(row);
-          }
-          lifecycle = { sections: [...sections.values()], revision: event.model.revision };
+          // A late frame with an older revision must not undo a newer model.
+          if (event.model.revision < (lifecycle?.revision ?? -Infinity)) return;
+          // The frame is the complete model (archived rows are omitted), so it replaces the raced
+          // copy outright; merging would re-stamp deleted/archived rows onto every refetch.
+          lifecycle = event.model;
           setSettled((previous) => {
             const current = previous[machineId];
             return current?.model

@@ -1552,6 +1552,18 @@ impl DaemonSessionService {
         {
             return Err("SESSION_OWNERSHIP_CHANGED".into());
         }
+        // A keeper-routed spawn returns before any `PtySession` exists (`terminal/pty.rs`), so the
+        // direct lookup is false for a session this daemon is in fact serving. Asking the keeper
+        // first is what keeps a machine/phone attach working for every pane the default keeper
+        // routing created. Geometry comes from the durable record the spawn wrote, which is the
+        // only source the keeper's own status does not carry.
+        if self.terminal_service.keeper_serves(&target.session_id) {
+            let mut session = session.clone();
+            if let Some((cols, rows)) = self.terminal_service.keeper_geometry(&target.session_id) {
+                (session.cols, session.rows) = (cols, rows);
+            }
+            return Ok(session);
+        }
         let pty = self
             .terminal_service
             .get_session(&target.session_id)
@@ -1830,6 +1842,30 @@ impl DaemonSessionService {
             relative_cwd
         };
 
+        // A keeper-routed session has no `PtySession` on this daemon, so the direct lookup below
+        // would refuse a live session as `SESSION_EXPIRED`. The keeper's own status is the proof it
+        // is running, and the durable record the spawn wrote carries the geometry.
+        if self.terminal_service.keeper_serves(session_id) {
+            let (cols, rows) = self
+                .terminal_service
+                .keeper_geometry(session_id)
+                .unwrap_or((meta.spawn_fingerprint.cols, meta.spawn_fingerprint.rows));
+            return Ok(crate::remote::machine_protocol::Session {
+                title: None,
+                agent_type,
+                target,
+                workspace_id: meta.workspace_id.clone(),
+                worktree,
+                cwd,
+                cols,
+                rows,
+                running: true,
+                provider_session,
+                start_sequence,
+                end_sequence,
+                pid: None,
+            });
+        }
         let pty = self
             .terminal_service
             .get_session(session_id)
@@ -1888,10 +1924,16 @@ impl DaemonSessionService {
     }
 
     /// True when this daemon can drive the session even though no local `PtySession`
-    /// backs it: an SSH-backed remote session or a paired daemon session.
+    /// backs it: an SSH-backed remote session, a paired daemon session, or a session whose master
+    /// this daemon's keeper holds.
+    ///
+    /// The keeper arm is not an optimization. Keeper routing is the default whenever a live keeper
+    /// is proven, and a keeper spawn returns before any `PtySession` exists, so a test built only on
+    /// `get_session` refuses every new macOS pane on the machine/phone wire.
     pub(crate) fn owns_machine_session(&self, id: &str) -> bool {
         self.terminal_service.remote().contains(id)
             || self.terminal_service.paired().contains(id)
+            || self.terminal_service.keeper_serves(id)
     }
 
     /// Bind the socket to the backend transport at admission, never to whichever

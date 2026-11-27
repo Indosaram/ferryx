@@ -91,6 +91,7 @@ const PAIRED_BLOCK_REASONS = [
   "SESSION_EXPIRED", "CONTROL_CONFLICT", "STALE_GENERATION", "PAIRED_HOST_STALE_GENERATION",
   "PAIRED_HOST_UNAUTHORIZED", "UNAUTHORIZED", "PERMISSION_DENIED", "PAIRED_HOST_WRONG_MACHINE",
   "PAIRED_HOST_INVALID_RESPONSE", "PAIRED_HOST_MIGRATION_PENDING", "UNSUPPORTED_PROTOCOL",
+  "PAIRED_PROXY_BLOCKED",
 ] as const;
 /** A block reason this build can name itself. */
 export type KnownLocalRecoveryBlockReason = "identity_conflict" | (typeof PAIRED_BLOCK_REASONS)[number];
@@ -666,6 +667,18 @@ export const LANE_LIFECYCLE_UNDO_MS = 5_000;
 
 export type LaneLifecycleAction = "pin" | "settle" | "snooze" | "archive" | "activate";
 
+/** The state a pending action will land the row in, for the optimistic sidebar overlay. */
+export function pendingLaneLifecycleState(pending: PendingLaneLifecycle): LaneLifecycleState | null {
+  switch (pending.action) {
+    case "pin": return "pinned";
+    case "settle": return "settled";
+    case "snooze": return "snoozed";
+    case "archive": return "archived";
+    case "activate": return "active";
+    default: return null;
+  }
+}
+
 /** One change inside its undo window: what it will write, and what the row read before. */
 export type PendingLaneLifecycle = {
   worktreeKey: string;
@@ -673,7 +686,10 @@ export type PendingLaneLifecycle = {
   path: string;
   action: LaneLifecycleAction;
   until?: string | null;
-  /** The row's state before this change; a cancel restores exactly it. */
+  /**
+   * The row's state before this change, recorded for diagnosis only: a cancel keeps the newer
+   * server frame instead of restoring this.
+   */
   previous: LaneLifecycleState | null;
   /** The revision the write will carry, so a raced window is refused by the server. */
   previousRevision: number;
@@ -2619,6 +2635,8 @@ export function useWorkspaceStore({
             workspaceId,
             error: error instanceof Error ? error.message : String(error),
           });
+          // The live inventory is unknown: skip pruning this sync instead of killing live PTYs.
+          return;
         }
       }
       dispatch({ type: "SET_WORKTREES", worktrees, retainedSessionIds });
@@ -2776,7 +2794,10 @@ export function useWorkspaceStore({
       const pending = stateRef.current.lanePending?.[worktreeKey];
       if (!pending) return;
       const transport = declaredLaneLifecycleTransport();
-      if (!transport) return;
+      if (!transport) {
+        dispatch({ type: "CANCEL_LANE_LIFECYCLE", worktreeKey });
+        return;
+      }
       try {
         const row = await transport.write({
           worktreeKey,
@@ -4325,16 +4346,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       if (!pending) return state;
       const lanePending = { ...state.lanePending };
       delete lanePending[action.worktreeKey];
-      // The row's state never changed in the store, so there is nothing to roll back; restoring
-      // `previous` covers a caller that optimistically painted the new state.
-      const restored = pending.previous;
-      return {
-        ...state,
-        lanePending,
-        laneLifecycle: restored
-          ? { ...state.laneLifecycle, [action.worktreeKey]: restored }
-          : state.laneLifecycle,
-      };
+      // The row's state never changed in the store (the sidebar overlays `lanePending`), so
+      // there is nothing to roll back; leaving `laneLifecycle` alone keeps any newer server frame.
+      return { ...state, lanePending };
     }
     case "COMMIT_LANE_LIFECYCLE": {
       const lanePending = { ...state.lanePending };

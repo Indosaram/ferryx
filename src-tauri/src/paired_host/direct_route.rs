@@ -189,6 +189,19 @@ impl DirectRoutes {
         }
     }
 
+    /// True when this host is parked inside a retry backoff window.
+    ///
+    /// An attempt in flight or an already direct route is *not* backoff: a caller
+    /// that waits on those may still be promoted. A host with no entry is not in
+    /// backoff either, so a cold host keeps its legitimate first-attempt wait
+    /// (its state reads as `Relay` before any attempt starts).
+    pub fn in_backoff(&self, host_id: &str, now: Instant) -> bool {
+        self.entries.lock().get(host_id).is_some_and(|entry| {
+            !matches!(entry.state, RouteState::Attempting | RouteState::Direct { .. })
+                && entry.retry_at.is_some_and(|at| at > now)
+        })
+    }
+
     /// Claims the next attempt. `None` while one is running, already direct,
     /// or still inside the retry backoff window.
     pub fn begin_attempt(&self, host_id: &str, now: Instant) -> Option<u64> {

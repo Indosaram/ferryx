@@ -938,6 +938,12 @@ pub struct ReferencePrompt {
     /// buttons only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<bool>,
+    /// `outcomeUnknown` when the durable row for this card carries a claim whose write may not
+    /// have happened. A surface that shows the card must not offer a second answer then, and the
+    /// phone needs this to say so: it is the same value `AgentPromptView` carries. Absent when
+    /// the card has no durable row or the row's attempt settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_status: Option<String>,
 }
 
 impl ReferencePrompt {
@@ -1425,6 +1431,7 @@ mod tests {
             queued: None,
             steps: vec![],
             fallback: None,
+            answer_status: None,
         };
         let pick = ReferencePromptAnswer { option_index: Some(0), ..Default::default() };
         let typed = ReferencePromptAnswer { custom_text: Some("sure".into()), ..Default::default() };
@@ -1435,6 +1442,37 @@ mod tests {
         prompt.kind = ReferencePromptKind::Menu;
         assert!(prompt.needs_confirmation(&pick));
         assert_eq!(prompt.selectable_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn answer_status_is_optional_on_the_wire_and_absent_when_unset() {
+        // The phone's parser reads `answerStatus` off this card; it must be absent, not null, when
+        // the durable row has no unresolved claim, so an older surface sees the same shape.
+        let mut prompt = ReferencePrompt {
+            id: "p1".into(),
+            agent: "claude".into(),
+            kind: ReferencePromptKind::Question,
+            title: "Q".into(),
+            question: "Q".into(),
+            body: None,
+            options: vec![ReferencePromptOption { label: "Yes".into(), description: None }],
+            multi_select: false,
+            custom_option_index: None,
+            queued: None,
+            steps: vec![],
+            fallback: None,
+            answer_status: None,
+        };
+        let wire = serde_json::to_value(&prompt).unwrap();
+        assert!(wire.get("answerStatus").is_none(), "unset status is omitted: {wire}");
+        // A card decoded without the field is the same card, so older writers still parse.
+        let decoded: ReferencePrompt = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded, prompt);
+        prompt.answer_status = Some("outcomeUnknown".into());
+        assert_eq!(
+            serde_json::to_value(&prompt).unwrap()["answerStatus"],
+            serde_json::json!("outcomeUnknown")
+        );
     }
 
     #[test]

@@ -552,7 +552,7 @@ pub(crate) const STARTUP_LOCK_NAME: &str = ".keeper-startup.lock";
 /// `ferryx_ptykeeper::install::InstallDir::{install, prune}` writes the same
 /// `~/.ferryx/keeper/<version>` tree with no lock at all. While that stays true, exclusive
 /// ownership covers daemon startup passes only and is not proof against an external installer.
-pub(crate) struct StartupLock {
+pub struct StartupLock {
     file: std::fs::File,
 }
 
@@ -699,7 +699,7 @@ pub fn start_production(
     }));
     let service_for_restore = std::sync::Arc::clone(&terminal_service);
     runtime.set_restore(std::sync::Arc::new(move |session_id: &str, bytes: &[u8]| {
-        service_for_restore.restore_checkpoint(session_id, bytes);
+        service_for_restore.restore_checkpoint(session_id, bytes)
     }));
     let runtime = std::sync::Arc::new(runtime);
     terminal_service.install_keeper(std::sync::Arc::clone(&runtime));
@@ -875,7 +875,15 @@ pub fn reconcile_and_activate(
         policy,
         &|session_id: &str| {
             let (recovered, rx) = runtime.attach(session_id)?;
-            terminal_service.pump_keeper_output(session_id, rx, recovered.prefix_skipped);
+            // Either condition means this hub cannot serve the session's true first byte: the
+            // prefix was beyond what one recovery reads, or the keeper dropped bytes at a seam.
+            // Reporting only `prefix_skipped` left a gapped recovery registered as a complete
+            // history, so a reader was never told its first byte was not the session's first.
+            terminal_service.pump_keeper_output(
+                session_id,
+                rx,
+                recovered.prefix_skipped || recovered.replay_gap.is_some(),
+            );
             Ok(())
         },
         &|| {

@@ -300,6 +300,27 @@ describe("useAccountWorktrees machine discovery and plan limits", () => {
     expect(openTunnel).not.toHaveBeenCalled();
   });
 
+  it("force bypasses a stale offline flag while default calls still return MACHINE_OFFLINE", async () => {
+    // Given a machine whose cached presence is offline.
+    const listed = createDeferred<AccountMachineView[]>();
+    vi.mocked(listMachines).mockReturnValue(listed.promise);
+    const { result } = renderHook(() => useAccountWorktrees("https://relay.test", "token-xyz", true));
+    await act(async () => { listed.resolve([{ ...sampleMachine, online: false }]); });
+    vi.mocked(requestGrant).mockClear();
+    vi.mocked(requestGrant).mockRejectedValueOnce(new AccountSessionError("NETWORK", "still down"));
+
+    // When the default and forced acquisitions run.
+    const normal = await result.current.acquireConnectionDetailed(sampleMachine.machineId);
+    expect(requestGrant).not.toHaveBeenCalled();
+    const forced = await result.current.acquireConnectionDetailed(sampleMachine.machineId, { force: true });
+
+    // Then only the forced call attempts the grant.
+    expect(normal).toMatchObject({ ok: false, code: "MACHINE_OFFLINE" });
+    expect(requestGrant).toHaveBeenCalledTimes(1);
+    expect(forced).toMatchObject({ ok: false });
+    expect((forced as { code: string }).code).not.toBe("MACHINE_OFFLINE");
+  });
+
   it("returns UNAUTHORIZED when no account session exists", async () => {
     // Given discovery without a session token.
     const { result } = renderHook(() => useAccountWorktrees("https://relay.test", null, false));

@@ -276,7 +276,7 @@ impl ToolId {
                     reason: NATIVE_INPUT_UNSUPPORTED_REASON,
                 },
             },
-            Self::RequestHelp => spec(self, S::Interact, false, None, false),
+            Self::RequestHelp => spec(self, S::Interact, false, Some(G::Interact), true),
             Self::Screenshot => ToolSpec {
                 id: self,
                 scope: S::File,
@@ -335,6 +335,13 @@ impl ToolSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_help_needs_an_interact_grant_and_the_tab_lease() {
+        let spec = ToolId::RequestHelp.spec();
+        assert_eq!(spec.origin_grant, Some(GrantScope::Interact));
+        assert!(spec.requires_lease);
+    }
 
     #[test]
     fn tool_ids_round_trip_and_are_unique() {

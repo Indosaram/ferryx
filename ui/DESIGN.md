@@ -594,3 +594,45 @@ single-pixel marker or a line of text: the active search match in `FilePreviewTe
 `+`/`-` lines of a diff body, a hover ground under an existing container button, a count
 pill nested inside one, and the voice orb's own tone (`VoiceCallSurface`). Everything else
 has been migrated; add no new `bg-status-X/NN`.
+
+## 15. System Resources Dialog
+
+Applies to `ui/src/components/SystemResourcesDialog.tsx` (`ui/resources-qa.html`).
+
+### 0. Research Log
+- **Embedded references**: Shortlisted `linear.app.md`, `sentry.md`, `vercel.md`. Loaded `linear.app.md` and `sentry.md` in full for luminance-stepped dark elevation, hairline structural dividers, and tabular telemetry typography while keeping Ferryx's own §1 semantic tokens.
+- **Lazyweb & shipped product references**: Queried Lazyweb (`server monitoring infrastructure dashboard host cpu memory`, `infrastructure machines list sidebar telemetry processes` — `netdata`, `signoz`, `grafana-labs`, `sematext`, `better-stack`; vision analysis temporarily throttled on downloaded refs) and reviewed shipped multi-host monitor architectures (**Beszel** fleet table + per-machine container/service drill-down, **Datadog Infrastructure** host list + per-host process inspector, **OrbStack** machine rail + detail pane, and Ferryx's own `SettingsDialog` two-pane layout).
+- **StyleGallery**: Adopted `fixed-sidenav-shell` (`https://raw.githubusercontent.com/changeroa/StyleGallery/main/patterns/viewport-shell/fixed-sidenav-shell.md`) for the machine rail + inspector split and `scroll-body-shell` (`https://raw.githubusercontent.com/changeroa/StyleGallery/main/patterns/viewport-shell/scroll-body-shell.md`) for the fixed dialog header and scrolling inspector body.
+
+### Brief
+- **Primary action**: Inspect a machine's live load and isolate or terminate runaway local sessions.
+- **Information priorities**:
+  1. Machine identity, connection health, and host-level CPU/Memory/Swap/Disk pressure (Level 1).
+  2. Worktree-grouped session totals with sortable CPU/Memory attribution (Level 2).
+  3. Individual terminal sessions (monospace ID, PID, process count, per-session CPU/Memory, and Kill action for local sessions) (Level 3).
+- **Left out on purpose**: Global detached `NAME | CPU | MEMORY` bar above all machines (moved session column headers inside each machine's sessions table and turned sort controls into an explicit inspector toolbar control); nested bordered metric boxes inside machine cards (replaced with a hairline-divided 4-column telemetry strip); `backdrop-blur` on the modal scrim; always-green progress bars on high-utilization meters.
+- **Required content**: Machine count, Refresh now, Close, machine list with local/paired/SSH status, per-machine collapse/expand, platform/cores/uptime metadata, CPU & Mem sparklines, CPU/Memory/Swap/Disk meters, unavailable-metrics note, per-host process count, worktree groups with collapse/expand and Name/CPU/Memory sorting, session rows with ID/PID/procs/CPU/Memory, local session Kill confirmation `alertdialog`.
+- **Layout**: `Layout: SystemResourcesDialog - separate 19-machine fleet navigation from nested worktree/session telemetry -> fixed-sidenav-shell (https://raw.githubusercontent.com/changeroa/StyleGallery/main/patterns/viewport-shell/fixed-sidenav-shell.md) + scroll-body-shell (https://raw.githubusercontent.com/changeroa/StyleGallery/main/patterns/viewport-shell/scroll-body-shell.md); scroll owner: [data-testid="resource-machine-rail"] and [data-testid="resource-inspector-body"]; anti-patterns: never let the modal root scroll as one flat stream mixing machine headers and session rows, and never omit min-h-0 on either grid/flex scroll pane.`
+
+### 3-Tier Visual Hierarchy Contract
+1. **Level 1 — Machine (`[data-testid="resource-machine"]`)**:
+   - Elevated card (`rounded-xl border border-border bg-panel shadow-elevation-1 overflow-hidden`) on the `bg-background` inspector canvas with `space-y-4` (`16px`) vertical separation between machines.
+   - Header band (`bg-muted/35 border-b border-border px-4 py-3`): disclosure chevron, `Laptop`/`Server` hardware icon inside a `size-7 rounded-md bg-background` well, `text-sm font-semibold` (14px) title, neutral origin tag (`Local`/`Paired`/`SSH`), status text when degraded, `text-[11px]` platform/cores/uptime subtitle, and right-aligned CPU/Mem sparklines with live `%` readout.
+   - Attached 4-column hairline-divided telemetry strip (`divide-x divide-border/60 border-b border-border bg-background/40`) with threshold-aware bars (`<70%` `bg-status-success`, `70-89%` `bg-status-warning`, `>=90%` `bg-destructive`) animated via compositor-only `scaleX`.
+2. **Level 2 — Worktree Group (`[data-testid="resource-worktree-group"]`)**:
+   - Lives inside the recessed `bg-background/60` sessions section below the telemetry strip, headed by a local `Sessions (N)` + `CPU` / `MEMORY` column header bar.
+   - `FolderGit2` icon + disclosure chevron + `text-xs font-medium` (12px) worktree label + `· N` session count + summed tabular CPU and Memory aligned under the local column headers.
+3. **Level 3 — Session Row (`[data-testid="resource-session-row"]`)**:
+   - Nested inside a 1px vertical tree guide rail (`ml-[22px] border-l border-border/75 pl-2.5`), matching §4's tree guide grammar.
+   - Leading `Terminal` icon, `font-mono text-[11px]` session identifier, muted `text-[10.5px] tabular-nums` PID and process count, right-aligned tabular CPU and Memory, and a `size-6` (`24x24px`, WCAG 2.5.8) hover/focus-visible Kill control for local sessions.
+
+### Gap Ledger
+| ID | Screen / state | Gap | Principle or rule broken | Evidence | Fix | Proof | Status |
+|---|---|---|---|---|---|---|---|
+| G1 | System resources / 19 machines | Machine headers, `Sessions (N)`, and worktree rows shared the same left edge, 11–12px size, and hairline borders | Hierarchy & 2:1 group separation (`craft-floor`) | User screenshot `/tmp/ferryx-user-img1.png` | Two-pane `fixed-sidenav-shell` rail + distinct `bg-panel` Machine Cards + recessed Sessions table + `border-l` guide rail | `dark-fleet-1440.png` visual audit + `14px/12px/11px` type step & `rgb(38,42,50)` card elevation verified | closed |
+| G2 | System resources / header | Global `NAME \| CPU \| MEMORY` bar sat detached above all 19 machines | Proximity & table structure (`layout-skill`) | User screenshot `/tmp/ferryx-user-img1.png` | Explicit sort controls in inspector toolbar + local `CPU` / `MEMORY` column headers inside each machine's sessions table | `cpuRights: [1078,1078,1078]`, `memRights: [1166,1166,1166]` (1440px) & `[236,236,236]` / `[308,308,308]` (390px) + 19/19 tests | closed |
+| G3 | System resources / 19 machines | All 19 machines stacked in one `max-w-2xl` scroller with no fleet index or search | Fleet scannability (Beszel/Datadog/OrbStack) | User screenshot `/tmp/ferryx-user-img1.png` | `max-w-5xl` shell with left machine rail (`All machines` + filter + per-machine CPU/Mem summary & focus) + `<select>` on `< md` | Rail focus, filter & Escape tests pass; 390/320px `overflowX: false` | closed |
+| G4 | System resources / meters | Meter bars always rendered green (`bg-status-success`) and animated `width` | Status feedback & compositor-only motion | `SystemResourcesDialog.tsx` L58 | Threshold colors (`success`/`warning`/`destructive`) + GPU `scaleX` transform | Unit test + `dark-fleet-1440.png` amber/green bars verified | closed |
+| G5 | System resources / session rows | Session UUIDs ran inline with PID/procs in one sans span without tree guide rail | Typography & scannability (`ui/DESIGN.md` §1/§4) | User screenshot `/tmp/ferryx-user-img1.png` | `border-l` tree guide rail, `Terminal` icon, `font-mono` ID separated from tabular `pid · procs` (stacks on `< sm`) | `sessionOverlap: false` at 1440/390/320px | closed |
+| G6 | System resources / controls | Kill button was `size-5` (20px < 24px WCAG 2.5.8); disclosure/sort buttons lacked `focus-visible` ring; header lacked close button; scrim used `backdrop-blur-sm` | WCAG 2.5.8, 2.4.7, §6 surface rules | `SystemResourcesDialog.tsx` L214, L439 | `size-6` Kill button, `focus-visible:ring-1 focus-visible:ring-ring` on all controls, header `X` close button, plain scrim | `smallTargets: []`, `sortStable: true`, `check-accent-stripes` & `check-draft-guard` exit 0 | closed |
+

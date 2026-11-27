@@ -300,4 +300,42 @@ describe("useRemoteSidebarModel", () => {
       ["m2", "Laptop", "inventory"],
     ]);
   });
+
+  it("does not re-stamp a lane a later panel.lanes frame omitted onto refetches", async () => {
+    const row = (state: "pinned" | "archived") => ({
+      worktreeKey: "p:ferryx/code/ferryx", workspaceId: "ferryx", worktreePath: "/code/ferryx", state, effectiveState: state,
+      pinnedTabs: [], snoozedUntil: null, position: 0, revision: state === "pinned" ? 1 : 2, updatedAt: "2026-11-15T00:00:00Z",
+    });
+    let sidebar = published(1, "ferryx");
+    const m = fakeMachine(() => ({ "/api/v1/workspace/sidebar": json(200, { model: sidebar }) }));
+    const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
+    await waitFor(() => expect(result.current[0]?.state).toBe("ok"));
+
+    m.emit({ type: "panel.lanes", model: { revision: 1, sections: [{ workspaceId: "ferryx", rows: [row("pinned")] }] } });
+    expect(result.current[0]?.model?.projects[0]?.worktrees[0]?.lifecycle).toBe("pinned");
+    // The archived row is omitted from the complete model; the refetch must not bring "pinned" back.
+    m.emit({ type: "panel.lanes", model: { revision: 2, sections: [] } });
+    const before = m.sidebarFetches();
+    sidebar = published(2, "ferryx");
+    m.emit({ type: "sidebarChanged" });
+    await waitFor(() => expect(m.sidebarFetches()).toBe(before + 1));
+    await waitFor(() => expect(result.current[0]?.model?.revision).toBe(2));
+    expect(result.current[0]?.model?.projects[0]?.worktrees[0]?.lifecycle).toBe("active");
+  });
+
+  it("ignores a panel.lanes frame older than the one already applied", async () => {
+    const pinnedRow = {
+      worktreeKey: "p:ferryx/code/ferryx", workspaceId: "ferryx", worktreePath: "/code/ferryx", state: "pinned" as const,
+      effectiveState: "pinned" as const, pinnedTabs: [], snoozedUntil: null, position: 0, revision: 1, updatedAt: "2026-11-15T00:00:00Z",
+    };
+    const m = fakeMachine(() => ({ "/api/v1/workspace/sidebar": json(200, { model: published(1, "ferryx") }) }));
+    const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
+    await waitFor(() => expect(result.current[0]?.state).toBe("ok"));
+
+    m.emit({ type: "panel.lanes", model: { revision: 2, sections: [] } });
+    expect(result.current[0]?.model?.projects[0]?.worktrees[0]?.lifecycle).toBe("active");
+    // A late frame carrying revision 1 must not resurrect the pinned row.
+    m.emit({ type: "panel.lanes", model: { revision: 1, sections: [{ workspaceId: "ferryx", rows: [pinnedRow] }] } });
+    expect(result.current[0]?.model?.projects[0]?.worktrees[0]?.lifecycle).toBe("active");
+  });
 });

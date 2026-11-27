@@ -902,16 +902,21 @@ impl SessionHub {
     }
 
     /// Whether a full replay still carries output lost to a gap. It stops doing so once the
-    /// screen was redrawn, or once retention evicted the gap seam: the lost output then lies
-    /// before the replay's start like any other evicted output. Without the second case a pane
-    /// that never clears the whole screen (an inline TUI such as an agent's) stayed unreadable
-    /// for good after one reconnect gap.
+    /// screen was redrawn, or once retention evicted past the gap floor: the lost output then
+    /// lies before the replay's start like any other evicted output. Without the second case a
+    /// pane that never clears the whole screen (an inline TUI such as an agent's) stayed
+    /// unreadable for good after one reconnect gap.
+    ///
+    /// The comparison is inclusive on purpose. A recovery hole (`mark_history_gap`) sets the floor
+    /// to the first sequence this hub will ever hold, so retention starting *at* the floor still
+    /// means the whole prefix before it is missing; only eviction strictly past the floor proves
+    /// the prefix boundary itself fell out of retention.
     pub(crate) fn history_incomplete(&self) -> bool {
         self.history_incomplete
             && self
                 .buffer
                 .retained_start_sequence()
-                .is_none_or(|start| start < self.buffer.gap_floor)
+                .is_none_or(|start| start <= self.buffer.gap_floor)
     }
 
     /// The mirrored screen, when it can stand in for retained replay.
@@ -1118,12 +1123,6 @@ impl TerminalOutputHub {
         self.retention
             .text_bytes
             .saturating_add(self.retention.image_bytes)
-    }
-
-    /// True when the budget, not the pre-existing configuration, is the binding constraint. Used
-    /// to leave the screen mirror on its line cap whenever the budget does not bind.
-    fn budget_binds(&self, ceiling: usize) -> bool {
-        ceiling < self.configured_retention_bytes()
     }
 
     /// Runs `f` against the ledger if this hub enforces one.
@@ -1389,12 +1388,15 @@ impl TerminalOutputHub {
         }
     }
 
-    /// The byte ceiling the session's screen mirror enforces for `ceiling`. When the budget does not
-    /// bind, the mirror keeps the creation-time ceiling rather than an unset (unlimited) limit, so a
-    /// hub without a binding budget behaves exactly as it did before the budget existed.
+    /// The byte ceiling the session's screen mirror enforces for `ceiling`. A budgeted hub always
+    /// applies the session's share, capped at the daemon-wide native ceiling -- including while
+    /// only one session is live, when the share is the whole budget and would otherwise let the
+    /// mirror grow past the ceiling every other session is held to. Only a hub with no aggregate
+    /// budget keeps the unset creation-time default, so it behaves exactly as it did before the
+    /// budget existed.
     fn mirror_limit_bytes(&self, ceiling: usize) -> usize {
-        if self.budget_binds(ceiling) {
-            ceiling
+        if self.with_ledger(|_| ()).is_some() {
+            ceiling.min(super::NATIVE_SCROLLBACK_CEILING_BYTES)
         } else {
             super::NATIVE_SCROLLBACK_CEILING_BYTES
         }
@@ -3719,6 +3721,70 @@ mod tests {
 
         // A session the hub never saw cannot be marked: there is no floor to set.
         assert!(!hub.mark_history_gap("never-seen"));
+    }
+
+    /// A budgeted hub applies its session share to the screen mirror even with a single live
+    /// session, and caps it at the daemon-wide native ceiling; only an unbudgeted hub keeps the
+    /// creation-time default.
+    #[test]
+    fn a_budgeted_hub_caps_the_mirror_with_one_live_session() {
+        let hub = budgeted_hub(1024 * 1024, 256 * 1024);
+        hub.register_session("solo");
+        let ceiling = hub.session_ceiling_bytes();
+        assert_eq!(ceiling, 1024 * 1024, "one session owns the whole budget");
+        let session = hub.sessions.read().get("solo").cloned().expect("session");
+        let limit = session
+            .read()
+            .screen
+            .as_ref()
+            .expect("mirror")
+            .lock()
+            .scrollback_limit_bytes();
+        assert_eq!(
+            limit,
+            Some(ceiling.min(crate::terminal::NATIVE_SCROLLBACK_CEILING_BYTES)),
+            "the mirror follows the share, not the unbudgeted default"
+        );
+
+        let unbudgeted = TerminalOutputHub::new(1024);
+        unbudgeted.register_session("solo");
+        let session = unbudgeted.sessions.read().get("solo").cloned().expect("s");
+        let limit = session
+            .read()
+            .screen
+            .as_ref()
+            .expect("mirror")
+            .lock()
+            .scrollback_limit_bytes();
+        assert_eq!(limit, Some(crate::terminal::NATIVE_SCROLLBACK_CEILING_BYTES));
+    }
+
+    /// A recovery hole keeps `history_incomplete` on a full attach even after sequence 1 is
+    /// published: the prefix before the recovered tail is missing, and retention starting at the
+    /// floor is not evidence that it was evicted.
+    #[test]
+    fn a_recovered_prefix_stays_incomplete_on_a_full_attach() {
+        let hub = TerminalOutputHub::default();
+        hub.register_session("recovered");
+        assert!(hub.mark_history_gap("recovered"));
+        let chunk = hub.publish("recovered", b"tail".to_vec()).expect("published");
+        assert_eq!(chunk.sequence, 1);
+
+        let full = hub
+            .subscribe_with_sequence("recovered", None)
+            .expect("full attach");
+        assert!(
+            full.snapshot.history_incomplete,
+            "a full attach must not claim the history is whole while the prefix is missing"
+        );
+        assert!(full.snapshot.history.ends_with(b"tail"));
+
+        // A whole-screen redraw is what clears it.
+        hub.publish("recovered", b"\x1b[2Jtail".to_vec());
+        let after_reset = hub
+            .subscribe_with_sequence("recovered", None)
+            .expect("attach after reset");
+        assert!(!after_reset.snapshot.history_incomplete);
     }
 
     #[test]

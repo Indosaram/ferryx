@@ -865,6 +865,25 @@ impl PtySession {
     /// output nobody can deliver. Reporting it here is what lets the spawn path fail cleanly instead
     /// of panicking on a host that is already out of resources.
     pub(crate) fn new(config: PtySessionConfig) -> Result<Self, PtyError> {
+        // Kills and reaps the child unless the session takes it over at the very end of this
+        // function. The caller's own guard only covers the window before this call; from here on
+        // the guard is what makes both the `Err` path *and* an unwind inside `new` leave no
+        // untracked pane process behind, because `Box<dyn Child>` has no `Drop` that would.
+        struct ChildReapGuard(Option<Box<dyn Child + Send + Sync>>);
+        impl ChildReapGuard {
+            fn take(&mut self) -> Box<dyn Child + Send + Sync> {
+                self.0.take().expect("pane child is handed over once")
+            }
+        }
+        impl Drop for ChildReapGuard {
+            fn drop(&mut self) {
+                if let Some(mut child) = self.0.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut child_guard = ChildReapGuard(Some(config.child));
         let reader_interrupt = Arc::new(Mutex::new(config.reader_interrupt));
         let output_tx = Arc::new(Mutex::new(Some(config.tx)));
         let reader_tx = output_tx
@@ -1029,12 +1048,18 @@ impl PtySession {
             reader_phase_task.store(PtyReaderPhase::Finished.as_raw(), Ordering::Release);
             let _ = reader_done_tx.send(());
         };
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("ferryx-pty-reader".into())
             .spawn(reader_loop)
-            .map_err(|error| {
-                PtyError::IoError(format!("Failed to start the PTY reader: {error}"))
-            })?;
+        {
+            // The child is already running and no reader will ever drain it, so kill and reap it
+            // here: returning the error while merely dropping the handle would leave an
+            // untracked pane process behind for the life of the daemon. `child_guard` does exactly
+            // that on drop, which is why this path needs no explicit kill.
+            return Err(PtyError::IoError(format!(
+                "Failed to start the PTY reader: {error}"
+            )));
+        }
         let reader_task = reader_done_rx;
 
         Ok(Self {
@@ -1052,7 +1077,7 @@ impl PtySession {
             reader_interrupt,
             master_release: Arc::new(Mutex::new(None)),
             writer: Arc::new(Mutex::new(Some(config.writer))),
-            child: Arc::new(Mutex::new(Some(ProcessHandle::Spawned(config.child)))),
+            child: Arc::new(Mutex::new(Some(ProcessHandle::Spawned(child_guard.take())))),
             reader_task: Arc::new(Mutex::new(Some(reader_task))),
             output_tx,
             worktree_path: config.worktree_path,

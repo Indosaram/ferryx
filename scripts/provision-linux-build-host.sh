@@ -6,8 +6,8 @@
 #
 # It installs the same toolchain the other Ferryx Linux hosts use and leaves a canonical
 # clone plus a shared worktree root. Those two paths come from scripts/host-paths.sh so no
-# real path is hardcoded here; override with FERRYX_CANONICAL_ROOT / FERRYX_WORKTREE_ROOT /
-# FERRYX_TARGET_DIR.
+# real path is hardcoded here; override with FERRYX_CANONICAL_ROOT (the canonical clone itself,
+# not its parent) / FERRYX_WORKTREE_ROOT / FERRYX_TARGET_DIR.
 set -euo pipefail
 
 log() { printf '[provision] %s\n' "$*"; }
@@ -21,7 +21,7 @@ if [ -x "$HOST_PATHS_BIN" ]; then
   WORKTREE_ROOT=$("$HOST_PATHS_BIN" worktree-root)
   TARGET_DIR=$("$HOST_PATHS_BIN" target)
 else
-  CANONICAL="${FERRYX_CANONICAL_ROOT:-$HOME/code}/ferryx"
+  CANONICAL="${FERRYX_CANONICAL_ROOT:-$HOME/code/ferryx}"
   WORKTREE_ROOT="${FERRYX_WORKTREE_ROOT:-$HOME/code/ferryx-wt}"
   TARGET_DIR="${FERRYX_TARGET_DIR:-$WORKTREE_ROOT/.target}"
 fi
@@ -158,15 +158,18 @@ fi
 # 7. A detached-job runner. Long cargo jobs die with the SSH session, so every build/test
 #    goes through systemd-run and terminates with a TPI-DONE sentinel line.
 mkdir -p "$HOME/bin" "$WORKTREE_ROOT/.evidence"
-cat > "$HOME/bin/fx-run" <<'RUNNER'
-#!/usr/bin/env bash
+{
+printf '#!/usr/bin/env bash\n'
+printf 'default_root=%q\ndefault_target=%q\n' "$WORKTREE_ROOT" "$TARGET_DIR"
+cat <<'RUNNER'
 # fx-run <slug> <name> <command...>
 # Runs the command inside ~/code/ferryx-wt/<slug> as a systemd user unit, so it survives the
 # SSH session. The log always ends with "TPI-DONE <name> EXIT=<rc>"; read that line to learn
 # the outcome instead of polling the process table.
 set -euo pipefail
 slug="$1"; name="$2"; shift 2
-root="$WORKTREE_ROOT"
+root="${FERRYX_WORKTREE_ROOT:-$default_root}"
+target_dir="${FERRYX_TARGET_DIR:-$default_target}"
 dir="$root/$slug"
 [ -d "$dir" ] || { echo "no worktree $dir" >&2; exit 2; }
 logdir="$root/.evidence/$slug"; mkdir -p "$logdir"
@@ -188,11 +191,12 @@ unit="fx-$slug-$name"
 unit_path="$HOME/.cargo/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 systemd-run --user --unit="$unit" --collect --working-directory="$dir" \
   -p StandardOutput=append:"$log" -p StandardError=append:"$log" \
-  --setenv=CARGO_TARGET_DIR="$root/.target" \
+  --setenv=CARGO_TARGET_DIR="$target_dir" \
   --setenv=PATH="$unit_path" --setenv=HOME="$HOME" \
   /bin/bash "$inner" >/dev/null
 echo "unit=$unit log=$log"
 RUNNER
+} > "$HOME/bin/fx-run"
 chmod +x "$HOME/bin/fx-run"
 
 log "arch=$ZIG_ARCH rust-target=$RUST_TARGET no-default-features=${NO_DEFAULT_FEATURES:-0}"

@@ -385,6 +385,7 @@ impl ScreenPromptCard {
                 queued: None,
                 steps: Vec::new(),
                 fallback: None,
+                answer_status: None,
             },
             option_keys,
             custom_keys,
@@ -1959,6 +1960,7 @@ mod tests {
             queued: None,
             steps: vec![],
             fallback: None,
+            answer_status: None,
         }
     }
 

@@ -634,6 +634,7 @@ fn parse_omp_question(screen: &str) -> Option<OmpPromptCard> {
             queued: None,
             steps: Vec::new(),
             fallback: None,
+            answer_status: None,
         },
         responder: OmpPromptResponder::Question,
         // the row as `parseBorderMenu` read it, suffix and all: the pinned `menuLabels` (`:282`)
@@ -724,6 +725,7 @@ fn parse_omp_approval(screen: &str) -> Option<OmpPromptCard> {
             queued: None,
             steps: Vec::new(),
             fallback: None,
+            answer_status: None,
         },
         responder: OmpPromptResponder::Approval,
         menu_labels: rows.iter().map(|row| row.label.clone()).collect(),

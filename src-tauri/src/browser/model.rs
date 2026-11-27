@@ -1090,7 +1090,8 @@ pub struct ImportInstalledBrowserCookiesResult {
 pub struct InstalledCookieImportBlock {
     /// The same wire string the failure path uses (`app-bound-key-refused`).
     pub reason: String,
-    /// How many rows this block left unapplied (the importer's "seen" count).
+    /// How many rows this block left unapplied (the importer's "seen" count). A subset of the
+    /// parent result's `skipped_count`; do not add the two.
     pub skipped_count: usize,
     /// The measured COM status behind the block, `0x`-prefixed, when it came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -14,6 +14,11 @@ interface RemoteDirectoryPickerProps {
   readonly onSelect: (path: string | null) => void;
 }
 
+/** Codes meaning the remote refused the path itself, as opposed to a transient connection/IO failure. */
+const REJECTED_PATH_CODES: ReadonlySet<string> = new Set([
+  "NOT_FOUND", "DIRECTORY_NOT_FOUND", "PERMISSION_DENIED", "INVALID_PATH", "PATH_OUTSIDE_WORKSPACE",
+]);
+
 /** Completions are a background nicety: typing must not flood the remote host with RPCs. */
 const COMPLETION_DEBOUNCE_MS = 180;
 
@@ -161,8 +166,11 @@ export function RemoteDirectoryPicker({ hostId, source, disabled, onSelect }: Re
     } catch (cause) {
       if (cache.current.get(cacheKey(request.path)) === pending) cache.current.delete(cacheKey(request.path));
       if (id !== requestId.current) return;
-      setError(toIpcError(cause).message);
+      const failure = toIpcError(cause);
+      setError(failure.message);
       setLoading(false);
+      // A path the remote explicitly rejected must not stay submittable; transient errors keep it.
+      if (REJECTED_PATH_CODES.has(failure.code)) onSelect(null);
     }
   }, [hostId, source, remoteHidden, onSelect]);
 

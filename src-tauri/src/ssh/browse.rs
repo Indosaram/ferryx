@@ -129,8 +129,10 @@ fn listing_script(environment: &RemoteEnvironment, path: &str, marker: &str) -> 
             r#"set -e
 if [ -n "${{ZSH_VERSION:-}}" ]; then setopt NULL_GLOB; fi
 LC_ALL=C; export LC_ALL
-cd {path}
-[ -r . ] && [ -x . ] || {{ printf '%s\n' 'Directory is not readable' >&2; exit 1; }}
+target={path}
+if [ ! -e "$target" ]; then printf '{marker}\000ERR\000NOT_FOUND\000'; exit 0; fi
+if [ ! -d "$target" ]; then printf '{marker}\000ERR\000INVALID_PATH\000'; exit 0; fi
+if [ ! -r "$target" ] || [ ! -x "$target" ] || ! cd "$target" 2>/dev/null; then printf '{marker}\000ERR\000PERMISSION_DENIED\000'; exit 0; fi
 root=$(pwd -P)
 parent=$(cd .. && pwd -P)
 [ "$parent" != "$root" ] || parent=
@@ -148,18 +150,21 @@ printf 'END\000%s\000' "$truncated""#,
             path = direct::quote_posix(path),
         ),
         RemotePlatform::Windows => format!(
-            r#"$item=Get-Item -LiteralPath {path} -Force
-if (!$item.PSIsContainer -or $item.PSProvider.Name -ne 'FileSystem') {{ throw 'Remote path is not a filesystem directory' }}
+            r#"$target={path}
+if (-not (Test-Path -LiteralPath $target)) {{ [Console]::Write(('{marker}','ERR','NOT_FOUND','' -join [char]0)); exit 0 }}
+try {{ $item=Get-Item -LiteralPath $target -Force -ErrorAction Stop }} catch [System.UnauthorizedAccessException] {{ [Console]::Write(('{marker}','ERR','PERMISSION_DENIED','' -join [char]0)); exit 0 }}
+if (!$item.PSIsContainer -or $item.PSProvider.Name -ne 'FileSystem') {{ [Console]::Write(('{marker}','ERR','INVALID_PATH','' -join [char]0)); exit 0 }}
 $root=$item.FullName
 $parent=''; if ($item.Parent) {{ $parent=$item.Parent.FullName }}
+try {{ $children=@(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop) }} catch [System.UnauthorizedAccessException] {{ [Console]::Write(('{marker}','ERR','PERMISSION_DENIED','' -join [char]0)); exit 0 }}
 [Console]::Write(('{marker}',$root,$parent,'' -join [char]0))
 $n=0; $bytes=0; $truncated='0'
-Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop | ForEach-Object {{
-    $name=$_.Name
+foreach ($child in $children) {{
+    $name=$child.Name
     $bytes += [Text.Encoding]::UTF8.GetByteCount($name)+3
     if ($n -lt 1000 -and $bytes -le 6000) {{
         $hidden='0'
-        if ($name.StartsWith('.') -or ($_.Attributes -band [IO.FileAttributes]::Hidden)) {{ $hidden='1' }}
+        if ($name.StartsWith('.') -or ($child.Attributes -band [IO.FileAttributes]::Hidden)) {{ $hidden='1' }}
         [Console]::Write(($name,$hidden,'' -join [char]0))
     }} else {{ $truncated='1' }}
     $n++
@@ -190,6 +195,26 @@ fn parse_listing(
     let fields: Vec<&[u8]> = bytes[start + prefix.len()..]
         .split(|byte| *byte == 0)
         .collect();
+    if fields.len() == 3 && fields[0] == b"ERR" && fields[2].is_empty() {
+        return Err(match fields[1] {
+            b"NOT_FOUND" => runtime::error(
+                IpcErrorCode::NotFound,
+                "directory",
+                "Remote directory does not exist",
+            ),
+            b"PERMISSION_DENIED" => runtime::error(
+                IpcErrorCode::PermissionDenied,
+                "directory",
+                "Remote directory is not readable",
+            ),
+            b"INVALID_PATH" => runtime::error(
+                IpcErrorCode::InvalidPath,
+                "directory",
+                "Remote path is not a directory",
+            ),
+            _ => invalid(),
+        });
+    }
     if fields.len() < 5
         || !(fields.len() - 5).is_multiple_of(2)
         || fields.last() != Some(&b"".as_slice())
@@ -344,7 +369,11 @@ mod tests {
             ])
             .output()
             .unwrap();
-        assert!(!output.status.success());
+        assert!(output.status.success());
+        assert_eq!(
+            parse_listing(&output.stdout, "EMPTY", &env).unwrap_err().code,
+            IpcErrorCode::NotFound
+        );
     }
 
     #[cfg(unix)]
@@ -448,7 +477,11 @@ mod tests {
             .output()
             .unwrap();
         std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(!output.status.success());
+        assert!(output.status.success());
+        assert_eq!(
+            parse_listing(&output.stdout, "BOUNDED", &env).unwrap_err().code,
+            IpcErrorCode::PermissionDenied
+        );
     }
 
     #[test]
@@ -543,5 +576,45 @@ mod tests {
             &environment()
         )
         .is_err());
+    }
+
+    #[test]
+    fn parses_structured_missing_and_permission_errors() {
+        let env = environment();
+        let not_found = parse_listing(b"M\0ERR\0NOT_FOUND\0", "M", &env).unwrap_err();
+        assert_eq!(not_found.code, IpcErrorCode::NotFound);
+        let denied = parse_listing(b"M\0ERR\0PERMISSION_DENIED\0", "M", &env).unwrap_err();
+        assert_eq!(denied.code, IpcErrorCode::PermissionDenied);
+        let not_dir = parse_listing(b"M\0ERR\0INVALID_PATH\0", "M", &env).unwrap_err();
+        assert_eq!(not_dir.code, IpcErrorCode::InvalidPath);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_script_reports_missing_and_non_directory_as_structured_errors() {
+        let fixture = tempfile::tempdir().unwrap();
+        let env = environment();
+        let missing = fixture.path().join("does-not-exist");
+        let output = std::process::Command::new("sh")
+            .args(["-c", &listing_script(&env, missing.to_str().unwrap(), "ERRM")])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            parse_listing(&output.stdout, "ERRM", &env).unwrap_err().code,
+            IpcErrorCode::NotFound
+        );
+
+        let file = fixture.path().join("regular-file");
+        std::fs::write(&file, b"hi").unwrap();
+        let output = std::process::Command::new("sh")
+            .args(["-c", &listing_script(&env, file.to_str().unwrap(), "ERRM")])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            parse_listing(&output.stdout, "ERRM", &env).unwrap_err().code,
+            IpcErrorCode::InvalidPath
+        );
     }
 }

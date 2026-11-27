@@ -278,22 +278,69 @@ impl OwnershipStore {
         }
         let json = serde_json::to_vec_pretty(table)
             .map_err(|error| OwnershipError::Io(error.to_string()))?;
-        let tmp = self.path.with_extension(format!(
-            "tmp-{}-{}",
-            std::process::id(),
-            now_millis()
-        ));
-        fs::write(&tmp, &json).map_err(|error| OwnershipError::Io(error.to_string()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-        }
-        fs::rename(&tmp, &self.path).map_err(|error| OwnershipError::Io(error.to_string()))
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        // The staging name is only unique per process *and* per counter, so a pid reused after a
+        // killed process can collide with a stale `tmp-<pid>-0` it left behind. A collision is
+        // therefore retried with the next ticket instead of failing `save` once and for all.
+        const SAVE_ATTEMPTS: u32 = 64;
+        let mut attempt = 0u32;
+        let (tmp, file) = loop {
+            let tmp = self.path.with_extension(format!(
+                "tmp-{}-{}",
+                std::process::id(),
+                TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            use std::io::Write as _;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            match options.open(&tmp) {
+                Ok(mut file) => {
+                    let write = file.write_all(&json).and_then(|()| file.sync_all());
+                    match write {
+                        Ok(()) => break (tmp, file),
+                        Err(error) => {
+                            drop(file);
+                            let _ = fs::remove_file(&tmp);
+                            return Err(OwnershipError::Io(error.to_string()));
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    attempt += 1;
+                    if attempt >= SAVE_ATTEMPTS {
+                        return Err(OwnershipError::Io(format!(
+                            "no free staging file for {} after {SAVE_ATTEMPTS} attempts: {error}",
+                            self.path.display()
+                        )));
+                    }
+                    continue;
+                }
+                Err(error) => return Err(OwnershipError::Io(error.to_string())),
+            }
+        };
+        drop(file);
+        fs::rename(&tmp, &self.path).map_err(|error| {
+            let _ = fs::remove_file(&tmp);
+            OwnershipError::Io(error.to_string())
+        })
+    }
+
+    /// Serializes every load -> modify -> save transaction in this process. Hold the guard across
+    /// the whole sequence; `record`, `forget` and `set_keeper_enabled` take it themselves, so never
+    /// call them while holding it (the lock is not reentrant).
+    pub fn transaction(&self) -> parking_lot::MutexGuard<'static, ()> {
+        static OWNERSHIP_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        OWNERSHIP_LOCK.lock()
     }
 
     /// Records one session's owner and persists it.
     pub fn record(&self, record: OwnershipRecord) -> Result<OwnershipTable, OwnershipError> {
+        let _guard = self.transaction();
         let mut table = self.load()?;
         table.record(record);
         self.save(&table)?;
@@ -301,6 +348,7 @@ impl OwnershipStore {
     }
 
     pub fn forget(&self, session_id: &str) -> Result<OwnershipTable, OwnershipError> {
+        let _guard = self.transaction();
         let mut table = self.load()?;
         table.forget(session_id);
         self.save(&table)?;
@@ -310,6 +358,7 @@ impl OwnershipStore {
     /// Flips the enable flag. Existing sessions keep their recorded owner: the flip is a routing
     /// rule for new sessions, never a migration.
     pub fn set_keeper_enabled(&self, enabled: bool) -> Result<OwnershipTable, OwnershipError> {
+        let _guard = self.transaction();
         let mut table = self.load()?;
         table.keeper_ownership_enabled = enabled;
         self.save(&table)?;
@@ -552,6 +601,84 @@ impl RecoveredSession {
     /// True when the caller must reset its terminal parser before applying later output.
     pub fn requires_parser_reset(&self) -> bool {
         self.replay_gap.is_some()
+    }
+}
+
+/// One item a keeper pump delivers to its reader.
+///
+/// The gap is an *item in the stream*, not a side channel. The keeper's bytes and the seam that
+/// says "output was dropped here" share one ordered channel, so a reader can never apply a post-gap
+/// byte to parser state that has not been reset: the only way to reach the bytes is past the seam.
+/// Publishing the seam from the pump thread while earlier bytes were still queued made the
+/// ordering cosmetic, which is what this type removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeeperOutput {
+    /// Bytes the keeper retained, in keeper order.
+    Bytes(Vec<u8>),
+    /// The keeper no longer holds the bytes before this point: reset the parser here.
+    Gap,
+}
+
+/// Where a pump's output goes.
+///
+/// Two receivers exist because the two entry points promise different things. A spawn starts at
+/// offset 0 of a brand-new session and can never report a gap, so it keeps the `Vec<u8>` shape a
+/// direct PTY produces and every existing caller is untouched. An attach *can* report one, and
+/// gets [`KeeperOutput`] so the seam is in-band.
+#[derive(Debug)]
+enum PumpSink {
+    Bytes(tokio::sync::mpsc::Sender<Vec<u8>>),
+    Typed(tokio::sync::mpsc::Sender<KeeperOutput>),
+}
+
+/// A sink handed to the pump thread: owned, `'static`, and the only thing that queues output.
+#[derive(Debug)]
+enum OwnedPumpSink {
+    Bytes(tokio::sync::mpsc::Sender<Vec<u8>>),
+    Typed(tokio::sync::mpsc::Sender<KeeperOutput>),
+}
+
+impl PumpSink {
+    /// Queues the seam without waiting. `false` means the sink cannot carry one.
+    fn try_gap(&self) -> bool {
+        match self {
+            Self::Bytes(_) => false,
+            Self::Typed(tx) => tx.try_send(KeeperOutput::Gap).is_ok(),
+        }
+    }
+
+    /// Queues the first chunk without waiting. `false` means the receiver is gone.
+    fn try_bytes(&self, bytes: Vec<u8>) -> bool {
+        match self {
+            Self::Bytes(tx) => tx.try_send(bytes).is_ok(),
+            Self::Typed(tx) => tx.try_send(KeeperOutput::Bytes(bytes)).is_ok(),
+        }
+    }
+
+    fn into_owned(self) -> OwnedPumpSink {
+        match self {
+            Self::Bytes(tx) => OwnedPumpSink::Bytes(tx),
+            Self::Typed(tx) => OwnedPumpSink::Typed(tx),
+        }
+    }
+}
+
+impl OwnedPumpSink {
+    /// Queues the seam, blocking on a full channel: the pump must not run ahead of its reader's
+    /// knowledge that the stream is discontinuous. `false` means the sink cannot carry one.
+    fn blocking_gap(&self) -> bool {
+        match self {
+            Self::Bytes(_) => false,
+            Self::Typed(tx) => tx.blocking_send(KeeperOutput::Gap).is_ok(),
+        }
+    }
+
+    /// Queues bytes, blocking on a full channel. `false` means the receiver is gone.
+    fn blocking_bytes(&self, bytes: Vec<u8>) -> bool {
+        match self {
+            Self::Bytes(tx) => tx.blocking_send(bytes).is_ok(),
+            Self::Typed(tx) => tx.blocking_send(KeeperOutput::Bytes(bytes)).is_ok(),
+        }
     }
 }
 
@@ -799,6 +926,7 @@ impl KeeperSessionHost {
         session_id: &str,
         request_id: &str,
     ) -> Result<String, KeeperSessionError> {
+        let _guard = store.transaction();
         let mut table = store.load().map_err(|error| {
             KeeperSessionError::Incompatible(format!("ownership not readable: {error}"))
         })?;
@@ -887,7 +1015,7 @@ impl KeeperSessionHost {
         let (reply, replayed, delivered) = self.with_client(|client| {
             client.attach_recovering(session_id, epoch, after_sequence)
         })?;
-        let checkpoint_bytes = self.fetch_checkpoint(session_id, epoch, &reply);
+        let checkpoint_bytes = self.fetch_checkpoint(session_id, epoch, &reply)?;
         let gap = reply.gap.map(|gap| ReplayGapKind {
             requested_after_sequence: gap.requested_after_sequence,
             available_from_sequence: gap.available_from_sequence,
@@ -980,16 +1108,24 @@ impl KeeperSessionHost {
     }
 
     /// Reads the committed checkpoint's bytes, which are the terminal state the retained suffix
-    /// continues from. A missing checkpoint is not a failure: the suffix and a gap cover the
-    /// session, and a fatal error here would refuse a recovery the keeper can still serve.
+    /// continues from.
+    ///
+    /// A session the keeper holds **without** a checkpoint is not a failure: the suffix and a gap
+    /// cover it, so `Ok(None)` is the answer. A checkpoint the keeper advertises but cannot deliver
+    /// is a failure, and it is returned as one. Flattening it to `None` used to be silent data loss:
+    /// the attach succeeds with no gap (the requested offset is inside the retained window), the
+    /// pump queues only the post-checkpoint suffix, and it then commits a checkpoint of that
+    /// incomplete state over the good one -- permanently. A refusal here leaves the durable record
+    /// intact so the next startup pass retries the attach.
     fn fetch_checkpoint(
         &self,
         session_id: &str,
         epoch: u64,
         reply: &crate::daemon::keeper_client::AttachReply,
-    ) -> Option<Vec<u8>> {
-        let checkpoint_id = reply.checkpoint_id.as_deref()?;
-        let sequence_offset = reply.checkpoint_sequence_offset;
+    ) -> Result<Option<Vec<u8>>, KeeperSessionError> {
+        let Some((checkpoint_id, sequence_offset)) = checkpoint_to_fetch(reply) else {
+            return Ok(None);
+        };
         self.with_client(|client| {
             client.checkpoint_fetch(
                 session_id,
@@ -999,7 +1135,7 @@ impl KeeperSessionHost {
                 CHECKPOINT_FETCH_PAGE_BYTES,
             )
         })
-        .ok()
+        .map(Some)
     }
 
     /// Installs a daemon-produced checkpoint at `offset`, chunking it when it exceeds the frame cap
@@ -1141,6 +1277,7 @@ pub fn reconcile_startup(
     store: &OwnershipStore,
     views: Vec<KeeperSessionView>,
 ) -> Result<StartupDiscovery, OwnershipError> {
+    let _guard = store.transaction();
     let mut table = store.load()?;
     let live: std::collections::BTreeSet<&str> =
         views.iter().map(|view| view.session_id.as_str()).collect();
@@ -1250,6 +1387,7 @@ pub fn activate_ownership(
     if !status.is_live() {
         return Ok(ActivationOutcome::NotProven);
     }
+    let _guard = store.transaction();
     let mut table = store.load()?;
     if table.keeper_ownership_enabled {
         return Ok(ActivationOutcome::AlreadyActive);
@@ -1551,6 +1689,7 @@ impl KeeperOwnership {
             .entry(session_id.to_string())
             .or_insert_with(|| CheckpointClock::new(self.cadence, now))
             .committed(offset, now);
+        let _guard = self.store.transaction();
         if let Ok(mut table) = self.store.load() {
             if let Some(record) = table.sessions.get_mut(session_id) {
                 record.checkpoint_offset = offset;
@@ -1619,7 +1758,12 @@ pub struct KeeperSessionStatus {
 }
 
 /// The hook that applies a fetched checkpoint's bytes to a recovered session.
-type RestoreHook = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
+///
+/// Fallible on purpose. A checkpoint that cannot be applied is not a cosmetic warning: the pump
+/// would then queue the retained suffix onto parser state that never saw the checkpoint, and
+/// commit that incomplete state back over the good one. Returning the error fails the attach, which
+/// keeps the durable record so the next startup pass retries.
+type RestoreHook = Arc<dyn Fn(&str, &[u8]) -> Result<(), String> + Send + Sync>;
 
 /// The reader of the receiver's cumulative published-byte counter for a session.
 type HubPublishedReader = Arc<dyn Fn(&str) -> Option<u64> + Send + Sync>;
@@ -1699,6 +1843,32 @@ const KEEPER_POLL_FAILURES_BEFORE_END: u32 = 8;
 /// problem, so the pump reads the code and ends instead of spending a backoff on every turn.
 const KEEPER_CODE_UNKNOWN_SESSION: &str = "UNKNOWN_SESSION";
 
+/// The checkpoint an attach reply obliges the caller to fetch, if any.
+///
+/// Separated from [`KeeperRuntime::fetch_checkpoint`] so the *decision* is testable without a keeper
+/// socket: `Some` means a fetch that must succeed (its failure fails the attach), `None` means the
+/// session genuinely has no checkpoint and the suffix plus a gap cover it.
+fn checkpoint_to_fetch(
+    reply: &crate::daemon::keeper_client::AttachReply,
+) -> Option<(&str, u64)> {
+    reply
+        .checkpoint_id
+        .as_deref()
+        .map(|checkpoint_id| (checkpoint_id, reply.checkpoint_sequence_offset))
+}
+
+/// Whether a close may drop the runtime's entries for a session.
+///
+/// Only success, or the keeper answering that it no longer holds the session, is proof the child is
+/// gone. Every other failure leaves the entries in place so the session stays addressable and a
+/// retried close reaches the same keeper child instead of a `PtySession` that never existed.
+fn close_clears_runtime(result: &Result<(), KeeperSessionError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => keeper_reports_session_gone(error),
+    }
+}
+
 /// Whether a poll failed because the keeper no longer holds this session at all.
 fn keeper_reports_session_gone(error: &KeeperSessionError) -> bool {
     matches!(
@@ -1739,7 +1909,7 @@ impl KeeperRuntime {
             host,
             ownership,
             gap_sink: Arc::new(|_| {}),
-            restore: Arc::new(|_, _| {}),
+            restore: Arc::new(|_, _| Ok(())),
             ring_capacity_bytes: None,
             checkpoints: Arc::new(parking_lot::RwLock::new(None)),
             statuses: Arc::new(parking_lot::Mutex::new(BTreeMap::new())),
@@ -1798,6 +1968,14 @@ impl KeeperRuntime {
         self.statuses.lock().values().cloned().collect()
     }
 
+    /// Registers a status without a keeper behind it, so `describe_live_sessions` can be driven
+    /// through its real keeper loop. Test-only: production inserts a status exactly when
+    /// `start_pump` returns one.
+    #[cfg(test)]
+    pub(crate) fn install_status_for_test(&self, status: KeeperSessionStatus) {
+        self.statuses.lock().insert(status.session_id.clone(), status);
+    }
+
     pub fn owned_sessions(&self) -> Vec<String> {
         self.statuses.lock().keys().cloned().collect()
     }
@@ -1811,11 +1989,16 @@ impl KeeperRuntime {
         let record = self
             .host
             .spawn(self.ownership.store(), spec, self.ownership.next_epoch())?;
-        let (_, status, rx) = self.start_pump(
+        // A spawn starts at offset 0 of a brand-new session, so its recovery can never report a
+        // gap. The byte-only sink is therefore lossless here, and it keeps the caller's receiver
+        // the same `Vec<u8>` shape a direct PTY produces.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(KEEPER_OUTPUT_CAPACITY);
+        let (_, status) = self.start_pump(
             &record.session_id,
             record.checkpoint_offset,
             record.pid,
             record.process_start_time,
+            PumpSink::Bytes(tx),
         )?;
         self.statuses.lock().insert(record.session_id.clone(), status);
         Ok((record, rx))
@@ -1852,7 +2035,8 @@ impl KeeperRuntime {
     pub fn attach(
         &self,
         session_id: &str,
-    ) -> Result<(RecoveredSession, tokio::sync::mpsc::Receiver<Vec<u8>>), KeeperSessionError> {
+    ) -> Result<(RecoveredSession, tokio::sync::mpsc::Receiver<KeeperOutput>), KeeperSessionError>
+    {
         let stored = self
             .ownership
             .store()
@@ -1867,11 +2051,16 @@ impl KeeperRuntime {
                 session_id: session_id.to_string(),
             });
         }
-        let (recovered, status, rx) = self.start_pump(
+        // A recovery can report a gap, and that gap must reach the reader *between* the bytes it
+        // separates. A typed sink is what makes that ordering structural rather than a race
+        // between the pump thread and the task draining this channel.
+        let (tx, rx) = tokio::sync::mpsc::channel::<KeeperOutput>(KEEPER_OUTPUT_CAPACITY);
+        let (recovered, status) = self.start_pump(
             session_id,
             self.resume_offset(session_id, stored.checkpoint_offset),
             stored.pid,
             stored.process_start_time,
+            PumpSink::Typed(tx),
         )?;
         self.statuses.lock().insert(session_id.to_string(), status);
         Ok((recovered, rx))
@@ -1922,10 +2111,18 @@ impl KeeperRuntime {
         let result = self
             .host
             .close(self.ownership.store(), session_id, epoch);
-        self.pump_epochs.lock().remove(session_id);
-        self.wakes.lock().remove(session_id);
-        self.statuses.lock().remove(session_id);
-        self.ownership.forget(session_id);
+        // The runtime entries are what make this daemon the session's owner: dropping them ends the
+        // pump, ends output and makes `owns` false, so a retried close falls through to the direct
+        // PTY path where the session does not exist. That is only correct when the child is really
+        // gone. A failed KILL (a 30 s pool wait, a connect failure) leaves a live child with no
+        // addressable owner until the next daemon start, so the entries are kept and the caller gets
+        // the error -- except for the one refusal that *is* proof the session is gone.
+        if close_clears_runtime(&result) {
+            self.pump_epochs.lock().remove(session_id);
+            self.wakes.lock().remove(session_id);
+            self.statuses.lock().remove(session_id);
+            self.ownership.forget(session_id);
+        }
         result
     }
 
@@ -1969,14 +2166,8 @@ impl KeeperRuntime {
         start_offset: u64,
         pid: u32,
         process_start_time: Option<u64>,
-    ) -> Result<
-        (
-            RecoveredSession,
-            KeeperSessionStatus,
-            tokio::sync::mpsc::Receiver<Vec<u8>>,
-        ),
-        KeeperSessionError,
-    > {
+        sink: PumpSink,
+    ) -> Result<(RecoveredSession, KeeperSessionStatus), KeeperSessionError> {
         let epoch = self.ownership.next_epoch();
         // How much history one recovery may read: the receiver's ring, which is the most a client
         // attach can be handed in one snapshot.
@@ -1993,32 +2184,54 @@ impl KeeperRuntime {
         let recovered =
             self.host
                 .attach_and_recover(session_id, epoch, start_offset, tail_bytes)?;
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(KEEPER_OUTPUT_CAPACITY);
+        self.begin_pump(session_id, epoch, recovered, pid, process_start_time, sink)
+    }
+
+    /// The half of [`Self::start_pump`] that runs once the keeper has answered: apply the
+    /// checkpoint, queue the seam and the replay, then start the pump thread.
+    ///
+    /// Split out so the restore refusal -- the failure that must fail the pump *before* any runtime
+    /// entry exists -- is exercised directly, without a keeper socket to produce a
+    /// [`RecoveredSession`].
+    fn begin_pump(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        recovered: RecoveredSession,
+        pid: u32,
+        process_start_time: Option<u64>,
+        sink: PumpSink,
+    ) -> Result<(RecoveredSession, KeeperSessionStatus), KeeperSessionError> {
         let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
-        self.pump_epochs.lock().insert(session_id.to_string(), epoch);
-        self.wakes.lock().insert(session_id.to_string(), wake_tx);
+        // Everything the reader must see, in the order it must see it, is queued *before* any
+        // runtime entry exists. A failure here therefore needs no unwind: nothing was registered.
+        //
+        // The checkpoint is applied first and its failure is fatal, because the suffix that follows
+        // continues from exactly that state. A swallowed restore error feeds post-checkpoint bytes
+        // to parser state that never saw the checkpoint, and the pump then commits that incomplete
+        // state over the good one.
         if let Some(bytes) = recovered.checkpoint_bytes.as_deref() {
-            (self.restore)(session_id, bytes);
+            (self.restore)(session_id, bytes).map_err(KeeperSessionError::Incompatible)?;
         }
-        if recovered.requires_parser_reset() {
+        // The seam is the first item on the same channel as the bytes it precedes, so the consumer
+        // cannot observe a post-gap byte before the reset. A byte-only sink (a spawn, which never
+        // has a gap) cannot carry it and falls back to the runtime's hook.
+        if recovered.requires_parser_reset() && !sink.try_gap() {
             (self.gap_sink)(session_id);
         }
         // `try_send`, not `blocking_send`: this runs on the spawn caller's thread, which is a Tokio
         // worker, where blocking on a channel panics. The channel is empty and sized for far more
         // than one chunk, so the only failure that can happen here is a dropped receiver.
         let replayed_len = recovered.replayed.len() as u64;
-        if !recovered.replayed.is_empty()
-            && tx.try_send(recovered.replayed.clone()).is_err()
-        {
-            // No pump was started, so the entries registered above would outlive the receiver they
-            // belong to: drop them rather than leave a nudge pointing at nothing.
-            self.pump_epochs.lock().remove(session_id);
-            self.wakes.lock().remove(session_id);
+        if !recovered.replayed.is_empty() && !sink.try_bytes(recovered.replayed.clone()) {
             return Err(KeeperSessionError::Incompatible(format!(
                 "the recovered tail of {session_id} could not be queued for its reader"
             )));
         }
+        self.pump_epochs.lock().insert(session_id.to_string(), epoch);
+        self.wakes.lock().insert(session_id.to_string(), wake_tx);
         let gap_sink = Arc::clone(&self.gap_sink);
+        let sink = sink.into_owned();
         let ownership = Arc::clone(&self.ownership);
         let checkpoints = Arc::clone(&self.checkpoints);
         let statuses = Arc::clone(&self.statuses);
@@ -2094,7 +2307,13 @@ impl KeeperRuntime {
                                             hub_expected,
                                             available_from_sequence,
                                         );
-                                        gap_sink(&pump_session);
+                                        // Queued on the reader's own channel, so it lands between
+                                        // exactly the bytes forwarded before the keeper dropped
+                                        // them and the bytes after. A byte-only receiver cannot
+                                        // express it and keeps the runtime hook.
+                                        if !sink.blocking_gap() {
+                                            gap_sink(&pump_session);
+                                        }
                                         if let Some(status) =
                                             statuses.lock().get_mut(&pump_session)
                                         {
@@ -2128,7 +2347,7 @@ impl KeeperRuntime {
                                         hub_expected = hub_expected.saturating_add(produced);
                                         // A dropped receiver means nobody will read this session
                                         // again, which is this pump's reason to end.
-                                        if tx.blocking_send(data).is_err() {
+                                        if !sink.blocking_bytes(data) {
                                             break 'pump;
                                         }
                                         forwarded = true;
@@ -2240,7 +2459,6 @@ impl KeeperRuntime {
                 pid,
                 process_start_time,
             },
-            rx,
         ))
     }
 
@@ -2480,6 +2698,45 @@ mod tests {
             ..intact
         };
         assert!(gapped.requires_parser_reset());
+    }
+
+    #[test]
+    fn a_failing_restore_hook_fails_the_pump_before_any_runtime_entry_exists() {
+        // R2-F2a-03: the F-R2-02 chain is `RestoreHook -> start_pump -> Err(Incompatible)`. The
+        // existing coverage only reached the deserialize and unknown-session refusals in
+        // `restore_checkpoint`, so a `start_pump` that swallowed the hook error (`.ok()`, `let _ =`)
+        // would still have passed. This drives the hook refusal itself and proves nothing is
+        // registered when it fires.
+        let (_dir, mut runtime) = runtime_without_a_keeper();
+        runtime.set_restore(Arc::new(|_, _| Err("the hub refused the snapshot".to_string())));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<KeeperOutput>(8);
+        let recovered = RecoveredSession {
+            session_id: "refused".into(),
+            epoch: 7,
+            sequence_offset: 128,
+            checkpoint_id: Some("cp-1".into()),
+            checkpoint_bytes: Some(b"not a snapshot".to_vec()),
+            replayed: Vec::new(),
+            replay_gap: None,
+            prefix_skipped: false,
+        };
+
+        let error = runtime
+            .begin_pump("refused", 7, recovered, 4242, None, PumpSink::Typed(tx))
+            .expect_err("a checkpoint the hook cannot apply must fail the pump");
+        assert!(
+            matches!(error, KeeperSessionError::Incompatible(ref detail)
+                if detail.contains("the hub refused the snapshot")),
+            "the hook's own refusal is what fails the pump, got {error:?}"
+        );
+        assert!(
+            runtime.statuses().is_empty(),
+            "a refused restore must not register a runtime status"
+        );
+        assert!(
+            !runtime.owns("refused"),
+            "a refused restore must not make this runtime claim the session"
+        );
     }
 
     #[test]
@@ -2993,5 +3250,165 @@ mod tests {
             ActivationOutcome::Suppressed { keeper_sessions: 3 }
         );
         assert!(ActivationOutcome::AlreadyActive.is_active());
+    }
+
+    #[test]
+    fn a_close_only_clears_the_runtime_when_the_child_is_provably_gone() {
+        // Success and UNKNOWN_SESSION are the only two answers that prove the child is gone.
+        assert!(close_clears_runtime(&Ok(())));
+        assert!(close_clears_runtime(&Err(KeeperSessionError::Keeper(
+            KeeperClientError::Refused {
+                code: KEEPER_CODE_UNKNOWN_SESSION.to_string(),
+                message: "gone".to_string(),
+            }
+        ))));
+        // Every other failure leaves a live child with no addressable owner if the entries were
+        // dropped: a retried close would fall through to the direct PTY path where it does not
+        // exist. The entries must survive.
+        assert!(!close_clears_runtime(&Err(KeeperSessionError::Keeper(
+            KeeperClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "pool wait expired",
+            ))
+        ))));
+        assert!(!close_clears_runtime(&Err(KeeperSessionError::Incompatible(
+            "no generation".to_string()
+        ))));
+        assert!(!close_clears_runtime(&Err(KeeperSessionError::Keeper(
+            KeeperClientError::Refused {
+                code: "EPOCH_MISMATCH".to_string(),
+                message: "fenced".to_string(),
+            }
+        ))));
+    }
+
+    #[test]
+    fn a_byte_only_sink_cannot_carry_a_gap_and_a_typed_one_keeps_it_in_band() {
+        // A spawn starts at offset 0 and can never report a gap, so it keeps the `Vec<u8>` shape a
+        // direct PTY produces. Asking it to carry a seam must be an explicit `false`, never a
+        // silently dropped item.
+        let (bytes_tx, mut bytes_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let byte_sink = PumpSink::Bytes(bytes_tx);
+        assert!(!byte_sink.try_gap());
+        assert!(byte_sink.try_bytes(vec![1, 2, 3]));
+        drop(byte_sink);
+        assert_eq!(bytes_rx.try_recv().expect("the bytes were queued"), vec![1, 2, 3]);
+
+        // A recovery can report one, and the seam must sit between the bytes it separates.
+        let (typed_tx, mut typed_rx) = tokio::sync::mpsc::channel::<KeeperOutput>(4);
+        let typed_sink = PumpSink::Typed(typed_tx);
+        assert!(typed_sink.try_bytes(vec![7]));
+        assert!(typed_sink.try_gap());
+        assert!(typed_sink.try_bytes(vec![9]));
+        drop(typed_sink);
+        assert_eq!(typed_rx.try_recv().expect("first bytes"), KeeperOutput::Bytes(vec![7]));
+        assert_eq!(typed_rx.try_recv().expect("the seam, in order"), KeeperOutput::Gap);
+        assert_eq!(typed_rx.try_recv().expect("post-gap bytes"), KeeperOutput::Bytes(vec![9]));
+    }
+
+    #[test]
+    fn a_typed_sink_reports_a_dropped_receiver_instead_of_panicking() {
+        // The pump treats `false` as "this session's reader is gone, end the pump". A closed channel
+        // must produce that answer for both item kinds.
+        let (typed_tx, typed_rx) = tokio::sync::mpsc::channel::<KeeperOutput>(1);
+        let typed_sink = PumpSink::Typed(typed_tx);
+        drop(typed_rx);
+        assert!(!typed_sink.try_gap());
+        assert!(!typed_sink.try_bytes(vec![1]));
+    }
+
+    #[test]
+    fn a_checkpoint_the_keeper_advertises_but_cannot_deliver_is_an_error_not_an_absent_one() {
+        // `fetch_checkpoint` used to end in `.ok()`, which turned every fetch failure into "no
+        // checkpoint": the attach then succeeded with no gap, the pump queued only the
+        // post-checkpoint suffix, and it committed that incomplete state over the good one. The
+        // decision the fix relies on is `Some(id)` -> a fetch that must succeed, `None` -> nothing
+        // to fetch.
+        let mut reply = crate::daemon::keeper_client::AttachReply {
+            session_id: "s-1".to_string(),
+            epoch: 3,
+            sequence_offset: 4096,
+            checkpoint_id: None,
+            checkpoint_sequence_offset: 0,
+            checkpoint_stored_bytes: 0,
+            data_base64: String::new(),
+            gap: None,
+            data_chunked: false,
+            live_output: false,
+        };
+        assert_eq!(checkpoint_to_fetch(&reply), None, "no checkpoint, nothing to fetch");
+        reply.checkpoint_id = Some("cp-1".to_string());
+        reply.checkpoint_sequence_offset = 8192;
+        assert_eq!(
+            checkpoint_to_fetch(&reply),
+            Some(("cp-1", 8192)),
+            "an advertised checkpoint names both the id and the offset the fetch must present"
+        );
+        // And the failure type the fetch returns is a keeper error, which `is_transient` already
+        // classifies: a dropped socket is retried by the next startup pass, a protocol mismatch is
+        // not silently retried forever.
+        let io = KeeperSessionError::Keeper(KeeperClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "checkpoint fetch timed out",
+        )));
+        assert!(io.is_transient());
+    }
+
+    #[test]
+    fn an_ownership_transaction_serializes_concurrent_writers_into_one_table() {
+        // F-R2-01: the load -> modify -> save sequence is process-wide serialized, so concurrent
+        // recorders cannot drop each other's entries. Each thread records its own session; every id
+        // must survive.
+        let (_dir, store) = temp_store();
+        let store = Arc::new(store);
+        let mut handles = Vec::new();
+        for index in 0..8u32 {
+            let store = Arc::clone(&store);
+            handles.push(std::thread::spawn(move || {
+                store
+                    .record(OwnershipRecord {
+                        owner: SessionOwner::Keeper,
+                        ..keeper_record(&format!("concurrent-{index}"))
+                    })
+                    .expect("record");
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread");
+        }
+        let table = store.load().expect("table");
+        for index in 0..8u32 {
+            assert_eq!(
+                table.owner_of(&format!("concurrent-{index}")),
+                Some(SessionOwner::Keeper),
+                "a concurrent save must not drop a record it never read"
+            );
+        }
+    }
+
+    #[test]
+    fn every_save_uses_a_unique_create_new_staging_file() {
+        // F-R2-01: pid plus a counter, opened with `create_new`, so two saves in the same millisecond
+        // cannot collide on one staging inode.
+        let (dir, store) = temp_store();
+        for _ in 0..16 {
+            store
+                .record(OwnershipRecord {
+                    owner: SessionOwner::Keeper,
+                    ..keeper_record("staging-1")
+                })
+                .expect("save");
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a successful save leaves no staging file behind: {leftovers:?}"
+        );
+        assert!(store.load().is_ok(), "the published table is readable");
     }
 }
