@@ -2,12 +2,16 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   PANE_CHAT_LAST_AGENT_STORAGE_KEY,
+  PANE_CHAT_TOOL_CALL_VISIBILITY_STORAGE_KEY,
   chatSupportedAgents,
   isChatSupportedAgent,
+  isToolCallVisibility,
   loadLastChatAgentId,
+  loadToolCallVisibility,
   orderChatAgents,
   pickChatAgent,
   saveLastChatAgentId,
+  saveToolCallVisibility,
 } from "./paneChatPreferences";
 import { findConflict, SHORTCUTS } from "./shortcuts";
 
@@ -48,5 +52,19 @@ describe("paneChatPreferences", () => {
     expect(definition).toBeDefined();
     expect(findConflict("tab.newChat", definition!.binding, {}, true)).toBeNull();
     expect(findConflict("tab.newChat", definition!.binding, {}, false)).toBeNull();
+  });
+
+  it("persists tool calls in chat under a ferryx.* key and validates the stored value", () => {
+    expect(PANE_CHAT_TOOL_CALL_VISIBILITY_STORAGE_KEY.startsWith("ferryx.")).toBe(true);
+    expect(loadToolCallVisibility()).toBe("all");
+    saveToolCallVisibility("zen");
+    expect(localStorage.getItem(PANE_CHAT_TOOL_CALL_VISIBILITY_STORAGE_KEY)).toBe("zen");
+    expect(loadToolCallVisibility()).toBe("zen");
+    localStorage.setItem(PANE_CHAT_TOOL_CALL_VISIBILITY_STORAGE_KEY, "quiet");
+    expect(loadToolCallVisibility()).toBe("all");
+    expect(isToolCallVisibility("hide-successful")).toBe(true);
+    expect(isToolCallVisibility("all")).toBe(true);
+    expect(isToolCallVisibility("hide-all")).toBe(true);
+    expect(isToolCallVisibility("other")).toBe(false);
   });
 });

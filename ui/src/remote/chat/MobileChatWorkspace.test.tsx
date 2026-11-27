@@ -607,5 +607,190 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("continue-unavailable-resume")).toHaveAttribute("data-reason", "liveClaim");
     expect(screen.queryByTestId("continue-in-new-pane-resume")).not.toBeInTheDocument();
   });
+
+  it("draft hero names the project like t3code's DraftHeroProjectHeading", () => {
+    render(
+      <MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} workspaceLabel="maho-workspace" worktreeLabel="feature/mobile-chat" />,
+    );
+    const hero = screen.getByTestId("chat-draft-hero");
+    expect(hero).toHaveTextContent("What should we build in feature/mobile-chat?");
+    // the context line survives inside the hero
+    expect(screen.getByTestId("chat-empty-context")).toBeInTheDocument();
+  });
+
+  it("draft hero falls back to the workspace label and then to the bare question", () => {
+    const { rerender } = render(
+      <MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} workspaceLabel="maho-workspace" />,
+    );
+    expect(screen.getByTestId("chat-draft-hero")).toHaveTextContent("What should we build in maho-workspace?");
+    rerender(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
+    expect(screen.getByTestId("chat-draft-hero")).toHaveTextContent("What should we build?");
+  });
+
+  it("draws the new-messages watermark at the first turn that arrived while the reader was away", () => {
+    const first: MobileChatMessageProps[] = [
+      { id: "u1", role: "user", content: "seen", timestamp: 1 },
+      { id: "a1", role: "assistant", content: "seen answer", timestamp: 2 },
+    ];
+    const { rerender } = render(<MobileChatWorkspace messages={first} onSendMessage={vi.fn()} />);
+    const stream = screen.getByTestId("chat-message-stream");
+    Object.defineProperty(stream, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(stream, "clientHeight", { value: 300, configurable: true });
+    Object.defineProperty(stream, "scrollTop", { value: 610, configurable: true, writable: true });
+    // the reader scrolls away from the bottom, so what is on screen counts as visited
+    fireEvent.scroll(stream);
+    expect(screen.queryByTestId("thread-visit-watermark")).not.toBeInTheDocument();
+
+    rerender(
+      <MobileChatWorkspace
+        messages={[...first, { id: "u2", role: "user", content: "arrived later", timestamp: 3 } as MobileChatMessageProps]}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("thread-visit-watermark")).toBeInTheDocument();
+  });
+
+  it("tool call visibility hides the tool rows the pane preference names", () => {
+    const messages: MobileChatMessageProps[] = [
+      { id: "u1", role: "user", content: "do it", timestamp: 1 },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "done",
+        timestamp: 2,
+        toolCalls: [
+          { toolName: "grep", summary: "searched", output: "2 files", status: "success", workKey: "w1" },
+          { toolName: "bash", summary: "running", status: "running", workKey: "w2" },
+          { toolName: "edit", summary: "failed", status: "error", workKey: "w3" },
+        ],
+      },
+    ];
+    const base = { messages, onSendMessage: vi.fn() };
+    const rows = () => screen.getAllByTestId("work-row").length;
+    const { rerender } = render(<MobileChatWorkspace {...base} />);
+    expect(rows()).toBe(3);
+
+    rerender(<MobileChatWorkspace {...base} toolCallVisibility="hide-successful" />);
+    expect(rows()).toBe(2);
+
+    rerender(<MobileChatWorkspace {...base} toolCallVisibility="hide-all" />);
+    // Approvals, questions, and errors always show: the failed call survives every mode.
+    expect(screen.getAllByTestId("work-row")).toHaveLength(1);
+    expect(screen.getByText("failed")).toBeInTheDocument();
+
+    rerender(<MobileChatWorkspace {...base} toolCallVisibility="zen" />);
+    expect(screen.getAllByTestId("work-row")).toHaveLength(1);
+    // prose stays in every mode
+    expect(screen.getByText("done")).toBeInTheDocument();
+  });
+
+  it("a bare PageDown pages the stream and an IME-buffered one does nothing", () => {    // Reduced motion makes the reference page move a single synchronous jump, so the target
+    // is observable without frames; the IME refusal below must not scroll at all.
+    const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(((query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+    })) as unknown as typeof window.matchMedia);
+    render(
+      <MobileChatWorkspace
+        messages={[
+          { id: "u1", role: "user", content: "one", timestamp: 1 },
+          { id: "a1", role: "assistant", content: "two", timestamp: 2 },
+        ]}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    const stream = screen.getByTestId("chat-message-stream");
+    Object.defineProperty(stream, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(stream, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(stream, "scrollTop", { value: 100, configurable: true, writable: true });
+    const el = stream as unknown as { scrollTo: (options: { top: number }) => void };
+    el.scrollTo = vi.fn();
+    fireEvent.keyDown(stream, { key: "PageDown" });
+    expect(el.scrollTo).toHaveBeenCalledWith({ top: 100 + (400 - 36) });
+
+    el.scrollTo = vi.fn();
+    fireEvent.keyDown(stream, { key: "PageDown", isComposing: true });
+    expect(el.scrollTo).not.toHaveBeenCalled();
+    matchMedia.mockRestore();
+  });
+
+  it("timeline minimap renders on desktop widths and navigates by user turn", () => {
+    const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(((query: string) => ({
+      matches: query.includes("pointer: fine"),
+      media: query,
+    })) as unknown as typeof window.matchMedia);
+    const messages: MobileChatMessageProps[] = [
+      { id: "u1", role: "user", content: "first turn", timestamp: 1 },
+      { id: "a1", role: "assistant", content: "first answer", timestamp: 2 },
+      { id: "u2", role: "user", content: "second turn", timestamp: 3 },
+      { id: "a2", role: "assistant", content: "second answer", timestamp: 4 },
+    ];
+    render(<MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} />);
+    const stream = screen.getByTestId("chat-message-stream");
+    Object.defineProperty(stream, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(stream, "clientHeight", { value: 300, configurable: true });
+    Object.defineProperty(stream, "scrollTop", { value: 0, configurable: true, writable: true });
+    fireEvent.scroll(stream);
+    expect(screen.getByTestId("timeline-minimap")).toBeInTheDocument();
+    expect(screen.getAllByTestId("timeline-minimap-item")).toHaveLength(2);
+    expect(screen.getAllByTestId("timeline-minimap-item")[0]).toHaveAttribute("aria-label", "first turn");
+    matchMedia.mockRestore();
+  });
+
+  it("timeline minimap is absent under two turns even on desktop widths", () => {
+    const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(((query: string) => ({
+      matches: query.includes("pointer: fine"),
+      media: query,
+    })) as unknown as typeof window.matchMedia);
+    render(
+      <MobileChatWorkspace
+        messages={[{ id: "u1", role: "user", content: "only", timestamp: 1 }]}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("timeline-minimap")).not.toBeInTheDocument();
+    matchMedia.mockRestore();
+  });
+
+  it("mounts find in thread: Cmd/Ctrl+F opens the bar and a query counts the matches", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[
+          { id: "u1", role: "user", content: "find the needle", timestamp: 1 },
+          { id: "a1", role: "assistant", content: "a needle and another needle", timestamp: 2 },
+        ]}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    // Nothing mounts the provider on its own, so the bar being reachable from the keyboard is
+    // the proof this pane wires it rather than only importing it.
+    expect(screen.queryByTestId("thread-find-bar")).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    const input = screen.getByTestId("thread-find-input");
+    fireEvent.change(input, { target: { value: "needle" } });
+    expect(screen.getByTestId("thread-find-count")).toHaveTextContent("1/3");
+  });
+
+  it("zen keeps the reply that closes a turn, and find shows the turns it hides", () => {
+    const messages: MobileChatMessageProps[] = [
+      { id: "u1", role: "user", content: "do it", timestamp: 1 },
+      { id: "a1", role: "assistant", content: "INTERIM_MARKER", timestamp: 2 },
+      { id: "a2", role: "assistant", content: "FINAL_MARKER", timestamp: 3 },
+    ];
+    const { rerender } = render(
+      <MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} toolCallVisibility="zen" />,
+    );
+    // Zen hides the in-between reply but never the answer that ends the turn.
+    expect(screen.queryByText("INTERIM_MARKER")).not.toBeInTheDocument();
+    expect(screen.getByText("FINAL_MARKER")).toBeInTheDocument();
+
+    // While find is open zen steps aside, so a hidden turn is searchable again.
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    fireEvent.change(screen.getByTestId("thread-find-input"), { target: { value: "INTERIM_MARKER" } });
+    rerender(
+      <MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} toolCallVisibility="zen" />,
+    );
+    expect(screen.getByText("INTERIM_MARKER")).toBeInTheDocument();
+  });
 });
 

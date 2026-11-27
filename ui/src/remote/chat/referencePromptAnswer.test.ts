@@ -9,6 +9,7 @@ import {
   REFERENCE_PROMPT_STALE_MESSAGE,
   referenceAnswerFromText,
   referenceAnswerHint,
+  referenceAnswerTextWithAttachments,
   referenceAnswerRefusal,
   referenceFocusFollowsAnswer,
   referenceNeedsConfirmation,
@@ -17,6 +18,7 @@ import {
   type ReferencePressOrigin,
 } from "./referencePromptAnswer";
 import type { ReferencePrompt } from "./referenceTypes";
+import { planReferenceFileSend } from "./referenceFiles";
 
 function prompt(
   options: readonly string[],
@@ -237,5 +239,55 @@ describe("a stale screen", () => {
     expect(REFERENCE_PROMPT_STALE_MESSAGE).toBe(
       "The question changed on your computer. Read it again before you answer.",
     );
+  });
+});
+
+describe("referenceAnswerTextWithAttachments", () => {
+  const paths = ["uploads/report.pdf", "shots/pic.png"];
+
+  it("appends every saved file's path as an @path mention, the composer's format", () => {
+    expect(referenceAnswerTextWithAttachments("use these", paths)).toBe(
+      "use these @uploads/report.pdf @shots/pic.png",
+    );
+  });
+
+  it("sends a file by itself as the mentions alone", () => {
+    expect(referenceAnswerTextWithAttachments("", paths)).toBe("@uploads/report.pdf @shots/pic.png");
+  });
+
+  it("keeps text that already ends in a space from doubling separators", () => {
+    expect(referenceAnswerTextWithAttachments("see ", ["a.txt"])).toBe("see @a.txt");
+  });
+
+  it("refuses a path that is not a safe relative path, so the draft stays", () => {
+    expect(referenceAnswerTextWithAttachments("x", ["/etc/passwd"])).toBeNull();
+    expect(referenceAnswerTextWithAttachments("x", ["../escape"])).toBeNull();
+    expect(referenceAnswerTextWithAttachments("x", [""])).toBeNull();
+    expect(referenceAnswerTextWithAttachments("", [])).toBeNull();
+  });
+
+  it("refuses a path with a space, as planReferenceFileSend refuses that mention", () => {
+    // `referenceMentionPathOf` is the composer's own reading of a mention: a space ends it, so
+    // the receipt's path could never be parsed back out of the text we would append
+    expect(() =>
+      planReferenceFileSend("x", [
+        { receipt: { hostId: "h", attachmentId: "a", sha256: "ab", sizeBytes: 4, mediaType: "text/plain" }, displayName: "my file.txt", mentionText: "@my file.txt " },
+      ]),
+    ).toThrow();
+    expect(referenceAnswerTextWithAttachments("x", ["my file.txt"])).toBeNull();
+    expect(referenceAnswerTextWithAttachments("x", [" padded.txt"])).toBeNull();
+  });
+
+  it("produces the same text the composer's send would, for every draft shape", () => {
+    const receipts = ["uploads/a.txt", "shots/b[1].png", "docs/c(2).pdf"].map((path) => ({
+      receipt: { hostId: "h", attachmentId: path, sha256: "ab", sizeBytes: 4, mediaType: "text/plain" as const },
+      displayName: path.split("/").pop() ?? path,
+      mentionText: `@${path} `,
+    }));
+    for (const draft of ["", "use", "use ", "line\nnext"]) {
+      expect(referenceAnswerTextWithAttachments(draft, receipts.map((each) => each.mentionText.slice(1).trim()))).toBe(
+        planReferenceFileSend(draft, receipts).text.trim(),
+      );
+    }
   });
 });

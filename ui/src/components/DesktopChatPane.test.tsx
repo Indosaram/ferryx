@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
-import { StrictMode } from "react";
+import { StrictMode, createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { DesktopChatPane } from "./DesktopChatPane";
 import {
@@ -9,8 +9,43 @@ import {
   type DesktopChatResult,
 } from "../lib/desktopChat";
 import { DESKTOP_CHAT_FILE_CAPABILITY, type DesktopChatFileStaging } from "../lib/desktopChatLane";
+import { referenceSha256Hex } from "../remote/chat/referenceFiles";
 import type { ReferenceHistoryPage, ReferencePrompt } from "../remote/chat/referenceTypes";
 import type { TerminalSession } from "../lib/types";
+
+// Capture the workspace props each mount receives, then render the real component, so the
+// lane-to-workspace seams (sentPrompts, attachments) are observable without changing behaviour.
+const capturedWorkspaceProps = vi.hoisted(() => {
+  const calls: Record<string, unknown>[] = [];
+  return { calls };
+});
+vi.mock("../remote/chat/MobileChatWorkspace", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../remote/chat/MobileChatWorkspace")>();
+  return {
+    ...actual,
+    MobileChatWorkspace: (props: Record<string, unknown>) => {
+      capturedWorkspaceProps.calls.push(props);
+      return createElement(actual.MobileChatWorkspace, props as unknown as Parameters<typeof actual.MobileChatWorkspace>[0]);
+    },
+  };
+});
+
+// The prompt card's answer-file seam is a prop the card forwards to the lane; recording the
+// props keeps the wiring observable without depending on the card's own attach UI (lane G6).
+const capturedPromptProps = vi.hoisted(() => {
+  const calls: Record<string, unknown>[] = [];
+  return { calls };
+});
+vi.mock("../remote/chat/ReferencePromptCard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../remote/chat/ReferencePromptCard")>();
+  return {
+    ...actual,
+    ReferencePromptCard: (props: Record<string, unknown>) => {
+      capturedPromptProps.calls.push(props);
+      return createElement(actual.ReferencePromptCard, props as unknown as Parameters<typeof actual.ReferencePromptCard>[0]);
+    },
+  };
+});
 
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
 
@@ -61,6 +96,8 @@ function handlers(overrides: Partial<MockHandlers> = {}): MockHandlers {
 
 function mount(s: TerminalSession, h = handlers(), onViewTerminal = vi.fn()) {
   const transport = desktopChatTransportFrom(h);
+  capturedWorkspaceProps.calls.length = 0;
+  capturedPromptProps.calls.length = 0;
   const view = render(
     <DesktopChatPane session={s} visible onViewTerminal={onViewTerminal} transport={transport} identity={{ hostId: "local" }} pollMs={0} />,
   );
@@ -231,5 +268,139 @@ describe("DesktopChatPane", () => {
       <DesktopChatPane session={s} visible onViewTerminal={vi.fn()} transport={transport} identity={{ hostId: "local" }} pollMs={0} fileStaging={fileStaging} />,
     );
     expect(screen.getByTestId("attach-file-button")).toBeInTheDocument();
+  });
+
+  it("derives sentPrompts from the lane's own user turns, deduplicated in order", async () => {
+    const mixed: ReferenceHistoryPage = {
+      source: "claude-transcript",
+      availability: "native",
+      turns: [
+        { role: "user", id: "t0", parts: [{ kind: "text", text: "run the suite" }] },
+        { role: "assistant", id: "t1", parts: [{ kind: "text", text: "suite failed" }] },
+        { role: "user", id: "t2", parts: [{ kind: "text", text: "run the suite" }] },
+        { role: "user", id: "t3", parts: [{ kind: "text", text: "fix it then" }] },
+      ],
+      hasMore: false,
+      generation: "g1",
+    };
+    mount(session(), handlers({ history: vi.fn<DesktopChatHandlers["history"]>(async () => ok(mixed)) }));
+    await screen.findByText("suite failed");
+    const latest = capturedWorkspaceProps.calls.at(-1) ?? {};
+    expect(latest.sentPrompts).toEqual(["run the suite", "fix it then"]);
+  });
+
+  it("gives the prompt card an answer-file seam that stages on the pane's host and hands back receipts", async () => {
+    const prompt: ReferencePrompt = {
+      id: "p-files",
+      agent: "claude",
+      kind: "question",
+      title: "Question",
+      question: "Attach the failing log",
+      options: [{ label: "A" }],
+      multiSelect: false,
+    };
+    const stage = vi.fn<DesktopChatFileStaging["transport"]["stage"]>(async (target, payload) => ({
+      receipt: {
+        hostId: target.hostId,
+        attachmentId: "att-answer",
+        sha256: await referenceSha256Hex(new TextEncoder().encode("log")),
+        sizeBytes: payload.sizeBytes,
+        mediaType: payload.mediaType,
+      },
+      displayName: payload.name,
+      mentionText: `@${payload.name} `,
+    }));
+    const fileStaging: DesktopChatFileStaging = {
+      capabilities: [DESKTOP_CHAT_FILE_CAPABILITY],
+      transport: { stage, cancel: vi.fn(async () => true), remove: vi.fn(async () => true) },
+    };
+    const s = session();
+    const h = handlers({ prompt: vi.fn<DesktopChatHandlers["prompt"]>(async () => ok({ prompt, screenRevision: "rev-1" })) });
+    render(
+      <DesktopChatPane session={s} visible onViewTerminal={vi.fn()} transport={desktopChatTransportFrom(h)}
+        identity={{ hostId: "local" }} pollMs={0} fileStaging={fileStaging} />,
+    );
+    await waitFor(() => expect(capturedPromptProps.calls.length).toBeGreaterThan(0));
+    const attach = capturedPromptProps.calls.at(-1)?.onAttachAnswerFiles as
+      | ((files: readonly File[]) => Promise<readonly { mentionText: string }[]>)
+      | undefined;
+    expect(attach).toBeTypeOf("function");
+
+    const bytes = new TextEncoder().encode("log");
+    const file = new File([bytes], "fail.log", { type: "text/plain" });
+    Object.defineProperty(file, "arrayBuffer", { value: async () => bytes.slice().buffer });
+    const receipts = await attach!([file]);
+    // The card's answer text carries this mention: the staged file's own relative path.
+    expect(receipts.map((each) => each.mentionText)).toEqual(["@fail.log "]);
+    expect(stage).toHaveBeenCalledTimes(1);
+    expect(stage.mock.calls[0]?.[0]).toMatchObject({ backendSessionId: s.backendSessionId });
+  });
+
+  it("adds no answer-file seam where the pane has no staging route", async () => {
+    const prompt: ReferencePrompt = {
+      id: "p-no-files",
+      agent: "claude",
+      kind: "question",
+      title: "Question",
+      question: "Which model?",
+      options: [{ label: "A" }],
+      multiSelect: false,
+    };
+    mount(session(), handlers({ prompt: vi.fn<DesktopChatHandlers["prompt"]>(async () => ok({ prompt, screenRevision: "rev-1" })) }));
+    await waitFor(() => expect(capturedPromptProps.calls.length).toBeGreaterThan(0));
+    expect(capturedPromptProps.calls.at(-1)).not.toHaveProperty("onAttachAnswerFiles");
+  });
+
+  it("scopes the answer set to the pane's own chat target key", async () => {
+    const prompt: ReferencePrompt = {
+      id: "p-scope",
+      agent: "claude",
+      kind: "question",
+      title: "Question",
+      question: "Which model?",
+      options: [{ label: "A" }],
+      multiSelect: false,
+    };
+    const fileStaging: DesktopChatFileStaging = {
+      capabilities: [DESKTOP_CHAT_FILE_CAPABILITY],
+      transport: { stage: vi.fn(), cancel: vi.fn(async () => true), remove: vi.fn(async () => true) },
+    };
+    const s = session();
+    capturedPromptProps.calls.length = 0;
+    const transport = desktopChatTransportFrom(
+      handlers({ prompt: vi.fn<DesktopChatHandlers["prompt"]>(async () => ok({ prompt, screenRevision: "rev-1" })) }),
+    );
+    render(
+      <DesktopChatPane session={s} visible onViewTerminal={vi.fn()} transport={transport}
+        identity={{ hostId: "local" }} pollMs={0} fileStaging={fileStaging} />,
+    );
+    await waitFor(() => expect(capturedPromptProps.calls.length).toBeGreaterThan(0));
+    // The same key the remote surface uses as `chatTargetKey`: prompt ids are content hashes,
+    // so two panes asking one question would otherwise share a single answer set.
+    expect(capturedPromptProps.calls.at(-1)?.answerScope).toBe(
+      `local|owner|1|${s.backendSessionId}`,
+    );
+  });
+
+  it("prunes the pane's staged answer sets once its prompt request resolves", async () => {
+    const { referenceAnswerAttachmentStore } = await import(
+      "../remote/chat/promptAttach/referencePromptAttach"
+    );
+    const s = session();
+    const scope = `local|owner|1|${s.backendSessionId}`;
+    // A file staged for this pane's question: its key is `<scope>\0<promptId>`.
+    referenceAnswerAttachmentStore.add(`${scope}\u0000p-clear`, [
+      new File([new TextEncoder().encode("x")], "keep.log", { type: "text/plain" }),
+    ]);
+    expect(referenceAnswerAttachmentStore.get(`${scope}\u0000p-clear`)).toHaveLength(1);
+
+    mount(
+      s,
+      handlers({ prompt: vi.fn<DesktopChatHandlers["prompt"]>(async () => ok({ prompt: null, screenRevision: null })) }),
+    );
+    // No prompt on the pane: the thread moved past the question, so its files go with it.
+    await waitFor(() =>
+      expect(referenceAnswerAttachmentStore.get(`${scope}\u0000p-clear`)).toHaveLength(0),
+    );
   });
 });

@@ -22,6 +22,47 @@ import type {
   ReferenceComposerCapabilities,
   ReferenceFileReceipt,
 } from "./referenceTypes";
+import type {
+  AdditionalDirsControl,
+  AgentControl,
+  ChipSources,
+  CitationInsert,
+  ExecutionModeControl,
+  FastModeControl,
+  PermissionControl,
+  PermissionMode,
+  QueueModeControl,
+  ThinkingControl,
+} from "./composer/chipTypes";
+import { citeIntoComposer, composerSeams, messageSeams } from "./workspace/seams";
+import {
+  ThreadFindProvider,
+  useThreadFind,
+  useThreadFindHotkey,
+} from "./messages/threadFind";
+import type { AnnounceLevel } from "./messages/announcer";
+import { usePaneActivityClaim, type PaneActivityClaim } from "./workspace/paneActivity";
+import { TimelineMinimap } from "./workspace/TimelineMinimap";
+import { ThreadVisitWatermark } from "./workspace/ThreadVisitWatermark";
+import {
+  advanceVisit,
+  EMPTY_VISIT,
+  type ThreadVisitState,
+} from "./workspace/timelineWatermark";
+import { deriveTimelineMinimapItems, resolveTimelineMinimapCurrentIndex } from "./workspace/timelineMinimapItems";
+import {
+  animatePageScroll,
+  timelinePageScrollKey,
+  type PageScrollKey,
+} from "./workspace/pageScroll";
+import {
+  anchoredScrollTop,
+  EMPTY_VIEWPORT,
+  FOLLOW_THRESHOLD_PX,
+  snapshotViewport,
+  type TimelineViewportSnapshot,
+} from "./workspace/timelineScrollAnchoring";
+export { FOLLOW_THRESHOLD_PX } from "./workspace/timelineScrollAnchoring";
 
 /**
  * The chat lens over the original pane (plan task 12).
@@ -40,6 +81,8 @@ export interface MobileChatWorkspaceProps {
   readonly onSendMessage: (text: string) => boolean | void;
   readonly voiceConversation?: VoiceConversationProps;
   readonly onStopExecution?: () => void;
+  /** Interrupt the running turn (t3code composer.md:269 — shown when running with an empty draft). */
+  readonly onInterrupt?: () => void;
   readonly isRunning?: boolean;
   readonly activityState?: ActivityState;
   readonly activityLabel?: string;
@@ -130,15 +173,160 @@ export interface MobileChatWorkspaceProps {
   readonly showHeader?: boolean;
   readonly onBack?: () => void;
   readonly headerActions?: React.ReactNode;
+
+  // --- Frozen chat-parity seams (plan chat-t3-parity-20261125, shared interfaces) ---
+  /**
+   * INTEGRATION NOTE (lane G5): the props below are the workspace's half of the frozen
+   * composer/message contracts. G3 (composer) and G4 (messages) add the rendering halves in
+   * parallel; until those land, this component accepts them so callers can wire today, and
+   * the rendering is a documented no-op — none of these fake behaviour on their own.
+   *
+   * - `chipSources`, `permissionControl`: rendered by the composer lane (composer/chipTypes.ts).
+   * - `sentPrompts`, `onEditQueued`, `onRemoveQueued`, `onSendQueuedNow`, `onInterruptQueued`:
+   *   consumed by the composer's prompt history and queued-row actions once G3 adds them.
+   * - `onCiteSelection`: emitted by the transcript (G4); the owner wires it to
+   *   `composerHandleRef.current.insertCitation` (`MobileChatComposerHandle` grows it in G3).
+   * - `onOpenFile` / `onOpenExternal`: consumed by file links and external links in the
+   *   message renderer (G4).
+   * - `toolCallVisibility`, `announceLevel`, `onSaveImage`, `onCopyImage`: consumed by the
+   *   message renderer (G4), which owns the filter and the announcement copy. The mode is
+   *   forwarded, not applied here: only the renderer knows the find-bar override and which of
+   *   a turn's parts zen keeps.
+   */
+  readonly chipSources?: ChipSources;
+  readonly permissionControl?: PermissionControl;
+  readonly executionModeControl?: ExecutionModeControl;
+  readonly agentControl?: AgentControl;
+  readonly thinkingControl?: ThinkingControl;
+  readonly fastModeControl?: FastModeControl;
+  readonly additionalDirsControl?: AdditionalDirsControl;
+  readonly queueModeControl?: QueueModeControl;
+  readonly sentPrompts?: readonly string[];
+  readonly onEditQueued?: (id: string, text: string) => void;
+  readonly onRemoveQueued?: (id: string) => void;
+  readonly onSendQueuedNow?: (id: string) => void;
+  readonly onInterruptQueued?: (id: string) => void;
+  readonly onCiteSelection?: (citation: CitationInsert) => void;
+  readonly toolCallVisibility?: ToolCallVisibility;
+  readonly announceLevel?: AnnounceLevel;
+  readonly onSaveImage?: (src: string, name?: string) => void;
+  readonly onCopyImage?: (src: string) => void;
+  readonly onOpenFile?: (path: string, line?: number) => void;
+  readonly onOpenExternal?: (url: string) => void;
+  /** "Edit from here" (t3code composer.md:191-193); absent leaves the affordance off every turn. */
+  readonly onEditFrom?: (seq: number) => void;
+  /**
+   * Extra controls for this lane, drawn directly above the message box: the structured lane's
+   * Undo / Compact / Clear, which are composer commands t3code also offers as visible controls
+   * (composer.md:283-315). Absent draws nothing.
+   */
+  readonly composerToolbar?: React.ReactNode;
+  /**
+   * Whether this pane is the one the user is looking at. A hidden pane (a background tab) is not,
+   * and neither is the other leaf of a split until the user points at it. Window-scoped shortcuts
+   * (Find) answer only from the active pane; absent means this pane is the only one.
+   */
+  readonly active?: boolean;
+}
+export type {
+  AdditionalDirsControl,
+  AgentControl,
+  ChipSources,
+  CitationInsert,
+  ExecutionModeControl,
+  FastModeControl,
+  PermissionControl,
+  PermissionMode,
+  QueueModeControl,
+  ThinkingControl,
+};
+
+/**
+ * How much of a turn's tool work the reader sees, mirroring t3code's pane chat preference.
+ * `zen` hides the tool rows like `hide-all`; the composer chrome it also folds belongs to
+ * the composer lane (G3), not here.
+ */
+export type ToolCallVisibility = "all" | "hide-successful" | "hide-all" | "zen";
+
+/**
+ * Drops the tool rows a visibility mode hides; thinking prose stays in every mode.
+ *
+ * This covers the legacy `toolCalls` path only. Those rows are `ToolCallCardProps`, whose `kind`
+ * is optional and unset by the history mapper, so the message renderer's own part-level filter
+ * (which keys on `kind`) cannot classify them and keeps them in every mode. A turn carrying
+ * `referenceParts` is filtered by the renderer instead, which also knows the find-bar override
+ * and which parts zen keeps; forwarding the mode there is what lets those rules apply.
+ */
+export function applyToolCallVisibility<T>(
+  visibility: ToolCallVisibility,
+  toolCalls: readonly T[] | undefined,
+): T[] | undefined {
+  if (!toolCalls || toolCalls.length === 0 || visibility === "all") return toolCalls ? [...toolCalls] : undefined;
+  // Approvals, questions, and errors always show (activity-log.md). A failed call is the one
+  // row every mode keeps, so it survives hide-all and zen instead of vanishing with the rest.
+  const isFailed = (call: T) =>
+    typeof call === "object" && call !== null && "status" in call && (call as { status?: unknown }).status === "error";
+  if (visibility === "hide-all" || visibility === "zen") {
+    const failed = toolCalls.filter(isFailed);
+    return failed.length > 0 ? failed : undefined;
+  }
+  // The status field exists only on the tool-call shape, never on thinking blocks.
+  return toolCalls.filter((call) => isFailed(call) || !((typeof call === "object" && call !== null && "status" in call) && (call as { status?: unknown }).status === "success"));
 }
 
-/** One distance from the bottom decides both following the stream and offering the pill. */
-const FOLLOW_THRESHOLD_PX = 80;
+/**
+ * The assistant messages that close their turn, for zen: the last assistant message that has prose
+ * before the next user message (or the end of the transcript). A rich turn marks its own final
+ * reply by part phase, and that mark always wins; this covers the legacy path, whose turns carry
+ * no phases, so zen keeps an answer instead of hiding it along with the commentary around it.
+ *
+ * The last message alone is not the answer: an agent that ends a turn with a tool-only message
+ * (a final search, a failing command) would hand the "final reply" mark to a message with no prose,
+ * and zen would then hide the answer that precedes it. A turn with no prose at all falls back to
+ * its last assistant message, so the mark still exists where the renderer expects one.
+ */
+export function finalReplyIds(messages: readonly MobileChatMessageProps[]): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]!.role !== "assistant") continue;
+    const next = messages[index + 1];
+    if (next !== undefined && next.role !== "user") continue;
+    // The turn ends here: prefer the last assistant message of the run that carries prose.
+    let start = index;
+    while (start > 0 && messages[start - 1]!.role === "assistant") start -= 1;
+    let answer: string | null = null;
+    for (let cursor = start; cursor <= index; cursor += 1) {
+      const candidate = messages[cursor]!;
+      if (hasProsePart(candidate)) answer = candidate.id;
+    }
+    ids.add(answer ?? messages[index]!.id);
+  }
+  return ids;
+}
+
+/** Whether a turn draws prose: its text parts, or the legacy `content`. */
+function hasProsePart(message: MobileChatMessageProps): boolean {
+  if (message.referenceParts && message.referenceParts.length > 0) {
+    return message.referenceParts.some((part) => part.kind === "text" && part.text.trim().length > 0);
+  }
+  return message.content.trim().length > 0;
+}
 
 function prefersReducedMotion(): boolean {
   return (
     typeof window !== "undefined" &&
     window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
+}
+
+/**
+ * The minimap shows only where its own media query does (fine pointer, desktop width), so
+ * the per-scroll measurement that feeds it is skipped everywhere else.
+ */
+function minimapVisible(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(pointer: fine) and (min-width: 1024px)").matches === true
   );
 }
 
@@ -252,11 +440,36 @@ function aggregateReferenceAbandoned(
   return summary === null ? { count, branches } : { count, branches, summary };
 }
 
-export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
+/**
+ * Find in thread (t3code, docs/user/activity-log.md). One provider per thread: Cmd/Ctrl+F opens
+ * the bar, Escape closes it, and while it is open the zen-hidden in-between turns show again.
+ * The hotkey has to run inside the provider to see its state, so it lives in this child; the
+ * workspace's own markup is the provider's child unchanged.
+ */
+const ThreadFindHotkey: React.FC<{ isActive: () => boolean }> = ({ isActive }) => {
+  useThreadFindHotkey(useThreadFind(), isActive);
+  return null;
+};
+
+export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({ active = true, ...props }) => {
+  // Which mounted pane answers Find: a background tab and the unfocused leaf of a split must not.
+  const paneClaim = usePaneActivityClaim(active);
+  return (
+    <ThreadFindProvider>
+      <ThreadFindHotkey isActive={paneClaim.isActive} />
+      <MobileChatWorkspaceBody {...props} paneClaim={paneClaim} />
+    </ThreadFindProvider>
+  );
+};
+
+const MobileChatWorkspaceBody: React.FC<
+  MobileChatWorkspaceProps & { readonly paneClaim: PaneActivityClaim }
+> = ({
   messages,
   onSendMessage,
   voiceConversation,
   onStopExecution,
+  onInterrupt,
   isRunning = false,
   activityState = "idle",
   activityLabel,
@@ -312,6 +525,29 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   headerSubtitle,
   onBack,
   headerActions,
+  toolCallVisibility = "all",
+  chipSources,
+  permissionControl,
+  executionModeControl,
+  agentControl,
+  thinkingControl,
+  fastModeControl,
+  additionalDirsControl,
+  queueModeControl,
+  sentPrompts,
+  onEditQueued,
+  onRemoveQueued,
+  onSendQueuedNow,
+  onInterruptQueued,
+  onCiteSelection,
+  onOpenFile,
+  onOpenExternal,
+  onEditFrom,
+  announceLevel,
+  onSaveImage,
+  onCopyImage,
+  composerToolbar,
+  paneClaim,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -354,14 +590,24 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   // Announced to screen readers when a running turn ends; aria-busy alone says nothing then.
   const [turnAnnouncement, setTurnAnnouncement] = useState("");
   const wasRunningRef = useRef(isRunning);
+  // True from the moment a running turn ends until the next one starts: the live turn's
+  // transcript row is idle then, which is what makes the per-turn announcer say Done. Opening a
+  // thread whose turns already finished announces nothing, because no turn ended here.
+  const [liveTurnEnded, setLiveTurnEnded] = useState(false);
   // the viewport as it was before this commit, so an older page can be anchored
-  const viewportRef = useRef<{
-    top: number;
-    height: number;
-    count: number;
-    atBottom: boolean;
-    firstId: string | null;
-  }>({ top: 0, height: 0, count: 0, atBottom: true, firstId: null });
+  const viewportRef = useRef<TimelineViewportSnapshot>(EMPTY_VIEWPORT);
+  // Where the stream is right now, for the minimap's current marker.
+  const [minimapViewport, setMinimapViewport] = useState({
+    scrollTop: 0,
+    viewportHeight: 0,
+    topById: new Map<string, number>(),
+  });
+  // t3code's visit model: messages that arrived while the reader was scrolled away stay
+  // unread, and one divider marks where they begin.
+  const [visit, setVisit] = useState<ThreadVisitState>(EMPTY_VISIT);
+  useEffect(() => {
+    setVisit((previous) => advanceVisit(previous, messages, isAtBottom));
+  }, [messages, isAtBottom]);
 
   // Only a press on the pill animates; following a stream jumps, and reduced motion never animates.
   const scrollToBottom = useCallback((smooth = false) => {
@@ -379,13 +625,16 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
 
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const atBottom = distanceFromBottom < FOLLOW_THRESHOLD_PX;
-    viewportRef.current = {
-      top: el.scrollTop,
-      height: el.scrollHeight,
-      count: messages.length,
-      atBottom,
-      firstId: messages[0]?.id ?? null,
-    };
+    viewportRef.current = snapshotViewport(el.scrollTop, el.scrollHeight, el.clientHeight, messages);
+    if (minimapVisible()) {
+      const topById = new Map<string, number>();
+      const containerRect = el.getBoundingClientRect();
+      for (const node of Array.from(el.querySelectorAll<HTMLElement>("[data-message-id]"))) {
+        const id = node.dataset.messageId;
+        if (id) topById.set(id, node.getBoundingClientRect().top - containerRect.top + el.scrollTop);
+      }
+      setMinimapViewport({ scrollTop: el.scrollTop, viewportHeight: el.clientHeight, topById });
+    }
     setIsAtBottom(atBottom);
     setShowScrollPill(!atBottom);
   }, [messages]);
@@ -396,12 +645,18 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     if (isRunning) {
       // cleared so the next finished turn is a text change and is announced again
       setTurnAnnouncement("");
+      setLiveTurnEnded(false);
       return;
     }
     if (!wasRunning) return;
+    setLiveTurnEnded(true);
+    // With a level, the live turn's own announcer (t3code ThreadActivityAnnouncer) says Done;
+    // this region is the fallback for an owner that supplies no level, and two live regions
+    // saying the same thing would be read twice.
+    if (announceLevel !== undefined) return;
     const last = messages[messages.length - 1];
     setTurnAnnouncement(last?.role === "assistant" ? "Assistant finished responding." : "");
-  }, [isRunning, messages]);
+  }, [isRunning, messages, announceLevel]);
 
   // An older page lands ABOVE what the reader is looking at: keep their place instead of
   // jumping. A page that lands below keeps the bottom-follow rule.
@@ -409,30 +664,14 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     const el = scrollContainerRef.current;
     if (!el) return;
     const previous = viewportRef.current;
-    const firstId = messages[0]?.id ?? null;
-    // a page was prepended only when the first turn changed and the old first turn is still here
-    const prepended =
-      previous.firstId !== null &&
-      firstId !== previous.firstId &&
-      messages.some((message) => message.id === previous.firstId);
-    if (
-      prepended &&
-      messages.length > previous.count &&
-      !previous.atBottom &&
-      el.scrollHeight > previous.height
-    ) {
+    const anchor = anchoredScrollTop(previous, messages, el.scrollHeight, el.scrollTop);
+    if (anchor !== null) {
       // an animated anchor would show the reader's place jump
       el.style.scrollBehavior = "auto";
-      el.scrollTop = previous.top + (el.scrollHeight - previous.height);
+      el.scrollTop = anchor;
       el.style.scrollBehavior = "";
     }
-    viewportRef.current = {
-      top: el.scrollTop,
-      height: el.scrollHeight,
-      count: messages.length,
-      atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX,
-      firstId,
-    };
+    viewportRef.current = snapshotViewport(el.scrollTop, el.scrollHeight, el.clientHeight, messages);
   }, [messages]);
 
   // Set by a pill press: its own smooth scroll already heads to the bottom, so the follow effect
@@ -453,10 +692,104 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   // The page discloses abandoned branches once; a turn never repeats them.
   const abandoned = pageAbandoned ?? aggregateReferenceAbandoned(messages);
 
+  // PageUp/PageDown page the stream itself (the composer pages its own text); IME-buffered
+  // keydowns are refused, matching the reference page-scroll controller.
+  const pageScrollCancelRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => pageScrollCancelRef.current?.(), []);
+  const handlePageKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const native = event.nativeEvent as KeyboardEvent;
+    const key: PageScrollKey | null = timelinePageScrollKey(
+      {
+        key: event.key,
+        defaultPrevented: event.defaultPrevented,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        isComposing: native.isComposing,
+        keyCode: event.keyCode,
+      },
+      { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
+    );
+    if (!key) return;
+    event.preventDefault();
+    pageScrollCancelRef.current?.();
+    pageScrollCancelRef.current = animatePageScroll(el, key, prefersReducedMotion(), {
+      now: () => performance.now(),
+      requestFrame: (callback) => window.requestAnimationFrame(callback),
+      cancelFrame: (handle) => window.cancelAnimationFrame(handle as number),
+    });
+  }, []);
+
+  const navigateToMessage = useCallback((messageId: string) => {
+    const el = scrollContainerRef.current;
+    const target = el?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"]`);
+    target?.scrollIntoView({ block: "start" });
+  }, []);
+
+  // A cited selection goes into the message box, not the clipboard: the reader is annotating
+  // the prompt they are about to send.
+  const handleCiteSelection = useCallback((citation: CitationInsert) => {
+    citeIntoComposer(composerRef.current, citation, onCiteSelection);
+  }, [onCiteSelection]);
+
+  const composerParity = composerSeams({
+    chipSources,
+    permissionControl,
+    executionModeControl,
+    agentControl,
+    thinkingControl,
+    fastModeControl,
+    additionalDirsControl,
+    queueModeControl,
+    sentPrompts,
+    onInterrupt,
+    onEditQueued,
+    onRemoveQueued,
+    onSendQueuedNow,
+    onInterruptQueued,
+  });
+  const messageParity = messageSeams({
+    onCiteSelection: handleCiteSelection,
+    toolCallVisibility,
+    announceLevel,
+    onSaveImage,
+    onCopyImage,
+    onOpenFile,
+    onOpenExternal,
+    onEditFrom,
+  });
+
+  // The project name t3code's draft hero headings carry: the pane's worktree, else the workspace.
+  const heroProject = worktreeLabel?.trim() || workspaceLabel?.trim() || null;
+
+  // Zen keeps the reply that closes a turn; a legacy turn carries no phase to say which it is.
+  const finalIds = finalReplyIds(messages);
+
+  // The live turn is the last assistant row: while the pane runs, that row carries the pane's
+  // activity so the announcer can read it, and the moment the turn ends it goes idle, which is
+  // what says Done. A turn opened after it finished announces nothing.
+  const lastAssistantIndex = (() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]!.role === "assistant") return index;
+    }
+    return -1;
+  })();
+  const liveTurnState: ActivityState | undefined = isRunning
+    ? activityState === "idle"
+      ? undefined
+      : activityState
+    : liveTurnEnded
+      ? "idle"
+      : undefined;
+
   return (
     <div
       data-testid="mobile-chat-workspace"
       data-workspace-area="conversation"
+      {...paneClaim.claimProps}
       className={cn(
         "relative flex flex-col w-full h-full min-h-0 bg-chat-screen text-chat-foreground overflow-hidden",
         className
@@ -533,6 +866,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
+        onKeyDown={handlePageKey}
         data-testid="chat-message-stream"
         aria-busy={isRunning}
         className="flex-1 min-h-0 overflow-y-auto px-3 pt-4 pb-14 overscroll-contain select-text sm:px-5"
@@ -565,20 +899,33 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         {!hasMessages ? (
           <div
             data-testid="chat-empty-state"
-            className="mx-auto flex min-h-[40vh] w-full max-w-2xl flex-col items-start justify-center px-1 my-auto select-text"
+            className="mx-auto flex min-h-[40vh] w-full max-w-2xl flex-col items-center justify-center gap-6 px-1 my-auto select-text"
           >
-            <div className="w-full space-y-1 border-l border-chat-border pl-3">
-              {workspaceLabel ? (
-                <div
-                  data-testid="chat-empty-context"
-                  className="font-mono text-xs text-chat-foreground-secondary truncate"
-                >
-                  {`${workspaceLabel}${worktreeLabel ? ` · ${worktreeLabel}` : ""}`}
-                </div>
-              ) : null}
-              <p className="text-sm text-chat-foreground">
-                Messages go to the agent in this session's terminal.
-              </p>
+            {/* t3code's DraftHeroProjectHeading: one question naming the project, centered. */}
+            <div data-testid="chat-draft-hero" className="w-full text-center">
+              <h1 className="text-2xl font-normal tracking-tight text-chat-foreground sm:text-3xl">
+                {heroProject ? (
+                  <>
+                    What should we build in{" "}
+                    <span className="font-medium">{heroProject}</span>?
+                  </>
+                ) : (
+                  "What should we build?"
+                )}
+              </h1>
+              <div className="mt-3 w-full space-y-1 border-l border-chat-border pl-3 text-left">
+                {workspaceLabel ? (
+                  <div
+                    data-testid="chat-empty-context"
+                    className="font-mono text-xs text-chat-foreground-secondary truncate"
+                  >
+                    {`${workspaceLabel}${worktreeLabel ? ` · ${worktreeLabel}` : ""}`}
+                  </div>
+                ) : null}
+                <p className="text-sm text-chat-foreground">
+                  Messages go to the agent in this session's terminal.
+                </p>
+              </div>
             </div>
             {starterPrompts.length > 0 ? (
             <div className="mt-3 flex flex-col gap-2 w-full">
@@ -599,27 +946,37 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           </div>
         ) : (
           <>
-            {messages.map((msg) => (
-              <MobileChatMessage
-                key={msg.id}
-                id={msg.id}
-                role={msg.role}
-                content={msg.content}
-                timestamp={msg.timestamp}
-                avatarUrl={msg.avatarUrl}
-                senderName={msg.senderName}
-                attachments={msg.attachments}
-                toolCalls={msg.toolCalls}
-                approvalAction={msg.approvalAction}
-                activityState={msg.activityState}
-                durationLabel={msg.durationLabel}
-                durationStartedAt={msg.durationStartedAt}
-                pending={msg.pending ?? msg.id.startsWith("pending-")}
-                referenceParts={msg.referenceParts}
-                referenceSource={msg.referenceSource}
-                referenceMeta={msg.referenceMeta}
-                referenceContext={referenceContext}
-              />
+            {messages.map((msg, index) => (
+              <div key={msg.id} data-message-id={msg.id}>
+                {visit.watermarkId === msg.id ? <ThreadVisitWatermark /> : null}
+                <MobileChatMessage
+                  id={msg.id}
+                  role={msg.role}
+                  content={msg.content}
+                  timestamp={msg.timestamp}
+                  avatarUrl={msg.avatarUrl}
+                  senderName={msg.senderName}
+                  attachments={msg.attachments}
+                  toolCalls={applyToolCallVisibility(toolCallVisibility, msg.toolCalls)}
+                  approvalAction={msg.approvalAction}
+                  // The live turn is the last assistant row: it is the one whose end is announced.
+                  // A row that carries its own state keeps it.
+                  activityState={
+                    msg.activityState ??
+                    (index === lastAssistantIndex ? liveTurnState : undefined)
+                  }
+                  durationLabel={msg.durationLabel}
+                  durationStartedAt={msg.durationStartedAt}
+                  pending={msg.pending ?? msg.id.startsWith("pending-")}
+                  referenceParts={msg.referenceParts}
+                  referenceSource={msg.referenceSource}
+                  referenceMeta={msg.referenceMeta}
+                  referenceContext={referenceContext}
+                  isTurnFinalReply={msg.isTurnFinalReply ?? finalIds.has(msg.id)}
+                  editFromSeq={msg.editFromSeq}
+                  {...messageParity}
+                />
+              </div>
             ))}
           </>
         )}
@@ -633,6 +990,17 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         <div ref={messagesEndRef} className="h-2 w-full" />
         </div>
       </div>
+
+      <TimelineMinimap
+        messages={messages}
+        currentIndex={resolveTimelineMinimapCurrentIndex({
+          items: deriveTimelineMinimapItems(messages),
+          topById: minimapViewport.topById,
+          scrollTop: minimapViewport.scrollTop,
+          viewportHeight: minimapViewport.viewportHeight,
+        })}
+        onNavigate={navigateToMessage}
+      />
 
       <footer className="relative z-20 flex max-h-[50%] shrink-0 flex-col">
         <div className="relative flex min-h-0 flex-col">
@@ -661,6 +1029,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             held={continuationHeld}
             onContinue={onContinueInNewPane}
           />
+          {composerToolbar}
           <MobileChatComposer
             ref={bindComposer}
             value={activeDraft}
@@ -688,6 +1057,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             onSend={onSendMessage}
             voiceConversation={voiceConversation}
             onStop={onStopExecution}
+            onInterrupt={onInterrupt}
             isRunning={isRunning}
             disabled={disabled}
             placeholder={composerPlaceholder}
@@ -696,6 +1066,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             controlNotice={controlNotice}
             dictationFence={dictationFence}
             dictationSuspended={dictationSuspended}
+            {...composerParity}
           />
           </div>
         </div>

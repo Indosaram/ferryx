@@ -45,6 +45,7 @@ pub(crate) mod test_support;
 pub mod agent_history;
 pub mod scoped_contracts;
 pub mod session;
+pub mod structured_chat;
 #[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
 mod shortcut_dispatch;
 pub mod ssh;
@@ -2096,6 +2097,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::agent_prompt::cmd_agent_prompt_resolve_ambiguous,
         crate::ipc::reference_chat::cmd_desktop_reference_chat_identity,
         crate::ipc::reference_chat::cmd_desktop_reference_chat,
+        crate::ipc::reference_chat::cmd_desktop_reference_chat_file_stage,
+        crate::ipc::reference_chat::cmd_desktop_reference_chat_file_remove,
+        crate::ipc::structured_chat::cmd_structured_chat,
         cmd_project_register,
         cmd_sync_desktop_local_projects,
         cmd_sync_desktop_sidebar,

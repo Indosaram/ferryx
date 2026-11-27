@@ -16,14 +16,30 @@
  * Presentational: the transport is the integration owner's (task 12). The card awaits
  * `onAnswer`, so the flight, the stale refusal and the focus hand-off stay its own.
  */
-import React, { useCallback, useEffect, useId, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { AlertCircle, Check, Loader2, Send } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { haptic } from "../haptics";
 import { userFacingError } from "../userFacingError";
 import { isImeConfirmingKey } from "./imeKeys";
+import { referenceMentionPathIsSafe, referenceMentionPathOf } from "./referenceFiles";
+import type { ReferenceFileReceipt } from "./referenceTypes";
+import { ReferenceAnswerAttachments } from "./promptAttach/ReferenceAnswerAttachments";
+import {
+  promptAttachmentDraftKey,
+  promptAttachUploadScope,
+  referenceAnswerAttachmentStore,
+} from "./promptAttach/referencePromptAttach";
 import { ApprovalActionCard } from "./MobileChatComponents";
 import {
+  referenceAnswerTextWithAttachments,
   REFERENCE_PROMPT_STALE_MESSAGE,
   referenceFocusFollowsAnswer,
   referencePressOrigin,
@@ -58,6 +74,19 @@ export interface ReferencePromptCardProps {
   readonly onDismissAmbiguous?: () => Promise<void>;
   /** An answer went out; `toMessageBox`: the keyboard's focus was in the card and may go on to the message box. */
   readonly onAnswered?: (toMessageBox: boolean) => void;
+  /**
+   * Stage the picked files on the environment the thread runs on and return their staged
+   * receipts — the same receipt type the composer's staged files use. Absent where the
+   * server cannot take answer attachments (t3code: "older servers"): the card then shows
+   * no attach control and takes no pasted images.
+   */
+  readonly onAttachAnswerFiles?: (files: readonly File[]) => Promise<readonly ReferenceFileReceipt[]>;
+  /**
+   * The pane's stable identity, for the answer-attachment set's key: the session id, or
+   * `referenceTargetKey` of the remote target. Prompt ids are content hashes, so without it
+   * the same question in another session or on another host shares one set of files.
+   */
+  readonly answerScope?: string;
   /** An option picked by a typed message, waiting in the card for Confirm. */
   readonly typedAnswer?: ReferenceTypedAnswer | null;
   readonly onTypedAnswerDone?: () => void;
@@ -93,6 +122,28 @@ const REMEMBERS_CHOICE = /\b(always|don'?t ask again|for this session|remember)\
 const FALLBACK_HINT =
   "This session is waiting, but Ferryx can't read its question. Answer it in the terminal.";
 
+/**
+ * Can a key pressed anywhere on the page be read as this card's? Only while the card is in
+ * the pane the user is looking at: panes stay mounted while hidden (`DesktopChatPane`'s
+ * `hidden={!visible}`, `TerminalSplitView`'s `hidden` tab containers), and a card in a
+ * background pane must not take the digit the user meant for the visible one (t3code:
+ * `!isCollapsed && !backgroundThread`).
+ */
+function cardIsOnScreen(card: HTMLElement | null): boolean {
+  if (card === null || card.closest('[hidden], [inert], [aria-hidden="true"]') !== null) {
+    return false;
+  }
+  const view = card.ownerDocument.defaultView;
+  if (view === null) return true;
+  // `hidden` as a class (`display: none`) and `invisible` (`visibility: hidden`) leave no
+  // ancestor attribute to look for, so ask what the browser actually lays out.
+  for (let node: HTMLElement | null = card; node !== null; node = node.parentElement) {
+    const style = view.getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+  }
+  return true;
+}
+
 export function ReferencePromptCard({
   prompt,
   screenRevision,
@@ -102,6 +153,8 @@ export function ReferencePromptCard({
   onAnswered,
   typedAnswer = null,
   onTypedAnswerDone,
+  onAttachAnswerFiles,
+  answerScope,
   error = null,
   className,
 }: ReferencePromptCardProps) {
@@ -132,6 +185,98 @@ export function ReferencePromptCard({
   useEffect(() => {
     if (typedIndex !== null) confirmButtonRef.current?.focus({ preventScroll: true });
   }, [typedIndex]);
+
+  // Answer attachments (t3code question-attachments parity): one set per question, kept
+  // while the user moves between questions, never touching the message box's draft. The key
+  // is the pane's identity plus the question's: a prompt id is a content hash, so the same
+  // question asked elsewhere must not find this pane's files. The fallback scope is pinned on
+  // the card's first render, so an owner that re-creates its upload callback inline (a new
+  // function each render) does not move the key out from under a set that is uploading.
+  const [fallbackScope] = useState(() => promptAttachUploadScope(onAttachAnswerFiles));
+  const attachKey = promptAttachmentDraftKey(
+    prompt.id,
+    answerScope != null && answerScope.length > 0 ? answerScope : fallbackScope,
+  );
+  const attachments = useSyncExternalStore(
+    referenceAnswerAttachmentStore.subscribe,
+    () => referenceAnswerAttachmentStore.get(attachKey),
+  );
+  const uploadsBusy = attachments.some((each) => each.status === "uploading");
+  const uploadsFailed = attachments.some((each) => each.status === "failed");
+  // An upload still in flight, or one that failed and was not retried or removed, holds
+  // the answer back (t3code: "wait for uploads to finish before submitting").
+  const answerHeldForUploads = attachments.length > 0 && (uploadsBusy || uploadsFailed);
+  const attachmentsReady = attachments.length > 0 && !uploadsBusy && !uploadsFailed;
+
+  const runUploads = useCallback(
+    async (
+      added: readonly { readonly id: string; readonly file: File }[],
+      upload: (files: readonly File[]) => Promise<readonly ReferenceFileReceipt[]>,
+      key: string,
+    ) => {
+      const ids = added.map((each) => each.id);
+      // The answer set outlives the card (the user may move to another question while it
+      // uploads), so the outcome always lands in the store, mounted card or not.
+      try {
+        const receipts = await upload(added.map((each) => each.file));
+        referenceAnswerAttachmentStore.markReady(key, ids, receipts);
+      } catch (cause) {
+        referenceAnswerAttachmentStore.markFailed(
+          key,
+          ids,
+          userFacingError(cause, { action: "upload these files" }),
+        );
+      }
+    },
+    [],
+  );
+
+  const addAnswerFiles = useCallback(
+    (files: readonly File[]) => {
+      if (onAttachAnswerFiles === undefined || files.length === 0) return;
+      const { added, refusals } = referenceAnswerAttachmentStore.add(attachKey, files);
+      if (refusals.length > 0) {
+        setLocalError(refusals.map((each) => each.reason).join(" "));
+      }
+      if (added.length > 0) void runUploads(added, onAttachAnswerFiles, attachKey);
+    },
+    [attachKey, onAttachAnswerFiles, runUploads],
+  );
+
+  const retryAnswerUpload = useCallback(
+    (id: string) => {
+      if (onAttachAnswerFiles === undefined) return;
+      const attachment = referenceAnswerAttachmentStore.get(attachKey).find((each) => each.id === id);
+      if (attachment === undefined || attachment.status !== "failed") return;
+      referenceAnswerAttachmentStore.markRetrying(attachKey, id);
+      void runUploads([attachment], onAttachAnswerFiles, attachKey);
+    },
+    [attachKey, onAttachAnswerFiles, runUploads],
+  );
+
+  /**
+   * The custom text an answer turns in when files are attached: the typed (or option
+   * number) text with each uploaded file's saved path appended as an `@path ` mention.
+   * A mention the staged receipt does not vouch for refuses the send and keeps the draft.
+   */
+  const composeAnswerWithAttachments = useCallback(
+    (baseText: string): string | null => {
+      const receipts = referenceAnswerAttachmentStore.readyReceipts(attachKey);
+      const paths: string[] = [];
+      for (const receipt of receipts) {
+        const path = referenceMentionPathOf(receipt.mentionText);
+        if (path === null || !referenceMentionPathIsSafe(path)) {
+          setLocalError(
+            "An attached file's saved path cannot be added to the answer. Remove it and attach the file again.",
+          );
+          return null;
+        }
+        paths.push(path);
+      }
+      return referenceAnswerTextWithAttachments(baseText, paths);
+    },
+    [attachKey],
+  );
 
   const answer = useCallback(
     // `pressFelt`: the approval card already gave the press its own haptic
@@ -169,6 +314,8 @@ export function ReferencePromptCard({
           return false;
         }
         if (!pressFelt) haptic("success");
+        // the answer's attachments belong to it now: the next answer starts an empty set
+        referenceAnswerAttachmentStore.clear(attachKey);
         // and read again: the answer took a moment, and the user may have gone on to something else
         const card = cardRef.current;
         const active = document.activeElement;
@@ -197,7 +344,7 @@ export function ReferencePromptCard({
       setPending(false);
       return true;
     },
-    [onAnswer, onAnswered, onPromptChanged, prompt.id, screenRevision],
+    [onAnswer, onAnswered, onPromptChanged, prompt.id, screenRevision, attachKey],
   );
 
   const toggle = (index: number): void => {
@@ -205,6 +352,21 @@ export function ReferencePromptCard({
       current.includes(index) ? current.filter((each) => each !== index) : [...current, index],
     );
   };
+
+  /** A picked option goes out on its own, or with the attachments' mentions as its text. */
+  const submitChoice = useCallback(
+    (index: number, press?: ReferencePromptPress, pressFelt = false): void => {
+      if (attachmentsReady) {
+        const composed = composeAnswerWithAttachments(String(index + 1));
+        if (composed === null) return;
+        void answer({ customText: composed }, press, pressFelt);
+        return;
+      }
+      void answer({ optionIndex: index }, press, pressFelt);
+    },
+    [answer, attachmentsReady, composeAnswerWithAttachments],
+  );
+
 
   const titleId = useId();
   const customLabelId = useId();
@@ -261,6 +423,65 @@ export function ReferencePromptCard({
   const approvalQuestion = prompt.question === prompt.title ? null : prompt.question;
   const shownError = localError ?? error ?? null;
   const pickedIndex = picked ?? typedAnswer?.optionIndex ?? null;
+
+  // Number-key answers, t3code parity (ComposerPendingUserInputPanel's digit shortcuts and
+  // the approval card's Allow once / Allow for session / Decline): 1–9 pick an option while
+  // the question is answerable. A single-select goes out right away, as t3code's digit
+  // shortcut answers it; a multiple choice only toggles. Nothing fires from a text field
+  // (type "1" into the answer freely), from an IME-confirming Enter, or under a modifier.
+  useEffect(() => {
+    if (
+      pending ||
+      prompt.answerStatus === "outcomeUnknown" ||
+      prompt.fallback === true ||
+      typedAnswer != null ||
+      answerHeldForUploads
+    ) {
+      return;
+    }
+    const handler = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isImeConfirmingKey(event as unknown as React.KeyboardEvent, false)) return;
+      const digit = Number.parseInt(event.key, 10);
+      if (Number.isNaN(digit) || digit < 1 || digit > 9) return;
+      const index = digit - 1;
+      if (!selectableIndices.includes(index)) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+      if (
+        target instanceof HTMLElement &&
+        target.closest(
+          '[contenteditable]:not([contenteditable="false"]), [role="dialog"], [aria-modal="true"], [role="menu"], [role="combobox"], [data-slot$="popup"]',
+        )
+      ) {
+        return;
+      }
+      // A pane keeps its card mounted while it is hidden: only the card the user can see
+      // may take a digit, or the background pane answers the question in front of them.
+      if (!cardIsOnScreen(cardRef.current)) return;
+      event.preventDefault();
+      if (prompt.multiSelect) toggle(index);
+      else submitChoice(index);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-arms on any answerability change
+  }, [
+    pending,
+    prompt.answerStatus,
+    prompt.fallback,
+    prompt.multiSelect,
+    typedAnswer,
+    answerHeldForUploads,
+    selectableIndices,
+    submitChoice,
+  ]);
 
   const bodyBlock =
     prompt.body != null && prompt.body.length > 0 ? (
@@ -362,10 +583,14 @@ export function ReferencePromptCard({
           declineLabel={prompt.options[twoOptionApproval[1] ?? 1]?.label ?? "Decline"}
           allowCustomFeedback={false}
           onAccept={(_feedback, event) =>
-            prompt.answerStatus === "outcomeUnknown" ? undefined : void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event, true)
+            prompt.answerStatus === "outcomeUnknown" || answerHeldForUploads
+              ? undefined
+              : void submitChoice(twoOptionApproval[0] ?? 0, event, true)
           }
           onDecline={(_feedback, event) =>
-            prompt.answerStatus === "outcomeUnknown" ? undefined : void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event, true)
+            prompt.answerStatus === "outcomeUnknown" || answerHeldForUploads
+              ? undefined
+              : void submitChoice(twoOptionApproval[1] ?? 1, event, true)
           }
           isSubmitting={pending || prompt.answerStatus === "outcomeUnknown"}
         />
@@ -458,14 +683,31 @@ export function ReferencePromptCard({
               type="button"
               data-testid="reference-prompt-submit"
               disabled={
-                pending || prompt.answerStatus === "outcomeUnknown" || (prompt.multiSelect ? selected.length === 0 : pickedIndex === null)
+                pending || prompt.answerStatus === "outcomeUnknown" || answerHeldForUploads || (prompt.multiSelect ? selected.length === 0 : pickedIndex === null)
               }
               className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:bg-chat-surface-raised disabled:text-chat-foreground-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={(event) => {
                 if (prompt.multiSelect) {
-                  void answer({ optionIndices: [...selected].sort((a, b) => a - b) }, event);
+                  const indices = [...selected].sort((a, b) => a - b);
+                  if (attachmentsReady) {
+                    const composed = composeAnswerWithAttachments(
+                      indices.map((each) => each + 1).join(" "),
+                    );
+                    if (composed !== null) void answer({ customText: composed }, event);
+                    return;
+                  }
+                  void answer({ optionIndices: indices }, event);
                 } else if (pickedIndex !== null) {
-                  void answer({ optionIndex: pickedIndex }, event).then((current) => {
+                  const send = (): Promise<boolean> =>
+                    attachmentsReady
+                      ? (() => {
+                          const composed = composeAnswerWithAttachments(String(pickedIndex + 1));
+                          return composed !== null
+                            ? answer({ customText: composed }, event)
+                            : Promise.resolve(false);
+                        })()
+                      : answer({ optionIndex: pickedIndex }, event);
+                  void send().then((current) => {
                     if (current && typedAnswer != null) onTypedAnswerDone?.();
                   });
                 }
@@ -501,6 +743,17 @@ export function ReferencePromptCard({
                   aria-label={hasChoices ? undefined : "Your answer"}
                   aria-labelledby={hasChoices ? customLabelId : undefined}
                   onChange={(event) => setCustom(event.currentTarget.value)}
+                  onPaste={(event) => {
+                    // t3code: pasted images join the answer. Only images; other pasted files
+                    // keep the browser's default (the text of a file path or nothing).
+                    if (onAttachAnswerFiles === undefined) return;
+                    const images = [...event.clipboardData.files].filter((each) =>
+                      each.type.startsWith("image/"),
+                    );
+                    if (images.length === 0) return;
+                    event.preventDefault();
+                    addAnswerFiles(images);
+                  }}
                   onCompositionStart={() => {
                     composing.current = true;
                   }}
@@ -510,26 +763,50 @@ export function ReferencePromptCard({
                   onKeyDown={(event) => {
                     if (event.key !== "Enter" || isImeConfirmingKey(event, composing.current)) return;
                     event.preventDefault();
-                    if (custom.trim().length > 0) void answer({ customText: custom.trim() });
+                    if (answerHeldForUploads) return;
+                    const typed = custom.trim();
+                    if (typed.length === 0 && attachments.length === 0) return;
+                    const composed = attachmentsReady ? composeAnswerWithAttachments(typed) : typed;
+                    if (composed === null || composed.length === 0) return;
+                    void answer({ customText: composed });
                   }}
                 />
                 <button
                   type="button"
                   data-testid="reference-prompt-custom-send"
-                  disabled={pending || prompt.answerStatus === "outcomeUnknown" || custom.trim().length === 0}
+                  disabled={
+                    pending ||
+                    prompt.answerStatus === "outcomeUnknown" ||
+                    answerHeldForUploads ||
+                    (custom.trim().length === 0 && attachments.length === 0)
+                  }
                   className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border border-chat-border bg-chat-surface-raised px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  onClick={(event) => void answer({ customText: custom.trim() }, event)}
+                  onClick={(event) => {
+                    const typed = custom.trim();
+                    const composed = attachmentsReady ? composeAnswerWithAttachments(typed) : typed;
+                    if (composed === null || composed.length === 0) return;
+                    void answer({ customText: composed }, event);
+                  }}
                 >
                   <Send className="size-4" aria-hidden="true" />
                   <span>Send</span>
                 </button>
               </div>
+              {onAttachAnswerFiles !== undefined && (
+                <ReferenceAnswerAttachments
+                  attachments={attachments}
+                  disabled={pending || prompt.answerStatus === "outcomeUnknown"}
+                  onPickFiles={addAnswerFiles}
+                  onRemove={(id) => referenceAnswerAttachmentStore.remove(attachKey, id)}
+                  onRetry={retryAnswerUpload}
+                />
+              )}
             </div>
           )}
         </>
       )}
 
-      {typedAnswer?.optionIndex != null && (
+      {typedIndex !== null && typedAnswer !== null && (
         <div
           role="group"
           aria-labelledby={confirmLabelId}
@@ -543,20 +820,31 @@ export function ReferencePromptCard({
             aria-live="polite"
             className="block max-h-24 overflow-y-auto text-sm text-chat-foreground break-words"
           >
-            {`Send ${typedAnswer.optionIndex + 1}. ${prompt.options[typedAnswer.optionIndex]?.label ?? ""}?`}
+            {`Send ${typedIndex + 1}. ${prompt.options[typedIndex]?.label ?? ""}?`}
           </span>
           <span className="flex flex-col gap-3">
             <button
               ref={confirmButtonRef}
               type="button"
               data-testid="reference-prompt-confirm-send"
-              disabled={pending || prompt.answerStatus === "outcomeUnknown"}
-              className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              onClick={(event) =>
-                void answer(typedAnswer, event).then((current) => {
-                  if (current) onTypedAnswerDone?.();
-                })
+              disabled={
+                pending || prompt.answerStatus === "outcomeUnknown" || answerHeldForUploads
               }
+              className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={(event) => {
+                // the ready attachments are part of this answer too: the option's number is
+                // the text their mentions follow, exactly as a picked option sends it
+                const composed = attachmentsReady
+                  ? composeAnswerWithAttachments(String(typedIndex + 1))
+                  : null;
+                if (attachmentsReady && composed === null) return;
+                void answer(
+                  composed !== null ? { customText: composed } : { optionIndex: typedIndex },
+                  event,
+                ).then((current) => {
+                  if (current) onTypedAnswerDone?.();
+                });
+              }}
             >
               {pending ? (
                 <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />

@@ -24,6 +24,7 @@ import {
   type ReferencePrompt,
   type ReferencePromptAnswer,
 } from "./referenceTypes";
+import { referenceMentionPathOf, referenceMentionPathIsSafe, referenceAppendMention } from "./referenceFiles";
 
 /** The three mutually exclusive answer shapes, as the pinned module names them. */
 export type ReferenceTypedAnswer = ReferencePromptAnswer;
@@ -192,4 +193,32 @@ export function referencePromptErrorIsStale(error: unknown): boolean {
   if (error === null || typeof error !== "object") return false;
   const code = (error as { readonly code?: unknown }).code;
   return code === REFERENCE_PROMPT_STALE_CODE || code === REFERENCE_PROMPT_CHANGED_CODE;
+}
+
+/**
+ * The answer text an answer set turns in: the typed (or option-number) text with every
+ * uploaded file's saved path appended as an `@path ` mention — the same mention format
+ * `planReferenceFileSend` appends to a composer draft (referenceFiles.ts:764-804).
+ *
+ * A file sent by itself is the mentions alone; with a selected option, the option's
+ * number stands in as the text, the way a typed answer would name it, because the frozen
+ * `ReferencePromptAnswer` carries one shape and cannot hold a pick and a text at once.
+ *
+ * Each path is read the way `planReferenceFileSend` reads a receipt's mention
+ * (referenceFiles.ts:764-804): `referenceMentionPathOf` first, so a path the composer would
+ * refuse (a space in it, say) is refused here too, then the safety fence on the path it
+ * returns. An unsafe path refuses the whole send: the caller keeps the draft and the files.
+ */
+export function referenceAnswerTextWithAttachments(
+  answerText: string,
+  paths: readonly string[],
+): string | null {
+  let text = answerText.trim();
+  for (const path of paths) {
+    const parsed = referenceMentionPathOf("@" + path);
+    if (parsed === null || parsed !== path || !referenceMentionPathIsSafe(parsed)) return null;
+    text = referenceAppendMention(text, parsed);
+  }
+  const trimmed = text.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }

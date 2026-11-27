@@ -270,6 +270,16 @@ where
             // One bad cron problem must not block every other lead's events.
             let taken = crate::cron_remediate::handle_event(&body, &lead).await;
             if let Err(error) = &taken {
+                if crate::cron_remediate::is_busy_error(error) {
+                    let release_at = (now + chrono::Duration::seconds(30)).to_rfc3339();
+                    let _ = sqlx::query(
+                        "UPDATE lane_events SET release_at = ? WHERE id = ? AND delivered_at IS NULL",
+                    )
+                    .bind(release_at)
+                    .bind(id)
+                    .execute(pool)
+                    .await;
+                }
                 tracing::warn!(event_id = id, %error, "cron problem handling failed; event remains queued");
             }
             match cron_disposition(taken) {
@@ -606,6 +616,8 @@ fn critical(kind: &str, body: &str) -> bool {
         | "cron_report" | "unmerged_branch" | "launch_failed" | "startup_error" => true,
         "action_loop" | "no_progress" | "kibitzer" => true,
         "cron_problem" => body.contains("needs_owner"),
+        // Queued cron remediation lanes must never be silently dropped by EventWake (`jev_skip`).
+        "question" => body.contains("remediation lane"),
         _ => false,
     }
 }
@@ -1324,5 +1336,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(ended.code(), "NOT_FOUND");
         assert_eq!(count().await, before);
+    }
+
+    #[tokio::test]
+    async fn cron_remediation_lane_question_is_critical_and_never_jev_skipped() {
+        let pool = crate::storage::memory().await.unwrap();
+        let lead = SessionKey::new("slack", None::<String>, "C1", None::<String>, "U1")
+            .with_bot_id("U0BOT")
+            .storage_key();
+        enqueue(
+            &pool,
+            "cron-fix-demo-1234",
+            &lead,
+            "question",
+            r#"{"lane":"cron-fix-demo-1234","brief":"/tmp/b.md","action":"cron remediation lane queued; drive it with lane.drive"}"#,
+        )
+        .await
+        .unwrap();
+        let judge = crate::judge::Judge::forced("skip");
+        let now = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let mut admitted_bodies = Vec::new();
+        let count = dispatch_tick(&pool, &judge, now, |_, body| {
+            admitted_bodies.push(body);
+            async { true }
+        })
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(admitted_bodies.len(), 1);
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT delivery_reason FROM lane_events WHERE lane_key = 'cron-fix-demo-1234'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reason.as_deref(), Some("lead_turn"));
     }
 }

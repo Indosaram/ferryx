@@ -19,7 +19,8 @@ use super::input::ReferenceInputQueue;
 use super::model_discovery::{
     self, DiscoveredModels, DiscoveryError, CLAUDE_PROBE_ARGS, CLAUDE_PROBE_PROGRAM,
     CODEX_PROBE_ARGS, CODEX_PROBE_PROGRAM, DISCOVERY_PROBE_TIMEOUT, DISCOVERY_STDOUT_LIMIT,
-    GROK_PROBE_ARGS, GROK_PROBE_PROGRAM,
+    GROK_PROBE_ARGS, GROK_PROBE_PROGRAM, MAHO_PROBE_ARGS, MAHO_PROBE_PROGRAM, OMO_PROBE_ARGS,
+    OMO_PROBE_PROGRAM, OPENCODE_PROBE_ARGS, OPENCODE_PROBE_PROGRAM,
 };
 use super::prompt_codex::{
     parse_reference_codex_prompt, ReferenceCodexPrompt, ReferenceCodexResponder,
@@ -180,17 +181,39 @@ static ABSENT_PROBE: AbsentProbe = AbsentProbe;
 /// A registry id maps to a verified CLI only when it is one of the three probed providers and,
 /// when a launch program is known, that program's basename is the same CLI. A wrapper or a
 /// custom command disables discovery instead of being probed under a guessed name.
+fn expected_cli_basename(provider: &str) -> Option<&'static str> {
+    match provider {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "grok" => Some("grok"),
+        "maho" => Some("mhc"),
+        "omo" => Some("omo"),
+        "opencode" => Some("opencode"),
+        "antigravity" => Some("agy"),
+        "cline" => Some("cline"),
+        "copilot" => Some("copilot"),
+        "cursor" => Some("cursor-agent"),
+        "kimi" => Some("kimi"),
+        "droid" => Some("droid"),
+        "omp" => Some("omp"),
+        "aider" => Some("aider"),
+        "crush" => Some("crush"),
+        "gjc" => Some("gjc"),
+        _ => None,
+    }
+}
+
 pub fn launch_maps_to_verified_cli(provider: &str, launch_program: Option<&str>) -> bool {
     let provider = provider.trim().to_ascii_lowercase();
-    if !matches!(provider.as_str(), "claude" | "codex" | "grok") {
+    let Some(expected) = expected_cli_basename(provider.as_str()) else {
         return false;
-    }
+    };
     let Some(program) = launch_program.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
     };
     let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
     let base = base.strip_suffix(".exe").or_else(|| base.strip_suffix(".EXE")).unwrap_or(base);
-    base.eq_ignore_ascii_case(&provider)
+    base.eq_ignore_ascii_case(expected) || base.eq_ignore_ascii_case(&provider)
 }
 
 /// Cache identity: provider plus the pane cwd, or the host home when cwd is unknown.
@@ -240,9 +263,7 @@ pub fn verified_cli_identity(
     search_dirs: &[PathBuf],
 ) -> Option<CliIdentity> {
     let provider = provider.trim().to_ascii_lowercase();
-    if !matches!(provider.as_str(), "claude" | "codex" | "grok") {
-        return None;
-    }
+    let expected = expected_cli_basename(provider.as_str())?;
     let candidate = match launch_program.map(str::trim).filter(|value| !value.is_empty()) {
         Some(program) => {
             if !launch_maps_to_verified_cli(&provider, Some(program)) {
@@ -257,14 +278,14 @@ pub fn verified_cli_identity(
                 find_on_path(program, search_dirs)?
             }
         }
-        None => find_on_path(&provider, search_dirs)?,
+        None => find_on_path(expected, search_dirs)?,
     };
     let base = candidate.file_name()?.to_str()?;
     let base = base
         .strip_suffix(".exe")
         .or_else(|| base.strip_suffix(".EXE"))
         .unwrap_or(base);
-    if !base.eq_ignore_ascii_case(&provider) {
+    if !base.eq_ignore_ascii_case(expected) && !base.eq_ignore_ascii_case(&provider) {
         return None;
     }
     let meta = std::fs::metadata(&candidate).ok()?;
@@ -340,10 +361,8 @@ impl CliIdentityLookup for SystemCliIdentity {
 /// in-turn typed input as a queue, and this module has no Codex or Grok path that delivers
 /// those bytes as a steer. Unsure, so steer is hidden.
 pub fn follow_up_for(provider: &str) -> ReferenceFollowUpCapabilities {
-    let queue = matches!(
-        provider.trim().to_ascii_lowercase().as_str(),
-        "claude" | "codex" | "grok"
-    );
+    let normalized = provider.trim().to_ascii_lowercase();
+    let queue = expected_cli_basename(normalized.as_str()).is_some();
     ReferenceFollowUpCapabilities { queue, steer: false }
 }
 
@@ -368,6 +387,24 @@ pub fn probe_spec_for(provider: &str, cwd: Option<&str>) -> Option<ProbeSpec> {
             stdin: String::new(),
             cwd,
         }),
+        "maho" => Some(ProbeSpec {
+            program: MAHO_PROBE_PROGRAM,
+            args: MAHO_PROBE_ARGS,
+            stdin: String::new(),
+            cwd,
+        }),
+        "omo" => Some(ProbeSpec {
+            program: OMO_PROBE_PROGRAM,
+            args: OMO_PROBE_ARGS,
+            stdin: String::new(),
+            cwd,
+        }),
+        "opencode" => Some(ProbeSpec {
+            program: OPENCODE_PROBE_PROGRAM,
+            args: OPENCODE_PROBE_ARGS,
+            stdin: String::new(),
+            cwd,
+        }),
         _ => None,
     }
 }
@@ -383,6 +420,8 @@ fn parse_probe(provider: &str, raw: ProbeRaw) -> Result<DiscoveredModels, Discov
         "claude" => model_discovery::parse_claude_list_models(&stdout),
         "codex" => model_discovery::parse_codex_model_list(&stdout),
         "grok" => model_discovery::parse_grok_models(&stdout),
+        "maho" | "omo" => model_discovery::parse_maho_list_models(&stdout),
+        "opencode" => model_discovery::parse_opencode_models(&stdout),
         _ => Err(DiscoveryError::UnsupportedVersion),
     }
 }
@@ -423,6 +462,76 @@ pub fn composer_from_models(provider: &str, models: &DiscoveredModels) -> Refere
             current: None,
             apply: option_apply,
         });
+    }
+    match provider {
+        "maho" | "omo" => {
+            if !options.iter().any(|o| o.id == CONTROL_EFFORT_ID) {
+                options.push(ReferenceComposerOption {
+                    id: CONTROL_EFFORT_ID.to_string(),
+                    label: "Thinking".to_string(),
+                    values: vec![
+                        "off".into(),
+                        "minimal".into(),
+                        "low".into(),
+                        "medium".into(),
+                        "high".into(),
+                        "xhigh".into(),
+                        "max".into(),
+                    ],
+                    current: None,
+                    apply: ReferenceComposerOptionApply::Command,
+                });
+            }
+            options.push(ReferenceComposerOption {
+                id: "mode".to_string(),
+                label: "Mode".to_string(),
+                values: vec!["default".into(), "plan".into()],
+                current: None,
+                apply: ReferenceComposerOptionApply::Command,
+            });
+        }
+        "antigravity" => {
+            options.push(ReferenceComposerOption {
+                id: "mode".to_string(),
+                label: "Mode".to_string(),
+                values: vec!["accept-edits".into(), "auto".into(), "plan".into()],
+                current: None,
+                apply: ReferenceComposerOptionApply::StartOnly,
+            });
+            options.push(ReferenceComposerOption {
+                id: CONTROL_EFFORT_ID.to_string(),
+                label: "Effort".to_string(),
+                values: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into(), "max".into()],
+                current: None,
+                apply: ReferenceComposerOptionApply::StartOnly,
+            });
+        }
+        "cline" => {
+            options.push(ReferenceComposerOption {
+                id: "mode".to_string(),
+                label: "Mode".to_string(),
+                values: vec!["act".into(), "plan".into()],
+                current: None,
+                apply: ReferenceComposerOptionApply::Command,
+            });
+            options.push(ReferenceComposerOption {
+                id: CONTROL_EFFORT_ID.to_string(),
+                label: "Thinking".to_string(),
+                values: vec!["none".into(), "low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                current: None,
+                apply: ReferenceComposerOptionApply::StartOnly,
+            });
+        }
+        "kimi" => {
+            options.push(ReferenceComposerOption {
+                id: CONTROL_EFFORT_ID.to_string(),
+                label: "Thinking".to_string(),
+                values: vec!["off".into(), "on".into()],
+                current: None,
+                apply: ReferenceComposerOptionApply::Command,
+            });
+        }
+        _ => {}
     }
     ReferenceComposerCapabilities {
         models: Some(ReferenceComposerModels {
@@ -658,7 +767,7 @@ impl ComposerHost {
             return rejected("UNSUPPORTED", "the control ledger is full; nothing was typed");
         }
         let provider = registry_id.trim().to_ascii_lowercase();
-        if !matches!(provider.as_str(), "claude" | "codex" | "grok") {
+        if expected_cli_basename(provider.as_str()).is_none() {
             return rejected("UNSUPPORTED", "this provider has no composer control");
         }
         if !safe_token(control_id) || !safe_token(value_id) {
@@ -2229,5 +2338,43 @@ mod tests {
         started_rx.recv().await.expect("the next step runs after the apply");
         let _ = apply_task.await;
         let _ = other.await;
+    }
+
+    #[test]
+    fn expanded_harnesses_map_verified_clis_probes_and_follow_up() {
+        assert!(launch_maps_to_verified_cli("maho", Some("/Users/indo/.local/bin/mhc")));
+        assert!(launch_maps_to_verified_cli("omo", Some("omo")));
+        assert!(launch_maps_to_verified_cli("antigravity", Some("/usr/local/bin/agy")));
+        assert!(launch_maps_to_verified_cli("opencode", Some("opencode")));
+        assert!(launch_maps_to_verified_cli("cline", Some("cline")));
+        assert!(launch_maps_to_verified_cli("cursor", Some("cursor-agent")));
+        assert!(launch_maps_to_verified_cli("copilot", Some("copilot")));
+        assert!(launch_maps_to_verified_cli("kimi", Some("kimi")));
+        assert!(!launch_maps_to_verified_cli("maho", Some("wrapper-script")));
+        assert!(!launch_maps_to_verified_cli("pi", None));
+
+        assert_eq!(probe_spec_for("maho", None).map(|s| s.program), Some("mhc"));
+        assert_eq!(probe_spec_for("omo", None).map(|s| s.program), Some("omo"));
+        assert_eq!(probe_spec_for("opencode", None).map(|s| s.program), Some("opencode"));
+        assert!(probe_spec_for("copilot", None).is_none());
+
+        assert!(follow_up_for("maho").queue);
+        assert!(follow_up_for("antigravity").queue);
+        assert!(follow_up_for("opencode").queue);
+        assert!(follow_up_for("cline").queue);
+        assert!(follow_up_for("kimi").queue);
+        assert!(!follow_up_for("pi").queue);
+
+        let empty = DiscoveredModels {
+            current: None,
+            models: Vec::new(),
+            slash_commands: Vec::new(),
+        };
+        let agy_caps = composer_from_models("antigravity", &empty);
+        assert!(agy_caps.options.iter().any(|o| o.id == "mode" && o.values.contains(&"plan".to_string())));
+        let maho_caps = composer_from_models("maho", &empty);
+        assert!(maho_caps.options.iter().any(|o| o.id == CONTROL_EFFORT_ID && o.values.len() == 7));
+        let cline_caps = composer_from_models("cline", &empty);
+        assert!(cline_caps.options.iter().any(|o| o.id == "mode" && o.values == vec!["act", "plan"]));
     }
 }
