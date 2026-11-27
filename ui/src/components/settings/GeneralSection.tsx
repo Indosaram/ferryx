@@ -11,7 +11,9 @@ import {
 } from "lucide-react";
 
 import {
+  loadRevealOnWorktreeCreate,
   loadSidebarOpenStartup,
+  saveRevealOnWorktreeCreate,
   saveSidebarOpenStartup,
   useGeneralSettings,
 } from "../../lib/generalSettings";
@@ -399,6 +401,7 @@ export function GeneralSection() {
   const { settings, updateSettings } = useGeneralSettings();
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
+  const [revealOnWorktreeCreate, setRevealOnWorktreeCreate] = useState<boolean>(() => loadRevealOnWorktreeCreate());
   const advancedFeatures = useAdvancedFeatures();
   const [supervisor, setSupervisor] = useState<{ supported: boolean; enabled: boolean } | null>(null);
   const [supervisorBusy, setSupervisorBusy] = useState(false);
@@ -478,6 +481,20 @@ export function GeneralSection() {
               onCheckedChange={(checked) => {
                 setSidebarOpenStartup(checked);
                 saveSidebarOpenStartup(checked);
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            label="Reveal new worktrees in the sidebar"
+            description="Open the sidebar and expand the project when a worktree is created, so the new row is visible right away. Turn this off to keep the sidebar as it is."
+          >
+            <Switch
+              id="general-reveal-worktree-create"
+              aria-label="Reveal new worktrees in the sidebar"
+              checked={revealOnWorktreeCreate}
+              onCheckedChange={(checked) => {
+                setRevealOnWorktreeCreate(checked);
+                saveRevealOnWorktreeCreate(checked);
               }}
             />
           </SettingRow>

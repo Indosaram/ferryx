@@ -126,6 +126,13 @@ type SidebarProps = {
    * whenever this is set (App always sets it); a host without a focus target has no panel.
    */
   onFocusSupervisorSession?: (sessionRef: string) => void;
+  /**
+   * Asks the sidebar to make one project's rows visible: its group is expanded and the tree view
+   * is selected. A new request carries a new id, so revealing the same project twice still applies.
+   */
+  revealGroupRequest?: { groupId: string; id: number } | null;
+  /** Called once a reveal request has been applied, so the owner can drop it and never replay it. */
+  onRevealGroupHandled?: () => void;
   /** Sidebar-embedded slot below the tree, used for persistent setup progress. */
   footerSlot?: React.ReactNode;
 };
@@ -168,6 +175,8 @@ export function Sidebar({
   onToggle,
   onHide,
   onFocusSupervisorSession,
+  revealGroupRequest,
+  onRevealGroupHandled,
   footerSlot,
 }: SidebarProps) {
   // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
@@ -224,6 +233,23 @@ export function Sidebar({
       return next;
     });
   }, []);
+  // A reveal request outranks the persisted accordion state: the row that was just created has to
+  // be visible, so its group is expanded and the tree view is shown. The id keeps two consecutive
+  // reveals of the same project from collapsing into one no-op.
+  useEffect(() => {
+    if (!revealGroupRequest) return;
+    const { groupId } = revealGroupRequest;
+    updateCollapsed((current) => {
+      if (!current.has(groupId)) return current;
+      const next = new Set(current);
+      next.delete(groupId);
+      return next;
+    });
+    if (panelMode) setChosenView("worktrees");
+    // The request is one-shot: the owner drops it here, so closing and reopening the sidebar later
+    // cannot replay an old reveal over a group the user collapsed in the meantime.
+    onRevealGroupHandled?.();
+  }, [onRevealGroupHandled, panelMode, revealGroupRequest, updateCollapsed]);
   const previousEmptyGroupIds = useRef(emptyGroupIds);
   useEffect(() => {
     const newlyEmpty = [...emptyGroupIds].filter((id) => !previousEmptyGroupIds.current.has(id));

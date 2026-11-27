@@ -47,7 +47,7 @@ import { useBrowserLibrarySync } from "./lib/browserLibrarySync";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
-import { useGeneralSettings } from "./lib/generalSettings";
+import { loadRevealOnWorktreeCreate, useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
 import { startDaemonAttentionFeed } from "./lib/attentionFeed";
@@ -188,6 +188,7 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
+import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume, startAgentAutoResumeWatcher } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler, setSessionSleeping } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
@@ -2599,16 +2600,24 @@ function WorkspaceApp({
   // does not schedule a save only reaches disk if some unrelated change saves later.
   const persistedSessionsKey = useMemo(() => sessionPersistenceKey(state.sessions), [state.sessions]);
 
+  // Tracks workspaces that had at least one open tab in this window so closing the last tab
+  // still persists the empty layout (preventing closed SSH/local tabs from resurrecting on
+  // restart) while un-restored initial empty renders remain blocked from clobbering disk.
+  const hadTabsByWorkspaceRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     const hasTabs =
       state.layout.tabs.length > 0 ||
       Object.values(state.worktreeLayouts ?? {}).some((l) => l.tabs.length > 0);
-    if (state.worktrees.length === 0 || !hasTabs) return;
+    const owner = state.workspaceId ?? activeProject.workspaceId;
+    if (hasTabs) {
+      hadTabsByWorkspaceRef.current.add(owner);
+    }
+    if (state.worktrees.length === 0 || (!hasTabs && !hadTabsByWorkspaceRef.current.has(owner))) return;
     // On the render that switches projects, `state` still holds the outgoing
     // project's data. Saving it under the incoming id would overwrite that
     // project's persisted session, so save it under its own owner instead of
     // discarding the newest state of the project being left.
-    const owner = state.workspaceId ?? activeProject.workspaceId;
     if (owner !== activeProject.workspaceId) {
       const outgoing = projectsRef.current.find((project) => project.workspaceId === owner);
       if (outgoing) void persistSession(owner, outgoing.repoRoot, state);
@@ -2676,6 +2685,8 @@ function WorkspaceApp({
     resumeStartup: SpawnTerminalRequest["startup"] | null;
   } | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
+  const [revealGroupRequest, setRevealGroupRequest] = useState<{ groupId: string; id: number } | null>(null);
+  const revealGroupRequestIdRef = useRef(0);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
@@ -3515,9 +3526,30 @@ function WorkspaceApp({
   // Local projects supervisor setup maps (onboarding step and setup banner).
   const setupProjects = useMemo(() => setupProjectsFrom(projects), [projects]);
 
+  // Creating a worktree is a request to look at it: the sidebar opens (when the setting is on) and
+  // the owning project's group expands, so the new row is visible instead of hidden behind a
+  // collapsed group the user closed long ago. A worktree created while the sidebar is closed used
+  // to appear nowhere at all.
+  const handleRevealGroupHandled = useCallback(() => setRevealGroupRequest(null), []);
+
+  const revealWorktreeProject = useCallback((owner: RegisteredProject) => {
+    if (!loadRevealOnWorktreeCreate()) return;
+    const group = groupProjects(projectsRef.current).find((candidate) =>
+      candidate.memberProjects.some((member) => member.workspaceId === owner.workspaceId),
+    );
+    setIsSidebarOpen((current) => {
+      if (current) return current;
+      persistSidebarOpen(true);
+      return true;
+    });
+    revealGroupRequestIdRef.current += 1;
+    setRevealGroupRequest({ groupId: group?.groupId ?? owner.workspaceId, id: revealGroupRequestIdRef.current });
+  }, []);
+
   const handleWorktreeCreated = useCallback(
     async (owner: RegisteredProject, worktree: Worktree, launch?: WorktreeAgentLaunch) => {
       if (activeRemoteHostRef.current) return;
+      revealWorktreeProject(owner);
       if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
         // The project switch clears any pending worktree and its agent, so record the agent after it.
         handleSelectProject(owner);
@@ -3529,7 +3561,7 @@ function WorkspaceApp({
       await ensureTabForWorktree(worktree).catch(reportRuntimeError);
       if (launch) await launchAgentByIdInWorktree(worktree, launch.agentId);
     },
-    [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError],
+    [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError, revealWorktreeProject],
   );
 
   useEffect(() => {
@@ -5309,6 +5341,8 @@ function WorkspaceApp({
           onOpenResources={() => setIsResourcesOpen(true)}
 
           onFocusSupervisorSession={handleFocusSupervisorSession}
+          revealGroupRequest={revealGroupRequest}
+          onRevealGroupHandled={handleRevealGroupHandled}
           footerSlot={
             !activeRemoteHost && setupProgressCtx && !setupProgressDismissed ? (
               <SetupProgressPanel
