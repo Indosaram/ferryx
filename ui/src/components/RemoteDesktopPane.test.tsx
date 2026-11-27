@@ -461,7 +461,12 @@ describe("RemoteDesktopPane", () => {
     await waitFor(() => expect(remoteDesktopStore.getSession("host-1")?.rdSessionId).toBe("rd-1"));
     act(() => channels[0].onmessage(statusFrame("connected")));
     act(() => channels[0].onmessage(videoFrame(400, 200)));
-    await waitFor(() => expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" }));
+    // The canvas is already hit-testable while connected (`canvasVisible = hasFrame || isConnected`),
+    // so visibility alone does not prove the bitmap was decoded. Wait for the Canvas 2D paint and for
+    // the overlay to clear (that is what flips `hasFrame`), otherwise the scrim assertions race it.
+    await waitFor(() => expect(drawImage).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByTestId("remote-desktop-overlay")).toBeNull());
+    expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" });
 
     act(() => channels[0].onmessage(statusFrame("reconnecting")));
     const overlay = screen.getByTestId("remote-desktop-overlay");
@@ -490,7 +495,11 @@ describe("RemoteDesktopPane", () => {
     await waitFor(() => expect(remoteDesktopStore.getSession("host-1")?.rdSessionId).toBe("rd-1"));
     act(() => channels[0].onmessage(statusFrame("connected")));
     act(() => channels[0].onmessage(videoFrame(400, 200)));
-    await waitFor(() => expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" }));
+    // Same race as above: wait for the painted frame (overlay cleared) before ending the session,
+    // otherwise `hasFrame` is still false and no scrim/error palette is applied.
+    await waitFor(() => expect(drawImage).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByTestId("remote-desktop-overlay")).toBeNull());
+    expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" });
 
     act(() => channels[0].onmessage(statusFrame("ended")));
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
