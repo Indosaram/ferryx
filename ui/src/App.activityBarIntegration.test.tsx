@@ -74,6 +74,7 @@ const native = vi.hoisted(() => ({
   saveSession: vi.fn(),
   isTauriRuntime: vi.fn(),
   newTerminalMenuHandler: null as null | (() => void),
+  selectActivityModeMenuHandler: null as null | ((digit: number) => void),
 }));
 
 vi.mock("./lib/tauri", async (importOriginal) => ({
@@ -103,6 +104,12 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
   onCommandPaletteMenu: async () => () => undefined,
   onToggleSidebarMenu: async () => () => undefined,
   onOpenSettingsMenu: async () => () => undefined,
+  onSelectActivityModeMenu: async (handler: (digit: number) => void) => {
+    native.selectActivityModeMenuHandler = handler;
+    return () => {
+      if (native.selectActivityModeMenuHandler === handler) native.selectActivityModeMenuHandler = null;
+    };
+  },
   onRemoteSelectionRequested: async () => () => undefined,
   listenDagRunUpdated: async () => () => undefined,
   publishFocusedTerminal: async () => undefined,
@@ -466,6 +473,34 @@ describe("Activity Bar shell integration", () => {
     expect(localStorage.getItem(ACTIVITY_MODE_STORAGE_KEY)).toBe("remoteDesktop");
     // The canvas is the mode's main area, and it is the one that was already mounted.
     expect(screen.getByTestId("global-rd-canvas")).toHaveAttribute("data-active", "true");
+  });
+
+  it("clears traffic lights with 36px rail height + 24px sidebar overhang and switches modes from native menu or input focus", async () => {
+    render(<App />);
+    await screen.findByTestId("workspace-surface");
+
+    expect(screen.getByTestId("titlebar-traffic-light-pad")).toHaveStyle({ height: "36px" });
+    expect(screen.getByTestId("sidebar-traffic-light-overhang-pad")).toHaveStyle({ width: "24px" });
+
+    // Native macOS key monitor forwards activity mode digits to the focused window.
+    expect(native.selectActivityModeMenuHandler).not.toBeNull();
+    act(() => { native.selectActivityModeMenuHandler?.(3); });
+    expect(screen.getByTestId("activity-canvas-browser")).toBeInTheDocument();
+    expect(railTab("Browser")).toHaveAttribute("aria-selected", "true");
+
+    // Ctrl+Cmd+2 switches to Worktrees even when focus is inside a text input.
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.focus();
+    try {
+      act(() => {
+        fireEvent.keyDown(input, { key: "2", code: "Digit2", metaKey: true, ctrlKey: true });
+      });
+      expect(railTab("Worktrees")).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByTestId("workspace-surface")).toBeVisible();
+    } finally {
+      input.remove();
+    }
   });
   // Rendering the whole App under jsdom takes several seconds on a cold shared runner, and this
   // case additionally waits on a lazy dynamic import. The deadline only moves past what a loaded

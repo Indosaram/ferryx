@@ -4,7 +4,13 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActivityMode } from "../../lib/sidebarPersistence";
-import { DesktopActivityBar, ACTIVITY_BAR_WIDTH, MAC_TRAFFIC_LIGHT_CLEARANCE } from "./DesktopActivityBar";
+import {
+  DesktopActivityBar,
+  ACTIVITY_BAR_WIDTH,
+  MAC_TRAFFIC_LIGHT_CLEARANCE,
+  MAC_TRAFFIC_LIGHT_OVERHANG,
+  MAC_TRAFFIC_LIGHT_WIDTH,
+} from "./DesktopActivityBar";
 
 afterEach(cleanup);
 
@@ -106,14 +112,56 @@ describe("DesktopActivityBar", () => {
     expect(screen.queryByTestId("activity-mode-worktrees-badge")).toBeNull();
   });
 
-  it("renders the macOS traffic-light pad on macOS and nothing there on Windows and Linux", () => {
+  it("renders the macOS traffic-light pad at titlebar height (36px) and exposes the 24px overhang", () => {
+    expect(MAC_TRAFFIC_LIGHT_CLEARANCE).toBe(36);
+    expect(MAC_TRAFFIC_LIGHT_WIDTH).toBe(72);
+    expect(MAC_TRAFFIC_LIGHT_OVERHANG).toBe(24);
+
     const { rerender } = render(<Harness isMac />);
     const pad = screen.getByTestId("titlebar-traffic-light-pad");
-    expect(pad).toHaveStyle({ height: `${MAC_TRAFFIC_LIGHT_CLEARANCE}px` });
+    expect(pad).toHaveStyle({ height: "36px" });
     expect(screen.getByTestId("desktop-activity-bar")).toHaveAttribute("data-tauri-drag-region");
 
     rerender(<Harness isMac={false} />);
     expect(screen.queryByTestId("titlebar-traffic-light-pad")).toBeNull();
+  });
+
+  it("wires data-shortcut and tooltip labels for every mode, Settings, and the drawer toggle", () => {
+    const { rerender } = render(
+      <Harness
+        isMac
+        sidebarOpen
+        supervisorBadge={3}
+        onOpenSettings={() => undefined}
+        onToggleSidebar={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId("activity-mode-supervisor")).toHaveAttribute("data-shortcut", "activity.mode1");
+    expect(screen.getByTestId("activity-mode-worktrees")).toHaveAttribute("data-shortcut", "activity.mode2");
+    expect(screen.getByTestId("activity-mode-browser")).toHaveAttribute("data-shortcut", "activity.mode3");
+    expect(screen.getByTestId("activity-mode-remoteDesktop")).toHaveAttribute("data-shortcut", "activity.mode4");
+    expect(screen.getByTestId("activity-settings")).toHaveAttribute("data-shortcut", "settings.toggle");
+    expect(screen.getByTestId("activity-drawer-toggle")).toHaveAttribute("data-shortcut", "sidebar.left.toggle");
+
+    expect(screen.getByTestId("activity-mode-supervisor")).toHaveAttribute("title", "Supervisor (⌘⌃1) - 3 waiting");
+    expect(screen.getByTestId("activity-mode-worktrees")).toHaveAttribute("title", "Worktrees (⌘⌃2)");
+    expect(screen.getByTestId("activity-mode-browser")).toHaveAttribute("title", "Browser (⌘⌃3)");
+    expect(screen.getByTestId("activity-mode-remoteDesktop")).toHaveAttribute("title", "Remote Desktop (⌘⌃4)");
+    expect(screen.getByTestId("activity-settings")).toHaveAttribute("title", "Settings (⌘,)");
+    expect(screen.getByTestId("activity-drawer-toggle")).toHaveAttribute("title", "Collapse sidebar (⌘B)");
+
+    rerender(
+      <Harness
+        isMac={false}
+        sidebarOpen={false}
+        onOpenSettings={() => undefined}
+        onToggleSidebar={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId("activity-mode-supervisor")).toHaveAttribute("title", "Supervisor (Ctrl+Alt+Shift+1)");
+    expect(screen.getByTestId("activity-settings")).toHaveAttribute("title", "Settings (Ctrl+,)");
+    expect(screen.getByTestId("activity-drawer-toggle")).toHaveAttribute("title", "Show sidebar (Ctrl+B)");
   });
 
   it("toggles only the drawer from the rail and keeps the mode selection", () => {

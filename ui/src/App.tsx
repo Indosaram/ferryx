@@ -6,7 +6,7 @@ import { useDesktopContinuity } from "./lib/useDesktopContinuity";
 import { deriveContinuitySelection } from "./lib/continuitySelection";
 
 import { CommandPalette } from "./components/CommandPalette";
-import { DesktopActivityBar } from "./components/activity/DesktopActivityBar";
+import { ACTIVITY_BAR_MODES, DesktopActivityBar, MAC_TRAFFIC_LIGHT_OVERHANG } from "./components/activity/DesktopActivityBar";
 import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
@@ -46,7 +46,7 @@ import { useAppearanceSettings, useApplyAppearanceSettings } from "./lib/appeara
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, closeBrowser, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserActivityModeIndex, browserTabIdForBrowserId, closeBrowser, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { startInboundUrlDelivery } from "./lib/inboundUrls";
 import { printBrowser, stepBrowserZoom } from "./lib/browserSystem";
 import { browserTabNavigation } from "./lib/browserTabNavigation";
@@ -176,6 +176,7 @@ import {
   onCommandPaletteMenu,
   onToggleSidebarMenu,
   onOpenSettingsMenu,
+  onSelectActivityModeMenu,
   onNewWindowMenu,
   onNewTerminalTabMenu,
   onRemoteSelectionRequested,
@@ -5101,6 +5102,7 @@ function WorkspaceApp({
     let unlistenCmdPalette: (() => void) | null = null;
     let unlistenSidebar: (() => void) | null = null;
     let unlistenSettings: (() => void) | null = null;
+    let unlistenActivityMode: (() => void) | null = null;
     let cancelled = false;
 
     void onSelectTabMenu((digit) => {
@@ -5167,6 +5169,15 @@ function WorkspaceApp({
       else unlistenSettings = dispose;
     });
 
+    void onSelectActivityModeMenu((digit) => {
+      if (activeRemoteHostRef.current) return;
+      const targetMode = ACTIVITY_BAR_MODES[digit - 1];
+      if (targetMode) selectActivityMode(targetMode);
+    }).then((dispose) => {
+      if (cancelled) dispose();
+      else unlistenActivityMode = dispose;
+    });
+
     return () => {
       cancelled = true;
       unlistenSelectTab?.();
@@ -5177,6 +5188,7 @@ function WorkspaceApp({
       unlistenCmdPalette?.();
       unlistenSidebar?.();
       unlistenSettings?.();
+      unlistenActivityMode?.();
     };
   }, [
     handleSelectTerminalTabByIndex,
@@ -5185,6 +5197,7 @@ function WorkspaceApp({
     setIsCommandPaletteOpen,
     toggleSidebar,
     setIsSettingsOpen,
+    selectActivityMode,
   ]);
 
   const activeShortcutTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? null;
@@ -5304,6 +5317,12 @@ function WorkspaceApp({
         handleSelectWorktreeByIndex(wsIndex);
         return;
       }
+      const modeIndex = browserActivityModeIndex(action);
+      if (modeIndex !== null) {
+        const targetMode = ACTIVITY_BAR_MODES[modeIndex];
+        if (targetMode) selectActivityMode(targetMode);
+        return;
+      }
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -5320,6 +5339,7 @@ function WorkspaceApp({
     toggleSidebar,
     handleSplitActive,
     handleSelectWorktreeByIndex,
+    selectActivityMode,
     handleReopenClosedBrowserTab,
     handleBrowserZoom,
     handleBrowserPrint,
@@ -5569,6 +5589,7 @@ function WorkspaceApp({
     activity: browserActivity,
     onRevealBrowser: handleOpenBrowserFullscreen,
   });
+  const isMacPlatform = isMacShortcutPlatform();
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
@@ -5607,7 +5628,7 @@ function WorkspaceApp({
         onToggleSidebar={toggleSidebar}
         onOpenResources={() => setIsResourcesOpen(true)}
         onOpenSettings={handleOpenSettings}
-        isMac={isMacShortcutPlatform()}
+        isMac={isMacPlatform}
       />
       {isSidebarOpen && worktreeDrawerMode ? (
         <Sidebar
@@ -5615,8 +5636,10 @@ function WorkspaceApp({
           widthMode={worktreeDrawerMode}
           view={worktreeDrawerMode}
           hideViewTabs
-          // The rail owns the traffic-light clearance.
+          // The 48px rail clears the first 48px horizontally; the drawer clears the remaining
+          // macOS traffic-light overhang so its titlebar buttons sit right of the green button.
           isMac={false}
+          trafficLightClearancePx={isMacPlatform ? MAC_TRAFFIC_LIGHT_OVERHANG : 0}
           projects={projects}
           activeProjectId={activeProject.workspaceId}
           registeredProjectId={registeredProjectId}
@@ -5846,7 +5869,7 @@ function WorkspaceApp({
             onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
               markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
             }}
-            leadingSpacer={0}
+            leadingSpacer={isMacPlatform && !isSidebarOpen ? MAC_TRAFFIC_LIGHT_OVERHANG : 0}
           />
         ) : (
           <div className="flex h-full flex-1 items-center justify-center bg-background text-xs text-muted-foreground">

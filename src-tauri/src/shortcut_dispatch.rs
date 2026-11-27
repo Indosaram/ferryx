@@ -58,6 +58,7 @@ mod tests {
                 "menu_command_palette",
                 "menu_toggle_sidebar",
                 "menu_open_settings",
+                "menu_select_activity_mode",
             ] {
                 let (sender, receiver) = std::sync::mpsc::channel();
                 // Shortcuts are emitted to the target window, so listen where the UI listens.

@@ -146,6 +146,12 @@ type SidebarProps = {
   view?: SidebarViewId;
   /** Hides the Supervisor/Worktrees tabs; the desktop rail replaces them. Never owned by the view. */
   hideViewTabs?: boolean;
+  /**
+   * Explicit horizontal macOS traffic-light clearance (px) inside the sidebar titlebar. Set by the
+   * desktop shell when a narrow Activity Bar sits to the left and leaves an overhang; omitted
+   * falls back to `isMac ? 72 : 0`.
+   */
+  trafficLightClearancePx?: number;
 };
 
 /**
@@ -191,6 +197,7 @@ export function Sidebar({
   widthMode,
   view,
   hideViewTabs = false,
+  trafficLightClearancePx,
 }: SidebarProps) {
   // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
   // advanced features. The project tree is the other view; there is no Inbox view.
@@ -707,7 +714,18 @@ export function Sidebar({
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
           supervisor={onFocusSupervisorSession ? { content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} workspaceId={activeProjectId ?? null} registeredWorkspaceId={registeredProjectId} /> } : undefined}
-          titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
+          titlebarLeading={(() => {
+            const clearance = trafficLightClearancePx ?? (isMac ? 72 : 0);
+            if (clearance <= 0) return null;
+            return (
+              <div
+                data-testid={trafficLightClearancePx !== undefined ? "sidebar-traffic-light-overhang-pad" : "titlebar-traffic-light-pad"}
+                className="shrink-0"
+                style={{ width: `${clearance}px` }}
+                aria-hidden="true"
+              />
+            );
+          })()}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
           shortcuts={{
             hideSidebar: hide ? "sidebar.left.toggle" : undefined,

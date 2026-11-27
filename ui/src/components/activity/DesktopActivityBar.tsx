@@ -2,6 +2,8 @@ import { Activity, Bot, FolderGit2, Globe, Monitor, PanelLeft, PanelLeftClose, S
 import { useRef, type KeyboardEvent } from "react";
 
 import { cn } from "../../lib/cn";
+import { shortcutLabel, type ShortcutActionId } from "../../lib/shortcuts";
+import { useShortcutOverrides, useShortcutPreset } from "../../lib/shortcutOverrides";
 import type { ActivityMode } from "../../lib/sidebarPersistence";
 
 /**
@@ -27,8 +29,9 @@ export type DesktopActivityBarProps = {
   onToggleSidebar?: () => void;
   onOpenResources?: () => void;
   onOpenSettings?: () => void;
-  /** macOS draws its traffic lights inside the top-left 72px square; the rail is narrower than
-   * that square, so it yields the whole band instead of sliding buttons underneath the lights.
+  /** macOS draws its traffic lights inside the top-left titlebar band (72px wide x 36px tall).
+   * The rail clears that 36px vertical band so mode buttons sit cleanly beneath the lights, while
+   * the panel immediately to the right clears the remaining horizontal overhang (`MAC_TRAFFIC_LIGHT_OVERHANG`).
    */
   isMac?: boolean;
   /**
@@ -42,19 +45,30 @@ export type DesktopActivityBarProps = {
 /** The rail order. Fixed, because the modes are physical positions a user learns. */
 export const ACTIVITY_BAR_MODES: readonly ActivityMode[] = ["supervisor", "worktrees", "browser", "remoteDesktop"];
 
-/** macOS traffic lights occupy the top-left 72px of the window; nothing interactive may go there. */
-export const MAC_TRAFFIC_LIGHT_CLEARANCE = 72;
+/** Horizontal span of the macOS window traffic lights from the window's left edge. */
+export const MAC_TRAFFIC_LIGHT_WIDTH = 72;
+
+/** Vertical clearance for the macOS Overlay titlebar strip (`h-titlebar` = 2.25rem = 36px). */
+export const MAC_TRAFFIC_LIGHT_CLEARANCE = 36;
 
 export const ACTIVITY_BAR_WIDTH = 48;
 
-type ModeMeta = { readonly label: string; readonly icon: LucideIcon };
+/** Horizontal traffic-light overhang past the 48px rail that the adjacent drawer/tab bar must clear. */
+export const MAC_TRAFFIC_LIGHT_OVERHANG = Math.max(0, MAC_TRAFFIC_LIGHT_WIDTH - ACTIVITY_BAR_WIDTH);
+
+type ModeMeta = { readonly label: string; readonly icon: LucideIcon; readonly shortcut: ShortcutActionId };
 
 export const ACTIVITY_MODE_META: Record<ActivityMode, ModeMeta> = {
-  supervisor: { label: "Supervisor", icon: Bot },
-  worktrees: { label: "Worktrees", icon: FolderGit2 },
-  browser: { label: "Browser", icon: Globe },
-  remoteDesktop: { label: "Remote Desktop", icon: Monitor },
+  supervisor: { label: "Supervisor", icon: Bot, shortcut: "activity.mode1" },
+  worktrees: { label: "Worktrees", icon: FolderGit2, shortcut: "activity.mode2" },
+  browser: { label: "Browser", icon: Globe, shortcut: "activity.mode3" },
+  remoteDesktop: { label: "Remote Desktop", icon: Monitor, shortcut: "activity.mode4" },
 };
+
+function tooltipWithShortcut(label: string, shortcut: string, description?: string | null): string {
+  const base = shortcut ? `${label} (${shortcut})` : label;
+  return description ? `${base} - ${description}` : base;
+}
 
 /** The digits a count badge shows, or null when the badge is absent. */
 function badgeText(badge: ActivityBadge): string | null {
@@ -113,6 +127,10 @@ export function DesktopActivityBar({
   className,
 }: DesktopActivityBarProps) {
   const tabRefs = useRef(new Map<ActivityMode, HTMLButtonElement>());
+  const { overrides } = useShortcutOverrides();
+  const { preset } = useShortcutPreset();
+  const settingsShortcut = shortcutLabel("settings.toggle", isMac, overrides, preset);
+  const toggleSidebarShortcut = shortcutLabel("sidebar.left.toggle", isMac, overrides, preset);
 
   const badges: Record<ActivityMode, ActivityBadge> = {
     supervisor: supervisorBadge,
@@ -172,10 +190,11 @@ export function DesktopActivityBar({
         className="flex w-full flex-col items-center gap-1 px-1.5 py-1"
       >
         {ACTIVITY_BAR_MODES.map((entry, index) => {
-          const { label, icon: Icon } = ACTIVITY_MODE_META[entry];
+          const { label, icon: Icon, shortcut } = ACTIVITY_MODE_META[entry];
           const selected = entry === mode;
           const badge = badges[entry];
           const description = badgeDescription(badge);
+          const shortcutText = shortcutLabel(shortcut, isMac, overrides, preset);
           return (
             <button
               key={entry}
@@ -188,10 +207,11 @@ export function DesktopActivityBar({
               id={`activity-tab-${entry}`}
               data-testid={`activity-mode-${entry}`}
               data-mode={entry}
+              data-shortcut={shortcut}
               aria-selected={selected}
               aria-label={label}
               aria-describedby={description ? `activity-badge-${entry}` : undefined}
-              title={description ? `${label} - ${description}` : label}
+              title={tooltipWithShortcut(label, shortcutText, description)}
               tabIndex={selected ? 0 : -1}
               onClick={() => activate(entry)}
               onKeyDown={(event) => {
@@ -237,8 +257,9 @@ export function DesktopActivityBar({
         {onOpenSettings ? (
           <button
             type="button"
+            data-shortcut="settings.toggle"
             aria-label="Settings"
-            title="Settings"
+            title={tooltipWithShortcut("Settings", settingsShortcut)}
             data-testid="activity-settings"
             onClick={onOpenSettings}
             className="no-drag inline-flex size-9 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -251,7 +272,7 @@ export function DesktopActivityBar({
             type="button"
             data-shortcut="sidebar.left.toggle"
             aria-label={sidebarOpen ? "Collapse sidebar" : "Show sidebar"}
-            title={sidebarOpen ? "Collapse sidebar" : "Show sidebar"}
+            title={tooltipWithShortcut(sidebarOpen ? "Collapse sidebar" : "Show sidebar", toggleSidebarShortcut)}
             aria-expanded={sidebarOpen}
             data-testid="activity-drawer-toggle"
             onClick={onToggleSidebar}

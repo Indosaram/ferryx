@@ -1371,6 +1371,11 @@ export async function onOpenSettingsMenu(handler: () => void): Promise<UnlistenF
   return listenShortcut<void>("menu_open_settings", () => handler());
 }
 
+export async function onSelectActivityModeMenu(handler: (modeIndex: number) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<number>("menu_select_activity_mode", handler);
+}
+
 export async function onWorktreeChanged(handler: (payload: WorktreeChangedPayload) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<WorktreeChangedPayload>("worktree_changed", (event) => handler(event.payload));

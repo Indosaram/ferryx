@@ -91,6 +91,7 @@ const native = {
   onCommandPaletteMenu: vi.fn().mockResolvedValue(() => {}),
   onToggleSidebarMenu: vi.fn().mockResolvedValue(() => {}),
   onOpenSettingsMenu: vi.fn().mockResolvedValue(() => {}),
+  onSelectActivityModeMenu: vi.fn().mockResolvedValue(() => {}),
   onSelectWorktreeMenu: vi.fn().mockResolvedValue(() => {}),
   onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
   onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
@@ -186,6 +187,7 @@ vi.mock("./lib/tauri", () => ({
   onCommandPaletteMenu: native.onCommandPaletteMenu,
   onToggleSidebarMenu: native.onToggleSidebarMenu,
   onOpenSettingsMenu: native.onOpenSettingsMenu,
+  onSelectActivityModeMenu: native.onSelectActivityModeMenu,
   onSelectWorktreeMenu: native.onSelectWorktreeMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
   onNativeTerminalTitle: async () => () => {},
@@ -492,6 +494,8 @@ describe("App notification coordinator wiring", () => {
     native.onToggleSidebarMenu.mockResolvedValue(() => {});
     native.onOpenSettingsMenu.mockReset();
     native.onOpenSettingsMenu.mockResolvedValue(() => {});
+    native.onSelectActivityModeMenu.mockReset();
+    native.onSelectActivityModeMenu.mockResolvedValue(() => {});
     native.onSelectWorktreeMenu.mockReset();
     native.onSelectWorktreeMenu.mockResolvedValue(() => {});
     native.onTerminalLifecycle.mockReset();

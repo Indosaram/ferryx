@@ -81,6 +81,13 @@ const TAB_SELECT: [&str; 9] = [
     "tab-select-8",
     "tab-select-9",
 ];
+#[cfg(test)]
+const ACTIVITY_MODE: [&str; 4] = [
+    "activity-mode-1",
+    "activity-mode-2",
+    "activity-mode-3",
+    "activity-mode-4",
+];
 
 /// A user binding as the UI shortcut registry stores it (ui/src/lib/shortcutOverrides.ts):
 /// `mod` is Cmd on macOS and Ctrl elsewhere, `control` is the literal Control key.
@@ -145,7 +152,7 @@ fn with_native_overrides<T>(read: impl FnOnce(Option<&NativeOverrides>) -> T) ->
 /// Order matters: the first id whose chord matches wins, so `browser.bookmarkPage` (Mod+D on a
 /// focused browser guest) precedes `terminal.splitRight`. Page zoom follows the
 /// `browser.zoom*` bindings, not the terminal font zoom (`zoom.*`) that shares their chords.
-pub const BROWSER_ACTION_IDS: [(&str, &str); 35] = [
+pub const BROWSER_ACTION_IDS: [(&str, &str); 39] = [
     ("tab.newBrowser", "tab-new-browser"),
     ("tab.close", "tab-close"),
     ("commandPalette.open", "command-palette"),
@@ -181,11 +188,15 @@ pub const BROWSER_ACTION_IDS: [(&str, &str); 35] = [
     ("tab.select8", "tab-select-8"),
     ("tab.select9", "tab-select-9"),
     ("browser.print", "print"),
+    ("activity.mode1", "activity-mode-1"),
+    ("activity.mode2", "activity-mode-2"),
+    ("activity.mode3", "activity-mode-3"),
+    ("activity.mode4", "activity-mode-4"),
 ];
 
 /// TS action id -> the shortcut_dispatch event (and digit payload) the macOS key monitor
 /// emits. Order is the legacy predicate order, which decides ties between candidate keys.
-pub const MONITOR_ACTION_IDS: [(&str, &str, Option<u8>); 27] = [
+pub const MONITOR_ACTION_IDS: [(&str, &str, Option<u8>); 31] = [
     ("tab.close", "menu_close_tab", None),
     ("workspace.select1", "menu_select_worktree", Some(1)),
     ("workspace.select2", "menu_select_worktree", Some(2)),
@@ -213,6 +224,10 @@ pub const MONITOR_ACTION_IDS: [(&str, &str, Option<u8>); 27] = [
     ("commandPalette.open", "menu_command_palette", None),
     ("sidebar.left.toggle", "menu_toggle_sidebar", None),
     ("settings.toggle", "menu_open_settings", None),
+    ("activity.mode1", "menu_select_activity_mode", Some(1)),
+    ("activity.mode2", "menu_select_activity_mode", Some(2)),
+    ("activity.mode3", "menu_select_activity_mode", Some(3)),
+    ("activity.mode4", "menu_select_activity_mode", Some(4)),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +265,18 @@ fn default_chords(consumer: NativeConsumer, id: &str, platform: KeyPlatform) -> 
     }
     if let Some(digit) = select_digit(id, "tab.select") {
         return vec![ctrl_chord(Digit(digit), false)];
+    }
+    if let Some(digit) = select_digit(id, "activity.mode") {
+        if (1..=4).contains(&digit) {
+            let mac = platform == KeyPlatform::Mac;
+            return vec![Chord {
+                key: Digit(digit),
+                ctrl: true,
+                meta: mac,
+                alt: !mac,
+                shift: !mac,
+            }];
+        }
     }
     match id {
         "tab.newBrowser" if browser => vec![p(Letter('t'), false)],
@@ -498,6 +525,16 @@ fn legacy_chord_to_action(chord: Chord, platform: KeyPlatform) -> Option<&'stati
         }
         if ctrl && !meta && !alt && !shift {
             return Some(TAB_SELECT[index]);
+        }
+        if digit <= 4 {
+            let activity_mod = if mac {
+                ctrl && meta && !alt && !shift
+            } else {
+                ctrl && !meta && alt && shift
+            };
+            if activity_mod {
+                return Some(ACTIVITY_MODE[index]);
+            }
         }
     }
 
@@ -859,5 +896,48 @@ mod tests {
         for (ts, event, _) in MONITOR_ACTION_IDS {
             assert!(ts_declared(ts), "{ts} (for {event}) is not a TS ShortcutActionId");
         }
+    }
+
+    #[test]
+    fn activity_mode_chords_follow_platform_and_overrides() {
+        for digit in 1..=4u8 {
+            let expected_action = format!("activity-mode-{digit}");
+            let mac_chord = chord(KeyId::Digit(digit), true, true, false, false);
+            assert_eq!(
+                chord_to_action_in(None, mac_chord, KeyPlatform::Mac),
+                Some(expected_action.as_str())
+            );
+            assert_eq!(
+                monitor_action_in(None, &[mac_chord]),
+                Some(("menu_select_activity_mode", Some(digit)))
+            );
+            for platform in [KeyPlatform::Windows, KeyPlatform::Linux] {
+                let non_mac_chord = chord(KeyId::Digit(digit), true, false, true, true);
+                assert_eq!(
+                    chord_to_action_in(None, non_mac_chord, platform),
+                    Some(expected_action.as_str())
+                );
+            }
+        }
+        // Rebinding and unbinding an activity mode updates both browser guest and macOS monitor.
+        let custom = overrides(&[
+            ("activity.mode1", None),
+            ("activity.mode2", Some(binding("2", true, false, true, false))),
+        ]);
+        let mac_mode1 = chord(KeyId::Digit(1), true, true, false, false);
+        let mac_mode2_old = chord(KeyId::Digit(2), true, true, false, false);
+        let mac_mode2_new = chord(KeyId::Digit(2), false, true, true, false);
+        assert_eq!(chord_to_action_in(Some(&custom), mac_mode1, KeyPlatform::Mac), None);
+        assert_eq!(monitor_action_in(Some(&custom), &[mac_mode1]), None);
+        assert_eq!(chord_to_action_in(Some(&custom), mac_mode2_old, KeyPlatform::Mac), None);
+        assert_eq!(monitor_action_in(Some(&custom), &[mac_mode2_old]), None);
+        assert_eq!(
+            chord_to_action_in(Some(&custom), mac_mode2_new, KeyPlatform::Mac),
+            Some("activity-mode-2")
+        );
+        assert_eq!(
+            monitor_action_in(Some(&custom), &[mac_mode2_new]),
+            Some(("menu_select_activity_mode", Some(2)))
+        );
     }
 }

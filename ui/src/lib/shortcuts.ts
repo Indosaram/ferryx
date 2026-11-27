@@ -847,6 +847,7 @@ export function useShortcuts(
           !isTerminalTarget(event.target) &&
           shortcut.id !== "commandPalette.open" &&
           !shortcut.id.startsWith("browser.") &&
+          !shortcut.id.startsWith("activity.") &&
           shortcut.id !== "settings.toggle" &&
           shortcut.id !== "notifications.toggle"
         ) {

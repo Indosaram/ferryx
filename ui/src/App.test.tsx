@@ -109,6 +109,7 @@ const native = {
   onCommandPaletteMenu: vi.fn().mockResolvedValue(() => {}),
   onToggleSidebarMenu: vi.fn().mockResolvedValue(() => {}),
   onOpenSettingsMenu: vi.fn().mockResolvedValue(() => {}),
+  onSelectActivityModeMenu: vi.fn().mockResolvedValue(() => {}),
   selectWorktreeMenuHandler: null as ((digit: number) => void) | null,
   onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
   onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
@@ -282,6 +283,7 @@ vi.mock("./lib/tauri", () => ({
   onCommandPaletteMenu: native.onCommandPaletteMenu,
   onToggleSidebarMenu: native.onToggleSidebarMenu,
   onOpenSettingsMenu: native.onOpenSettingsMenu,
+  onSelectActivityModeMenu: native.onSelectActivityModeMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
   onTerminalOutput: native.onTerminalOutput,
   publishFocusedTerminal: native.publishFocusedTerminal,
@@ -644,6 +646,8 @@ describe("App project workspace flow", () => {
     native.onToggleSidebarMenu.mockResolvedValue(() => {});
     native.onOpenSettingsMenu.mockReset();
     native.onOpenSettingsMenu.mockResolvedValue(() => {});
+    native.onSelectActivityModeMenu.mockReset();
+    native.onSelectActivityModeMenu.mockResolvedValue(() => {});
     native.onRemoteSelectionRequested.mockReset();
     updater.check.mockReset();
     updater.check.mockResolvedValue(null);

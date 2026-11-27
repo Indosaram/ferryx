@@ -15,23 +15,27 @@ describe("workspace shell theme contract", () => {
     // The rail is the shell's left edge: it mounts before the drawer and never hides.
     expect(source).toContain("<DesktopActivityBar");
     expect(source.indexOf("<DesktopActivityBar")).toBeLessThan(source.indexOf("<Sidebar\n"));
-    // The collapsed-drawer workaround is gone: no floating titlebar controls, no tab leading spacer.
+    // The collapsed-drawer workaround is gone: no floating titlebar controls, only the 24px
+    // macOS traffic-light overhang past the 48px rail when the drawer is collapsed.
     expect(source).not.toContain("titlebar-left-floating");
     expect(source).not.toMatch(/leadingSpacer=\{isSidebarOpen[^}]*108/);
-    expect(source).toMatch(/leadingSpacer=\{0\}/);
+    expect(source).toContain("leadingSpacer={isMacPlatform && !isSidebarOpen ? MAC_TRAFFIC_LIGHT_OVERHANG : 0}");
   });
 
-  it("draws the macOS traffic-light clearance inside the rail, not in the drawer", () => {
+  it("clears the macOS traffic-light height in the rail and the horizontal overhang in the drawer", () => {
     const rail = readSource("./components/activity/DesktopActivityBar.tsx");
     const sidebar = readSource("./components/Sidebar.tsx");
 
     expect(rail).toContain('data-testid="titlebar-traffic-light-pad"');
-    expect(rail).toContain("MAC_TRAFFIC_LIGHT_CLEARANCE = 72");
+    expect(rail).toContain("MAC_TRAFFIC_LIGHT_WIDTH = 72");
+    expect(rail).toContain("MAC_TRAFFIC_LIGHT_CLEARANCE = 36");
+    expect(rail).toContain("MAC_TRAFFIC_LIGHT_OVERHANG");
     expect(rail).toContain("data-tauri-drag-region");
-    // The shell hands the drawer `isMac={false}`: its titlebar starts at x=48, right of the rail.
+    // The 48px rail clears the 36px vertical titlebar band, while the adjacent drawer clears the
+    // remaining 24px horizontal traffic-light overhang so its titlebar buttons sit clear.
     const app = readSource("./App.tsx");
-    expect(app).toMatch(/hideViewTabs[\s\S]{0,200}isMac=\{false\}/);
-    expect(sidebar).toContain("titlebarLeading={isMac ?");
+    expect(app).toMatch(/hideViewTabs[\s\S]{0,300}isMac=\{false\}[\s\S]{0,120}trafficLightClearancePx=\{isMacPlatform \? MAC_TRAFFIC_LIGHT_OVERHANG : 0\}/);
+    expect(sidebar).toContain("trafficLightClearancePx ?? (isMac ? 72 : 0)");
   });
 
   it("uses semantic workspace surfaces instead of a one-off background hex", () => {

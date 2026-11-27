@@ -108,7 +108,8 @@ export type BrowserShortcutAction =
   | "settings-toggle"
   | "split-right"
   | "split-down"
-  | `workspace-select-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9}`;
+  | `workspace-select-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9}`
+  | `activity-mode-${1 | 2 | 3 | 4}`;
 
 export const BROWSER_TAB_SHORTCUT_EVENT = "ferryx:browser-tab-shortcut";
 
@@ -139,6 +140,12 @@ export function browserWorkspaceSelectIndex(action: string): number | null {
   if (!action.startsWith("workspace-select-")) return null;
   const digit = Number(action.slice("workspace-select-".length));
   return Number.isInteger(digit) && digit >= 1 && digit <= 9 ? digit - 1 : null;
+}
+
+export function browserActivityModeIndex(action: string): number | null {
+  if (!action.startsWith("activity-mode-")) return null;
+  const digit = Number(action.slice("activity-mode-".length));
+  return Number.isInteger(digit) && digit >= 1 && digit <= 4 ? digit - 1 : null;
 }
 
 export type BrowserShortcutRequestedPayload = {
