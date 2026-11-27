@@ -378,4 +378,86 @@ describe("SystemResourcesDialog", () => {
     fireEvent.mouseDown(dialog.parentElement!);
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(2));
   });
+
+  it("focuses a single machine from the fleet rail and returns to all machines", async () => {
+    fetchSystemResources.mockResolvedValue(snapshot);
+    withHosts([pairedHost("h-omarchy", "omarchy"), pairedHost("h-win", "maho-win")]);
+    fetchPairedResources.mockImplementation(async (host: { hostId: string }) =>
+      host.hostId === "h-omarchy"
+        ? {
+            status: "sampled",
+            snapshot: {
+              ...snapshot,
+              platform: "linux",
+              cpuCount: 16,
+              sessions: [
+                { sessionId: "remote-1", pid: 77, worktreePath: "/code/feature-x", cpuPercent: 18, residentBytes: 2048, processCount: 2 },
+              ],
+            },
+          }
+        : { status: "unreachable" },
+    );
+    render(<SystemResourcesDialog onClose={() => undefined} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("resource-machine")).toHaveLength(3));
+    const navItems = screen.getAllByTestId("resource-machine-nav-item");
+    expect(navItems.map((el) => el.dataset.machineKey)).toEqual(["local", "h-win", "h-omarchy"]);
+
+    fireEvent.click(navItems[2]!);
+    expect(screen.getAllByTestId("resource-machine")).toHaveLength(1);
+    expect(screen.getByTestId("resource-machine")).toHaveAttribute("aria-label", "omarchy");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(screen.getAllByTestId("resource-machine")).toHaveLength(3);
+  });
+
+  it("filters a large machine fleet in the rail and clears filter on Escape before closing", async () => {
+    fetchSystemResources.mockResolvedValue(snapshot);
+    withHosts([
+      pairedHost("h-1", "alpha-box"),
+      pairedHost("h-2", "beta-box"),
+      pairedHost("h-3", "gamma-box"),
+      pairedHost("h-4", "delta-box"),
+    ]);
+    fetchPairedResources.mockResolvedValue({ status: "unreachable" });
+    const onClose = vi.fn();
+    render(<SystemResourcesDialog onClose={onClose} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("resource-machine-nav-item")).toHaveLength(5));
+    const search = screen.getByRole("searchbox", { name: "Filter machines" });
+    fireEvent.change(search, { target: { value: "gamma" } });
+    expect(screen.getAllByTestId("resource-machine-nav-item")).toHaveLength(1);
+    expect(screen.getByTestId("resource-machine-nav-item")).toHaveAttribute("data-machine-key", "h-3");
+
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("resource-machine-nav-item")).toHaveLength(5);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close system resources" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("encodes meter severity by utilization threshold and supports collapse all / expand all", async () => {
+    fetchSystemResources.mockResolvedValue({
+      ...snapshot,
+      cpuUtilization: 0.94,
+      memoryUsedBytes: 26 * 1024 ** 3,
+      memoryTotalBytes: 32 * 1024 ** 3,
+      swapUsedBytes: 512 * 1024 ** 2,
+      swapTotalBytes: 4 * 1024 ** 3,
+    });
+    withHosts([pairedHost("h-omarchy", "omarchy")]);
+    fetchPairedResources.mockResolvedValue({ status: "unreachable" });
+    render(<SystemResourcesDialog onClose={() => undefined} />);
+
+    await screen.findByTestId("meter-cpu");
+    expect(screen.getByTestId("meter-cpu").className).toContain("bg-destructive");
+    expect(screen.getByTestId("meter-memory").className).toContain("bg-status-warning");
+    expect(screen.getByTestId("meter-swap").className).toContain("bg-status-success");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.queryByTestId("meter-cpu")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(screen.getByTestId("meter-cpu")).toBeInTheDocument();
+  });
 });
