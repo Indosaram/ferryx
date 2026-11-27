@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { writeSurvivalFixture } from "./fixtures/survival-fixture.mjs";
+import { writeSymbolicationFixture } from "./fixtures/symbolication-fixture.mjs";
 import { appendSurvivalReport } from "./lib/release-changelog.mjs";
 import {
   SURVIVAL_SCENARIOS,
@@ -194,6 +195,9 @@ function assembledRun(tmp) {
     commitSha: COMMIT, sourceDateEpoch: plan.sourceDateEpoch, ghosttyPin: "a".repeat(40), updaterPublicKey: "fixture",
   }));
   for (const dir of ["receipts", "artifacts"]) mkdirSync(join(runDir, dir), { recursive: true });
+  // publishRelease refuses a run with no crash-symbolication evidence, and the packaged darwin
+  // artifact it needs belongs to artifacts/, so write it before the assembly snapshot is taken.
+  writeSymbolicationFixture(runDir);
   writeFileSync(join(runDir, "assembly-state.json"), JSON.stringify({
     schemaVersion: 1, planDigest, receiptsDigest: digestDirectory(join(runDir, "receipts")),
     artifactsDigest: digestDirectory(join(runDir, "artifacts")), publishDigest: digestDirectory(publishDir),
