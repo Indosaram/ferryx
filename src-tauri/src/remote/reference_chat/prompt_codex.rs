@@ -1475,6 +1475,7 @@ fn finish_codex_prompt(input: FinishCodexPrompt) -> ReferenceCodexPrompt {
         queued: input.queued,
         steps: Vec::new(),
         fallback: None,
+        answer_status: None,
     };
     ReferenceCodexPrompt {
         prompt,

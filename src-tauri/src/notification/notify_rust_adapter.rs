@@ -109,10 +109,16 @@ fn is_dev_output_dir(dir: &std::path::Path) -> bool {
 /// `System.AppUserModel.ID` of an installed Start-Menu shortcut, and this repo
 /// registers none yet, so the NSIS/MSI packaging must register `app_id` before
 /// packaged Windows toasts can be relied on.
+///
+/// `superseded` answers whether the order fence already withdrew this dispatch. On Linux the
+/// waiter slot is registered *before* the banner is shown, so the check runs after that
+/// registration and before `show()`: a withdrawal that landed in between found no slot to close,
+/// and this is where the fresh banner is refused instead of outliving the fence that recorded it.
 pub fn submit_with_click_routing(
     content: &NotificationContent,
     _app_id: &str,
     activations: Arc<NotificationActivations>,
+    superseded: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<(), String> {
     let mut builder = Notification::new();
     builder.summary(&content.title).body(&content.body);
@@ -159,21 +165,58 @@ pub fn submit_with_click_routing(
         builder.action(DEFAULT_ACTION_ID, "Open");
     }
 
-    let handle = builder.show().map_err(|error| error.to_string())?;
+    // Register the Linux waiter *before* showing: an immediate withdrawal (a
+    // newer banner for the same pane, or a closed pane) must find the slot in
+    // place, or it would race `show()` and the banner would outlive it.
+    #[cfg(target_os = "linux")]
+    let registration = target.as_ref().map(|target| {
+        let key = (target.workspace_id.clone(), target.session_id.clone());
+        let (token, cancel_rx) = linux_registry().register(key.clone());
+        (key, token, cancel_rx)
+    });
+
+    // The slot exists now, so a withdrawal that settled between the fence claim and that
+    // registration has nothing left to close: release the slot and show nothing.
+    if superseded() {
+        #[cfg(target_os = "linux")]
+        if let Some((key, token, _)) = &registration {
+            linux_registry().finish_token(key, *token);
+        }
+        return Ok(());
+    }
+
+    let handle = match builder.show() {
+        Ok(handle) => handle,
+        Err(error) => {
+            // Nothing was shown, so release the slot instead of leaving a dead one.
+            #[cfg(target_os = "linux")]
+            if let Some((key, token, _)) = &registration {
+                linux_registry().finish_token(key, *token);
+            }
+            return Err(error.to_string());
+        }
+    };
 
     let Some(target) = target else {
         return Ok(());
     };
 
-    // Register the Linux waiter *before* the thread starts: an immediate
-    // withdrawal (a newer banner for the same pane, or a closed pane) must find
-    // the slot already in place, or it would race the thread's startup.
     #[cfg(target_os = "linux")]
-    let (key, token, cancel_rx) = {
-        let key = (target.workspace_id.clone(), target.session_id.clone());
-        let (token, cancel_rx) = linux_registry().register(key.clone());
-        (key, token, cancel_rx)
+    let Some((key, token, mut cancel_rx)) = registration else {
+        return Ok(());
     };
+
+    // A withdrawal that landed while `show()` was in flight already fired the
+    // cancel: close the fresh banner now and route nothing.
+    #[cfg(target_os = "linux")]
+    if !matches!(
+        cancel_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ) {
+        handle.close();
+        linux_registry().finish_token(&key, token);
+        return Ok(());
+    }
 
     #[cfg(target_os = "linux")]
     let spawned = std::thread::Builder::new()

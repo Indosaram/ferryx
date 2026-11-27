@@ -348,6 +348,7 @@ async fn negotiate(
         gateway,
         deadline: manager.config.connect_deadline,
         cancellation,
+        datagram_peers: Some(Arc::clone(&state.direct_datagram_peers)),
     };
     let mut tasks = manager.tasks.lock();
     while tasks.try_join_next().is_some() {}

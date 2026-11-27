@@ -3254,12 +3254,13 @@ async fn execute_request<R: tauri::Runtime>(
             reference,
             generation,
         } => {
-            let expected_generation = match generation {
-                Some(gen) => Ok(gen),
-                None => manager.get_state(&browser_id).map(|state| state.generation),
+            let Some(generation) = generation else {
+                return error_response(IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    "upload requires `generation` from observe",
+                ));
             };
-            let expect = expected_generation
-                .and_then(|gen| manager.observed_ref(&browser_id, gen, &reference));
+            let expect = manager.observed_ref(&browser_id, generation, &reference);
             match expect {
                 Ok(expect) => {
                     match crate::browser::agent::page::upload_file(
@@ -3299,18 +3300,18 @@ async fn execute_request<R: tauri::Runtime>(
         }
         BrowserCliRequest::RequestHelp { browser_id, reason } => {
             match manager.get_state(&browser_id) {
-                Ok(_) => {
-                    crate::browser::agent::service::request_help(
-                        app,
-                        &browser_id,
-                        reason.as_deref(),
-                    );
-                    BrowserCliResponse::HelpRequested {
+                Ok(_) => match crate::browser::agent::service::request_help(
+                    app,
+                    &browser_id,
+                    reason.as_deref(),
+                ) {
+                    Ok(()) => BrowserCliResponse::HelpRequested {
                         browser_id,
                         handed_off: true,
                         reason,
-                    }
-                }
+                    },
+                    Err(error) => error_response(error),
+                },
                 Err(error) => error_response(error.into()),
             }
         }

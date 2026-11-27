@@ -109,6 +109,7 @@ mod tests {
             consent_sender: Some(consent),
             allow_input: Arc::new(AtomicBool::new(true)),
             allow_clipboard: Arc::new(AtomicBool::new(true)),
+            max_udp_payload_bytes: DEFAULT_MAX_UDP_PAYLOAD_BYTES,
         })
         .unwrap();
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();

@@ -668,7 +668,10 @@ async fn store_order_row(
              worktree_path = CASE WHEN excluded.worktree_path <> '' THEN excluded.worktree_path
                                  ELSE lane_lifecycles.worktree_path END,
              revision = lane_lifecycles.revision + 1,
-             updated_at = excluded.updated_at",
+             updated_at = excluded.updated_at
+         WHERE lane_lifecycles.position IS NOT excluded.position
+            OR (excluded.worktree_path <> ''
+                AND lane_lifecycles.worktree_path IS NOT excluded.worktree_path)",
     )
     .bind(&key)
     .bind(workspace_id)
@@ -1103,6 +1106,35 @@ mod tests {
             .await.expect("reorder");
         assert_eq!(one(&pool, "p:ferryx/code/plain", now).await.expect("read").expect("row").worktree_path, "/code/plain");
         assert_eq!(one(&pool, "p:ferryx/C:/code/plain", now).await.expect("read").expect("row").worktree_path, "C:/code/plain");
+    }
+
+    /// A drag rewrites the whole section; rows whose position and path are unchanged must keep
+    /// their revision (pending undo guards) and updated_at (7-day idle clock).
+    #[tokio::test]
+    async fn reorder_leaves_unmoved_rows_untouched_and_still_backfills_paths() {
+        let pool = crate::storage::memory().await.expect("memory database");
+        let (t1, t2, t3) = ("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z");
+        let (a, b, c) = ("p:ferryx/code/a", "p:ferryx/code/b", "p:ferryx/code/c");
+        reorder(&pool, "ferryx", &[a.into(), b.into(), c.into()], t1).await.expect("seed");
+        reorder(&pool, "ferryx", &[a.into(), c.into(), b.into()], t2).await.expect("swap");
+        let read = |key: &'static str| {
+            let pool = pool.clone();
+            async move { one(&pool, key, t3).await.expect("read").expect("row") }
+        };
+        let (ra, rb, rc) = (read(a).await, read(b).await, read(c).await);
+        assert_eq!((ra.revision, ra.position), (1, 0));
+        assert_eq!((rb.revision, rb.position), (2, 2));
+        assert_eq!((rc.revision, rc.position), (2, 1));
+        let updated: String = sqlx::query_scalar("SELECT updated_at FROM lane_lifecycles WHERE worktree_key = ?")
+            .bind(a).fetch_one(&pool).await.expect("updated_at");
+        assert_eq!(updated, t1);
+        // A row stored without a path keeps its position but must still gain the directory.
+        row(&pool, "ferryx", "p:ferryx/code/d", 3).await;
+        reorder(&pool, "ferryx", &[a.into(), c.into(), b.into(), "p:ferryx/code/d".into()], t3)
+            .await.expect("backfill");
+        let rd = read("p:ferryx/code/d").await;
+        assert_eq!((rd.worktree_path.as_str(), rd.revision, rd.position), ("/code/d", 2, 3));
+        assert_eq!(read(a).await.revision, 1);
     }
 
     #[tokio::test]

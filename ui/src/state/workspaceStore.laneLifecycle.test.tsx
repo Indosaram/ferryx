@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { toast } from "../components/ui/sonner";
 import { setLaneLifecycleTransport, type LaneLifecycleTransport, type LaneLifecycleView } from "../lib/sidebarPersistence";
 import { createLayoutState } from "./layout";
-import { useWorkspaceStore, type WorkspaceServices } from "./workspaceStore";
+import { pendingLaneLifecycleState, useWorkspaceStore, workspaceReducer, type WorkspaceServices, type WorkspaceState } from "./workspaceStore";
 
 const root = { path: "/code/ferryx", head: "abc", branch: "main", bare: false, detached: false, locked: null, prunable: null };
 const saved: LaneLifecycleView = {
@@ -112,6 +112,34 @@ describe("project-root lifecycle persistence", () => {
     await act(async () => { await result.current.refreshLaneLifecycles(); });
     expect(api.read).toHaveBeenCalled();
     expect(errorToast).not.toHaveBeenCalled();
+    unmount();
+  });
+});
+
+describe("lane lifecycle undo window", () => {
+  const pendingRequest = { worktreeKey: saved.worktreeKey, workspaceId: "ferryx", path: root.path, action: "archive" as const };
+
+  it("overlays a pending action onto the rendered sidebar rows without touching the store", () => {
+    const pending = { ...pendingRequest, previous: "pinned" as const, previousRevision: 0, expiresAt: 0 };
+    expect(pendingLaneLifecycleState(pending)).toBe("archived");
+    expect(pendingLaneLifecycleState({ ...pending, action: "settle" })).toBe("settled");
+    expect(pendingLaneLifecycleState({ ...pending, action: "snooze" })).toBe("snoozed");
+  });
+
+  it("cancel drops only the pending entry and keeps a newer server frame", () => {
+    const pending = { ...pendingRequest, previous: "active" as const, previousRevision: 0, expiresAt: 0 };
+    const base = { laneLifecycle: { [saved.worktreeKey]: "pinned" }, lanePending: { [saved.worktreeKey]: pending } } as unknown as WorkspaceState;
+    const next = workspaceReducer(base, { type: "CANCEL_LANE_LIFECYCLE", worktreeKey: saved.worktreeKey });
+    expect(next.lanePending?.[saved.worktreeKey]).toBeUndefined();
+    expect(next.laneLifecycle?.[saved.worktreeKey]).toBe("pinned");
+  });
+
+  it("does not leak a pending entry when no transport is declared at commit", async () => {
+    const { result, unmount } = renderHook(() => useWorkspaceStore({ workspaceId: "ferryx", initialWorktrees: [root], services }));
+    act(() => result.current.beginLaneLifecycle(pendingRequest));
+    expect(result.current.state.lanePending?.[saved.worktreeKey]).toBeDefined();
+    await act(async () => { await result.current.commitLaneLifecycle(saved.worktreeKey); });
+    expect(result.current.state.lanePending?.[saved.worktreeKey]).toBeUndefined();
     unmount();
   });
 });

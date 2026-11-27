@@ -38,6 +38,11 @@ export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id
 export const REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY = "ferryx.remote.terminalInputMode";
 /** Remote terminal "Keep screen on" (Screen Wake Lock) preference: "true" or "false". */
 export const REMOTE_KEEP_SCREEN_ON_STORAGE_KEY = "ferryx.remote.keepScreenOn";
+export const RD_STATS_OVERLAY_STORAGE_KEY = "ferryx.rd.statsOverlay";
+export const RD_PLAYOUT_MODE_STORAGE_KEY = "ferryx.rd.playoutMode";
+export const RD_SCALE_MODE_STORAGE_KEY = "ferryx.rd.scaleMode";
+export const RD_AUDIO_MUTED_STORAGE_KEY = "ferryx.rd.audioMuted";
+export const RD_AUDIO_VOLUME_STORAGE_KEY = "ferryx.rd.audioVolume";
 export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
 /** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */

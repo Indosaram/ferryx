@@ -11,14 +11,18 @@
 //! blocking worker.
 
 use crate::daemon::protocol::{RdHostPending, RdHostSession, RdHostState};
+use crate::paired_host::client::{RD_DGRAM_ID_HEADER, RD_DGRAM_OPT_IN_HEADER};
+use crate::paired_host::direct::datagram::{
+    send_datagram_checked, DatagramChannelGuard, DatagramSendOutcome,
+};
 use crate::remote::auth::{DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::state::RemoteGatewayState;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -131,6 +135,9 @@ pub struct RemoteDesktopHost {
     allow_input: Arc<AtomicBool>,
     allow_clipboard: Arc<AtomicBool>,
     sink: Arc<RwLock<Option<RdEventSink>>>,
+    /// Test-only loopback endpoints standing in for a running host (no capture needed).
+    #[cfg(test)]
+    test_endpoints: Mutex<Option<(SocketAddr, SocketAddr)>>,
 }
 
 /// `<Ferryx data dir>/remote-desktop`.
@@ -190,7 +197,14 @@ impl RemoteDesktopHost {
             allow_input: Arc::new(AtomicBool::new(defaults.allow_input)),
             allow_clipboard: Arc::new(AtomicBool::new(defaults.allow_clipboard)),
             sink: Arc::new(RwLock::new(None)),
+            #[cfg(test)]
+            test_endpoints: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_endpoints(&self, tcp: SocketAddr, udp: SocketAddr) {
+        *self.test_endpoints.lock() = Some((tcp, udp));
     }
 
     pub fn set_event_sink(&self, sink: RdEventSink) {
@@ -380,6 +394,10 @@ impl RemoteDesktopHost {
 
     /// Loopback TCP and UDP endpoints of the running host.
     pub fn endpoints(&self) -> Result<(SocketAddr, SocketAddr), RdError> {
+        #[cfg(test)]
+        if let Some(endpoints) = *self.test_endpoints.lock() {
+            return Ok(endpoints);
+        }
         let mut inner = self.inner.lock();
         self.ensure_loaded(&mut inner);
         if !inner.settings.enabled {
@@ -490,6 +508,9 @@ fn spawn_host(
             let server = host_config(store).and_then(|mut config| {
                 config.allow_input = allow_input;
                 config.allow_clipboard = allow_clipboard;
+                // Media may ride direct QUIC datagrams; keep every packet inside that budget.
+                config.max_udp_payload_bytes =
+                    ferryx_rd_host::session::QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES;
                 let host_name = config.host_name.clone();
                 let server = bind_host(config)?;
                 let tcp = server.tcp_addr().map_err(|error| error.to_string())?;
@@ -600,17 +621,57 @@ pub fn decode_stream_frame(frame: &[u8]) -> Option<(StreamChannel, &[u8])> {
     }
 }
 
-async fn bridge(socket: WebSocket, tcp_addr: SocketAddr, udp_addr: SocketAddr) -> std::io::Result<()> {
+/// Direct QUIC datagram media state for one stream: the connection, the minted channel id, the
+/// channel's receiver and the guard that unregisters it from the mux when dropped.
+type DatagramBridge = (
+    quinn::Connection,
+    u64,
+    tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    DatagramChannelGuard,
+);
+
+/// The next datagram for this stream; pends forever once there is no (or no longer a) channel.
+async fn next_datagram(
+    rx: &mut Option<tokio::sync::mpsc::Receiver<bytes::Bytes>>,
+) -> Option<bytes::Bytes> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn bridge(
+    socket: WebSocket,
+    tcp_addr: SocketAddr,
+    udp_addr: SocketAddr,
+    datagrams: Option<DatagramBridge>,
+) -> std::io::Result<()> {
     let tcp = tokio::net::TcpStream::connect(tcp_addr).await?;
     tcp.set_nodelay(true)?;
     let udp = tokio::net::UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
     udp.connect(udp_addr).await?;
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
     let (mut ws_tx, mut ws_rx) = socket.split();
+    // Bound after the socket halves so it drops before them: when the bridge ends (exit or
+    // revocation) the channel leaves the mux before the peer can observe the close.
+    let (dgram_send, mut dgram_rx, _dgram_guard) = match datagrams {
+        Some((connection, channel_id, rx, guard)) => {
+            (Some((connection, channel_id)), Some(rx), Some(guard))
+        }
+        None => (None, None, None),
+    };
     let mut tcp_buf = vec![0_u8; MAX_TCP_CHUNK];
     let mut udp_buf = vec![0_u8; 64 * 1024];
+    let mut dgram_open = dgram_rx.is_some();
     loop {
         tokio::select! {
+            incoming = next_datagram(&mut dgram_rx), if dgram_open => match incoming {
+                Some(payload) => {
+                    udp.send(&payload).await?;
+                }
+                // The mux was cleared (the QUIC reader ended); WebSocket frames still work.
+                None => dgram_open = false,
+            },
             message = ws_rx.next() => match message {
                 Some(Ok(Message::Binary(data))) => match decode_stream_frame(&data) {
                     Some((StreamChannel::Tcp, payload)) => tcp_write.write_all(payload).await?,
@@ -639,6 +700,13 @@ async fn bridge(socket: WebSocket, tcp_addr: SocketAddr, udp_addr: SocketAddr) -
             }
             received = udp.recv(&mut udp_buf) => {
                 let n = received?;
+                if let Some((connection, channel_id)) = &dgram_send {
+                    if send_datagram_checked(connection, *channel_id, &udp_buf[..n])
+                        == DatagramSendOutcome::Sent
+                    {
+                        continue;
+                    }
+                }
                 let frame = encode_stream_frame(StreamChannel::Udp, &udp_buf[..n]);
                 ws_tx.send(Message::Binary(frame.into())).await.map_err(std::io::Error::other)?;
             }
@@ -711,8 +779,10 @@ async fn pair_handler(State(state): State<Arc<RemoteGatewayState>>, headers: Hea
 async fn stream_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<RemoteGatewayState>>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
 ) -> Response {
+    // Full authorization runs before anything touches the datagram registry.
     let device = match authorize(&state, &headers).await {
         Ok(device) => device,
         Err(response) => return *response,
@@ -732,19 +802,53 @@ async fn stream_handler(
     let Ok(mut revocation) = state.auth_manager.device_revocation(&device.id) else {
         return error_response(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "invalid or revoked token");
     };
-    ws.max_message_size(MAX_STREAM_MESSAGE)
+    let datagrams = datagram_channel(&state, peer, &headers);
+    let channel_id = datagrams.as_ref().map(|(_, channel_id, _, _)| *channel_id);
+    let mut response = ws
+        .max_message_size(MAX_STREAM_MESSAGE)
         .max_frame_size(MAX_STREAM_MESSAGE)
         .on_upgrade(move |socket| async move {
             tokio::select! {
                 biased;
                 _ = revocation.wait_for(|revoked| *revoked) => {}
-                result = bridge(socket, tcp, udp) => {
+                result = bridge(socket, tcp, udp, datagrams) => {
                     if let Err(error) = result {
                         tracing::debug!(%error, "remote desktop stream ended");
                     }
                 }
             }
-        })
+        });
+    if let Some(channel_id) = channel_id {
+        if let Ok(value) = HeaderValue::from_str(&format!("{channel_id:016x}")) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static(RD_DGRAM_ID_HEADER), value);
+        }
+    }
+    response
+}
+
+/// A datagram channel for this stream when the (already authorized) caller opted in AND its
+/// TCP peer is a live direct QUIC bridge stream whose connection supports datagrams. Anything
+/// else (relay, plain TCP, a forged opt-in, a peer without datagram support) gets `None` and
+/// stays on WebSocket UDP frames.
+fn datagram_channel(
+    state: &RemoteGatewayState,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+) -> Option<DatagramBridge> {
+    let opted_in = headers
+        .get(RD_DGRAM_OPT_IN_HEADER)
+        .is_some_and(|value| value.as_bytes() == b"1");
+    if !opted_in {
+        return None;
+    }
+    let axum::Extension(ConnectInfo(peer_addr)) = peer?;
+    let direct = state.direct_datagram_peers.lookup(&peer_addr)?;
+    direct.connection.max_datagram_size()?;
+    let channel_id = rand::random::<u64>().max(1);
+    let (rx, guard) = direct.mux.register(channel_id);
+    Some((direct.connection, channel_id, rx, guard))
 }
 
 /// The remote desktop gateway routes, merged into the daemon gateway router.
@@ -811,5 +915,351 @@ mod tests {
         let record = pairing_for_device(&store, "device-a", "Laptop").expect("pair");
         host.revoke_device("device-a");
         assert_eq!(store.load(&record.id).expect("load"), None);
+    }
+
+    mod datagram_route {
+        use super::super::*;
+        use crate::paired_host::direct::datagram::{
+            decode_datagram_frame, spawn_datagram_reader, DatagramMux, DirectDatagramPeer,
+        };
+        use crate::paired_host::direct::{create_quic_endpoint, generate_ephemeral_cert};
+        use crate::remote::auth::{DeviceAccessScope, DevicePermission};
+        use ferryx_rd_host::session::QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES;
+        use tokio::net::{TcpListener, TcpStream, UdpSocket};
+        use tokio_tungstenite::tungstenite::{
+            self, client::IntoClientRequest, handshake::client::Response as WsResponse,
+            Message as WsMessage,
+        };
+        use tokio_tungstenite::WebSocketStream;
+
+        const BOUND: Duration = Duration::from_secs(15);
+
+        /// The real stream route behind `ConnectInfo`, with loopback sockets standing in for
+        /// the running host so no screen capture is needed.
+        struct Gateway {
+            _dir: tempfile::TempDir,
+            state: Arc<RemoteGatewayState>,
+            addr: SocketAddr,
+            host_tcp: TcpListener,
+            host_udp: UdpSocket,
+            token: String,
+            device_id: String,
+            server: tokio::task::JoinHandle<()>,
+        }
+
+        impl Drop for Gateway {
+            fn drop(&mut self) {
+                self.server.abort();
+            }
+        }
+
+        async fn gateway() -> Gateway {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let state = Arc::new(RemoteGatewayState::new_with_paths(
+                Arc::new(crate::terminal::TerminalService::default()),
+                crate::worktree::WorkspaceRegistry::new(),
+                Some(dir.path().join("remote-config.json")),
+                Some(dir.path().join("remote-auth.json")),
+            ));
+            let host_tcp = TcpListener::bind("127.0.0.1:0").await.expect("host tcp");
+            let host_udp = UdpSocket::bind("127.0.0.1:0").await.expect("host udp");
+            state.remote_desktop.set_test_endpoints(
+                host_tcp.local_addr().expect("host tcp addr"),
+                host_udp.local_addr().expect("host udp addr"),
+            );
+            let code = state
+                .auth_manager
+                .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+                .expect("machine pairing code");
+            let (token, device) = state
+                .auth_manager
+                .exchange_pairing_code(&code, "rd datagram test")
+                .expect("exchange");
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("gateway");
+            let addr = listener.local_addr().expect("gateway addr");
+            let app = router(Arc::clone(&state));
+            let server = tokio::spawn(async move {
+                let _ = axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await;
+            });
+            Gateway {
+                _dir: dir,
+                state,
+                addr,
+                host_tcp,
+                host_udp,
+                token,
+                device_id: device.id,
+                server,
+            }
+        }
+
+        async fn upgrade(
+            tcp: TcpStream,
+            gateway: SocketAddr,
+            token: Option<&str>,
+            opt_in: bool,
+        ) -> Result<(WebSocketStream<TcpStream>, WsResponse), tungstenite::Error> {
+            let mut request = format!("ws://{gateway}{STREAM_ROUTE}")
+                .into_client_request()
+                .expect("request");
+            if let Some(token) = token {
+                request.headers_mut().insert(
+                    "authorization",
+                    format!("Bearer {token}").parse().expect("bearer"),
+                );
+            }
+            if opt_in {
+                request
+                    .headers_mut()
+                    .insert(RD_DGRAM_OPT_IN_HEADER, "1".parse().expect("opt-in"));
+            }
+            tokio_tungstenite::client_async_with_config(request, tcp, None).await
+        }
+
+        struct QuicPair {
+            server_endpoint: quinn::Endpoint,
+            client_endpoint: quinn::Endpoint,
+            /// The host's end, as the direct bridge registers it.
+            host: quinn::Connection,
+            client: quinn::Connection,
+        }
+
+        impl Drop for QuicPair {
+            fn drop(&mut self) {
+                self.server_endpoint.close(0u32.into(), b"done");
+                self.client_endpoint.close(0u32.into(), b"done");
+            }
+        }
+
+        async fn quic_pair() -> QuicPair {
+            let server_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("server udp");
+            let client_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("client udp");
+            let server_addr = server_sock.local_addr().expect("server addr");
+            let server_cert = generate_ephemeral_cert().expect("server cert");
+            let client_cert = generate_ephemeral_cert().expect("client cert");
+            let server_endpoint =
+                create_quic_endpoint(server_sock, &server_cert, &client_cert.cert_der, true)
+                    .expect("server endpoint");
+            let client_endpoint =
+                create_quic_endpoint(client_sock, &client_cert, &server_cert.cert_der, false)
+                    .expect("client endpoint");
+            let connect = async {
+                client_endpoint
+                    .connect(server_addr, "ferryx-direct")
+                    .map_err(|e| e.to_string())?
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            let accept = async {
+                let incoming = server_endpoint
+                    .accept()
+                    .await
+                    .ok_or_else(|| "server endpoint closed".to_string())?;
+                incoming.await.map_err(|e| e.to_string())
+            };
+            let (client, host) = tokio::try_join!(connect, accept).expect("quic handshake");
+            QuicPair {
+                server_endpoint,
+                client_endpoint,
+                host,
+                client,
+            }
+        }
+
+        fn channel_id(response: &WsResponse) -> Option<u64> {
+            let value = response.headers().get(RD_DGRAM_ID_HEADER)?.to_str().ok()?;
+            assert_eq!(value.len(), 16, "zero-padded hex id: {value}");
+            u64::from_str_radix(value, 16).ok()
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn registered_direct_peer_moves_udp_onto_quic_datagrams() {
+            tokio::time::timeout(BOUND, async {
+                let gw = gateway().await;
+                let quic = quic_pair().await;
+                let mux = DatagramMux::new();
+                let reader = spawn_datagram_reader(quic.host.clone(), Arc::clone(&mux));
+                let tcp = TcpStream::connect(gw.addr).await.expect("dial gateway");
+                let _peer = gw.state.direct_datagram_peers.register(
+                    tcp.local_addr().expect("local addr"),
+                    DirectDatagramPeer {
+                        connection: quic.host.clone(),
+                        mux: Arc::clone(&mux),
+                    },
+                );
+                let (mut ws, response) = upgrade(tcp, gw.addr, Some(gw.token.as_str()), true)
+                    .await
+                    .expect("upgrade");
+                let channel = channel_id(&response).expect("101 carries the datagram id");
+                assert_ne!(channel, 0);
+                assert_eq!(mux.len(), 1);
+                let (mut host_tcp, _) = gw.host_tcp.accept().await.expect("bridge dials host");
+
+                // Client -> host loopback UDP over a QUIC datagram.
+                assert_eq!(
+                    send_datagram_checked(&quic.client, channel, b"from-client"),
+                    DatagramSendOutcome::Sent
+                );
+                let mut buf = vec![0_u8; 2048];
+                let (n, bridge_udp) = gw.host_udp.recv_from(&mut buf).await.expect("host udp");
+                assert_eq!(&buf[..n], b"from-client");
+
+                // Host -> client: full-budget packets ride datagrams, in lockstep.
+                for seq in 0..5_u8 {
+                    let payload = vec![seq; QUIC_TUNNEL_MAX_UDP_PAYLOAD_BYTES];
+                    gw.host_udp.send_to(&payload, bridge_udp).await.expect("host send");
+                    let frame = quic.client.read_datagram().await.expect("datagram");
+                    let (id, got) = decode_datagram_frame(frame).expect("valid frame");
+                    assert_eq!(id, channel);
+                    assert_eq!(&got[..], &payload[..]);
+                }
+
+                // No UDP went over the WebSocket: the next frame is this TCP marker.
+                host_tcp.write_all(b"marker").await.expect("host tcp write");
+                let message = ws.next().await.expect("open").expect("frame");
+                assert_eq!(
+                    &message.into_data()[..],
+                    &encode_stream_frame(StreamChannel::Tcp, b"marker")[..]
+                );
+                reader.abort();
+            })
+            .await
+            .expect("test bounded");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn forged_opt_in_from_unregistered_peer_stays_on_websocket_udp() {
+            tokio::time::timeout(BOUND, async {
+                let gw = gateway().await;
+                let quic = quic_pair().await;
+                let mux = DatagramMux::new();
+                // A live direct peer exists, but under another loopback address.
+                let _other = gw.state.direct_datagram_peers.register(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+                    DirectDatagramPeer {
+                        connection: quic.host.clone(),
+                        mux: Arc::clone(&mux),
+                    },
+                );
+                let tcp = TcpStream::connect(gw.addr).await.expect("dial gateway");
+                let (mut ws, response) = upgrade(tcp, gw.addr, Some(gw.token.as_str()), true)
+                    .await
+                    .expect("upgrade");
+                assert!(response.headers().get(RD_DGRAM_ID_HEADER).is_none());
+                assert_eq!(mux.len(), 0);
+                let (_host_tcp, _) = gw.host_tcp.accept().await.expect("bridge dials host");
+
+                ws.send(WsMessage::Binary(
+                    encode_stream_frame(StreamChannel::Udp, b"ping").into(),
+                ))
+                .await
+                .expect("ws send");
+                let mut buf = vec![0_u8; 2048];
+                let (n, bridge_udp) = gw.host_udp.recv_from(&mut buf).await.expect("host udp");
+                assert_eq!(&buf[..n], b"ping");
+                gw.host_udp.send_to(b"pong", bridge_udp).await.expect("host send");
+                let message = ws.next().await.expect("open").expect("frame");
+                assert_eq!(
+                    &message.into_data()[..],
+                    &encode_stream_frame(StreamChannel::Udp, b"pong")[..]
+                );
+            })
+            .await
+            .expect("test bounded");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn revocation_closes_the_bridge_and_unregisters_the_channel() {
+            tokio::time::timeout(BOUND, async {
+                let gw = gateway().await;
+                let quic = quic_pair().await;
+                let mux = DatagramMux::new();
+                let tcp = TcpStream::connect(gw.addr).await.expect("dial gateway");
+                let _peer = gw.state.direct_datagram_peers.register(
+                    tcp.local_addr().expect("local addr"),
+                    DirectDatagramPeer {
+                        connection: quic.host.clone(),
+                        mux: Arc::clone(&mux),
+                    },
+                );
+                let (mut ws, response) = upgrade(tcp, gw.addr, Some(gw.token.as_str()), true)
+                    .await
+                    .expect("upgrade");
+                assert!(channel_id(&response).is_some());
+                assert_eq!(mux.len(), 1);
+                let (mut host_tcp, _) = gw.host_tcp.accept().await.expect("bridge dials host");
+                // One TCP round trip proves the bridge reached its loop.
+                ws.send(WsMessage::Binary(
+                    encode_stream_frame(StreamChannel::Tcp, b"hi").into(),
+                ))
+                .await
+                .expect("ws send");
+                let mut hi = [0_u8; 2];
+                host_tcp.read_exact(&mut hi).await.expect("host tcp read");
+                assert_eq!(&hi, b"hi");
+
+                assert!(gw
+                    .state
+                    .auth_manager
+                    .revoke_device(&gw.device_id)
+                    .expect("revoke"));
+                // The channel guard drops before the socket, so once the close is visible
+                // the channel is already gone.
+                loop {
+                    match ws.next().await {
+                        Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
+                        Some(Ok(_)) => {}
+                    }
+                }
+                assert_eq!(mux.len(), 0);
+            })
+            .await
+            .expect("test bounded");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn unauthorized_opt_in_never_allocates_a_channel() {
+            tokio::time::timeout(BOUND, async {
+                let gw = gateway().await;
+                let view_code = gw.state.auth_manager.create_pairing_code(DevicePermission::View);
+                let (mirror_token, mirror) = gw
+                    .state
+                    .auth_manager
+                    .exchange_pairing_code(&view_code, "rd mirror")
+                    .expect("exchange");
+                assert_eq!(mirror.access_scope, DeviceAccessScope::Mirror);
+                let quic = quic_pair().await;
+                let mux = DatagramMux::new();
+                for (token, status) in [
+                    (None, 401_u16),
+                    (Some("not-a-token"), 401),
+                    (Some(mirror_token.as_str()), 403),
+                ] {
+                    let tcp = TcpStream::connect(gw.addr).await.expect("dial gateway");
+                    let _peer = gw.state.direct_datagram_peers.register(
+                        tcp.local_addr().expect("local addr"),
+                        DirectDatagramPeer {
+                            connection: quic.host.clone(),
+                            mux: Arc::clone(&mux),
+                        },
+                    );
+                    let refused = upgrade(tcp, gw.addr, token, true)
+                        .await
+                        .expect_err("unauthorized upgrade is refused");
+                    let tungstenite::Error::Http(response) = refused else {
+                        panic!("expected an HTTP refusal");
+                    };
+                    assert_eq!(response.status().as_u16(), status);
+                    assert!(response.headers().get(RD_DGRAM_ID_HEADER).is_none());
+                    assert_eq!(mux.len(), 0, "no channel before authorization");
+                }
+            })
+            .await
+            .expect("test bounded");
+        }
     }
 }

@@ -868,6 +868,25 @@ impl PtyManager {
 
         drop(pair.slave);
 
+        // Kills and reaps the spawned child unless the session takes it over. `PtySession::new`
+        // owns the same invariant once the config is handed over; this guard covers the window
+        // between the spawn and that hand-over, so no failure below leaves an untracked child.
+        struct PaneChildGuard(Option<Box<dyn portable_pty::Child + Send + Sync>>);
+        impl PaneChildGuard {
+            fn take(&mut self) -> Box<dyn portable_pty::Child + Send + Sync> {
+                self.0.take().expect("pane child is handed over once")
+            }
+        }
+        impl Drop for PaneChildGuard {
+            fn drop(&mut self) {
+                if let Some(mut child) = self.0.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let mut child = PaneChildGuard(Some(child));
+
         let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
         // Taken while the master is still in hand: the session keeps it for the whole of its life,
         // so a close can end the reader even after a failed export took the master away.
@@ -878,7 +897,7 @@ impl PtyManager {
             incarnation: Some(incarnation),
             master: pair.master,
             reader_interrupt,
-            child,
+            child: child.take(),
             writer,
             writer_eof,
             reader,

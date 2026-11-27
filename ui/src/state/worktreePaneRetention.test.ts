@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
-import { workspaceReducer, type WorkspaceState } from "./workspaceStore";
+import { localRecoveryBlockReason, useWorkspaceStore, workspaceReducer, type WorkspaceServices, type WorkspaceState } from "./workspaceStore";
 
 const alpha: Worktree = {
   path: "/repo/alpha",
@@ -147,5 +148,51 @@ describe("a worktree refresh never destroys a session the daemon still runs", ()
 
     expect(parkedTabIds(next, alpha.path)).toEqual(["tab-live"]);
     expect(next.sessions["session-live"]).toBeDefined();
+  });
+});
+
+describe("worktree sync edge cases", () => {
+  it("keeps parked layouts and unread marks keyed by a raw Windows path", () => {
+    const win: Worktree = { ...alpha, path: "C:\\Users\\dev\\Repo" };
+    const state = stateWithVisibleTab(win.path, { activeWorktreePath: null });
+    const parked = {
+      ...state,
+      layout: { tabs: [], activeTabId: null, layoutsByTabId: {} } as unknown as WorkspaceState["layout"],
+      worktreeLayouts: { [win.path]: state.layout },
+      unreadWorktreePaths: { [win.path]: true },
+      activeWorktreePath: beta.path,
+    } as unknown as WorkspaceState;
+
+    const next = workspaceReducer(parked, { type: "SET_WORKTREES", worktrees: [win, beta], retainedSessionIds: [] });
+
+    expect(parkedTabIds(next, win.path)).toEqual(["tab-live"]);
+    expect(next.unreadWorktreePaths[win.path]).toBe(true);
+  });
+
+  it("skips pruning and closing when the live inventory cannot be read", async () => {
+    const closeTerminal = vi.fn(async () => undefined);
+    const services: WorkspaceServices = {
+      ensureTerminalEvents: vi.fn(async () => undefined), spawnTerminal: vi.fn(async () => "unused"),
+      getTerminalCwd: vi.fn(async () => null), closeTerminal, waitForTerminalExit: vi.fn(async () => undefined),
+      listTerminalSessions: vi.fn(async () => { throw new Error("inventory down"); }),
+    };
+    const { result, unmount } = renderHook(() => useWorkspaceStore({ workspaceId: "default", initialWorktrees: [alpha, beta], services }));
+    await act(async () => {
+      result.current.restoreWorkspace({ ...stateWithVisibleTab(alpha.path, { activeWorktreePath: alpha.path }), workspaceId: "default" } as WorkspaceState);
+    });
+    await act(async () => { await result.current.syncWorktrees([beta]); });
+    expect(closeTerminal).not.toHaveBeenCalled();
+    expect(result.current.state.sessions["session-live"]).toBeDefined();
+    expect(result.current.state.worktrees.map((w) => w.path)).toEqual([alpha.path, beta.path]);
+    unmount();
+  });
+});
+
+describe("localRecoveryBlockReason", () => {
+  it("knows PAIRED_PROXY_BLOCKED and keeps unknown non-empty codes verbatim", () => {
+    expect(localRecoveryBlockReason("PAIRED_PROXY_BLOCKED")).toBe("PAIRED_PROXY_BLOCKED");
+    expect(localRecoveryBlockReason("SOMETHING_NEW")).toBe("SOMETHING_NEW");
+    expect(localRecoveryBlockReason("")).toBe("identity_conflict");
+    expect(localRecoveryBlockReason(null)).toBe("identity_conflict");
   });
 });

@@ -615,18 +615,14 @@ export function runHostScript(host, scripts = {}, options = {}) {
       scpCommand,
       [...scpPrefix, "-q", localScript, `${host.ssh}:${remoteScript}`],
       { timeoutMs },
-    ).then((written) => {
+    ).then(() => runProcess(
+      sshCommand,
+      [...sshPrefix, "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", remoteScript],
+      { timeoutMs },
+    )).catch((error) => {
+      throw new Error(`Failed to stage the host script on '${host.ssh}': ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }).finally(() => {
       rmSync(staging, { recursive: true, force: true });
-      if (written.exitCode !== 0) {
-        throw new Error(
-          `Failed to stage the host script on '${host.ssh}': ${(written.stderr || written.stdout).trim()}`,
-        );
-      }
-      return runProcess(
-        sshCommand,
-        [...sshPrefix, "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", remoteScript],
-        { timeoutMs },
-      );
     });
   }
 

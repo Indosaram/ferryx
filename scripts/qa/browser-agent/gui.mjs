@@ -551,7 +551,7 @@ export function spawnGui(executable, { env, args = [], logFile = null, cwd = nul
   // The shell wrapper appends the child's output to a log file and detaches it in one step. Windows
   // has no `sh`, so there the app is spawned directly and its output is appended on exit instead.
   const useShell = Boolean(logFile) && process.platform !== 'win32';
-  const out = useShell ? spawn('sh', ['-c', `exec "${executable}" ${args.map((a) => `"${a}"`).join(' ')} >> "${logFile}" 2>&1`], { env, cwd, detached: true }) : null;
+  const out = useShell ? spawn('sh', ['-c', 'log=$1; shift; exec "$@" >> "$log" 2>&1', 'sh', logFile, executable, ...args.map(String)], { env, cwd, detached: true }) : null;
   const child = out ?? spawn(executable, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   if (!out) {
     const chunks = [];

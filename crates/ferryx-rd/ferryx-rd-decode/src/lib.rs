@@ -198,6 +198,34 @@ pub struct Nv12Frame {
     pub timestamp_ms: i64,
 }
 
+/// YCbCr matrix used to interpret decoded NV12 samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMatrix {
+    Bt601,
+    Bt709,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nv12ColorInfo {
+    pub matrix: ColorMatrix,
+    pub full_range: bool,
+}
+
+impl Default for Nv12ColorInfo {
+    fn default() -> Self {
+        Self {
+            matrix: ColorMatrix::Bt601,
+            full_range: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedVideoFrame {
+    pub frame: Nv12Frame,
+    pub color: Nv12ColorInfo,
+}
+
 #[cfg(feature = "ffmpeg")]
 mod ffmpeg_impl {
     use std::ptr;
@@ -206,8 +234,8 @@ mod ffmpeg_impl {
     use ffmpeg_next as ffmpeg;
 
     use super::{
-        hevc_parameter_set_blob, parse_length_prefixed_nalus, to_annex_b, DecodeError,
-        HardwareAcceleration, Nv12Frame,
+        hevc_parameter_set_blob, parse_length_prefixed_nalus, to_annex_b, ColorMatrix, DecodeError,
+        DecodedVideoFrame, HardwareAcceleration, Nv12ColorInfo, Nv12Frame,
     };
 
     pub struct HevcDecoder {
@@ -337,7 +365,23 @@ mod ffmpeg_impl {
             access_unit: &[u8],
             timestamp_ms: i64,
         ) -> Result<Vec<Nv12Frame>, DecodeError> {
-            self.decode_into(access_unit, timestamp_ms, copy_nv12)
+            self.decode_into(access_unit, timestamp_ms, |source, timestamp, _color| {
+                copy_nv12(source, timestamp)
+            })
+        }
+
+        /// Decodes NV12 pixels with color metadata captured before hardware transfer or scaling.
+        pub fn decode_with_color(
+            &mut self,
+            access_unit: &[u8],
+            timestamp_ms: i64,
+        ) -> Result<Vec<DecodedVideoFrame>, DecodeError> {
+            self.decode_into(access_unit, timestamp_ms, |source, timestamp, color| {
+                Ok(DecodedVideoFrame {
+                    frame: copy_nv12(source, timestamp)?,
+                    color,
+                })
+            })
         }
 
         /// Decode directly into caller-owned packed storage, without plane vectors.
@@ -347,7 +391,7 @@ mod ffmpeg_impl {
             timestamp_ms: i64,
             mut acquire: impl FnMut(usize) -> Vec<u8>,
         ) -> Result<Vec<super::PackedNv12Frame>, DecodeError> {
-            self.decode_into(access_unit, timestamp_ms, |source, timestamp| {
+            self.decode_into(access_unit, timestamp_ms, |source, timestamp, _color| {
                 pack_nv12(source, timestamp, &mut acquire)
             })
         }
@@ -356,7 +400,7 @@ mod ffmpeg_impl {
             &mut self,
             access_unit: &[u8],
             timestamp_ms: i64,
-            consume: impl FnMut(&frame::Video, i64) -> Result<T, DecodeError>,
+            consume: impl FnMut(&frame::Video, i64, Nv12ColorInfo) -> Result<T, DecodeError>,
         ) -> Result<Vec<T>, DecodeError> {
             let nalus = parse_length_prefixed_nalus(access_unit)?;
             let mut packet = ffmpeg::Packet::new(access_unit.len());
@@ -380,13 +424,13 @@ mod ffmpeg_impl {
             self.decoder
                 .send_eof()
                 .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?;
-            self.receive_into(0, copy_nv12)
+            self.receive_into(0, |source, timestamp, _color| copy_nv12(source, timestamp))
         }
 
         fn receive_into<T>(
             &mut self,
             fallback_timestamp_ms: i64,
-            mut consume: impl FnMut(&frame::Video, i64) -> Result<T, DecodeError>,
+            mut consume: impl FnMut(&frame::Video, i64, Nv12ColorInfo) -> Result<T, DecodeError>,
         ) -> Result<Vec<T>, DecodeError> {
             let mut frames = Vec::new();
             loop {
@@ -397,6 +441,8 @@ mod ffmpeg_impl {
                             .timestamp()
                             .or_else(|| decoded.pts())
                             .unwrap_or(fallback_timestamp_ms);
+                        // Hardware downloads and swscale need not preserve AVFrame properties.
+                        let color = color_info(&decoded);
                         self.acceleration = decoded_backend(decoded.format());
                         if matches!(
                             decoded.format(),
@@ -406,12 +452,14 @@ mod ffmpeg_impl {
                             frames.push(self.convert_to_nv12(
                                 &decoded,
                                 timestamp_ms,
+                                color,
                                 &mut consume,
                             )?);
                         } else {
                             frames.push(self.convert_to_nv12(
                                 &decoded,
                                 timestamp_ms,
+                                color,
                                 &mut consume,
                             )?);
                         }
@@ -428,13 +476,14 @@ mod ffmpeg_impl {
             &mut self,
             decoded: &frame::Video,
             timestamp_ms: i64,
-            consume: &mut impl FnMut(&frame::Video, i64) -> Result<T, DecodeError>,
+            color: Nv12ColorInfo,
+            consume: &mut impl FnMut(&frame::Video, i64, Nv12ColorInfo) -> Result<T, DecodeError>,
         ) -> Result<T, DecodeError> {
             let converted;
             let source = if decoded.format() == Pixel::NV12 {
                 decoded
             } else {
-                let full_range = is_full_range(decoded);
+                let full_range = color.full_range;
 
                 let needs_scaler = self.scaler.as_ref().map_or(true, |scaler| {
                     scaler.input().format != decoded.format()
@@ -462,7 +511,18 @@ mod ffmpeg_impl {
                 };
                 &converted
             };
-            consume(source, timestamp_ms)
+            consume(source, timestamp_ms, color)
+        }
+    }
+
+    pub(super) fn color_info(frame: &frame::Video) -> Nv12ColorInfo {
+        Nv12ColorInfo {
+            matrix: if frame.color_space() == ffmpeg::util::color::Space::BT709 {
+                ColorMatrix::Bt709
+            } else {
+                ColorMatrix::Bt601
+            },
+            full_range: is_full_range(frame),
         }
     }
 
@@ -823,12 +883,137 @@ impl HevcDecoder {
     }
 }
 
+#[cfg(not(feature = "ffmpeg"))]
+impl HevcDecoder {
+    /// Native VideoToolbox outputs full-range NV12; unavailable backends keep their error.
+    pub fn decode_with_color(
+        &mut self,
+        access_unit: &[u8],
+        timestamp_ms: i64,
+    ) -> Result<Vec<DecodedVideoFrame>, DecodeError> {
+        self.decode(access_unit, timestamp_ms).map(|frames| {
+            frames
+                .into_iter()
+                .map(|frame| DecodedVideoFrame {
+                    frame,
+                    color: Nv12ColorInfo::default(),
+                })
+                .collect()
+        })
+    }
+}
+
 #[cfg(all(test, feature = "ffmpeg"))]
 mod hardware_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_color_info_matches_capture_convention() {
+        assert_eq!(
+            Nv12ColorInfo::default(),
+            Nv12ColorInfo {
+                matrix: ColorMatrix::Bt601,
+                full_range: true,
+            }
+        );
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn decode_with_color_preserves_fixture_pixels_and_timestamp() {
+        let access_unit: Vec<_> = include_str!("../tests/fixtures/black_16x16.hevc.hex")
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect();
+        let mut legacy_decoder = HevcDecoder::new_software(&access_unit).unwrap();
+        let expected = legacy_decoder.decode(&access_unit, 42).unwrap();
+        let mut decoder = HevcDecoder::new_software(&access_unit).unwrap();
+        let frames = decoder.decode_with_color(&access_unit, 42).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].frame, expected[0]);
+        assert_eq!(frames[0].frame.timestamp_ms, 42);
+        assert_eq!(
+            frames[0].color,
+            Nv12ColorInfo {
+                matrix: ColorMatrix::Bt601,
+                full_range: false,
+            }
+        );
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn color_info_extracts_matrix_and_range_independently() {
+        use ffmpeg_next::{
+            format::Pixel,
+            frame,
+            util::color::{Range, Space},
+        };
+
+        for (space, matrix) in [
+            (Space::BT709, ColorMatrix::Bt709),
+            (Space::BT470BG, ColorMatrix::Bt601),
+            (Space::SMPTE170M, ColorMatrix::Bt601),
+            (Space::Unspecified, ColorMatrix::Bt601),
+        ] {
+            for (range, full_range) in [
+                (Range::JPEG, true),
+                (Range::MPEG, false),
+                (Range::Unspecified, false),
+            ] {
+                let mut frame = frame::Video::new(Pixel::NV12, 16, 16);
+                frame.set_color_space(space);
+                frame.set_color_range(range);
+                assert_eq!(
+                    crate::ffmpeg_impl::color_info(&frame),
+                    Nv12ColorInfo { matrix, full_range },
+                    "space={space:?}, range={range:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn color_info_recognizes_legacy_full_range_formats() {
+        use ffmpeg_next::{
+            format::Pixel,
+            frame,
+            util::color::{Range, Space},
+        };
+
+        for format in [Pixel::YUVJ420P, Pixel::YUVJ422P, Pixel::YUVJ444P] {
+            let mut frame = frame::Video::new(format, 16, 16);
+            frame.set_color_space(Space::BT709);
+            frame.set_color_range(Range::Unspecified);
+            assert_eq!(
+                crate::ffmpeg_impl::color_info(&frame),
+                Nv12ColorInfo {
+                    matrix: ColorMatrix::Bt709,
+                    full_range: true,
+                }
+            );
+        }
+    }
+
+    #[cfg(all(
+        not(feature = "ffmpeg"),
+        not(all(
+            feature = "ios-videotoolbox",
+            any(target_os = "ios", target_os = "macos")
+        ))
+    ))]
+    #[test]
+    fn decode_with_color_reports_disabled_ffmpeg() {
+        let mut decoder = HevcDecoder;
+        assert!(matches!(
+            decoder.decode_with_color(&[], 0),
+            Err(DecodeError::FfmpegDisabled)
+        ));
+    }
 
     #[cfg(feature = "ffmpeg")]
     #[test]

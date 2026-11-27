@@ -101,6 +101,17 @@ pub async fn connect_net_websocket(
     request: tungstenite::handshake::client::Request,
     config: WebSocketConfig,
 ) -> Result<PairedSocket, tungstenite::Error> {
+    connect_net_websocket_with_response(request, config)
+        .await
+        .map(|(socket, _)| socket)
+}
+
+/// [`connect_net_websocket`], also returning the HTTP 101 response so callers can read the
+/// headers the server negotiated on the upgrade.
+pub async fn connect_net_websocket_with_response(
+    request: tungstenite::handshake::client::Request,
+    config: WebSocketConfig,
+) -> Result<(PairedSocket, tungstenite::handshake::client::Response), tungstenite::Error> {
     use tungstenite::error::UrlError;
     let uri = request.uri();
     let host = uri
@@ -119,14 +130,13 @@ pub async fn connect_net_websocket(
         .ok_or(tungstenite::Error::Url(UrlError::UnsupportedUrlScheme))?;
     let tcp = TcpStream::connect((host.as_str(), port)).await?;
     tcp.set_nodelay(true)?;
-    let (socket, _) = tokio_tungstenite::client_async_tls_with_config(
+    tokio_tungstenite::client_async_tls_with_config(
         request,
         PairedStream::Net(tcp),
         Some(config),
         None,
     )
-    .await?;
-    Ok(socket)
+    .await
 }
 
 /// The directory holding this client's own attach identity. Deliberately separate from

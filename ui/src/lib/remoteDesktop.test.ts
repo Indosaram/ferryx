@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { invoke, channels } = vi.hoisted(() => ({
+const { invoke, listen, channels } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  listen: vi.fn(),
   channels: [] as Array<{ onmessage: (payload: unknown) => void }>,
 }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -15,28 +16,38 @@ vi.mock("@tauri-apps/api/core", () => ({
     }
   },
 }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 import {
   __resetRdSupportedForTests,
   forwardCapturedRemoteDesktopShortcut,
   mapClientPointToFrame,
   parseRdFrameMessage,
+  onRdDisplayRefreshChanged,
+  rdClipboardSend,
   rdConnect,
+  rdDisplayRefresh,
   rdErrorMessage,
   rdHostSet,
   RdInputSender,
   rdMouseButton,
   rdRequestKeyframe,
   rdSendClipboard,
+  rdSetAudio,
   rdSetAudioMuted,
+  rdSetOptions,
   rdSetStreamOptions,
   rdSpecialKey,
+  rdStats,
   rdSupported,
+  rdSurfaceAttach,
+  rdSurfaceDetach,
+  rdSurfaceUpdateBounds,
   registerRemoteDesktopShortcutCapture,
   wheelDeltaPixels,
   type RdFrameMessage,
   type RdInputEvent,
+  type RdSessionStats,
 } from "./remoteDesktop";
 
 function videoFrame(width: number, height: number, frameId: bigint, jpeg: number[]): Uint8Array {
@@ -58,8 +69,15 @@ function statusFrame(json: string): Uint8Array {
   return bytes;
 }
 
+function cursorFrame(json: string): Uint8Array {
+  const bytes = statusFrame(json);
+  bytes[0] = 0x06;
+  return bytes;
+}
+
 afterEach(() => {
   invoke.mockReset();
+  listen.mockReset();
   channels.length = 0;
   __resetRdSupportedForTests();
 });
@@ -90,6 +108,41 @@ describe("parseRdFrameMessage", () => {
     expect(parseRdFrameMessage(statusFrame('{"state":"connected","reason":null}'))).toEqual({
       kind: "status", state: "connected", reason: null,
     });
+  });
+
+  it("decodes cursor frames and defaults absent shape fields to null", () => {
+    expect(parseRdFrameMessage(cursorFrame('{"x":0.25,"y":0.75,"cursorType":2,"visible":true}'))).toEqual({
+      kind: "cursor", x: 0.25, y: 0.75, cursorType: 2, visible: true,
+      shapeId: null, rgbaBase64: null, width: null, height: null, hotspotX: null, hotspotY: null,
+    });
+    const cursor = { x: 10, y: 20, cursorType: 3, visible: false, shapeId: 7, rgbaBase64: "AQIDBA==", width: 1, height: 1, hotspotX: 0, hotspotY: 0 };
+    expect(parseRdFrameMessage(cursorFrame(JSON.stringify(cursor)))).toEqual({ kind: "cursor", ...cursor });
+  });
+
+  it.each([
+    "{", "null", "[]", "{}",
+    '{"x":"0","y":0,"cursorType":0,"visible":true}',
+    '{"x":0,"y":null,"cursorType":0,"visible":true}',
+    '{"x":1e400,"y":0,"cursorType":0,"visible":true}',
+    '{"x":0,"y":-1e400,"cursorType":0,"visible":true}',
+    '{"x":0,"y":0,"cursorType":"0","visible":true}',
+    '{"x":0,"y":0,"cursorType":0,"visible":1}',
+  ])("rejects malformed cursor payload %s", (json) => {
+    expect(() => parseRdFrameMessage(cursorFrame(json))).toThrow();
+  });
+
+  it("decodes the 9-byte native-presented header in little endian, including offset views", () => {
+    const bytes = new Uint8Array([0x07, 0x80, 0x07, 0, 0, 0x38, 0x04, 0, 0]);
+    expect(parseRdFrameMessage(bytes)).toEqual({ kind: "nativePresented", width: 1920, height: 1080 });
+    const padded = new Uint8Array(12);
+    padded.set(bytes, 3);
+    expect(parseRdFrameMessage(padded.subarray(3))).toEqual({ kind: "nativePresented", width: 1920, height: 1080 });
+  });
+
+  it.each([1, 2, 3, 4, 5, 6, 7, 8])("rejects a %i-byte native-presented frame", (length) => {
+    const bytes = new Uint8Array(length);
+    bytes[0] = 0x07;
+    expect(() => parseRdFrameMessage(bytes)).toThrow(/too short/);
   });
 
   it("decodes meta, audio and clipboard frames", () => {
@@ -214,6 +267,41 @@ describe("input helpers", () => {
   });
 });
 
+describe("relative input coalescing", () => {
+  it("sums queued deltas while preserving non-move event boundaries", async () => {
+    const batches: RdInputEvent[][] = [];
+    let release!: () => void;
+    let nextBatch!: () => void;
+    const drained = new Promise<void>((resolve) => { nextBatch = resolve; });
+    const send = vi.fn((_: string, events: RdInputEvent[]) => {
+      batches.push(events);
+      if (batches.length === 1) return new Promise<void>((resolve) => { release = resolve; });
+      nextBatch();
+      return Promise.resolve();
+    });
+    const sender = new RdInputSender("rd-relative", send);
+    sender.push({ kind: "mouseButton", button: 0, down: true });
+    sender.push({ kind: "relativeMove", dx: 2, dy: -1 });
+    sender.push({ kind: "relativeMove", dx: 3, dy: 4 });
+    sender.push({ kind: "relativeMove", dx: -1, dy: 2 });
+    sender.push({ kind: "key", code: "KeyA", down: true });
+    sender.push({ kind: "relativeMove", dx: 1, dy: 1 });
+    sender.push({ kind: "mouseMove", x: 0.1, y: 0.2 });
+    sender.push({ kind: "mouseMove", x: 0.3, y: 0.4 });
+    expect(send).toHaveBeenCalledTimes(1);
+    release();
+    await drained;
+    expect(batches[1]).toEqual([
+      { kind: "relativeMove", dx: 4, dy: 5 },
+      { kind: "key", code: "KeyA", down: true },
+      { kind: "relativeMove", dx: 1, dy: 1 },
+      { kind: "mouseMove", x: 0.3, y: 0.4 },
+    ]);
+    expect(send).toHaveBeenLastCalledWith("rd-relative", batches[1]);
+    sender.close();
+  });
+});
+
 describe("commands", () => {
   it("reports unsupported when cmd_rd_supported is missing", async () => {
     invoke.mockRejectedValueOnce({ code: "UNKNOWN", message: "command cmd_rd_supported not found" });
@@ -230,6 +318,70 @@ describe("commands", () => {
     channels[0].onmessage(new Uint8Array([0x07]));
     expect(seen).toEqual([{ kind: "status", state: "connected", reason: null }]);
     expect(rejected).toHaveLength(1);
+  });
+
+  it("passes defined connection options without changing the channel contract", async () => {
+    invoke.mockResolvedValueOnce({ rdSessionId: "rd-options" });
+    const options = { playoutMode: "latest_wins", scaleMode: "fit", viewportWidth: 1920, viewportHeight: 1080, audioMuted: true, audioVolume: 0.5 } as const;
+    await rdConnect("host-b", () => undefined, undefined, options);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_connect", { hostId: "host-b", frames: channels[0], options });
+  });
+
+  it("returns camelCase session statistics", async () => {
+    const stats: RdSessionStats = {
+      rdSessionId: "rd-9", targetFps: 75, presentFps: 74.9, droppedFrames: 1,
+      codec: "hevc", hwAccel: "videotoolbox", presentBackend: "wgpu", transportMode: "quic_datagram", playoutMode: "adaptive",
+      frameWidth: 1920, frameHeight: 1080, scalePermille: 1000, audioActive: true, audioUnderruns: 0, audioDrops: 0,
+      decodeUs: { frames: 75, p50Us: 10, p95Us: 20, p99Us: 30, maxUs: 40 }, presentUs: null, totalClientUs: null,
+      udpReceiveBps: 5000000, packetLossRatio: 0, abrTargetBitrate: 4000000, hostEncodeUs: null, networkUs: null,
+      captureToPresentUs: null, inputToDrawSubmitUs: null, audioVideoSourceOffsetUs: -1000,
+    };
+    invoke.mockResolvedValueOnce(stats);
+    await expect(rdStats("rd-9")).resolves.toEqual(stats);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_stats", { rdSessionId: "rd-9" });
+  });
+
+  it("updates stream options and audio using camelCase IPC arguments", async () => {
+    invoke.mockResolvedValue(undefined);
+    const options = { playoutMode: "adaptive", scaleMode: "scale75", viewportWidth: 1280, viewportHeight: 720, codec: "h264" } as const;
+    await rdSetOptions("rd-9", options);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_set_options", { rdSessionId: "rd-9", options });
+    await rdSetAudio("rd-9", true, 0.25);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_set_audio", { rdSessionId: "rd-9", muted: true, volume: 0.25 });
+  });
+
+  it("attaches, updates and detaches the native surface", async () => {
+    const bounds = { x: 10, y: 20, width: 800, height: 600, scaleFactor: 2 };
+    const response = { backend: "wgpu", reason: null };
+    invoke.mockResolvedValueOnce(response);
+    await expect(rdSurfaceAttach("rd-9", bounds)).resolves.toEqual(response);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_surface_attach", { rdSessionId: "rd-9", bounds });
+    invoke.mockResolvedValue(undefined);
+    await rdSurfaceUpdateBounds("rd-9", bounds, false);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_surface_update_bounds", { rdSessionId: "rd-9", bounds, visible: false });
+    await rdSurfaceDetach("rd-9");
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_surface_detach", { rdSessionId: "rd-9" });
+  });
+
+  it("reads display refresh and forwards changes with an unlisten callback", async () => {
+    const refresh = { refreshHz: 75, millihertz: 75000, monitorName: null, source: "monitor" };
+    invoke.mockResolvedValueOnce(refresh);
+    await expect(rdDisplayRefresh()).resolves.toEqual(refresh);
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_display_refresh", undefined);
+    const unlisten = vi.fn();
+    listen.mockResolvedValueOnce(unlisten);
+    const handler = vi.fn();
+    await expect(onRdDisplayRefreshChanged(handler)).resolves.toBe(unlisten);
+    expect(listen).toHaveBeenCalledWith("rd-display-refresh-changed", expect.any(Function));
+    const change = { windowLabel: "main", refreshHz: 120, millihertz: 120000 };
+    listen.mock.calls[0][1]({ payload: change });
+    expect(handler).toHaveBeenCalledWith(change);
+  });
+
+  it("sends clipboard text", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await rdClipboardSend("rd-9", "clipboard text");
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_clipboard_send", { rdSessionId: "rd-9", text: "clipboard text" });
   });
 
   it("surfaces structured errors and maps them by code", async () => {

@@ -442,19 +442,34 @@ fn collect_dsym_bundles(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// likely to carry by hand.
 fn daemon_log_tail(data_dir: &Path, limit: u64) -> String {
     let logs = data_dir.join("logs");
-    let mut bytes: Vec<u8> = Vec::new();
-    for name in LOG_GENERATIONS {
-        if let Ok(segment) = fs::read(logs.join(name)) {
-            bytes.extend_from_slice(&segment);
+    // Newest file first, reading only the trailing bytes still needed, then
+    // reassembled oldest-first so the output order is unchanged.
+    let mut paths: Vec<PathBuf> = LOG_GENERATIONS.iter().map(|name| logs.join(name)).collect();
+    paths.push(data_dir.join(DETACHED_LOG_FILE));
+    let mut segments: Vec<Vec<u8>> = Vec::new();
+    let mut remaining = limit;
+    for path in paths.iter().rev() {
+        if remaining == 0 {
+            break;
+        }
+        if let Some(segment) = read_file_tail(path, remaining) {
+            remaining -= segment.len() as u64;
+            segments.push(segment);
         }
     }
-    if let Ok(segment) = fs::read(data_dir.join(DETACHED_LOG_FILE)) {
-        bytes.extend_from_slice(&segment);
-    }
-    if (bytes.len() as u64) > limit {
-        bytes.drain(..bytes.len() - limit as usize);
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
+    segments.reverse();
+    String::from_utf8_lossy(&segments.concat()).into_owned()
+}
+
+/// The last `max` bytes of a file, or `None` when it cannot be read.
+fn read_file_tail(path: &Path, max: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut buf = Vec::new();
+    file.take(max).read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// `20261116T085037Z` for the given Unix second, so bundle names sort chronologically.
@@ -676,5 +691,23 @@ mod tests {
         let written: Value = serde_json::from_str(&fs::read_to_string(out.join("report.json")).unwrap()).unwrap();
         assert_eq!(written["schema"], report["schema"]);
         assert_eq!(written["binaryUuids"], report["binaryUuids"]);
+    }
+
+    #[test]
+    fn daemon_log_tail_reads_only_the_trailing_bytes_in_order() {
+        let dir = std::env::temp_dir().join(format!("ferryx-tail-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("logs")).unwrap();
+        fs::write(dir.join("logs").join("daemon.log.1"), "old-old-old\n").unwrap();
+        let mut big = vec![b'x'; 1_000_000];
+        big.extend_from_slice(b"TAIL-END");
+        fs::write(dir.join(DETACHED_LOG_FILE), &big).unwrap();
+        let tail = daemon_log_tail(&dir, 8);
+        assert_eq!(tail, "TAIL-END");
+        let tail = daemon_log_tail(&dir, 12);
+        assert_eq!(tail, "xxxxTAIL-END");
+        let all = daemon_log_tail(&dir, 10_000_000);
+        assert!(all.starts_with("old-old-old\n") && all.ends_with("TAIL-END"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

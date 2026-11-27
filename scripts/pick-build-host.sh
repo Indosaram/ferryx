@@ -84,6 +84,7 @@ fi
 while read -r h transport target disk_gb ram_gb _rest; do
   case "$h" in ''|'#'*) continue ;; esac
   [ -n "${target:-}" ] || { echo "$h: malformed line in $HOSTS_FILE" >&2; continue; }
+  fx_valid_host "$h" || { echo "$h: invalid host name in $HOSTS_FILE" >&2; continue; }
 
   # A roster line may end with its own free-disk and free-RAM floors. instabox
   # has a 20 GB /data and 7 GB of RAM in total, so the fleet defaults would

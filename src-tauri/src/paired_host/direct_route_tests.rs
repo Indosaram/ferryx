@@ -27,6 +27,23 @@ fn failed_attempt_stays_on_relay_and_backs_off() {
 }
 
 #[test]
+fn in_backoff_is_true_only_while_a_retry_is_pending() {
+    let routes = DirectRoutes::new();
+    let now = Instant::now();
+    // A host nothing ever attempted is not in backoff: its cold first attempt must still wait.
+    assert!(!routes.in_backoff("h", now));
+    let epoch = routes.begin_attempt("h", now).unwrap();
+    assert!(!routes.in_backoff("h", now), "an attempt in flight is not backoff");
+    routes.fail("h", epoch, now);
+    assert!(routes.in_backoff("h", now), "a failed attempt parks the host");
+    assert!(!routes.in_backoff("h", now + RETRY_BASE), "the window closes at retry_at");
+    // A published direct route is not backoff either, even with a stale retry_at.
+    let epoch = routes.begin_attempt("h", now + RETRY_BASE).unwrap();
+    routes.publish("h", epoch, "http://127.0.0.1:7".into(), DirectGuard::default());
+    assert!(!routes.in_backoff("h", now));
+}
+
+#[test]
 fn publish_then_loss_returns_to_relay_and_retries() {
     let routes = DirectRoutes::new();
     let mut rx = routes.subscribe();

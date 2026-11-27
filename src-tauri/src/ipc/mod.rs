@@ -29,6 +29,8 @@ pub mod default_browser;
 #[cfg(feature = "desktop")]
 pub mod dag;
 #[cfg(feature = "desktop")]
+pub mod display_refresh;
+#[cfg(feature = "desktop")]
 pub mod daemon_update;
 pub mod debug;
 #[cfg(feature = "desktop")]
@@ -83,6 +85,14 @@ pub mod remote_file;
 pub mod remote_desktop_host;
 #[cfg(feature = "desktop")]
 pub mod remote_desktop;
+#[cfg(feature = "remote-desktop")]
+pub mod remote_desktop_codec;
+#[cfg(feature = "remote-desktop")]
+pub mod remote_desktop_media;
+#[cfg(feature = "remote-desktop")]
+pub mod remote_desktop_stats;
+#[cfg(all(feature = "desktop", feature = "remote-desktop"))]
+pub mod remote_desktop_surface;
 #[cfg(feature = "desktop")]
 pub mod session;
 pub mod ssh;

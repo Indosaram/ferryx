@@ -424,6 +424,7 @@ pub fn worktree_delete_preview_script(
             let path = direct::quote_posix(path);
             r#"set -eu
 root=__ROOT__; wt=__PATH__
+while [ "${#wt}" -gt 1 ] && [ "${wt%/}" != "$wt" ]; do wt=${wt%/}; done
 tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT
 # -z disables Git path quoting, preserving spaces, quotes and Unicode.
@@ -431,17 +432,22 @@ git -C "$root" worktree list --porcelain -z > "$tmp/list"
 # Paths accepted by validate_path contain no control characters.
 tr '\000' '\n' < "$tmp/list" > "$tmp/lines"
 branch=$(WT="$wt" awk 'BEGIN { RS="\n\n"; FS="\n" } $1 == "worktree " ENVIRON["WT"] { for(i=2;i<=NF;i++) if(index($i,"branch refs/heads/")==1) print substr($i,19); found=1 } END { if(!found) exit 1 }' "$tmp/lines") || { echo 'Worktree not found' >&2; exit 1; }
-if [ -z "$branch" ]; then printf '__MARKER__\000detached\000'; exit 0; fi
-ref="refs/heads/$branch"
-head=$(git -C "$root" rev-parse --verify --end-of-options "$ref^{commit}")
+porcelain_head=$(WT="$wt" awk 'BEGIN { RS="\n\n"; FS="\n" } $1 == "worktree " ENVIRON["WT"] { for(i=2;i<=NF;i++) if(index($i,"HEAD ")==1) print substr($i,6) }' "$tmp/lines")
+# A detached checkout has no branch: report an empty branch with unknown merge state and its own HEAD.
+if [ -z "$branch" ]; then ref=HEAD; else ref="refs/heads/$branch"; fi
+if [ -z "$branch" ] && [ -e "$wt" ]; then head=$(git -C "$wt" rev-parse --verify --end-of-options "HEAD^{commit}")
+elif [ -z "$branch" ] && [ -n "$porcelain_head" ]; then head="$porcelain_head"
+else head=$(git -C "$root" rev-parse --verify --end-of-options "$ref^{commit}"); fi
 missing=false
 : > "$tmp/status"
 if [ -e "$wt" ]; then git -C "$wt" status --porcelain=v1 -z > "$tmp/status"; else missing=true; fi
 merged=false
+if [ -n "$branch" ]; then
 if git -C "$root" merge-base --is-ancestor -- "$ref" HEAD; then merged=true; else rc=$?; [ "$rc" -eq 1 ] || exit "$rc"; fi
+fi
 upstream=''; counts=''
 # --end-of-options protects revisions; -- would instead begin path arguments.
-if upstream=$(git -C "$root" rev-parse --abbrev-ref --symbolic-full-name --verify --end-of-options "$branch@{upstream}" 2>/dev/null); then
+if [ -n "$branch" ] && upstream=$(git -C "$root" rev-parse --abbrev-ref --symbolic-full-name --verify --end-of-options "$branch@{upstream}" 2>/dev/null); then
     counts=$(git -C "$root" rev-list --left-right --count --end-of-options "$upstream...$ref" --)
 else upstream=''; fi
 base64 < "$tmp/status" > "$tmp/encoded"
@@ -463,26 +469,37 @@ $nul=[string][char]0; $wanted='worktree '+$wt.Replace('\','/').TrimEnd('/')
 $record=@($list.Output -split ($nul+$nul) | Where-Object { (($_ -split $nul)[0]).Replace('\','/').TrimEnd('/') -eq $wanted })
 if ($record.Count -ne 1) { throw 'Worktree not found' }
 $branch=@($record[0] -split $nul | Where-Object { $_.StartsWith('branch refs/heads/') })
-if ($branch.Count -eq 0) { [Console]::Write(('__MARKER__','detached','' -join [char]0)); return }
-$branch=$branch[0].Substring(18); $ref='refs/heads/'+$branch
-$head=Invoke-FerryxGit @('-C',$root,'rev-parse','--verify','--end-of-options',($ref+'^{commit}'))
-if ($head.Code -ne 0) { throw $head.Error }
+$porcelainHead=@($record[0] -split $nul | Where-Object { $_.StartsWith('HEAD ') })
+$detached=($branch.Count -eq 0)
+if ($detached) { $branch=''; $ref='HEAD' } else { $branch=$branch[0].Substring(18); $ref='refs/heads/'+$branch }
+if ($detached -and -not (Test-Path -LiteralPath $wt) -and $porcelainHead.Count -gt 0) {
+    $headValue=$porcelainHead[0].Substring(5).Trim()
+} else {
+    $headDir=$root; if ($detached -and (Test-Path -LiteralPath $wt)) { $headDir=$wt }
+    $head=Invoke-FerryxGit @('-C',$headDir,'rev-parse','--verify','--end-of-options',($ref+'^{commit}'))
+    if ($head.Code -ne 0) { throw $head.Error }
+    $headValue=$head.Output.Trim()
+}
 $missing=-not (Test-Path -LiteralPath $wt); $status=''
 if (-not $missing) {
     $g=Invoke-FerryxGit @('-C',$wt,'status','--porcelain=v1','-z')
     if ($g.Code -ne 0) { throw $g.Error }
     $status=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($g.Output))
 }
-$merge=Invoke-FerryxGit @('-C',$root,'merge-base','--is-ancestor','--',$ref,'HEAD')
-if ($merge.Code -ne 0 -and $merge.Code -ne 1) { throw $merge.Error }
-$up=Invoke-FerryxGit @('-C',$root,'rev-parse','--abbrev-ref','--symbolic-full-name','--verify','--end-of-options',($branch+'@{upstream}'))
+$merge=[pscustomobject]@{Code=1}
+if (-not $detached) {
+    $merge=Invoke-FerryxGit @('-C',$root,'merge-base','--is-ancestor','--',$ref,'HEAD')
+    if ($merge.Code -ne 0 -and $merge.Code -ne 1) { throw $merge.Error }
+}
+$up=[pscustomobject]@{Code=1}
+if (-not $detached) { $up=Invoke-FerryxGit @('-C',$root,'rev-parse','--abbrev-ref','--symbolic-full-name','--verify','--end-of-options',($branch+'@{upstream}')) }
 $upstream=''; $counts=''
 if ($up.Code -eq 0) {
     $upstream=$up.Output.Trim()
     $g=Invoke-FerryxGit @('-C',$root,'rev-list','--left-right','--count','--end-of-options',($upstream+'...'+$ref),'--')
     if ($g.Code -ne 0) { throw $g.Error }; $counts=$g.Output.Trim()
 }
-[Console]::Write(('__MARKER__','ok',$branch,$head.Output.Trim(),$missing.ToString().ToLowerInvariant(),($merge.Code -eq 0).ToString().ToLowerInvariant(),$upstream,$counts,$status,'' -join [char]0))
+[Console]::Write(('__MARKER__','ok',$branch,$headValue,$missing.ToString().ToLowerInvariant(),($merge.Code -eq 0).ToString().ToLowerInvariant(),$upstream,$counts,$status,'' -join [char]0))
 "#;
             format!(
                 "{POWERSHELL_GIT}\n{}",
@@ -499,16 +516,9 @@ pub fn parse_delete_preview_output(
     marker: &str,
 ) -> Result<BranchDeletionPreview, IpcError> {
     let invalid = || IpcError::new(IpcErrorCode::ParseError, "Malformed worktree delete preview");
-    if let Ok(fields) = parse_fields(output, marker, 1) {
-        if fields[0] == "detached" {
-            return Err(IpcError::new(
-                IpcErrorCode::InvalidArgument,
-                "Detached worktree has no branch",
-            ));
-        }
-    }
     let fields = parse_fields(output, marker, 8)?;
-    if fields[0] != "ok" || fields[1].is_empty() || fields[2].is_empty() {
+    // An empty branch is a detached checkout; it can never be merged.
+    if fields[0] != "ok" || fields[2].is_empty() || (fields[1].is_empty() && fields[4] != "false") {
         return Err(invalid());
     }
     let missing = fields[3].parse::<bool>().map_err(|_| invalid())?;
@@ -831,14 +841,46 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn preview_returns_structured_error_when_checkout_is_detached() {
+    async fn preview_returns_detached_preview_when_checkout_is_detached() {
         // Given: a registered checkout without a branch ref.
         let (_dir, root, path) = preview_fixture();
         preview_git(&path, &["checkout", "--detach"]);
         // When: requesting a deletion preview.
-        let error = execute_preview(&root, &path).await.unwrap_err();
-        // Then: no branch or merge state is fabricated.
-        assert_eq!(error.code, IpcErrorCode::InvalidArgument);
+        std::fs::write(std::path::Path::new(&path).join("scratch.txt"), "x").unwrap();
+        let preview = execute_preview(&root, &path).await.unwrap();
+        // Then: an empty branch and unknown merge state are reported, dirty state intact.
+        assert!(preview.branch.is_empty());
+        assert!(!preview.merged);
+        assert!(preview.dirty_state.is_dirty);
+        assert!(!preview.missing);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_reports_detached_worktrees_own_head_even_when_directory_is_missing() {
+        let (_dir, root, path) = preview_fixture();
+        // Advance main checkout so root HEAD differs from the detached worktree's HEAD.
+        std::fs::write(std::path::Path::new(&root).join("root-only.txt"), "root\n").unwrap();
+        preview_git(&root, &["add", "root-only.txt"]);
+        preview_git(&root, &["commit", "-m", "advance root"]);
+        preview_git(&path, &["checkout", "--detach"]);
+        let git_rev_parse = |dir: &str| {
+            let out = std::process::Command::new("git")
+                .args(["-C", dir, "rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let wt_head = git_rev_parse(&path);
+        let root_head = git_rev_parse(&root);
+        assert_ne!(wt_head, root_head);
+        std::fs::remove_dir_all(&path).unwrap();
+
+        let preview = execute_preview(&root, &path).await.unwrap();
+        assert!(preview.branch.is_empty());
+        assert!(preview.missing);
+        assert_eq!(preview.head, wt_head);
     }
 
     #[cfg(unix)]

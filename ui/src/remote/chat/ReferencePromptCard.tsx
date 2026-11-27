@@ -341,12 +341,16 @@ export function ReferencePromptCard({
 
       {prompt.answerStatus === "outcomeUnknown" && (
         <div role="alert" className="space-y-2 rounded-lg border border-status-warning p-3">
-          <p className="text-sm">The previous answer may have reached the agent. Choose whether to dismiss this card; no answer will be resent.</p>
-          <button type="button" data-testid="reference-prompt-dismiss-ambiguous" className="min-h-11 rounded border px-3" onClick={() => {
-            if (window.confirm("Dismiss this ambiguous prompt? The previous answer may already have been applied. No answer will be resent.")) {
-              void onDismissAmbiguous?.();
-            }
-          }}>Dismiss without retrying</button>
+          <p className="text-sm">{onDismissAmbiguous
+            ? "The previous answer may have reached the agent. Choose whether to dismiss this card; no answer will be resent."
+            : "The previous answer may have reached the agent; no answer will be resent."}</p>
+          {onDismissAmbiguous ? (
+            <button type="button" data-testid="reference-prompt-dismiss-ambiguous" className="min-h-11 rounded border px-3" onClick={() => {
+              if (window.confirm("Dismiss this ambiguous prompt? The previous answer may already have been applied. No answer will be resent.")) {
+                void onDismissAmbiguous();
+              }
+            }}>Dismiss without retrying</button>
+          ) : null}
         </div>
       )}
 

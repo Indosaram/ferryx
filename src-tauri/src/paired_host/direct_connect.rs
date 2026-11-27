@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -17,6 +17,7 @@ use url::Url;
 
 use super::direct::bridge::bridge_tcp_listener_to_quic;
 use super::direct::cert::generate_ephemeral_cert;
+use super::direct::datagram::{spawn_datagram_reader, DatagramMux};
 use super::direct::offer::{DirectConnectionOffer, DirectRole};
 use super::direct::punch::execute_nonce_punch;
 use super::direct::quic::create_quic_endpoint;
@@ -256,8 +257,11 @@ async fn negotiate(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(transport)?;
     let origin = format!("http://{}", listener.local_addr().map_err(transport)?);
     let bridge = bridge_tcp_listener_to_quic(listener, conn.clone());
-    let mut guard = DirectGuard::new(conn.clone(), endpoint);
+    let mux = DatagramMux::new();
+    let reader = spawn_datagram_reader(conn.clone(), Arc::clone(&mux));
+    let mut guard = DirectGuard::new(conn.clone(), endpoint).with_datagram_mux(mux);
     guard.track(bridge.abort_handle());
+    guard.track(reader.abort_handle());
     Ok((origin, conn, guard))
 }
 

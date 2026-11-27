@@ -53,6 +53,12 @@ pub(crate) async fn ensure_direct(
     if GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id).is_some() || lease.token().is_err() {
         return;
     }
+    // A host already parked in a retry backoff will not be promoted inside this budget: the
+    // worker emits nothing while it sleeps and `begin_attempt` refuses to claim. Return at once
+    // so the caller goes straight to the relay instead of burning the whole budget.
+    if GLOBAL_DIRECT_ROUTES.in_backoff(&host.host_id, std::time::Instant::now()) {
+        return;
+    }
     // Subscribe before kick: even an immediately promoted or failed attempt is observed.
     let mut events = GLOBAL_DIRECT_ROUTES.subscribe();
     let mut cancelled = lease.cancellation();
@@ -526,6 +532,41 @@ mod tests {
                 tokio::time::resume();
                 assert!(request_base(&host).unwrap().direct_epoch.is_none());
                 assert!(GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id).is_none());
+            })
+            .await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_host_in_backoff_does_not_consume_the_promotion_budget() {
+        use crate::paired_host::direct_trust::PinSource;
+        let fixture = DesktopFixture::new(Some(PinSource::Manual)).await;
+        let (sender, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        // Park the host where a failed attempt leaves it: inside a retry window, not attempting.
+        let epoch = GLOBAL_DIRECT_ROUTES
+            .begin_attempt(&fixture.host.host_id, std::time::Instant::now())
+            .expect("cold host may attempt");
+        GLOBAL_DIRECT_ROUTES.fail(&fixture.host.host_id, epoch, std::time::Instant::now());
+        assert!(GLOBAL_DIRECT_ROUTES.in_backoff(&fixture.host.host_id, std::time::Instant::now()));
+        TEST_ATTEMPT
+            .scope((fixture.root.path().join("remote"), sender), async {
+                let (host, lease) = fixture
+                    .service
+                    .capture_operation(fixture.host.host_id.clone(), fixture.host.generation)
+                    .await
+                    .unwrap();
+                // A 600 s budget would blow this watchdog if the wait were still entered.
+                tokio::time::timeout(
+                    LIMIT,
+                    ensure_direct(&http(), &host, &lease, Duration::from_secs(600)),
+                )
+                .await
+                .expect("a host in backoff must not wait for a promotion it cannot get");
+                // The early return precedes `kick`, so no attempt was started at all.
+                assert!(matches!(
+                    attempts.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
             })
             .await;
         fixture.close().await;

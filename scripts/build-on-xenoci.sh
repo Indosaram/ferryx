@@ -91,7 +91,8 @@ VMSCRIPT
 
 # Run via xenocast build
 rc=0
-runner_script=$(mktemp /tmp/xenoci-run-XXXXXX.sh)
+runner_script=$(mktemp /tmp/xenoci-run.XXXXXX)
+trap 'rm -f "$runner_script"' EXIT
 cat <<EOF > "$runner_script"
 bash -c $(printf '%q' "$vm_script") build-runner $remote_cmd
 EOF

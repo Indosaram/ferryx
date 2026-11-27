@@ -9,21 +9,33 @@ import { isDesktopShell } from "../lib/clientRuntime";
  * because supervision is off (no live keeper) or the restart budget is spent. Unlike the connection
  * banner there is no retry, because retrying is exactly what the supervisor just declined to do.
  */
-export function DaemonSupervisionBanner() {
+export type DaemonSupervisionBannerProps = {
+  /** Re-queries `cmd_daemon_supervision_status` whenever daemon connection state changes. */
+  refreshKey?: unknown;
+};
+
+export function DaemonSupervisionBanner({ refreshKey }: DaemonSupervisionBannerProps = {}) {
   const [banner, setBanner] = useState<string | null>(null);
   useEffect(() => {
     if (!isDesktopShell(isTauri())) return;
     let cancelled = false;
-    invoke<{ banner?: string | null } | undefined>("cmd_daemon_supervision_status")
-      .then((status) => {
-        if (cancelled) return;
-        setBanner(typeof status?.banner === "string" && status.banner.trim() !== "" ? status.banner : null);
-      })
-      .catch(() => undefined);
+    let latestRequest = 0;
+    const refresh = () => {
+      const requestId = ++latestRequest;
+      invoke<{ banner?: string | null } | undefined>("cmd_daemon_supervision_status")
+        .then((status) => {
+          if (cancelled || requestId !== latestRequest) return;
+          setBanner(typeof status?.banner === "string" && status.banner.trim() !== "" ? status.banner : null);
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", refresh);
     };
-  }, []);
+  }, [refreshKey]);
   if (banner === null) return null;
   return (
     <div

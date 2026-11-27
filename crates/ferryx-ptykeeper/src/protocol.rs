@@ -594,9 +594,14 @@ fn set_cloexec(fd: RawFd) -> Result<(), WireError> {
 }
 
 /// Receives one frame. Control data is collected into raw numbers bounded by the space actually
-/// provided, and only wrapped in `OwnedFd` after `MSG_CTRUNC` has been checked: a truncated
-/// control message can report a length larger than its buffer, and the kernel has already closed
-/// the descriptors that did not fit, so wrapping a reclaimed number would abort on drop.
+/// provided, and every descriptor the kernel handed over is adopted into an `OwnedFd` immediately
+/// after that collection - before `MSG_CTRUNC` is checked and before the payload is read. Adoption
+/// is what makes the rest of this function leak-free: every `?` from here on (a truncated control
+/// message, a stalled payload, a failing `FD_CLOEXEC`) drops the `OwnedFd` values, which close
+/// them. A `Vec<RawFd>` would own nothing, and a peer that repeated the failure could exhaust
+/// `RLIMIT_NOFILE` and take the keeper down with every session it holds. The descriptors that did
+/// not fit in the buffer were closed by the kernel, so `MSG_CTRUNC` is still an error - but the
+/// ones that did fit are ours to close, and adoption is how that happens on every exit path.
 pub fn recv_frame(fd: RawFd) -> Result<Frame, WireError> {
     let mut header = [0u8; HEADER_BYTES];
     let control_bytes = unsafe { libc::CMSG_SPACE((MAX_FDS * std::mem::size_of::<RawFd>()) as _) } as usize;
@@ -643,10 +648,17 @@ pub fn recv_frame(fd: RawFd) -> Result<Frame, WireError> {
         }
         cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
     }
+    // Adopt every descriptor the kernel handed over *before* the next fallible step. A `Vec<RawFd>`
+    // owns nothing: an early return through `?` below - a truncated header, a stalled payload - or a
+    // failing CLOEXEC in the loop at the end would drop bare integers and leak the descriptors. A
+    // peer that repeated that could exhaust `RLIMIT_NOFILE` and take the keeper, and every session
+    // it owns, down with it. As `OwnedFd` the tail is closed on every exit path, including the
+    // unwinding ones.
+    let owned_fds: Vec<OwnedFd> = raw_fds
+        .drain(..)
+        .map(|raw| unsafe { OwnedFd::from_raw_fd(raw) })
+        .collect();
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
-        for raw in raw_fds {
-            unsafe { libc::close(raw) };
-        }
         return Err(WireError::TruncatedControl);
     }
 
@@ -655,32 +667,15 @@ pub fn recv_frame(fd: RawFd) -> Result<Frame, WireError> {
         received_bytes += recv_bytes(fd, &mut header[received_bytes..HEADER_BYTES])?;
     }
 
-    let (kind, request_id, frame_sequence, fd_count, payload_len) = match decode_header(&header) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            for raw in raw_fds {
-                unsafe { libc::close(raw) };
-            }
-            return Err(error);
-        }
-    };
+    let (kind, request_id, frame_sequence, fd_count, payload_len) = decode_header(&header)?;
     if fd_count as usize > MAX_FDS {
-        for raw in raw_fds {
-            unsafe { libc::close(raw) };
-        }
         return Err(WireError::TooManyFds(fd_count));
     }
-    if raw_fds.len() != fd_count as usize {
-        let actual = raw_fds.len();
-        for raw in raw_fds {
-            unsafe { libc::close(raw) };
-        }
+    if owned_fds.len() != fd_count as usize {
+        let actual = owned_fds.len();
         return Err(WireError::FdCountMismatch { declared: fd_count, actual });
     }
     if payload_len > MAX_FRAME_PAYLOAD_BYTES {
-        for raw in raw_fds {
-            unsafe { libc::close(raw) };
-        }
         return Err(WireError::PayloadTooLarge(payload_len));
     }
 
@@ -689,25 +684,13 @@ pub fn recv_frame(fd: RawFd) -> Result<Frame, WireError> {
     while filled < payload.len() {
         filled += recv_bytes(fd, &mut payload[filled..])?;
     }
-    let value: Value = match serde_json::from_slice(&payload) {
-        Ok(value) => value,
-        Err(error) => {
-            for raw in raw_fds {
-                unsafe { libc::close(raw) };
-            }
-            return Err(WireError::InvalidPayload(error));
-        }
-    };
-    let mut fds = Vec::with_capacity(raw_fds.len());
-    for raw in raw_fds {
-        let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-        if let Err(error) = set_cloexec(owned.as_raw_fd()) {
-            drop(owned);
-            return Err(error);
-        }
-        fds.push(owned);
+    let value: Value = serde_json::from_slice(&payload).map_err(WireError::InvalidPayload)?;
+    // Iterated by reference: the vector stays the owner, so a CLOEXEC failure on one descriptor
+    // still closes that one and every descriptor after it when this function returns.
+    for owned in &owned_fds {
+        set_cloexec(owned.as_raw_fd())?;
     }
-    Ok(Frame { kind, request_id, frame_sequence, payload: value, fds })
+    Ok(Frame { kind, request_id, frame_sequence, payload: value, fds: owned_fds })
 }
 
 /// Peer uid/gid (and pid where the platform offers it) of a connected unix socket.

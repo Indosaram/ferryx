@@ -127,6 +127,7 @@ import { GettingStartedChecklist } from "./components/onboarding/GettingStartedC
 import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
 import { buildSetupProgress } from "./lib/setupProgress";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
+import { DaemonSupervisionBanner } from "./components/DaemonSupervisionBanner";
 import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
 import { GlobalRemoteDesktopCanvas, liveRemoteDesktopSessionCount } from "./components/remoteDesktop/GlobalRemoteDesktopCanvas";
 import { RemoteDesktopActivitySidebar } from "./components/remoteDesktop/RemoteDesktopActivitySidebar";
@@ -270,7 +271,7 @@ import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { layoutSyncHostTransport, useLayoutSync, usePairedLayoutAdapter } from "./state/useLayoutSync";
 import { publishPersistedLayouts } from "./state/layoutSync";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
-import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, LANE_LIFECYCLE_UNDO_MS, type LaneLifecycleAction, type WorkspaceState } from "./state/workspaceStore";
+import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, LANE_LIFECYCLE_UNDO_MS, pendingLaneLifecycleState, type LaneLifecycleAction, type PendingLaneLifecycle, type WorkspaceState } from "./state/workspaceStore";
 import { activityStateOfGroup, groupOf, type AttentionBySessionId } from "./lib/attentionGroup";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
@@ -601,6 +602,7 @@ function useLaneLifecycleModel(
   lifecycle: Readonly<Record<string, LaneLifecycleState>> | undefined,
   pinnedTabs: Readonly<Record<string, readonly string[]>> | undefined,
   pullRequests: Readonly<Record<string, LanePullRequestView | null>> | undefined,
+  pending?: Readonly<Record<string, PendingLaneLifecycle>>,
 ): {
   laneOrder: Record<string, string[]>;
   laneLifecycles: Record<string, SidebarLaneLifecycle>;
@@ -611,12 +613,19 @@ function useLaneLifecycleModel(
       const pins = pinnedTabs?.[key];
       rows[key] = { state, ...(pins && pins.length > 0 ? { pinnedTabs: pins } : {}), pullRequest: pullRequests?.[key] ?? null };
     }
+    // A change inside its undo window is shown at once; the store itself is untouched until commit.
+    for (const [key, entry] of Object.entries(pending ?? {})) {
+      const optimistic = pendingLaneLifecycleState(entry);
+      if (!optimistic) continue;
+      const base = rows[key];
+      rows[key] = { ...(base ?? { pullRequest: pullRequests?.[key] ?? null }), state: optimistic };
+    }
     const sections: Record<string, string[]> = {};
     for (const [workspaceId, keys] of Object.entries(order ?? {})) {
       if (keys.length > 0) sections[workspaceId] = [...keys];
     }
     return { laneOrder: sections, laneLifecycles: rows };
-  }, [order, lifecycle, pinnedTabs, pullRequests]);
+  }, [order, lifecycle, pinnedTabs, pullRequests, pending]);
 }
 
 /**
@@ -1210,7 +1219,7 @@ function WorkspaceApp({
     cancelLaneLifecycle,
     refreshLaneLifecycles,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
-  const { laneOrder, laneLifecycles } = useLaneLifecycleModel(state.laneOrder, state.laneLifecycle, state.lanePinnedTabs, state.lanePullRequests);
+  const { laneOrder, laneLifecycles } = useLaneLifecycleModel(state.laneOrder, state.laneLifecycle, state.lanePinnedTabs, state.lanePullRequests, state.lanePending);
   const handleLaneAction = useLaneActionHandler(activeProject.workspaceId, beginLaneLifecycle, cancelLaneLifecycle);
   useBrowserSessionHydration(state, activeProject.workspaceId);
 
@@ -5688,6 +5697,11 @@ function WorkspaceApp({
               setRegistrationError(null);
               setRegistrationAttempt((attempt) => attempt + 1);
             }}
+          />
+        ) : null}
+        {!activeRemoteHost ? (
+          <DaemonSupervisionBanner
+            refreshKey={`${registrationError?.code ?? ""}:${registrationAttempt}`}
           />
         ) : null}
         {/* An SSH project with saved tabs keeps its panes on screen instead of the full-pane status,
