@@ -117,6 +117,16 @@ impl Purpose {
     pub fn conservative_noul(self) -> f64 {
         1.0
     }
+
+    /// Reserved daily jev allowance for operational purposes so high-volume background
+    /// classification (inbox triage, directive checks) cannot starve cron remediation or event wakes.
+    pub fn reserved_jev_cap(self) -> usize {
+        match self {
+            Self::CronCause | Self::EventWake => 50,
+            Self::CronOutcome | Self::KibitzerWake => 30,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -727,8 +737,7 @@ impl Judge {
                 until.saturating_duration_since(Instant::now()).as_secs()
             ))
         } else {
-            let (jev_today, _) = self.counts_today().await;
-            if jev_today >= self.jev_cap {
+            if self.jev_cap_reached(purpose).await {
                 let capped = purpose.capped_choice();
                 self.record_call(
                     purpose,
@@ -830,8 +839,7 @@ impl Judge {
             .await;
             return Ok(score);
         }
-        let (jev_today, _) = self.counts_today().await;
-        if jev_today >= self.jev_cap {
+        if self.jev_cap_reached(purpose).await {
             let score = purpose.conservative_noul();
             self.record_kind(purpose, "noul", 0, &format!("capped:{score:.3}"), false)
                 .await;
@@ -988,6 +996,43 @@ impl Judge {
             }
         };
         selected.map_or(conservative, Choice::fallback)
+    }
+
+    /// True when the daily jev cap has been reached for `purpose`. High-volume background
+    /// purposes stop at `self.jev_cap`, while operational purposes (`CronCause`, `CronOutcome`,
+    /// `EventWake`, `KibitzerWake`) keep their own reserved slice (`min(reserved, self.jev_cap)`).
+    async fn jev_cap_reached(&self, purpose: Purpose) -> bool {
+        let (jev_today, _) = self.counts_today().await;
+        if jev_today < self.jev_cap {
+            return false;
+        }
+        let reserved = purpose.reserved_jev_cap().min(self.jev_cap);
+        if reserved == 0 {
+            return true;
+        }
+        self.count_today_for_purpose(purpose).await >= reserved
+    }
+
+    async fn count_today_for_purpose(&self, purpose: Purpose) -> usize {
+        let Some(pool) = &self.pool else {
+            return 0;
+        };
+        let count: std::result::Result<i64, _> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM judge_calls
+              WHERE created_at >= ? AND purpose = ?
+                AND used_fallback = 0 AND outcome NOT LIKE 'capped%'",
+        )
+        .bind(owner_day_start())
+        .bind(purpose.as_str())
+        .fetch_one(pool)
+        .await;
+        match count {
+            Ok(count) => count.max(0) as usize,
+            Err(error) => {
+                tracing::warn!(%error, purpose = purpose.as_str(), "purpose judge count was not read");
+                0
+            }
+        }
     }
 
     /// Today's (owner-local) jev and omo fallback calls, capped answers excluded (omo
@@ -1676,5 +1721,38 @@ if [ "$mode" = "choice" ]; then echo hold; else echo 0.8; fi
             [crate::meta::mhc_fault::TurnContext::Fresh]
         );
         assert_eq!(judge.counts_today().await, (0, FALLBACK_DAILY_CAP));
+    }
+
+    #[tokio::test]
+    async fn inbox_traffic_cannot_starve_cron_cause_budget() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = crate::storage::now_rfc3339();
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at) VALUES(?, 'inbox_class', 'choice', 10, 'fyi', 0, ?)",
+            )
+            .bind(format!("inbox-{i}"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let judge = Judge::bare().with_pool(pool.clone()).with_caps(5, 0);
+        // Background inbox_class is capped once the global cap is spent.
+        assert!(judge.jev_cap_reached(Purpose::InboxClass).await);
+        // Operational cron_cause retains its reserved slice (min(50, 5) = 5) and is not starved.
+        assert!(!judge.jev_cap_reached(Purpose::CronCause).await);
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at) VALUES(?, 'cron_cause', 'choice', 10, 'script_bug_needs_fix', 0, ?)",
+            )
+            .bind(format!("cron-{i}"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // Once cron_cause uses its own slice, it caps as well.
+        assert!(judge.jev_cap_reached(Purpose::CronCause).await);
     }
 }

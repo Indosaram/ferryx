@@ -1671,6 +1671,69 @@ async fn a_superseded_verification_attempt_closes_no_owner_items() {
     assert!(runtime.fake.outcomes.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn abandoned_queued_remediation_lane_is_reaped_and_unblocks_new_remediation() {
+    let (pool, id) = seeded("job-b", json!({"command": "echo hi"}), "KeyError: boom").await;
+    let stale = (chrono::Utc::now() - chrono::TimeDelta::seconds(STALE_REMEDIATING_SECS + 120))
+        .to_rfc3339();
+    // Simulate a remediation lane orphaned in `queued` with 0 turns and its event already skipped.
+    sqlx::query(
+        "INSERT INTO lanes(key, title, lead_session_key, cwd, session_key, status, done_signals, turns_run, created_at, updated_at, last_activity_at)
+         VALUES('cron-fix-old-job-dead', 'Cron fix: old-job', 'lead', '/tmp', 'lead', 'queued', '[]', 0, ?, ?, ?)",
+    )
+    .bind(&stale)
+    .bind(&stale)
+    .bind(&stale)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, delivered_at, delivery_reason)
+         VALUES('cron-fix-old-job-dead', 'lead', 'question', '{\"action\":\"cron remediation lane queued\"}', ?, ?, 'jev_skip')",
+    )
+    .bind(&stale)
+    .bind(&stale)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut hub = HubRuntime::new(pool.clone(), Some("owner".into()));
+    hub.transport = false;
+    let r = Remediator {
+        pool: pool.clone(),
+        judge: Judge::forced("script_bug_needs_fix"),
+        runtime: Arc::new(hub),
+    };
+    r.on_problem(id, "lead").await.unwrap();
+
+    let old_status: String =
+        sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'cron-fix-old-job-dead'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(old_status, "closed");
+
+    let new_lanes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT key, title FROM lanes WHERE key LIKE 'cron-fix-job-b-%' AND status = 'queued'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(new_lanes.len(), 1);
+    assert_eq!(new_lanes[0].1, "Cron fix: job-b");
+}
+
+#[tokio::test]
+async fn remediation_brief_includes_aside_login_rule() {
+    let (pool, id) = seeded("auth-job", json!({"script": "bun /tmp/collect.ts"}), "HTTP 401").await;
+    let fake = Arc::new(RecordingFake::default());
+    let r = remediator(&pool, "script_bug_needs_fix", fake.clone());
+    r.on_problem(id, "lead-1").await.unwrap();
+    let lane = fake.lanes.lock().unwrap()[0].clone();
+    assert!(lane.brief.contains("aside repl --account u0"), "{}", lane.brief);
+    assert!(lane.brief.contains("FERRYX_CRON_LLM_BIN"), "{}", lane.brief);
+}
+
 /// Deliberately gate-less runtime for the rejection contract in the parent test module.
 #[derive(Default)]
 struct Fake {

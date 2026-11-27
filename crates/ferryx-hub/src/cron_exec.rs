@@ -29,6 +29,17 @@ pub const CRON_MODEL_ENV: &str = "FERRYX_CRON_MODEL";
 /// same incident ([`crate::report_gate::Report::incident`]).
 pub const CRON_RUN_ENV: &str = "FERRYX_CRON_RUN_ID";
 
+/// Environment variable carrying a verified LLM CLI binary (`mhc`, falling back to `omo`)
+/// so cron scripts do not depend on volatile PATH ordering.
+pub const CRON_LLM_BIN_ENV: &str = "FERRYX_CRON_LLM_BIN";
+
+/// Environment variable carrying the resolved `aside` CLI path when available.
+pub const CRON_ASIDE_BIN_ENV: &str = "FERRYX_CRON_ASIDE_BIN";
+
+/// Environment variable signaling the standing rule that cron scripts should attempt Aside
+/// browser login/session refresh before failing on web auth errors.
+pub const CRON_ASIDE_LOGIN_ENV: &str = "FERRYX_CRON_ASIDE_LOGIN";
+
 tokio::task_local! {
     static CRON_RUN: String;
     static CRON_INCIDENT: String;
@@ -719,6 +730,19 @@ async fn run_script(
     if let Some(run) = exported_run() {
         command.env(CRON_RUN_ENV, run);
     }
+    if crate::hub_env::var_os(CRON_LLM_BIN_ENV).is_none() {
+        if let Some(bin) = crate::child_env::which("mhc").or_else(|| crate::child_env::which("omo")) {
+            command.env(CRON_LLM_BIN_ENV, bin);
+        }
+    }
+    if crate::hub_env::var_os(CRON_ASIDE_BIN_ENV).is_none() {
+        if let Some(bin) = crate::child_env::which("aside") {
+            command.env(CRON_ASIDE_BIN_ENV, bin);
+        }
+    }
+    if crate::hub_env::var_os(CRON_ASIDE_LOGIN_ENV).is_none() {
+        command.env(CRON_ASIDE_LOGIN_ENV, "1");
+    }
     let cwd = cwd.filter(|cwd| !cwd.as_os_str().is_empty());
     if let Some(cwd) = cwd {
         // A deleted working directory fails every job the same way: one environment fault,
@@ -796,7 +820,7 @@ struct ScriptTree {
 }
 
 impl ScriptTree {
-    fn arm(child: &tokio::process::Child) -> Self {
+    fn arm(#[cfg_attr(not(unix), allow(unused_variables))] child: &tokio::process::Child) -> Self {
         Self {
             // `process_group(0)` made the child a group leader, so its pid is the group id.
             #[cfg(unix)]
@@ -1212,6 +1236,7 @@ mod tests {
         assert_eq!(deliveries[0].text, "from-model");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_timed_out_script_leaves_no_child_process_behind() {
         let dir = std::env::temp_dir().join(format!(
@@ -1417,5 +1442,18 @@ mod tests {
             .unwrap();
         assert!(!second.deliver);
         assert!(second.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn script_receives_aside_login_policy_env() {
+        let pool = crate::storage::memory().await.unwrap();
+        let payload = serde_json::json!({
+            "no_agent": true,
+            "script": "printf %s \"$FERRYX_CRON_ASIDE_LOGIN\""
+        });
+        let result = run_payload(&pool, "aside-env-job", &payload, &StaticModel("".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(result.output.trim(), "1");
     }
 }

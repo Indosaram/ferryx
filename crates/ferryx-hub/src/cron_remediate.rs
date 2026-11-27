@@ -994,6 +994,12 @@ fn sibling_claim_busy(error: &HubError) -> bool {
     matches!(error, HubError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
 }
 
+/// True when a cron problem could not be handled now because another problem or remediation
+/// lane holds the active slot and the event should retry after backoff.
+pub fn is_busy_error(error: &HubError) -> bool {
+    sibling_claim_busy(error)
+}
+
 /// Hands a claimed problem back so a later tick retries it, fenced on the detail this attempt
 /// wrote: a problem another verifier already moved on is left alone.
 async fn release_claim(pool: &SqlitePool, id: i64, detail: &str) -> Result<()> {
@@ -1116,7 +1122,7 @@ impl Remediator {
             .choice(
                 Purpose::CronCause,
                 &scrub(&state),
-                "Classify the recorded failure, not a hypothetical cause. Explicit rejected authentication, a failed login, expired credentials, exhausted quota or payment failure needs_owner_login_or_quota; when the record shows such an explicit failure, it decides even if a timeout is reported with it. A network timeout or connection reset alone is transient_retry_once even if wrapped in a traceback. A deterministic code error is script_bug_needs_fix. Insufficient or ambiguous evidence is unknown; do not infer a login problem from a timeout alone.",
+                "Classify the recorded failure, not a hypothetical cause. Explicit rejected authentication, a failed login, expired credentials, exhausted quota or payment failure needs_owner_login_or_quota; when the record shows such an explicit failure, it decides even if a timeout is reported with it — EXCEPT when a web/browser login, session or cookie failure happened without attempting Aside browser auto-login (or Keychain cookie extraction failed), which is script_bug_needs_fix so a remediation lane adds Aside login (use needs_owner_login_or_quota only for quota/429/billing or when Aside auto-login already hit passkey/2FA/CAPTCHA/manual reauth). A network timeout or connection reset alone is transient_retry_once even if wrapped in a traceback. A deterministic code error is script_bug_needs_fix. Insufficient or ambiguous evidence is unknown; do not infer a login problem from a timeout alone.",
                 &CAUSES,
             )
             .await?;
@@ -1132,9 +1138,23 @@ impl Remediator {
         problem.detail = detail.encode()?;
         match choice.selected.as_str() {
             "unknown" => {
-                self.needs_owner(&problem,
-                    &Outcome::Unverified(text("실패 원인을 확인하지 못했습니다", "the cause of the failure is unclear")),
-                    Some(&text(&format!("실행 오류: {}", detail.cause), &format!("run error: {}", detail.cause)))).await?;
+                let reason = if choice.is_capped {
+                    text(
+                        "일일 자동 진단 한도에 도달해 원인을 판정하지 못했습니다",
+                        "the daily diagnosis cap was reached before the cause could be classified",
+                    )
+                } else {
+                    text(
+                        "실패 원인을 확인하지 못했습니다",
+                        "the cause of the failure is unclear",
+                    )
+                };
+                self.needs_owner(
+                    &problem,
+                    &Outcome::Unverified(reason),
+                    Some(&text(&format!("실행 오류: {}", detail.cause), &format!("run error: {}", detail.cause))),
+                )
+                .await?;
             }
             "needs_owner_login_or_quota" => {
                 let cause = &detail.cause;
@@ -1162,8 +1182,8 @@ impl Remediator {
                 } else {
                     (
                         text(
-                            "이 작업의 로그인·인증 정보나 결제를 복구",
-                            "restore this job's login, credentials or billing",
+                            "Aside(u0)에서 이 작업의 로그인·인증 정보나 결제를 복구",
+                            "restore this job's login via Aside (u0), credentials or billing",
                         ),
                         text(&format!("오류: {cause}"), &format!("error: {cause}")),
                     )
@@ -1369,8 +1389,59 @@ impl Remediator {
         Ok(true)
     }
 
+    /// Closes abandoned `cron-fix-*` remediation lanes that sat in `queued` with zero turns
+    /// past `STALE_REMEDIATING_SECS` and have no undelivered wake event, so one orphaned lane
+    /// cannot deadlock all subsequent cron remediations.
+    pub async fn reap_stale_queued_lanes(pool: &SqlitePool) -> Result<usize> {
+        let cutoff =
+            (chrono::Utc::now() - chrono::TimeDelta::seconds(STALE_REMEDIATING_SECS)).to_rfc3339();
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM lanes
+              WHERE key LIKE ? || '%'
+                AND status = 'queued'
+                AND turns_run = 0
+                AND julianday(updated_at) < julianday(?)
+                AND NOT EXISTS (
+                    SELECT 1 FROM lane_events
+                     WHERE lane_events.lane_key = lanes.key
+                       AND lane_events.delivered_at IS NULL
+                )",
+        )
+        .bind(LANE_KEY_PREFIX)
+        .bind(&cutoff)
+        .fetch_all(pool)
+        .await?;
+        let mut reaped = 0;
+        for key in keys {
+            let now = now_rfc3339();
+            let mut tx = pool.begin_write().await?;
+            let updated = sqlx::query(
+                "UPDATE lanes SET status = 'closed', updated_at = ?
+                  WHERE key = ? AND status = 'queued' AND turns_run = 0",
+            )
+            .bind(&now)
+            .bind(&key)
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() > 0 {
+                sqlx::query(
+                    "INSERT INTO lane_history(lane_key, at, from_status, to_status, reason)
+                     VALUES(?,?, 'queued', 'closed', 'abandoned queued remediation lane expired')",
+                )
+                .bind(&key)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+                reaped += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok(reaped)
+    }
+
     /// Escalates `remediating` rows no live lane or rerun can still settle.
     pub async fn sweep_stale_remediating(&self) -> Result<usize> {
+        let _ = Self::reap_stale_queued_lanes(&self.pool).await?;
         let cutoff =
             (chrono::Utc::now() - chrono::TimeDelta::seconds(STALE_REMEDIATING_SECS)).to_rfc3339();
         let rows: Vec<ProblemRow> = sqlx::query_as(&format!(
@@ -1679,7 +1750,7 @@ pub fn make_lane(
         .or_else(|| payload.get("prompt"))
         .unwrap_or(&Value::Null);
     let brief = format!(
-        "Job: {job} / {}\nExpression: {expression}\nProblem: {} / {}\nLast 3 runs: {}\nLast output: {}\nScript or prompt: {script}\nGateway log (UTC):\n{}\nRules: no .env edits; no model changes; no job disable/delete; a quota claim requires a direct check of the configured quota endpoint ({QUOTA_URL_ENV}) and is otherwise reported as unverified; katok forbidden. Diagnose, fix the root cause in the script/config/repo, then claim done. Do not execute the Done command yourself: gateway settlement owns the single verification rerun and validates output regex and delivery receipt.\nDone = {done}\n",
+        "Job: {job} / {}\nExpression: {expression}\nProblem: {} / {}\nLast 3 runs: {}\nLast output: {}\nScript or prompt: {script}\nGateway log (UTC):\n{}\nRules: no .env edits; no model changes; no job disable/delete; for any web/service login, session, or cookie failure (non-quota), automate re-login via Aside (`aside repl --account u0` / `aside exec`) in the script so future runs self-heal and only ask the owner when passkey/2FA/CAPTCHA blocks automation; prefer `FERRYX_CRON_LLM_BIN` (`mhc`) over bare `omo`; a quota claim requires a direct check of the configured quota endpoint ({QUOTA_URL_ENV}) and is otherwise reported as unverified; katok forbidden. Diagnose, fix the root cause in the script/config/repo, then claim done. Do not execute the Done command yourself: gateway settlement owns the single verification rerun and validates output regex and delivery receipt.\nDone = {done}\n",
         payload.get("name").and_then(Value::as_str).unwrap_or(job),
         problem.kind,
         scrub(&Detail::parse(&problem.detail).cause),
@@ -1758,6 +1829,8 @@ impl Runtime for HubRuntime {
         tokio::fs::create_dir_all(&self.briefs).await?;
         let brief = self.briefs.join(format!("{}.md", request.key));
         tokio::fs::write(&brief, &request.brief).await?;
+        // Reap any abandoned queued remediation lane before claiming the sole live slot.
+        let _ = Remediator::reap_stale_queued_lanes(&self.pool).await?;
         // One remediation pane at a time across every producer (a racing tick, an MCP call, a
         // restart): the slot is reserved in the same transaction that inserts the lane, so two
         // callers never both launch. A second problem waits for the live lane to settle.
@@ -1765,7 +1838,7 @@ impl Runtime for HubRuntime {
             &self.pool,
             &request.key,
             LANE_KEY_PREFIX,
-            "Cron root-cause remediation",
+            &request.title,
             &request.lead,
             &request.cwd.to_string_lossy(),
             &request.done,
