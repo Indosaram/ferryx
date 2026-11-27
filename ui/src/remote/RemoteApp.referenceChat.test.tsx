@@ -1889,9 +1889,19 @@ describe("reference chat lane review fixes", () => {
     }
   });
 
-  /** Message rows only: the composer's own value is not a sent message. */
+  /**
+   * Message rows only: the composer's own value is not a sent message. That value lives in a
+   * `<textarea>` on the plain surface and in a `contenteditable` ProseMirror host once the rich
+   * editor mounts (ComposerPromptEditorTiptap.tsx), so the exclusion covers both surfaces.
+   */
   const shownMessages = (text: string): HTMLElement[] =>
-    screen.queryAllByText(text).filter((element) => element.tagName !== "TEXTAREA");
+    screen
+      .queryAllByText(text)
+      .filter(
+        (element) =>
+          element.tagName !== "TEXTAREA" &&
+          element.closest('[contenteditable="true"], [role="textbox"], [data-testid="chat-composer-rich-editor"]') === null,
+      );
 
   it("ui-workspace-wiring-r19-1: a send failing while the target is briefly null removes its echo and restores the draft", async () => {
     try {
@@ -5030,5 +5040,126 @@ describe("reference history delta sync", () => {
     expect(calls.filter((call) => call.url.includes("/payload"))).toHaveLength(1);
     await switchToSecondTab();
     expect(payload[0].signal?.aborted).toBe(true);
+  });
+});
+
+/**
+ * Gap lane chat-gaps-20261126, item 6: the remote surface reaches the same G6 answer-attachment
+ * behaviour the desktop pane does.
+ *
+ * `onAttachAnswerFiles` and `answerScope` were built in lane G6 and never passed in production
+ * (chat-g6-repair CLAIM "GAPS FOR OTHER LANES"), so the card's attach row was invisible in the
+ * shipped web client. These cases press it.
+ */
+describe("remote answer attachments (G6 parity)", () => {
+  beforeEach(() => {
+    StubWebSocket.instances = [];
+    localStorage.clear();
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal("WebSocket", StubWebSocket);
+    setWidth(390);
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  /** A question with a free-text choice: the only shape whose card offers an attach row. */
+  const customAnswerPrompt = {
+    prompt: {
+      promptId: "prompt-attach-1",
+      agent: "claude",
+      kind: "question",
+      title: "Which files?",
+      question: "Which files?",
+      options: [{ label: "Other" }, { label: "Ship as is" }],
+      customOptionIndex: 0,
+      multiSelect: false,
+    },
+    screenRevision: "rev-attach",
+    cols: 80,
+    rows: 24,
+  };
+
+  it("offers the card's attach row and stages a picked file through the host's files route", async () => {
+    const harness = installFetch({ prompt: () => customAnswerPrompt });
+    // Readiness before the pick: the target ref is bound before the lane's own history read, and
+    // the upload returns early while it is null.
+    const laneReady = harness.whenCalled("/history");
+    render(<RemoteApp />);
+    await screen.findByTestId("reference-prompt-card");
+    await act(async () => {
+      await settleRequest(laneReady);
+    });
+
+    // The row exists only because `onAttachAnswerFiles` reached the card.
+    const attach = await screen.findByTestId("reference-answer-attach-input");
+    const staged = harness.whenCalled("/files", 2000, "POST");
+    const file = readableFile("abc", "notes.txt", "text/plain");
+    await act(async () => {
+      fireEvent.change(attach, { target: { files: [file] } });
+    });
+
+    const request = await settleRequest(staged);
+    expect(request.url).toContain("/files");
+    const body = request.body as { params: Record<string, unknown> };
+    expect(body.params.name).toBe("notes.txt");
+    expect(body.params.mediaType).toBe("text/plain");
+    // The staged receipt lands in the card's set for THIS pane's target.
+    await waitFor(() =>
+      expect(screen.getAllByTestId(/^reference-answer-attachment-/).length).toBeGreaterThan(0),
+    );
+  });
+
+  it("shows no attach row on a question that takes only the offered choices", async () => {
+    installFetch({
+      prompt: () => ({
+        ...customAnswerPrompt,
+        prompt: { ...customAnswerPrompt.prompt, customOptionIndex: undefined, options: [{ label: "Yes" }] },
+      }),
+    });
+    render(<RemoteApp />);
+    await screen.findByTestId("reference-prompt-card");
+    expect(screen.queryByTestId("reference-answer-attach")).toBeNull();
+  });
+
+  it("prunes the pane's answer sets once the prompt resolves", async () => {
+    // The card keys its set by the pane's target; a resolved prompt means the set is stale.
+    const prompt = customAnswerPrompt;
+    let answered = false;
+    const harness = installFetch({
+      prompt: () => (answered ? { prompt: null, screenRevision: "rev-after" } : prompt),
+      answer: () => {
+        answered = true;
+        return { ok: true, data: {}, requestId: "r-answer" };
+      },
+    });
+    const laneReady = harness.whenCalled("/history");
+    render(<RemoteApp />);
+    await screen.findByTestId("reference-prompt-card");
+    await act(async () => {
+      await settleRequest(laneReady);
+    });
+
+    const attach = await screen.findByTestId("reference-answer-attach-input");
+    const staged = harness.whenCalled("/files", 2000, "POST");
+    await act(async () => {
+      fireEvent.change(attach, { target: { files: [readableFile("abc", "notes.txt", "text/plain")] } });
+    });
+    await settleRequest(staged);
+    await waitFor(() =>
+      expect(screen.getAllByTestId(/^reference-answer-attachment-/).length).toBeGreaterThan(0),
+    );
+
+    // Answering resolves the prompt; the set is pruned with it, so it cannot outlive its question.
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("reference-prompt-custom-input"), { target: { value: "these" } });
+      fireEvent.click(screen.getByTestId("reference-prompt-custom-send"));
+    });
+    await waitFor(() => expect(screen.queryByTestId("reference-prompt-card")).toBeNull());
+    // A new question in the same pane starts with no inherited attachments.
+    expect(screen.queryAllByTestId(/^reference-answer-attachment-/)).toHaveLength(0);
   });
 });
