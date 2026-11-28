@@ -105,12 +105,12 @@ mod tests {
 
     #[test]
     fn a_host_before_a_group_is_the_host() {
-        let (host, argv) = split_host_prefix(&argv(&[
+        let (host, rest) = split_host_prefix(&argv(&[
             "ferryx-cli", "air", "agents", "list", "--json",
         ]))
         .expect("host prefix");
         assert_eq!(host, "air");
-        assert_eq!(argv, argv(&["ferryx-cli", "agents", "list", "--json"]));
+        assert_eq!(rest, argv(&["ferryx-cli", "agents", "list", "--json"]));
     }
 
     #[test]
