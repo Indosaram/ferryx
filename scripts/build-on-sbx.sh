@@ -103,7 +103,7 @@ provision=$(cat <<'PROVISION'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential pkg-config libssl-dev curl git unzip \
+sudo apt-get install -y -qq build-essential cmake pkg-config libssl-dev curl git unzip \
   libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
   libxdo-dev libasound2-dev protobuf-compiler clang libclang-dev \
   libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev \
