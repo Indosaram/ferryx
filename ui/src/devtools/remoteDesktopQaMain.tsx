@@ -17,6 +17,7 @@ window.localStorage.setItem(APPEARANCE_SETTINGS_STORAGE_KEY, JSON.stringify({ th
 applyAppearanceSettings(loadAppearanceSettings());
 
 mockWindows("main");
+(window as unknown as { isTauri?: boolean }).isTauri = true;
 mockIPC((command) => {
   if (command === "cmd_rd_supported" || command === "cmd_rd_is_supported") return true;
   if (command === "cmd_rd_host_state") {

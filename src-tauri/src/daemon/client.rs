@@ -974,6 +974,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteDesktopHostGet => "remoteDesktopHostGet",
         DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
         DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",
+        DaemonRequest::RemoteDesktopLocalPair { .. } => "remoteDesktopLocalPair",
         DaemonRequest::ReferenceChatIdentity => "referenceChatIdentity",
         DaemonRequest::AgentMemoryBlock { .. } => "agentMemoryBlock",
         DaemonRequest::ReferenceChat { .. } => "referenceChat",
@@ -1206,7 +1207,8 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
             request: crate::daemon::protocol::SupervisorSetupAction::Run { .. },
         } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
-        DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
+        DaemonRequest::RemoteDesktopHostSet { .. }
+        | DaemonRequest::RemoteDesktopLocalPair { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
         DaemonRequest::ReferenceChat { .. } => REFERENCE_CHAT_REQUEST_TIMEOUT,
         DaemonRequest::LayoutGet {
             after_revision: Some(_),
