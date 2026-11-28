@@ -31,7 +31,9 @@ const activity: BrowserAgentActivity = {
   activeTasks: [], pendingApprovals: [], controlledBrowserIds: [], handoffRequests: [],
   badgeCount: 0, errorCode: null, busy: false, controllers: [],
   controllerLabelFor: () => null, controllerIdFor: () => null,
-  takeOver: async () => {}, doneHandoff: async () => {}, revokeController: async () => {}, resolveApproval: async () => {},
+  taskStatusFor: () => "running", planeFor: () => "cli", receiptFor: () => null, stateFor: () => "disconnected",
+  takeOver: async () => {}, doneHandoff: async () => {}, respondToHelp: async () => {},
+  revokeController: async () => {}, resolveApproval: async () => {},
 };
 function Shell({ store }: { store: BrowserStore }) {
   return useMahoBrowserShell({ active: true, drawerOpen: true, activity, store }).overlays;

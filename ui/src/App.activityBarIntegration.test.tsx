@@ -402,6 +402,7 @@ describe("Activity Bar shell integration", () => {
 
   it("opens the Command Bar from the Browser-mode chord event and toggles the Library over the tab body", async () => {
     seedStoreTab("tab-a", "https://example.com/");
+    seedStoreTab("agent-bg", "https://agent.example.com/", true);
     browserStore.touch("tab-a");
     render(<App />);
     await screen.findByTestId("workspace-surface");

@@ -239,7 +239,7 @@ describe("download controls", () => {
   });
 
   it("puts an In Progress group first and counts every group", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(1_700_000_000_000);
     try {
       const now = Date.now();
@@ -267,7 +267,7 @@ describe("download controls", () => {
   });
 
   it("gives each row its file-type icon and a timestamp", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(1_700_000_000_000);
     try {
       const now = Date.now();

@@ -652,7 +652,7 @@ describe("MahoNowPlayingCard", () => {
 
     const seek = screen.getByTestId("maho-now-playing-seek");
     expect(seek).toHaveAttribute("max", "185000");
-    expect(seek).toHaveValue(65_000);
+    expect(seek).toHaveValue("65000");
     // Maho's FormatPosition: minutes:seconds, zero padded seconds.
     expect(screen.getByTestId("maho-now-playing-position")).toHaveTextContent("1:05");
     expect(screen.getByTestId("maho-now-playing-duration")).toHaveTextContent("3:05");
