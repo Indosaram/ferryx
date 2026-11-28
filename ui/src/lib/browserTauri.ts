@@ -234,7 +234,10 @@ function isBrowserNotFoundError(err: unknown): boolean {
 
 export async function createBrowser(request: CreateBrowserRequest): Promise<BrowserState> {
   const settings = loadBrowserSettings();
-  const profile = resolveSupportedBrowserProfileId(request.profile ?? settings.defaultProfileId, settings);
+  const { browserStore } = await import("../state/browserStore");
+  const state = browserStore.getState();
+  const tab = request.browserId ? state.tabs[request.browserId] : undefined;
+  const profile = resolveSupportedBrowserProfileId(request.profile ?? tab?.profileId ?? state.spaces[tab?.spaceId ?? state.activeSpaceId]?.profileId ?? settings.defaultProfileId, settings);
   const zoomFactor = request.zoomFactor ?? settings.defaultZoom / 100;
   return invoke<BrowserState>("cmd_browser_create", {
     request: { ...request, profile, zoomFactor },

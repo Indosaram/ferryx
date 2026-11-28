@@ -6,7 +6,6 @@
 
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { Pin, Star } from "lucide-react";
 
 import {
   browserStore,
@@ -16,7 +15,7 @@ import {
   type BrowserStore,
 } from "../../../state/browserStore";
 import { MahoBrowserTabRow } from "./MahoBrowserTabRow";
-import { mahoDragId, addTabToFavorites, moveTabToPinned } from "./mahoBrowserTabActions";
+import { mahoDragId } from "./mahoBrowserTabActions";
 
 export type MahoTodayListProps = {
   store?: BrowserStore;
@@ -53,7 +52,7 @@ export function MahoTodayList({ store = browserStore, spaceId, activeBrowserId, 
       data-empty={tabs.length === 0 ? "true" : undefined}
     >
       {tabs.length === 0 ? (
-        <p className="maho-today__empty">No tabs in Today</p>
+        null
       ) : (
         <SortableContext
           items={tabs.map((tab) => mahoDragId({ kind: "tab", tabId: tab.browserId }))}
@@ -62,39 +61,13 @@ export function MahoTodayList({ store = browserStore, spaceId, activeBrowserId, 
           {tabs.map((tab) => (
             <MahoBrowserTabRow
               key={tab.browserId}
+              store={store}
               tab={tab}
               sectionLabel="Today"
               active={tab.browserId === selectedBrowserId}
               onActivate={activate}
               onClose={(browserId) => store.closeTab(browserId)}
-              actions={
-                <>
-                  <button
-                    type="button"
-                    className="maho-row__action maho-tab-row__pin"
-                    aria-label={`Pin ${tab.title.trim() || tab.url}`}
-                    title="Pin to Pinned"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      moveTabToPinned(store, tab.browserId);
-                    }}
-                  >
-                    <Pin aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="maho-row__action maho-tab-row__favorite"
-                    aria-label={`Add ${tab.title.trim() || tab.url} to Favorites`}
-                    title="Add to Favorites"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      addTabToFavorites(store, tab.browserId);
-                    }}
-                  >
-                    <Star aria-hidden="true" />
-                  </button>
-                </>
-              }
+
             />
           ))}
         </SortableContext>

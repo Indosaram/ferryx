@@ -6,6 +6,7 @@
 // reports itself is `addTabToFavorites`. Components stay presentational.
 
 import { toast } from "sonner";
+import { closeBrowser, createBrowser } from "../../../lib/browserTauri";
 
 import {
   selectFavoriteTabs,
@@ -14,6 +15,42 @@ import {
   type BrowserStore,
   type BrowserWorktreeTag,
 } from "../../../state/browserStore";
+
+const sessionTransitions = new Map<string, Promise<void>>();
+
+export function suspendMahoTab(store: BrowserStore, browserId: string): Promise<void> {
+  const existing = sessionTransitions.get(browserId);
+  if (existing) return existing;
+  const tab = store.getState().tabs[browserId];
+  if (!tab || tab.suspended) return Promise.resolve();
+  // Clear active ownership before closing so the canvas releases its native surface.
+  store.setSuspended(browserId, true);
+  const task = closeBrowser(browserId).catch((error: unknown) => {
+    store.setSuspended(browserId, false);
+    throw error;
+  }).finally(() => sessionTransitions.delete(browserId));
+  sessionTransitions.set(browserId, task);
+  return task;
+}
+
+export async function activateMahoTab(store: BrowserStore, browserId: string, onActivate?: (id: string) => void): Promise<void> {
+  const pending = sessionTransitions.get(browserId);
+  if (pending) await pending;
+  const tab = store.getState().tabs[browserId];
+  if (!tab) return;
+  if (tab.suspended) {
+    let task = sessionTransitions.get(browserId);
+    if (!task) {
+      task = createBrowser({ browserId, url: tab.url, profile: tab.profileId, visible: false })
+        .then(() => { store.setSuspended(browserId, false); })
+        .finally(() => sessionTransitions.delete(browserId));
+      sessionTransitions.set(browserId, task);
+    }
+    await task;
+  }
+  if (onActivate) onActivate(browserId);
+  else { store.touch(browserId); store.setActiveSpace(tab.spaceId); }
+}
 
 /** Maho's 4x3 grid holds twelve favorites; the thirteenth add is refused with this toast. */
 export const FAVORITE_LIMIT_MESSAGE = "Favorites are full (12 max). Unpin a tile to make room.";

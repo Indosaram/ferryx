@@ -1,19 +1,10 @@
-// Maho Favorites: one shared 4x3 grid for every Space.
-//
-// Capacity and columns come from `MAHO_LAYOUT_TOKENS`, so the DOM grid matches the
-// stylesheet instead of trusting a hand-written `repeat(4, ...)`. Empty slots are
-// rendered (decoratively, never focusable) so the grid keeps its twelve cells and
-// the "full" state is visible rather than implied.
-//
-// Tiles are sortable through dnd-kit and the drop decision itself lives in
-// `applyMahoDrop`, so a keyboard drag and a pointer drag take the same path as the
-// click handlers do.
+// Count-dependent essentials layout from MahoSidebarFavoritesGridView::GetLayoutSpec.
 
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, rectSortingStrategy, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Globe, GripVertical, StarOff } from "lucide-react";
-import type { CSSProperties } from "react";
+import { Globe, GripVertical, StarOff, WandSparkles, X } from "lucide-react";
+import { useState, type CSSProperties } from "react";
 
 import {
   browserStore,
@@ -22,7 +13,8 @@ import {
   type BrowserStore,
   type BrowserStoreTab,
 } from "../../../state/browserStore";
-import { displayUrl, mahoDragId, moveTabToToday } from "./mahoBrowserTabActions";
+import { activateMahoTab, displayUrl, mahoDragId, moveTabToToday } from "./mahoBrowserTabActions";
+import { toast } from "sonner";
 import { MAHO_LAYOUT_TOKENS } from "./mahoTokens";
 
 export type MahoFavoritesGridProps = {
@@ -32,7 +24,11 @@ export type MahoFavoritesGridProps = {
 };
 
 const FAVORITES = MAHO_LAYOUT_TOKENS.favorites;
-const EMPTY_SLOTS = Array.from({ length: FAVORITES.capacity }, (_, index) => index);
+const FAVORITE_COLUMNS = [1, 1, 2, 3, 2, 4, 3, 4, 4, 3, 4, 4, 4] as const;
+
+export function favoriteColumns(count: number): number {
+  return FAVORITE_COLUMNS[Math.min(count, FAVORITES.capacity)];
+}
 
 function favoriteTileStyle(): CSSProperties {
   return {
@@ -82,7 +78,7 @@ function FavoriteTile({
         type="button"
         className="maho-favorite-tile__action"
         aria-label={`Open ${label}`}
-        title={displayUrl(tab.url)}
+        title={label}
         data-browser-id={tab.browserId}
         onClick={() => onActivate(tab.browserId)}
       >
@@ -110,15 +106,12 @@ function FavoriteTile({
 
 export function MahoFavoritesGrid({ store = browserStore, activeBrowserId = null, onActivateTab }: MahoFavoritesGridProps) {
   const favorites = useBrowserStore(selectFavoriteTabs, store);
+  const [hintDismissed, setHintDismissed] = useState(false);
+  const columns = favoriteColumns(favorites.length);
   const { setNodeRef, isOver } = useDroppable({ id: mahoDragId({ kind: "section", section: "favorite" }) });
-  const emptySlots = EMPTY_SLOTS.slice(favorites.length);
 
   const activate = (browserId: string) => {
-    if (onActivateTab) {
-      onActivateTab(browserId);
-      return;
-    }
-    store.touch(browserId);
+    void activateMahoTab(store, browserId, onActivateTab).catch(() => toast.error("Could not restore tab"));
   };
 
   return (
@@ -127,9 +120,11 @@ export function MahoFavoritesGrid({ store = browserStore, activeBrowserId = null
       className="maho-favorites"
       aria-label="Favorites"
       data-over={isOver ? "true" : undefined}
-      data-columns={FAVORITES.columns}
+      data-columns={columns}
       data-capacity={FAVORITES.capacity}
-      style={{ gridTemplateColumns: `repeat(${FAVORITES.columns}, minmax(0, 1fr))` }}
+      data-empty={favorites.length === 0 ? "true" : undefined}
+      data-hint-dismissed={hintDismissed && !isOver ? "true" : undefined}
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
     >
       <SortableContext
         items={favorites.map((tab) => mahoDragId({ kind: "tab", tabId: tab.browserId }))}
@@ -145,9 +140,14 @@ export function MahoFavoritesGrid({ store = browserStore, activeBrowserId = null
           />
         ))}
       </SortableContext>
-      {emptySlots.map((slot) => (
-        <div key={`empty-${slot}`} className="maho-favorite-tile" data-empty="true" aria-hidden="true" style={favoriteTileStyle()} />
-      ))}
+      {favorites.length === 0 && (!hintDismissed || isOver) ? (
+        <div className="maho-favorites__empty">
+          <span className="maho-favorites__empty-badge" aria-hidden="true"><WandSparkles /></span>
+          <button type="button" className="maho-favorites__dismiss" aria-label="Dismiss favorites hint" onClick={() => setHintDismissed(true)}><X aria-hidden="true" /></button>
+          <strong>Drag to add Favorites</strong>
+          <p>Favorites keep your most used sites<br />and apps close</p>
+        </div>
+      ) : null}
     </section>
   );
 }

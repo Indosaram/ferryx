@@ -5,13 +5,14 @@
 // level deep (`parentId` on a folder, `folderId` on a pinned tab). Both folder rows
 // and the Pinned body are drop targets, so dragging a Today tab here pins it.
 
-import { useDroppable } from "@dnd-kit/core";
+import { useDndContext, useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { ChevronDown, ChevronRight, FolderPlus, Folder as FolderIcon, Palette, PinOff, Trash2 } from "lucide-react";
+import { FolderOpen, FolderPlus, Folder as FolderIcon, Palette, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import {
   browserStore,
+  SPACE_IDENTITY_ICONS,
   selectActiveBrowserId,
   selectFolders,
   selectPinnedTabs,
@@ -23,7 +24,8 @@ import {
   type BrowserSpace,
 } from "../../../state/browserStore";
 import { MahoBrowserTabRow } from "./MahoBrowserTabRow";
-import { mahoDragId, moveTabToToday } from "./mahoBrowserTabActions";
+import { MahoSpaceIdentity } from "./MahoSpaceIdentity";
+import { mahoDragId } from "./mahoBrowserTabActions";
 import { SPACE_PRESETS } from "./mahoSpacePalette";
 
 export type MahoPinnedSectionProps = {
@@ -31,6 +33,7 @@ export type MahoPinnedSectionProps = {
   spaceId?: string;
   activeBrowserId?: string | null;
   onActivateTab?: (browserId: string) => void;
+  showSpaceHeader?: boolean;
 };
 
 function SpaceColorSwatches({ space, store }: { space: BrowserSpace; store: BrowserStore }) {
@@ -68,7 +71,7 @@ export function MahoSpaceHeader({ store = browserStore, space }: { store?: Brows
 
   return (
     <div className="maho-space-header">
-      <span className="maho-space-header__dot maho-space-dot__indicator" aria-hidden="true" />
+      <MahoSpaceIdentity icon={space.icon} />
       {editing ? (
         <form
           className="maho-space-header__rename"
@@ -114,6 +117,10 @@ export function MahoSpaceHeader({ store = browserStore, space }: { store?: Brows
         <div className="maho-space-popover" role="dialog" aria-label={`Edit Space ${space.name}`}>
           <span className="maho-space-popover__label">Color</span>
           <SpaceColorSwatches space={space} store={store} />
+          <div className="maho-create-space-pane__icons" role="group" aria-label="Space identity icon">
+            <button type="button" aria-label="No icon" onClick={() => store.setSpaceIcon(space.id, undefined)}>None</button>
+            {SPACE_IDENTITY_ICONS.map((icon) => <button type="button" key={icon} aria-label={icon} aria-pressed={space.icon === icon} onClick={() => store.setSpaceIcon(space.id, icon)}><MahoSpaceIdentity icon={icon} /></button>)}
+          </div>
         </div>
       ) : null}
     </div>
@@ -156,11 +163,8 @@ function FolderRow({
           aria-expanded={!collapsed}
           onClick={() => onToggleCollapsed(folder.id)}
         >
-          {collapsed ? <ChevronRight aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
+          {collapsed ? <FolderIcon aria-hidden="true" /> : <FolderOpen aria-hidden="true" />}
         </button>
-        <span className="maho-folder__glyph" aria-hidden="true">
-          <FolderIcon />
-        </span>
         {renaming ? (
           <form
             className="maho-folder__rename"
@@ -198,9 +202,6 @@ function FolderRow({
             {folder.name}
           </button>
         )}
-        <span className="maho-folder__count" aria-hidden="true">
-          {tabs.length}
-        </span>
         <button
           type="button"
           className="maho-row__action"
@@ -214,7 +215,7 @@ function FolderRow({
       {collapsed ? null : (
         <div className="maho-folder__tabs">
           {tabs.length === 0 ? (
-            <p className="maho-folder__empty">Drop tabs here</p>
+            null
           ) : (
             <SortableContext
               items={tabs.map((tab) => mahoDragId({ kind: "tab", tabId: tab.browserId }))}
@@ -223,25 +224,12 @@ function FolderRow({
               {tabs.map((tab) => (
                 <MahoBrowserTabRow
                   key={tab.browserId}
+                  store={store}
                   tab={tab}
                   sectionLabel={`Pinned folder ${folder.name}`}
                   active={tab.browserId === selectedBrowserId}
                   onActivate={onActivateTab}
                   onClose={(browserId) => store.closeTab(browserId)}
-                  actions={
-                    <button
-                      type="button"
-                      className="maho-row__action"
-                      aria-label={`Unpin ${tab.title.trim() || tab.url} to Today`}
-                      title="Unpin to Today"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        moveTabToToday(store, tab.browserId);
-                      }}
-                    >
-                      <PinOff aria-hidden="true" />
-                    </button>
-                  }
                 />
               ))}
             </SortableContext>
@@ -252,7 +240,7 @@ function FolderRow({
   );
 }
 
-export function MahoPinnedSection({ store = browserStore, spaceId, activeBrowserId, onActivateTab }: MahoPinnedSectionProps) {
+export function MahoPinnedSection({ store = browserStore, spaceId, activeBrowserId, onActivateTab, showSpaceHeader = true }: MahoPinnedSectionProps) {
   const state = useBrowserStore((snapshot) => snapshot, store);
   const targetSpaceId = spaceId ?? state.activeSpaceId;
   const space = useMemo(
@@ -265,6 +253,7 @@ export function MahoPinnedSection({ store = browserStore, spaceId, activeBrowser
   const [collapsedFolders, setCollapsedFolders] = useState<Readonly<Record<string, boolean>>>({});
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
+  const { active } = useDndContext();
   const { setNodeRef, isOver } = useDroppable({ id: mahoDragId({ kind: "section", section: "pinned" }) });
 
   const activate = (browserId: string) => {
@@ -283,10 +272,9 @@ export function MahoPinnedSection({ store = browserStore, spaceId, activeBrowser
   };
 
   return (
-    <section className="maho-pinned" aria-label="Pinned">
-      {space ? <MahoSpaceHeader store={store} space={space} /> : null}
+    <section className="maho-pinned" aria-label="Pinned" data-empty={pinnedTabs.length === 0 && folders.length === 0 ? "true" : undefined}>
+      {showSpaceHeader && space ? <MahoSpaceHeader store={store} space={space} /> : null}
       <div className="maho-section-header">
-        <h3 className="maho-section-header__title">Pinned</h3>
         <button
           type="button"
           className="maho-row__action"
@@ -325,10 +313,7 @@ export function MahoPinnedSection({ store = browserStore, spaceId, activeBrowser
           </button>
         </form>
       ) : null}
-      <div ref={setNodeRef} className="maho-pinned__body" data-over={isOver ? "true" : undefined}>
-        {pinnedTabs.length === 0 && folders.length === 0 ? (
-          <p className="maho-pinned__empty">Pin a tab to keep it here</p>
-        ) : null}
+      <div ref={setNodeRef} className="maho-pinned__body" data-over={isOver ? "true" : undefined} data-drag-active={active ? "true" : undefined}>
         <SortableContext
           items={pinnedTabs.map((tab) => mahoDragId({ kind: "tab", tabId: tab.browserId }))}
           strategy={verticalListSortingStrategy}
@@ -336,25 +321,12 @@ export function MahoPinnedSection({ store = browserStore, spaceId, activeBrowser
           {pinnedTabs.map((tab) => (
             <MahoBrowserTabRow
               key={tab.browserId}
+              store={store}
               tab={tab}
               sectionLabel="Pinned"
               active={tab.browserId === selectedBrowserId}
               onActivate={activate}
               onClose={(browserId) => store.closeTab(browserId)}
-              actions={
-                <button
-                  type="button"
-                  className="maho-row__action"
-                  aria-label={`Unpin ${tab.title.trim() || tab.url} to Today`}
-                  title="Unpin to Today"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    moveTabToToday(store, tab.browserId);
-                  }}
-                >
-                  <PinOff aria-hidden="true" />
-                </button>
-              }
             />
           ))}
         </SortableContext>

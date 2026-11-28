@@ -4,7 +4,7 @@
 // and `Clear` is the one action with baked-in store semantics because its undo
 // affordance has to mirror exactly what `clearToday` archived.
 
-import { Plus, Sparkles, Trash2 } from "lucide-react";
+import { ArrowDownToLine, WandSparkles } from "lucide-react";
 
 import {
   browserStore,
@@ -30,10 +30,9 @@ export function MahoActionRow({ store = browserStore, spaceId, onNewTab, onTidy 
   return (
     <div className="maho-action-row" role="toolbar" aria-label="Tab actions">
       <button type="button" className="maho-action-row__primary" aria-label="New Tab" onClick={onNewTab}>
-        <Plus aria-hidden="true" />
-        <span>New Tab</span>
+        <span>+ New Tab</span>
       </button>
-      <span className="maho-action-row__spacer" />
+      <span className="maho-action-row__divider" aria-hidden="true" />
       <button
         type="button"
         className="maho-action-row__button"
@@ -42,8 +41,10 @@ export function MahoActionRow({ store = browserStore, spaceId, onNewTab, onTidy 
         onClick={onTidy}
         disabled={!onTidy || todayCount === 0}
       >
-        <Sparkles aria-hidden="true" />
+        <WandSparkles aria-hidden="true" />
+        <span>Tidy</span>
       </button>
+      <span className="maho-action-row__divider" aria-hidden="true" />
       <button
         type="button"
         className="maho-action-row__button"
@@ -52,7 +53,8 @@ export function MahoActionRow({ store = browserStore, spaceId, onNewTab, onTidy 
         onClick={() => clearTodayWithUndo(store, targetSpaceId)}
         disabled={todayCount === 0}
       >
-        <Trash2 aria-hidden="true" />
+        <ArrowDownToLine aria-hidden="true" />
+        <span>Clear</span>
       </button>
     </div>
   );

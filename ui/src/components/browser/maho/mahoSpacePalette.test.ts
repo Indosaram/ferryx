@@ -38,12 +38,12 @@ function rgb(hex: string) {
 }
 
 function surfacesOf(palette: MahoSpacePalette): string[] {
-  return [palette.gradientFrom, palette.gradientTo, palette.surface, palette.surfaceHover];
+  return [palette.gradientFrom, palette.gradientTo, palette.surface, palette.surfaceHover, palette.rowActive, palette.rowSelected];
 }
 
 describe("maho space presets", () => {
-  it("ships eight unique, valid Space colors", () => {
-    expect(SPACE_PRESETS).toHaveLength(8);
+  it("ships all nine unique, valid Space colors", () => {
+    expect(SPACE_PRESETS).toHaveLength(9);
     expect(SPACE_PRESET_COLORS).toEqual(SPACE_PRESETS.map((preset) => preset.hex));
     expect(new Set(SPACE_PRESET_COLORS).size).toBe(SPACE_PRESET_COLORS.length);
     for (const hex of SPACE_PRESET_COLORS) {
@@ -102,7 +102,7 @@ describe("deriveSpacePalette", () => {
     expect(deriveSpacePalette("  #ff00ff  ", "light")).toEqual(deriveSpacePalette("#f0f", "light"));
   });
 
-  it("returns seven hex colors and a two-stop gradient for every preset", () => {
+  it("returns hex color roles and a two-stop gradient for every preset", () => {
     for (const hex of SPACE_PRESET_COLORS) {
       for (const scheme of SCHEMES) {
         const palette = deriveSpacePalette(hex, scheme);
@@ -214,6 +214,10 @@ describe("spacePaletteCssVars", () => {
       "--maho-space-gradient-from",
       "--maho-space-gradient-to",
       "--maho-space-muted-foreground",
+      "--maho-space-neutral-glyph",
+      "--maho-space-outline",
+      "--maho-space-row-active",
+      "--maho-space-row-selected",
       "--maho-space-surface",
       "--maho-space-surface-hover",
     ]);
@@ -224,6 +228,10 @@ describe("spacePaletteCssVars", () => {
     expect(vars["--maho-space-gradient-to"]).toBe(palette.gradientTo);
     expect(vars["--maho-space-surface"]).toBe(palette.surface);
     expect(vars["--maho-space-surface-hover"]).toBe(palette.surfaceHover);
+    expect(vars["--maho-space-row-active"]).toBe(palette.rowActive);
+    expect(vars["--maho-space-row-selected"]).toBe(palette.rowSelected);
+    expect(vars["--maho-space-neutral-glyph"]).toBe(palette.neutralGlyph);
+    expect(vars["--maho-space-outline"]).toBe(palette.neutralGlyph);
     expect(vars["--maho-space-foreground"]).toBe(palette.foreground);
     expect(vars["--maho-space-muted-foreground"]).toBe(palette.mutedForeground);
     expect(vars["--maho-space-accent"]).toBe(palette.accent);

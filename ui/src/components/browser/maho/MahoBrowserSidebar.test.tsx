@@ -21,7 +21,7 @@ import {
 } from "../../../state/browserStore";
 import { MahoActionRow } from "./MahoActionRow";
 import { MahoBrowserSidebar } from "./MahoBrowserSidebar";
-import { MahoFavoritesGrid } from "./MahoFavoritesGrid";
+import { favoriteColumns, MahoFavoritesGrid } from "./MahoFavoritesGrid";
 import { MahoPinnedSection } from "./MahoPinnedSection";
 import { MahoSidebarFooter } from "./MahoSidebarFooter";
 import { MahoSidebarTopBar } from "./MahoSidebarTopBar";
@@ -44,6 +44,16 @@ const toastMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("sonner", () => ({ toast: toastMocks, Toaster: () => null }));
+const lifecycleMock = vi.hoisted(() => ({ close: vi.fn(), create: vi.fn() }));
+vi.mock("../../../lib/browserTauri", () => ({ closeBrowser: lifecycleMock.close, createBrowser: lifecycleMock.create }));
+const menuMock = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("../../../lib/nativeMenu", () => ({ openNativePopupMenu: menuMock.open }));
+
+function tabMenu(label: string, command: string) {
+  fireEvent.contextMenu(screen.getByRole("button", { name: label }));
+  const call = menuMock.open.mock.calls[menuMock.open.mock.calls.length - 1]!;
+  act(() => call[3](command));
+}
 
 /** Sections use sortable/droppable hooks, which need a DndContext ancestor. */
 function withDnd(ui: ReactElement) {
@@ -78,6 +88,9 @@ function favoriteOrder(store: BrowserStore): string[] {
 }
 
 beforeEach(() => {
+  lifecycleMock.close.mockReset().mockResolvedValue(undefined);
+  lifecycleMock.create.mockReset().mockResolvedValue(undefined);
+  menuMock.open.mockReset().mockResolvedValue(() => undefined);
   for (const mock of Object.values(toastMocks)) mock.mockClear();
 });
 
@@ -95,6 +108,47 @@ describe("Space creation and switching", () => {
     expect(work).toBeDefined();
     expect(work?.color).toBe(SPACE_PRESETS.find((preset) => preset.id === "rose")?.hex);
     expect(store.getState().activeSpaceId).toBe(work?.id);
+  });
+
+  it("creates a Space with an identity and browser profile", () => {
+    const store = makeStore();
+    const { container } = sidebar(store);
+    fireEvent.click(screen.getByRole("button", { name: "Create Space" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Space name" }), { target: { value: "Studio" } });
+    fireEvent.click(screen.getByRole("button", { name: "Choose space icon" }));
+    fireEvent.click(screen.getByRole("button", { name: "Palette" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Choose profile" }), { target: { value: "default" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create", exact: true }));
+    const space = store.getState().spaces[store.getState().activeSpaceId];
+    expect(space).toMatchObject({ name: "Studio", icon: "Palette", profileId: "default" });
+    expect(container.querySelector(".maho-space-header .maho-space-identity")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Switch to Space Studio" })).toHaveAttribute("data-has-icon", "true");
+  });
+
+  it("submits the footer Create Space pane as one createSpace call with name, color and icon", () => {
+    const store = makeStore();
+    const createSpace = vi.spyOn(store, "createSpace");
+    sidebar(store);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Space" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Create Space" })).getByRole("button", { name: "Cancel" }));
+    expect(createSpace).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Space" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Space name" }), { target: { value: "Studio" } });
+    fireEvent.click(screen.getByRole("button", { name: "Choose space icon" }));
+    fireEvent.click(screen.getByRole("button", { name: "Palette" }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Space color" })).getByRole("button", { name: "Rose" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create", exact: true }));
+
+    expect(createSpace).toHaveBeenCalledTimes(1);
+    expect(createSpace.mock.calls[0][0]).toEqual({
+      name: "Studio",
+      icon: "Palette",
+      color: SPACE_PRESETS.find((preset) => preset.id === "rose")?.hex,
+      profileId: expect.any(String),
+    });
+    expect(screen.queryByRole("dialog", { name: "Create Space" })).toBeNull();
   });
 
   it("refuses an empty Space name", () => {
@@ -151,7 +205,21 @@ describe("Space creation and switching", () => {
 });
 
 describe("Favorites grid", () => {
-  it("renders a four-column, twelve-slot grid and activates a tile", () => {
+  it("uses the native essentials column count for every supported occupancy", () => {
+    expect(Array.from({ length: 13 }, (_, count) => favoriteColumns(count))).toEqual(
+      [1, 1, 2, 3, 2, 4, 3, 4, 4, 3, 4, 4, 4],
+    );
+  });
+
+  it("dismisses the empty hint without removing the Favorites drop target", () => {
+    const store = makeStore();
+    withDnd(<MahoFavoritesGrid store={store} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss favorites hint" }));
+    expect(screen.queryByRole("button", { name: "Dismiss favorites hint" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Favorites" })).toHaveAttribute("data-hint-dismissed", "true");
+  });
+
+  it("lays out populated favorites without reserving empty slots and activates a tile", () => {
     const store = makeStore();
     addTab(store, "github", { title: "GitHub", section: "favorite", order: 0 });
     addTab(store, "docs", { title: "Docs", section: "favorite", order: 1 });
@@ -160,10 +228,9 @@ describe("Favorites grid", () => {
     const onActivateTab = vi.fn();
     const { container } = sidebar(store, { onActivateTab });
     const grid = container.querySelector(".maho-favorites") as HTMLElement;
-    // Four columns, twelve slots: the grid contract comes from the layout tokens.
-    expect(grid.getAttribute("data-columns")).toBe("4");
+    expect(grid.getAttribute("data-columns")).toBe("3");
     expect(grid.getAttribute("data-capacity")).toBe("12");
-    expect(grid.querySelectorAll(".maho-favorite-tile")).toHaveLength(12);
+    expect(grid.querySelectorAll(".maho-favorite-tile")).toHaveLength(3);
     expect(grid.querySelectorAll(".maho-favorite-tile__action")).toHaveLength(3);
 
     fireEvent.click(screen.getByRole("button", { name: "Open GitHub" }));
@@ -175,7 +242,7 @@ describe("Favorites grid", () => {
     addTab(store, "github", { title: "GitHub" });
     sidebar(store);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add GitHub to Favorites" }));
+    tabMenu("Today: GitHub", "favorite");
     expect(store.getState().tabs.github.section).toBe("favorite");
     expect(screen.getByRole("button", { name: "Open GitHub" })).toBeInTheDocument();
   });
@@ -201,7 +268,7 @@ describe("Favorites grid", () => {
     // The Today row action takes the same path and refuses the same way.
     toastMocks.error.mockClear();
     withDnd(<MahoTodayList store={store} />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Thirteenth to Favorites" }));
+    tabMenu("Today: Thirteenth", "favorite");
     expect(store.getState().tabs.thirteenth.section).toBe("today");
     expect(toastMocks.error).toHaveBeenCalledWith(FAVORITE_LIMIT_MESSAGE);
   });
@@ -227,18 +294,53 @@ describe("Favorites grid", () => {
 });
 
 describe("Pinned and folders", () => {
+  it("has one trailing unload action and restores the unloaded tab on activation", async () => {
+    const store = makeStore();
+    addTab(store, "saved", { title: "Saved", section: "pinned" });
+    const { container } = withDnd(<MahoPinnedSection store={store} />);
+    const row = () => container.querySelector(".maho-tab-row") as HTMLElement;
+    expect(container.querySelectorAll(".maho-tab-row__actions button")).toHaveLength(1);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Unload Saved" })); });
+    expect(lifecycleMock.close).toHaveBeenCalledWith("saved");
+    expect(store.getState().tabs.saved.suspended).toBe(true);
+    expect(row().getAttribute("data-suspended")).toBe("true");
+    expect(screen.getByRole("button", { name: "Close Saved" })).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pinned: Saved" })); });
+    expect(lifecycleMock.create).toHaveBeenCalledWith(expect.objectContaining({ browserId: "saved", url: "https://saved.example.com/", visible: false }));
+    expect(store.getState().tabs.saved.suspended).toBe(false);
+    expect(row().getAttribute("data-suspended")).toBeNull();
+    expect(screen.getByRole("button", { name: "Unload Saved" })).toBeInTheDocument();
+  });
+
+  it("renders the Space icon in the footer dots and the Space header, and retints it from the popover", () => {
+    const store = makeStore();
+    store.setSpaceIcon(DEFAULT_SPACE_ID, "Rocket");
+    const { container } = sidebar(store);
+
+    const headerIcon = () => container.querySelector(".maho-space-header .maho-space-identity");
+    const dotIcon = () => container.querySelector(".maho-space-dot .maho-space-identity");
+    expect(headerIcon()).not.toBeNull();
+    expect(dotIcon()).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Switch to Space Personal" })).toHaveAttribute("data-has-icon", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Space" }));
+    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    expect(store.getState().spaces[DEFAULT_SPACE_ID].icon).toBe("Code");
+    expect(headerIcon()).not.toBeNull();
+  });
+
   it("pins a Today tab and unpins it back", () => {
     const store = makeStore();
     addTab(store, "github", { title: "GitHub" });
     sidebar(store);
 
-    fireEvent.click(screen.getByRole("button", { name: "Pin GitHub" }));
+    tabMenu("Today: GitHub", "pin");
     expect(store.getState().tabs.github.section).toBe("pinned");
 
     const pinned = within(screen.getByRole("region", { name: "Pinned" }));
     expect(pinned.getByRole("button", { name: "Pinned: GitHub" })).toBeInTheDocument();
 
-    fireEvent.click(pinned.getByRole("button", { name: "Unpin GitHub to Today" }));
+    tabMenu("Pinned: GitHub", "pin");
     expect(store.getState().tabs.github.section).toBe("today");
   });
 
@@ -285,7 +387,7 @@ describe("Pinned and folders", () => {
     withDnd(<MahoPinnedSection store={store} />);
     expect(screen.getByRole("button", { name: "Pinned folder Research: GitHub" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Unpin GitHub to Today" }));
+    tabMenu("Pinned folder Research: GitHub", "pin");
     expect(store.getState().tabs.github.section).toBe("today");
     expect(store.getState().tabs.github.folderId).toBeUndefined();
   });
@@ -386,6 +488,17 @@ describe("URL pill, top bar and accessibility", () => {
     expect(onCopyUrl).toHaveBeenCalledWith("https://www.github.com/ferryx/ui");
   });
 
+  it("keeps address and navigation controls in the contents header, not the sidebar", () => {
+    const store = makeStore();
+    sidebar(store);
+    const navigation = screen.getByRole("toolbar", { name: "Browser navigation" });
+    expect(within(navigation).queryByRole("button", { name: "Back" })).toBeNull();
+    expect(within(navigation).queryByRole("button", { name: "Forward" })).toBeNull();
+    expect(within(navigation).queryByRole("button", { name: "Reload" })).toBeNull();
+    expect(within(navigation).getByRole("button", { name: "Collapse sidebar" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Address bar" })).toBeNull();
+  });
+
   it("wires top bar back/forward/reload and the collapse toggle", () => {
     const onBack = vi.fn();
     const onForward = vi.fn();
@@ -423,7 +536,7 @@ describe("URL pill, top bar and accessibility", () => {
     sidebar(store);
 
     expect(screen.getByRole("toolbar", { name: "Browser navigation" })).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Address bar" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Address bar" })).toBeNull();
     expect(screen.getByRole("region", { name: "Favorites" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Pinned" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Today" })).toBeInTheDocument();
@@ -516,8 +629,8 @@ describe("Space Dots", () => {
 
     const dots = screen.getByRole("group", { name: "Spaces" });
     const buttons = within(dots).getAllByRole("button");
-    // One dot per Space, plus the create-Space affordance.
-    expect(buttons).toHaveLength(3);
+    expect(buttons).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Create Space" }).parentElement).toBe(dots.parentElement);
     expect(buttons[0]).toHaveAttribute("aria-pressed", "true");
     expect(buttons[0].querySelector(".maho-space-dot__indicator")).not.toBeNull();
     expect(buttons[1]).toHaveAttribute("aria-pressed", "false");

@@ -31,11 +31,19 @@ export type BrowserWorktreeTag = {
   label?: string;
 };
 
+export const SPACE_IDENTITY_ICONS = ["Briefcase", "House", "Code", "BookOpen", "Palette", "Globe", "Rocket", "Heart", "Star", "Music", "Coffee", "GraduationCap"] as const;
+export type SpaceIdentityIcon = typeof SPACE_IDENTITY_ICONS[number];
+export function isSpaceIdentityIcon(value: unknown): value is SpaceIdentityIcon {
+  return typeof value === "string" && (SPACE_IDENTITY_ICONS as readonly string[]).includes(value);
+}
+
 export type BrowserSpace = {
   id: string;
   name: string;
   /** Hex color driving the Space palette. */
   color: string;
+  icon?: string;
+  profileId?: string;
   order: number;
 };
 
@@ -45,6 +53,8 @@ export type BrowserStoreTab = {
   url: string;
   title: string;
   faviconUrl?: string;
+  suspended?: boolean;
+  profileId?: string;
   section: BrowserSection;
   /** Only pinned tabs live inside folders. */
   folderId?: string;
@@ -112,7 +122,7 @@ export type BrowserStoreFailure = { ok: false; error: BrowserStoreErrorCode };
 export type BrowserStoreSuccess<T> = { ok: true; value: T };
 export type BrowserStoreResult<T> = BrowserStoreSuccess<T> | BrowserStoreFailure;
 
-export type CreateSpaceInput = { name: string; color?: string };
+export type CreateSpaceInput = { name: string; color?: string; icon?: string; profileId?: string };
 
 export type UpsertBrowserTabInput = {
   browserId: string;
@@ -128,6 +138,8 @@ export type UpsertBrowserTabInput = {
   agentControlled?: boolean;
   private?: boolean;
   engine?: BrowserEngine;
+  suspended?: boolean;
+  profileId?: string;
 };
 
 export type MoveTabTarget = {
@@ -148,6 +160,8 @@ export type BrowserStoreActions = {
   reorderSpaces: (spaceId: string, toIndex: number) => BrowserStoreResult<readonly BrowserSpace[]>;
   setActiveSpace: (spaceId: string) => BrowserStoreResult<BrowserSpace>;
 
+  setSpaceIcon: (spaceId: string, icon?: string) => BrowserStoreResult<BrowserSpace>;
+  setSuspended: (browserId: string, suspended: boolean) => BrowserStoreResult<BrowserStoreTab>;
   upsertTab: (input: UpsertBrowserTabInput) => BrowserStoreResult<BrowserStoreTab>;
   /** Closes a tab; non-private tabs are archived and can be restored. */
   closeTab: (browserId: string) => BrowserStoreResult<{ tab: BrowserStoreTab; archived: boolean }>;
@@ -358,6 +372,8 @@ function parseBrowserState(raw: string | null, storageStamp: number): BrowserSto
       id,
       name: readString(record.name) ?? id,
       color: readString(record.color) ?? DEFAULT_SPACE_COLOR,
+      icon: isSpaceIdentityIcon(record.icon) ? record.icon : undefined,
+      profileId: readString(record.profileId),
       order: readFiniteNumber(record.order) ?? Object.keys(spaces).length,
     };
   }
@@ -468,8 +484,10 @@ function normalizeTab(
     section: isSection(record.section) ? record.section : "today",
     order: readFiniteNumber(record.order) ?? 0,
     lastActiveAt: readFiniteNumber(record.lastActiveAt) ?? fallbackTimestamp,
-    private: record.private === true,
+    private: record.private === true || isPrivateBrowserProfileId(readString(record.profileId)),
     agentControlled: record.agentControlled === true,
+    suspended: record.suspended === true,
+    profileId: readString(record.profileId),
   };
   const faviconUrl = readString(record.faviconUrl);
   if (faviconUrl) tab.faviconUrl = faviconUrl;
@@ -580,6 +598,8 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
         id: createId("space"),
         name,
         color: input.color?.trim() || DEFAULT_SPACE_COLOR,
+        icon: isSpaceIdentityIcon(input.icon) ? input.icon : undefined,
+        profileId: readString(input.profileId),
         order: sortSpaces(prev.spaces).length,
       };
       setState((current) => ({ ...current, spaces: { ...current.spaces, [space.id]: space } }));
@@ -654,6 +674,29 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
       return success(space);
     },
 
+    setSpaceIcon(spaceId, icon) {
+      const space = spaceById(spaceId);
+      if (!space) return failure("unknown-space");
+      const next = { ...space, icon: isSpaceIdentityIcon(icon) ? icon : undefined };
+      setState((prev) => ({ ...prev, spaces: { ...prev.spaces, [spaceId]: next } }));
+      return success(next);
+    },
+
+    setSuspended(browserId, suspended) {
+      const prev = getState();
+      const tab = prev.tabs[browserId];
+      if (!tab) return failure("unknown-tab");
+      const next = { ...withoutLiveState(tab), suspended };
+      const activeBrowserIdBySpace = { ...prev.activeBrowserIdBySpace };
+      if (suspended) {
+        for (const spaceId of Object.keys(activeBrowserIdBySpace)) {
+          if (activeBrowserIdBySpace[spaceId] === browserId) activeBrowserIdBySpace[spaceId] = null;
+        }
+      }
+      commit({ ...prev, tabs: { ...prev.tabs, [browserId]: next }, activeBrowserIdBySpace });
+      return success(next);
+    },
+
     upsertTab(input) {
       const prev = getState();
       const browserId = input.browserId?.trim();
@@ -680,8 +723,10 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
         title: input.title === null ? "" : input.title ?? existing?.title ?? "",
         order: input.order ?? existing?.order ?? nextGroupOrder(spaceId, section, folderId),
         lastActiveAt: input.lastActiveAt ?? existing?.lastActiveAt ?? now(),
-        private: input.private ?? existing?.private ?? false,
+        private: input.private ?? existing?.private ?? isPrivateBrowserProfileId(input.profileId ?? prev.spaces[spaceId].profileId),
         agentControlled: input.agentControlled ?? existing?.agentControlled ?? false,
+        suspended: input.suspended ?? existing?.suspended ?? false,
+        profileId: input.profileId ?? existing?.profileId ?? prev.spaces[spaceId].profileId,
       };
       const faviconUrl = input.faviconUrl === null ? undefined : input.faviconUrl ?? existing?.faviconUrl;
       if (faviconUrl) tab.faviconUrl = faviconUrl;

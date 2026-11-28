@@ -7,34 +7,38 @@
 
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Globe, GripVertical, X } from "lucide-react";
-import type { ReactNode } from "react";
+import { Globe, GripVertical, Minus, X } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { toast } from "sonner";
+import { openNativePopupMenu } from "../../../lib/nativeMenu";
 
-import type { BrowserStoreTab } from "../../../state/browserStore";
-import { displayUrl, mahoDragId, worktreeTagLabel } from "./mahoBrowserTabActions";
+import { browserStore, type BrowserStore, type BrowserStoreTab } from "../../../state/browserStore";
+import { activateMahoTab, addTabToFavorites, displayUrl, mahoDragId, moveTabToPinned, moveTabToToday, suspendMahoTab, worktreeTagLabel } from "./mahoBrowserTabActions";
 
 export type MahoBrowserTabRowProps = {
   tab: BrowserStoreTab;
+  store?: BrowserStore;
   active?: boolean;
   onActivate: (browserId: string) => void;
   onClose?: (browserId: string) => void;
-  /** Trailing buttons (pin, unpin, favorite, ...). */
-  actions?: ReactNode;
   /** Prefixes the row's accessible name, e.g. "Pinned". */
   sectionLabel?: string;
 };
 
 export function MahoBrowserTabRow({
   tab,
+  store = browserStore,
   active = false,
   onActivate,
   onClose,
-  actions,
   sectionLabel,
 }: MahoBrowserTabRowProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
     id: mahoDragId({ kind: "tab", tabId: tab.browserId }),
   });
+  const menuAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => menuAbort.current?.abort(), []);
+  const unload = tab.section === "pinned" && !tab.suspended;
   const label = tab.title.trim() || displayUrl(tab.url);
   const worktree = tab.worktreeTag ? worktreeTagLabel(tab.worktreeTag) : null;
 
@@ -44,6 +48,32 @@ export function MahoBrowserTabRow({
       className="maho-row maho-tab-row"
       data-selected={active ? "true" : undefined}
       data-dragging={isDragging ? "true" : undefined}
+      data-suspended={tab.suspended ? "true" : undefined}
+      onKeyDown={(event) => {
+        if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          event.preventDefault();
+          const rect = event.currentTarget.getBoundingClientRect();
+          event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: rect.left, clientY: rect.bottom }));
+        }
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        menuAbort.current?.abort();
+        const controller = new AbortController();
+        menuAbort.current = controller;
+        void openNativePopupMenu("cmd_native_sidebar_context_menu", [
+          { kind: "item", id: "pin", label: tab.section === "pinned" ? "Unpin to Today" : "Pin tab" },
+          { kind: "item", id: "favorite", label: "Add to Favorites" },
+          { kind: "separator" },
+          { kind: "item", id: "close", label: "Close tab" },
+        ], { x: event.clientX, y: event.clientY }, (id) => {
+          if (id === "pin") {
+            if (tab.section === "pinned") moveTabToToday(store, tab.browserId);
+            else moveTabToPinned(store, tab.browserId);
+          } else if (id === "favorite") addTabToFavorites(store, tab.browserId);
+          else if (id === "close") onClose?.(tab.browserId);
+        }, controller.signal).catch(() => toast.error("Could not open tab menu"));
+      }}
       style={{ transform: CSS.Transform.toString(transform), transition }}
     >
       <button
@@ -63,7 +93,7 @@ export function MahoBrowserTabRow({
         aria-current={active ? "page" : undefined}
         title={displayUrl(tab.url)}
         data-browser-id={tab.browserId}
-        onClick={() => onActivate(tab.browserId)}
+        onClick={() => { void activateMahoTab(store, tab.browserId, onActivate).catch(() => toast.error("Could not restore tab")); }}
       >
         <span className="maho-row__icon maho-tab-row__icon">
           {tab.faviconUrl ? (
@@ -81,19 +111,19 @@ export function MahoBrowserTabRow({
         {tab.agentControlled ? <span className="maho-agent-badge" title="Agent controlled" aria-hidden="true" /> : null}
       </button>
       <span className="maho-tab-row__actions">
-        {actions}
         {onClose ? (
           <button
             type="button"
             className="maho-row__action"
-            aria-label={`Close ${label}`}
-            title="Close tab"
+            aria-label={`${unload ? "Unload" : "Close"} ${label}`}
+            title={unload ? "Unload tab" : "Close tab"}
             onClick={(event) => {
               event.stopPropagation();
-              onClose(tab.browserId);
+              if (unload) void suspendMahoTab(store, tab.browserId).catch(() => toast.error("Could not unload tab"));
+              else onClose(tab.browserId);
             }}
           >
-            <X aria-hidden="true" />
+            {unload ? <Minus aria-hidden="true" /> : <X aria-hidden="true" />}
           </button>
         ) : null}
       </span>
