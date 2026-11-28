@@ -17,17 +17,24 @@ pub struct HostRefusal {
 pub enum HostSpelling {
     /// `--host <id>`, inserted right after the group name.
     Flag,
-    /// Named inside the group's own arguments (`file cp <host>:<path>`).
-    Inline,
     Unsupported,
 }
 
 pub fn spelling(group: &str) -> HostSpelling {
     match group {
-        "agents" => HostSpelling::Flag,
-        "supervisor" => HostSpelling::Flag,
-        "file" => HostSpelling::Inline,
+        "agents" | "supervisor" => HostSpelling::Flag,
         _ => HostSpelling::Unsupported,
+    }
+}
+
+/// Groups whose host is named inline, inside an argument, rather than by a prefix. A prefix
+/// cannot be applied to them: `file cp <src> <dst>` takes `<host>:<path>` on whichever side
+/// is remote, so the prefix would have to guess the side. They are refused, and the refusal
+/// teaches the inline form instead of silently dropping the host and running here.
+fn inline_host_hint(group: &str) -> Option<&'static str> {
+    match group {
+        "file" => Some("`file` names its host inside the path: `ferryx-cli file cp <host>:<path> <path>`"),
+        _ => None,
     }
 }
 
@@ -71,20 +78,23 @@ pub fn apply_host_prefix(args: &[String]) -> Result<Vec<String>, HostRefusal> {
             out.push(argv[0].clone());
             out.push(argv[1].clone());
             out.push("--host".to_string());
-            out.push(host);
+            out.push(host.clone());
             out.extend(argv[2..].iter().cloned());
             Ok(out)
         }
-        HostSpelling::Inline => Ok(argv),
-        HostSpelling::Unsupported => Err(HostRefusal {
-            code: "TARGET_UNSUPPORTED",
-            message: format!(
-                "`{group}` cannot run against another host yet; host-capable groups are: {}. \
-                 Run `{group}` here without a host, or use `ferryx-cli file cp {host}:<path> <path>` \
-                 to move a file",
-                host_capable_groups().join(", ")
-            ),
-        }),
+        HostSpelling::Unsupported => {
+            let hint = inline_host_hint(group)
+                .map(|hint| format!(" {hint}."))
+                .unwrap_or_default();
+            Err(HostRefusal {
+                code: "TARGET_UNSUPPORTED",
+                message: format!(
+                    "`{group}` cannot run against host `{host}` yet; host-capable groups are: {}.{hint} \
+                     Run `{group}` here without a host to act on this machine",
+                    host_capable_groups().join(", ")
+                ),
+            })
+        }
     }
 }
 
@@ -164,8 +174,31 @@ mod tests {
     }
 
     #[test]
-    fn file_keeps_its_own_host_spelling() {
-        let args = argv(&["ferryx-cli", "air", "file", "cp", "a", "b"]);
-        assert_eq!(apply_host_prefix(&args).unwrap(), args);
+    fn file_is_refused_with_its_inline_spelling() {
+        let refusal = apply_host_prefix(&argv(&["ferryx-cli", "air", "file", "cp", "a", "b"]))
+            .expect_err("a prefix cannot say which side of a copy is remote");
+        assert_eq!(refusal.code, "TARGET_UNSUPPORTED");
+        assert!(refusal.message.contains("air"), "the refusal names the host it refused");
+        assert!(
+            refusal.message.contains("<host>:<path>"),
+            "the refusal teaches the inline form: {}",
+            refusal.message
+        );
+    }
+
+    #[test]
+    fn no_group_silently_drops_a_host() {
+        // A prefix that is accepted must put the host somewhere. Anything that cannot is
+        // refused, because dropping it would run the command on this machine instead.
+        for group in CLI_GROUPS {
+            let args = argv(&["ferryx-cli", "air", group, "sub"]);
+            match apply_host_prefix(&args) {
+                Ok(out) => assert!(
+                    out.iter().any(|token| token == "air"),
+                    "{group} accepted the prefix but lost the host: {out:?}"
+                ),
+                Err(refusal) => assert_eq!(refusal.code, "TARGET_UNSUPPORTED"),
+            }
+        }
     }
 }
