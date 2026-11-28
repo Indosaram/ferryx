@@ -3,15 +3,18 @@ import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
 
 import "../index.css";
+import { applyAppearanceSettings, loadAppearanceSettings } from "../lib/appearanceSettings";
 import { APPEARANCE_SETTINGS_STORAGE_KEY } from "../lib/storageKeys";
 import { GlobalRemoteDesktopCanvas } from "../components/remoteDesktop/GlobalRemoteDesktopCanvas";
 import { RemoteDesktopActivitySidebar } from "../components/remoteDesktop/RemoteDesktopActivitySidebar";
+import { remoteDesktopStore } from "../state/remoteDesktopStore";
 import { remoteHostStore } from "../state/remoteHostStore";
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.dataset.theme = theme;
 window.localStorage.setItem(APPEARANCE_SETTINGS_STORAGE_KEY, JSON.stringify({ theme }));
+applyAppearanceSettings(loadAppearanceSettings());
 
 mockWindows("main");
 mockIPC((command) => {
@@ -71,6 +74,10 @@ remoteHostStore.setHosts([
     generation: "1",
   },
 ]);
+
+if (params.get("state") === "session") {
+  void remoteDesktopStore.connect("studio-mac", "Studio Mac");
+}
 
 function Harness() {
   const [activeHostId, setActiveHostId] = useState<string | null>(

@@ -7,6 +7,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 
 import "../index.css";
+import { applyAppearanceSettings, loadAppearanceSettings } from "../lib/appearanceSettings";
 import { BROWSER_MODE_SHORTCUT_EVENT, useMahoBrowserShell } from "../components/browser/maho/MahoBrowserShell";
 import type { BrowserAgentActivity } from "../components/browser/maho/MahoAgentControl";
 import { APPEARANCE_SETTINGS_STORAGE_KEY } from "../lib/storageKeys";
@@ -16,6 +17,7 @@ const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.dataset.theme = theme;
 window.localStorage.setItem(APPEARANCE_SETTINGS_STORAGE_KEY, JSON.stringify({ theme }));
+applyAppearanceSettings(loadAppearanceSettings());
 
 mockWindows("main");
 mockIPC((command) => {
