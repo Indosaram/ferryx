@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Monitor, ScreenShare } from "lucide-react";
 
 import { cn } from "../../lib/cn";
 import { rdErrorMessage } from "../../lib/remoteDesktop";
@@ -19,7 +19,6 @@ import {
 } from "../../lib/sidebarPersistence";
 import { remoteDesktopStore, useRemoteDesktopSession, type RemoteDesktopStatus } from "../../state/remoteDesktopStore";
 import { remoteHostStore, selectHostList, type HostEndpoint } from "../../state/remoteHostStore";
-import { RemoteDesktopHostSection } from "../settings/remote/RemoteDesktopHostSection";
 import { Button } from "../ui/button";
 
 const RANGE = SIDEBAR_RANGE_BY_MODE.remoteDesktop;
@@ -71,7 +70,7 @@ function safeId(hostId: string): string {
 export type RemoteDesktopActivitySidebarProps = {
   /** The machine the global canvas shows; the drawer highlights its row. */
   activeHostId: string | null;
-  onSelectHost: (hostId: string) => void;
+  onSelectHost: (hostId: string | null) => void;
 };
 
 /**
@@ -155,6 +154,10 @@ export function RemoteDesktopActivitySidebar({ activeHostId, onSelectHost }: Rem
               : `${hosts.length} paired ${hosts.length === 1 ? "machine" : "machines"}`}
           </p>
         </header>
+        <Button type="button" variant={activeHostId === null ? "secondary" : "ghost"} size="sm" className="justify-start gap-2" onClick={() => onSelectHost(null)}>
+          <Monitor aria-hidden="true" className="size-4" />
+          Computers
+        </Button>
         {hosts.length === 0 ? (
           <p data-testid="rd-no-machines" className="text-[11px] text-muted-foreground">
             Pair a machine from Settings &gt; Remote to control it here.
@@ -185,11 +188,13 @@ export function RemoteDesktopActivitySidebar({ activeHostId, onSelectHost }: Rem
               aria-hidden="true"
               className={cn("size-3 transition-transform", sharingOpen && "rotate-90")}
             />
-            Host sharing
+            <ScreenShare aria-hidden="true" className="size-4" />
+            This Computer (Host)
           </button>
           {sharingOpen ? (
             <div id="rd-host-sharing-panel" data-testid="rd-host-sharing-panel" className="px-1 pt-2">
-              <RemoteDesktopHostSection />
+              <p className="mb-2 text-[12px] text-muted-foreground">Manage screen sharing, input access and connected viewers from Computers.</p>
+              <Button type="button" size="sm" variant="outline" onClick={() => onSelectHost(null)}>View hosting controls</Button>
             </div>
           ) : null}
         </section>
@@ -212,15 +217,16 @@ export function RemoteDesktopActivitySidebar({ activeHostId, onSelectHost }: Rem
   );
 }
 
-function PairedMachineRow({ host, active, onConnect, onSelect }: {
+export function PairedMachineRow({ host, active, onConnect, onSelect, library = false }: {
   host: HostEndpoint;
   active: boolean;
   onConnect: (host: HostEndpoint) => void;
   onSelect: (hostId: string) => void;
+  library?: boolean;
 }) {
   const session = useRemoteDesktopSession(host.hostId);
   const name = host.displayName ?? host.name;
-  const id = safeId(host.hostId);
+  const id = `${library ? "library-" : ""}${safeId(host.hostId)}`;
   const reasonId = `rd-connect-reason-${id}`;
   const block = remoteDesktopConnectBlock(host);
   const granted = host.authStatus === "paired" && host.grantScope === "machine";
@@ -230,15 +236,17 @@ function PairedMachineRow({ host, active, onConnect, onSelect }: {
   return (
     <li
       role="listitem"
-      data-testid={`rd-host-${id}`}
+      data-testid={`${library ? "rd-library-host" : "rd-host"}-${id}`}
       data-active={active ? "true" : "false"}
       data-session={status}
       className={cn(
-        "space-y-1 rounded-lg border p-2",
+        "flex min-w-0 flex-col gap-2 rounded-xl border p-3",
+        library && "bg-card p-4",
         active ? "border-primary/60 bg-accent/40" : "border-border bg-card/40",
       )}
     >
-      <div className="flex min-w-0 items-center gap-1.5">
+      <div className="flex min-w-0 items-center gap-2">
+        <Monitor aria-hidden="true" className="size-5 shrink-0 text-muted-foreground" />
         <button
           type="button"
           onClick={() => onSelect(host.hostId)}
@@ -259,6 +267,7 @@ function PairedMachineRow({ host, active, onConnect, onSelect }: {
           </span>
         ) : null}
       </div>
+      <p className="truncate select-text font-mono text-[11px] text-muted-foreground" title={host.address}>{host.address}</p>
       <p className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
         <span
           aria-hidden="true"
@@ -272,6 +281,12 @@ function PairedMachineRow({ host, active, onConnect, onSelect }: {
           {granted ? "Remote desktop granted" : "Remote desktop not granted"}
         </span>
       </p>
+      {host.online && host.latencyMs != null ? (
+        <p className="text-[11px] text-muted-foreground">{Math.round(host.latencyMs)} ms · {host.transport}</p>
+      ) : null}
+      {!host.online ? (
+        <p className="text-[11px] text-muted-foreground">Last seen: {host.lastSeenAt ? new Date(host.lastSeenAt).toLocaleString() : "Not observed on this client"}</p>
+      ) : null}
       {session?.error ? (
         <p
           role="alert"
@@ -287,17 +302,17 @@ function PairedMachineRow({ host, active, onConnect, onSelect }: {
           {block.reason}
         </p>
       ) : null}
-      <div className="flex gap-1.5">
+      <div className="mt-auto flex gap-1.5 border-t border-border pt-2">
         {live ? (
           <Button
             type="button"
             size="sm"
             variant="outline"
-            aria-label={`Disconnect ${name}`}
+            aria-label={`${status === "connecting" ? "Cancel connection to" : "Disconnect"} ${name}`}
             data-testid={`rd-disconnect-${id}`}
             onClick={() => void remoteDesktopStore.disconnect(host.hostId)}
           >
-            Disconnect
+            {status === "connecting" ? "Cancel" : "Disconnect"}
           </Button>
         ) : (
           <Button

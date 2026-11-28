@@ -1092,6 +1092,9 @@ pub mod viewer {
         pub max_present_fps: Arc<AtomicU32>,
         /// True once the host sent PCM, so the meta reports audio as available.
         pub audio_available: Arc<AtomicBool>,
+        /// DOM presentation modes use JPEG frames rather than the native aspect-fit surface.
+        pub canvas_presentation: Arc<AtomicBool>,
+        pub retry_renderer: Arc<AtomicBool>,
         /// Last decoded frame size, which outruns the control channel's stream state.
         pub last_frame_size: Arc<Mutex<(u32, u32)>>,
     }
@@ -1119,6 +1122,8 @@ pub mod viewer {
                 jpeg_quality: Arc::new(AtomicU32::new(DEFAULT_JPEG_QUALITY)),
                 max_present_fps: Arc::new(AtomicU32::new(DEFAULT_MAX_PRESENT_FPS)),
                 audio_available: Arc::new(AtomicBool::new(false)),
+                canvas_presentation: Arc::new(AtomicBool::new(false)),
+                retry_renderer: Arc::new(AtomicBool::new(false)),
                 last_frame_size: Arc::new(Mutex::new((0, 0))),
             }
         }
@@ -1510,11 +1515,7 @@ pub mod viewer {
     }
 
     fn apply_remote_clipboard(session: &ClientSession, shared: &ViewerShared, text: &str) {
-        let allow = session
-            .stream_state()
-            .ok()
-            .and_then(|state| state.policy)
-            .is_some_and(|policy| policy.allow_clipboard);
+        let allow = session.clipboard_allowed().unwrap_or(false);
         if !allow {
             return;
         }
@@ -1817,7 +1818,7 @@ pub mod viewer {
         let mut last_jpeg: Option<Instant> = None;
 
         while let Some((queue, (frame, received))) = shared.frame_queue.next_frame() {
-            if signals.reset_decoder.swap(false, Ordering::SeqCst) {
+            if signals.reset_decoder.swap(false, Ordering::SeqCst) || shared.retry_renderer.swap(false, Ordering::SeqCst) {
                 decoder = None;
             }
             let codec_changed = frame.header.is_key_frame
@@ -1884,7 +1885,7 @@ pub mod viewer {
 
             let present_started = Instant::now();
             let mut presented = None;
-            match present_native(&shared, &picture) {
+            match if shared.canvas_presentation.load(Ordering::SeqCst) { NativeOutcome::NotAttached } else { present_native(&shared, &picture) } {
                 NativeOutcome::Presented(announce) => {
                     if !native_backend {
                         native_backend = true;
@@ -2242,6 +2243,9 @@ pub mod commands {
         pub viewport_height: Option<u32>,
         /// `"auto" | "hevc" | "h264"`.
         pub codec: Option<String>,
+        pub clipboard_enabled: Option<bool>,
+        pub canvas_presentation: Option<bool>,
+        pub retry_renderer: Option<bool>,
     }
 
     /// The renderer's `RdLogicalBounds` (`LogicalBounds` itself has no serde shape).
@@ -2656,6 +2660,12 @@ pub mod commands {
         let entry = session_or_not_found(&rd_session_id)?;
         let codec = options.codec.as_deref().map(parse_codec).transpose()?;
         let shared = &entry.shared;
+        if options.retry_renderer == Some(true) {
+            shared.retry_renderer.store(true, Ordering::SeqCst);
+        }
+        if let Some(canvas) = options.canvas_presentation {
+            shared.canvas_presentation.store(canvas, Ordering::SeqCst);
+        }
         if let Some(mode) = options.playout_mode {
             shared.set_playout_mode(mode);
         }
@@ -2674,6 +2684,13 @@ pub mod commands {
             if let Some(codec) = codec {
                 stream.set_codec(codec);
             }
+        }
+        if let Some(enabled) = options.clipboard_enabled {
+            let session = entry.session.clone();
+            crate::ipc::run_blocking(move || {
+                session.set_clipboard_enabled(enabled)
+                    .map_err(|error| rd_error(RD_CONNECT_FAILED, error.to_string()))
+            }).await?;
         }
         // Unchanged settings produce no request; changed ones get the next request id.
         renegotiate(shared, false).await
@@ -3011,6 +3028,17 @@ pub mod commands {
         }
 
         const MISSING: &str = "missing-rd-session";
+
+        #[test]
+        fn client_clipboard_toggle_is_optional_and_codec_is_validated() {
+            let unchanged: RdStreamOptionsUpdate = serde_json::from_str("{}").unwrap();
+            assert_eq!(unchanged.clipboard_enabled, None);
+            let disabled: RdStreamOptionsUpdate = serde_json::from_str(r#"{"clipboardEnabled":false}"#).unwrap();
+            assert_eq!(disabled.clipboard_enabled, Some(false));
+            assert_eq!(parse_codec("h264").unwrap(), StreamCodecPreference::H264);
+            assert_eq!(parse_codec("invalid").unwrap_err().code,
+                crate::ipc::error::IpcErrorCode::Custom(RD_INVALID_OPTIONS.into()));
+        }
 
         #[tokio::test]
         async fn unknown_sessions_report_rd_not_found() {

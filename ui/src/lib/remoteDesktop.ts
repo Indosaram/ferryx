@@ -223,6 +223,9 @@ export type RdStreamOptionsUpdate = {
   viewportWidth?: number;
   viewportHeight?: number;
   codec?: "auto" | "hevc" | "h264";
+  clipboardEnabled?: boolean;
+  canvasPresentation?: boolean;
+  retryRenderer?: boolean;
 };
 export type RdLogicalBounds = { x: number; y: number; width: number; height: number; scaleFactor: number };
 export type RdSurfaceAttachResponse = { backend: "wgpu" | "canvas2d"; reason: string | null };
@@ -389,7 +392,7 @@ export function parseRdFrameMessage(frame: ArrayBuffer | Uint8Array | number[]):
 }
 
 export type FramePoint = { x: number; y: number };
-export type RdFitMode = "fit" | "actual";
+export type RdFitMode = "fit" | "actual" | "stretch";
 
 /**
  * Maps a client point to normalized 0..1 coordinates of a frame drawn either aspect-fit
@@ -404,7 +407,7 @@ export function mapClientPointToFrame(
   fitMode: RdFitMode = "fit",
 ): FramePoint | null {
   if (rect.width <= 0 || rect.height <= 0 || frameWidth <= 0 || frameHeight <= 0) return null;
-  if (fitMode === "actual") {
+  if (fitMode === "actual" || fitMode === "stretch") {
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
     if (x < 0 || x > 1 || y < 0 || y > 1) return null;

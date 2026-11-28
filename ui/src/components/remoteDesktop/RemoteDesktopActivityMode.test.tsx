@@ -167,7 +167,7 @@ describe("Remote Desktop Activity mode", () => {
     act(() => channels[1].onmessage(statusFrame("connected")));
 
     const rdTabs = within(await screen.findByRole("tablist", { name: "Remote desktop hosts" })).getAllByRole("tab");
-    expect(rdTabs.map((tab) => tab.textContent)).toEqual(["Studio", "Laptop"]);
+    expect(rdTabs.map((tab) => tab.textContent?.trim())).toEqual(["Computers", "Studio", "Laptop"]);
     // The newest connection is focused; both panes stay mounted.
     expect(screen.getByTestId("rd-tab-host-2")).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("rd-tab-host-1")).toHaveAttribute("aria-selected", "false");
@@ -234,8 +234,10 @@ describe("Remote Desktop Activity mode", () => {
     expect(alert).toHaveAttribute("data-error-code", "RD_HOST_DISABLED");
     expect(alert).toHaveTextContent("Remote desktop hosting is turned off on that machine.");
     expect(alert).not.toHaveTextContent("request timeout");
-    // A failed attempt is not a tab; the connect action becomes the retry.
-    expect(screen.queryByTestId("rd-tab-host-2")).toBeNull();
+    // A failed attempt retains its main-area recovery UI, but is not a live session.
+    expect(screen.getByTestId("rd-tab-host-2")).toHaveAttribute("data-rd-tab-status", "error");
+    expect(screen.getByTestId("remote-desktop-status")).toHaveAttribute("role", "alert");
+    expect(screen.queryByTestId("activity-mode-remoteDesktop-badge")).toBeNull();
     expect(screen.getByTestId("rd-connect-host-2")).toHaveTextContent("Reconnect");
   });
 
@@ -245,7 +247,8 @@ describe("Remote Desktop Activity mode", () => {
 
     expect(screen.queryByTestId("rd-host-sharing-panel")).toBeNull();
     fireEvent.click(screen.getByTestId("rd-host-sharing-toggle"));
-    expect(await screen.findByTestId("remote-desktop-host-section")).toBeInTheDocument();
+    expect(await screen.findByTestId("rd-host-sharing-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-desktop-host-section")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Allow remote desktop" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("rd-host-sharing-toggle"));
@@ -262,10 +265,48 @@ describe("Remote Desktop Activity mode", () => {
     expect(within(drawer).getByRole("list", { name: "Paired machines" })).toBeInTheDocument();
   });
 
-  it("shows an empty state when no machine is connected", async () => {
+  it("offers the computer library when no machine is connected and filters the available inventory", () => {
+    seedHosts([host({ hostId: "host-1", name: "Studio" }), host({ hostId: "host-2", name: "Laptop", online: false })]);
     render(<Harness />);
-    expect(await screen.findByTestId("remote-desktop-empty")).toHaveTextContent("No machine is connected");
-    expect(screen.queryByRole("tablist", { name: "Remote desktop hosts" })).toBeNull();
+    const library = within(screen.getByTestId("remote-desktop-library"));
+    expect(library.getByRole("region", { name: "Available computers" })).toBeInTheDocument();
+    expect(library.getByRole("region", { name: "Offline computers" })).toBeInTheDocument();
+    fireEvent.click(library.getByRole("button", { name: "Available only" }));
+    expect(library.queryByRole("region", { name: "Offline computers" })).toBeNull();
+    fireEvent.change(library.getByRole("searchbox", { name: "Search computers" }), { target: { value: "missing" } });
+    expect(library.getByTestId("remote-desktop-empty")).toBeInTheDocument();
+    expect(connectCalls()).toHaveLength(0);
+  });
+
+  it("keeps a session mounted while visiting Computers, then restores its tab", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("rd-connect-host-1"));
+    await waitFor(() => expect(remoteDesktopStore.getSession("host-1")?.rdSessionId).toBe("rd-host-1"));
+    act(() => channels[0].onmessage(statusFrame("connected")));
+    fireEvent.click(screen.getByRole("tab", { name: "Computers" }));
+    expect(screen.getByTestId("rd-view-host-1")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("remote-desktop-library")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("rd-tab-host-1"));
+    expect(screen.getByTestId("rd-view-host-1")).not.toHaveAttribute("hidden");
+    expect(connectCalls()).toHaveLength(1);
+    expect(invoke).not.toHaveBeenCalledWith("cmd_rd_disconnect", expect.anything());
+  });
+
+  it("retains host-ended sessions for recovery without dialing again on mount", async () => {
+    await remoteDesktopStore.connect("host-1", "Studio");
+    act(() => channels[0].onmessage(statusFrame("ended", "Host disconnected")));
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("rd-tab-host-1"));
+    expect(screen.getByTestId("remote-desktop-status")).toHaveTextContent("Host disconnected");
+    expect(connectCalls()).toHaveLength(1);
+    expect(liveRemoteDesktopSessionCount(remoteDesktopStore.getState())).toBe(0);
+  });
+
+  it("shows pairing guidance for an empty inventory", () => {
+    seedHosts([]);
+    render(<Harness />);
+    expect(screen.getByTestId("remote-desktop-empty")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Computers" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("treats an unpaired or ungranted machine as needing access", () => {
