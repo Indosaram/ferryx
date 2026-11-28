@@ -45,8 +45,13 @@ const activity: BrowserAgentActivity = {
   controllers: [],
   controllerLabelFor: () => null,
   controllerIdFor: () => null,
+  taskStatusFor: () => "running",
+  planeFor: () => "embedded",
+  receiptFor: () => null,
+  stateFor: () => "idle",
   takeOver: async () => undefined,
   doneHandoff: async () => undefined,
+  respondToHelp: async () => undefined,
   revokeController: async () => undefined,
   resolveApproval: async () => undefined,
 };

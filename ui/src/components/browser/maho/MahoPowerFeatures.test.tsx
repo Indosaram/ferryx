@@ -47,7 +47,7 @@ import {
   runAutoArchiveSweep,
   saveAutoArchiveHours,
 } from "./mahoAutoArchive";
-import { MahoNowPlayingCard } from "./MahoNowPlayingCard";
+import { MahoNowPlayingCard, formatMediaTime } from "./MahoNowPlayingCard";
 import { MahoTabSwitcher } from "./MahoTabSwitcher";
 import { planTidyGroups, tidyDomainOf, tidyTodayTabs } from "./mahoTabTidy";
 import { browserMediaStore, type BrowserMediaState } from "../../../lib/browserMedia";
@@ -96,6 +96,12 @@ function mediaState(overrides: Partial<BrowserMediaState> = {}): BrowserMediaSta
     playing: true,
     muted: false,
     hasMedia: true,
+    sessionId: "session-1",
+    positionMs: 0,
+    durationMs: 0,
+    canSeek: false,
+    canPrevious: false,
+    canNext: false,
     ...overrides,
   };
 }
@@ -561,5 +567,114 @@ describe("MahoNowPlayingCard", () => {
     fireEvent.click(screen.getByTestId("maho-now-playing-toggle"));
 
     await waitFor(() => expect(screen.getByTestId("maho-now-playing-error")).toHaveTextContent("INVALID_REQUEST"));
+  });
+
+  it("draws a seek bar with m:ss timestamps only when the page can seek", async () => {
+    const store = makeStore();
+    addTab(store, "tab-a");
+    const { rerender } = render(<MahoNowPlayingCard store={store} onSelectTab={vi.fn()} />);
+    await act(async () => {});
+
+    // A report with no duration offers no transport: a bar with no end cannot be dragged.
+    emitMedia(mediaState({ browserId: "tab-a", durationMs: 0, canSeek: false }));
+    expect(screen.queryByTestId("maho-now-playing-seek")).toBeNull();
+    expect(screen.queryByTestId("maho-now-playing-position")).toBeNull();
+
+    emitMedia(mediaState({
+      browserId: "tab-a",
+      sessionId: "session-2",
+      positionMs: 65_000,
+      durationMs: 185_000,
+      canSeek: true,
+    }));
+    rerender(<MahoNowPlayingCard store={store} onSelectTab={vi.fn()} />);
+
+    const seek = screen.getByTestId("maho-now-playing-seek");
+    expect(seek).toHaveAttribute("max", "185000");
+    expect(seek).toHaveValue(65_000);
+    // Maho's FormatPosition: minutes:seconds, zero padded seconds.
+    expect(screen.getByTestId("maho-now-playing-position")).toHaveTextContent("1:05");
+    expect(screen.getByTestId("maho-now-playing-duration")).toHaveTextContent("3:05");
+  });
+
+  it("seeks to the dragged position through the host command", async () => {
+    const store = makeStore();
+    addTab(store, "tab-a");
+    render(<MahoNowPlayingCard store={store} onSelectTab={vi.fn()} />);
+    await act(async () => {});
+    emitMedia(mediaState({
+      browserId: "tab-a",
+      durationMs: 200_000,
+      positionMs: 10_000,
+      canSeek: true,
+    }));
+
+    const seek = screen.getByTestId("maho-now-playing-seek");
+    fireEvent.change(seek, { target: { value: "90000" } });
+    // The thumb follows the pointer before the host answers.
+    expect(screen.getByTestId("maho-now-playing-position")).toHaveTextContent("1:30");
+    // Releasing the thumb (or a keyboard step) is what commits the seek.
+    fireEvent.keyUp(seek);
+
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith("cmd_browser_media_control", {
+      browserId: "tab-a",
+      action: "seek",
+      positionMs: 90_000,
+    }));
+  });
+
+  it("shows previous and next only when the page reports them", async () => {
+    const store = makeStore();
+    addTab(store, "tab-a");
+    render(<MahoNowPlayingCard store={store} onSelectTab={vi.fn()} />);
+    await act(async () => {});
+
+    emitMedia(mediaState({ browserId: "tab-a", canPrevious: false, canNext: false }));
+    expect(screen.queryByTestId("maho-now-playing-previous")).toBeNull();
+    expect(screen.queryByTestId("maho-now-playing-next")).toBeNull();
+
+    emitMedia(mediaState({ browserId: "tab-a", sessionId: "session-2", canPrevious: true, canNext: true }));
+    fireEvent.click(screen.getByTestId("maho-now-playing-previous"));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith("cmd_browser_media_control", {
+      browserId: "tab-a",
+      action: "previous",
+      positionMs: null,
+    }));
+
+    fireEvent.click(screen.getByTestId("maho-now-playing-next"));
+    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith("cmd_browser_media_control", {
+      browserId: "tab-a",
+      action: "next",
+      positionMs: null,
+    }));
+  });
+
+  it("keeps a dismissal bound to its media session, not to the tab", async () => {
+    const store = makeStore();
+    addTab(store, "tab-a");
+    render(<MahoNowPlayingCard store={store} onSelectTab={vi.fn()} />);
+    await act(async () => {});
+    emitMedia(mediaState({ browserId: "tab-a", sessionId: "session-1" }));
+
+    fireEvent.click(screen.getByLabelText("Dismiss Now Playing"));
+    expect(screen.queryByTestId("maho-now-playing")).toBeNull();
+    expect(store.getState().dismissedMediaSessionIds).toEqual(["session-1"]);
+
+    // The same session reports again: the card stays dismissed.
+    emitMedia(mediaState({ browserId: "tab-a", sessionId: "session-1", title: "Song (live)" }));
+    expect(screen.queryByTestId("maho-now-playing")).toBeNull();
+
+    // A new track is a new session id, so the card comes back on its own.
+    emitMedia(mediaState({ browserId: "tab-a", sessionId: "session-2", title: "Next Song" }));
+    expect(screen.getByTestId("maho-now-playing-title")).toHaveTextContent("Next Song");
+  });
+
+  it("formats positions the way Maho's card does", () => {
+    expect(formatMediaTime(0)).toBe("0:00");
+    expect(formatMediaTime(-500)).toBe("0:00");
+    expect(formatMediaTime(Number.NaN)).toBe("0:00");
+    expect(formatMediaTime(9_000)).toBe("0:09");
+    expect(formatMediaTime(65_000)).toBe("1:05");
+    expect(formatMediaTime(3_600_000)).toBe("60:00");
   });
 });

@@ -488,6 +488,73 @@ export async function getBrowserSnapshotCapability(browserId?: string): Promise<
   return invoke<BrowserSnapshotCapability>("cmd_browser_snapshot_capability", { browserId: browserId ?? null });
 }
 
+/** Event the host emits for each tab whose Now Playing state changed. */
+export const BROWSER_MEDIA_STATE_EVENT = "browser_media_state";
+
+/** One page report of what a tab is playing. Every string is page text and display-only. */
+export type BrowserMediaStatePayload = {
+  browserId: string;
+  title: string;
+  artist: string;
+  album: string;
+  artworkUrl: string;
+  playing: boolean;
+  muted: boolean;
+  hasMedia: boolean;
+  /** Identity of the page's media session; a new track in the same tab is a new id. */
+  sessionId?: string;
+  positionMs?: number;
+  durationMs?: number;
+  canSeek?: boolean;
+  canPrevious?: boolean;
+  canNext?: boolean;
+};
+
+/** The media controls the host accepts. A closed set, matching the Rust command. */
+export type BrowserMediaControlAction =
+  | "play"
+  | "pause"
+  | "toggle"
+  | "mute"
+  | "unmute"
+  | "seek"
+  | "previous"
+  | "next";
+
+/** What the page reported back for one control. */
+export type BrowserMediaControlOutcome = {
+  action: string;
+  applied: boolean;
+  playing?: boolean;
+  muted?: boolean;
+  hasMedia?: boolean;
+  reason?: string | null;
+};
+
+/**
+ * Drives the tab's dominant media element. `positionMs` is required for `seek` (the host refuses a
+ * seek without one) and ignored for every other action. A refusal is reported in-band through
+ * `applied`/`reason`; a transport failure rejects with the host's structured IPC error.
+ */
+export async function controlBrowserMediaSession(
+  browserId: string,
+  action: BrowserMediaControlAction,
+  positionMs?: number,
+): Promise<BrowserMediaControlOutcome> {
+  return invoke<BrowserMediaControlOutcome>("cmd_browser_media_control", {
+    browserId,
+    action,
+    positionMs: action === "seek" ? Math.max(0, Math.round(positionMs ?? 0)) : null,
+  });
+}
+
+/** Subscribes to `browser_media_state`; resolves to the unlisten function. */
+export function listenBrowserMediaState(
+  listener: (state: BrowserMediaStatePayload) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserMediaStatePayload>(BROWSER_MEDIA_STATE_EVENT, (event) => listener(event.payload));
+}
+
 export async function getBrowserState(browserId: string): Promise<BrowserState> {
   return invoke<BrowserState>("cmd_browser_get_state", { browserId });
 }

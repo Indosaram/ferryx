@@ -166,6 +166,13 @@ export const EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY = "ferryx.worktrees.external
 export const EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY = "ferryx.worktrees.externalPromptMuted";
 /** Supervisor setup next-action kinds whose banner the user dismissed ("Not now"). */
 export const SUPERVISOR_SETUP_BANNER_DISMISSED_STORAGE_KEY = "ferryx.supervisor.setupBannerDismissed";
+/**
+ * The Maho Mini / Peek pane's own geometry: `{ x, y, width, height }` as JSON.
+ *
+ * Peek is a floating card over the canvas edge, so its size and place are the user's, not the
+ * layout's: they are restored across opens and clamped by `mahoMiniPanePrefs.ts` on read.
+ */
+export const MAHO_MINI_PANE_PREFS_STORAGE_KEY = "ferryx.maho.miniPane.prefs";
 
 
 

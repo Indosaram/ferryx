@@ -19,11 +19,21 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   AlertTriangle,
   Archive,
+  Bookmark,
+  File,
+  FileArchive,
+  FileAudio,
+  FileCode,
+  FileImage,
+  FileSpreadsheet,
+  FileText,
+  FileVideo,
+  FolderPlus,
+  Globe,
+  History,
   Home,
   Images,
   ArrowDownToLine,
-  FolderPlus,
-  Globe,
   Pencil,
   Search,
   Trash2,
@@ -62,6 +72,20 @@ export const MAHO_LIBRARY_CATEGORIES: ReadonlyArray<{
   { id: "archive", label: "Archived Tabs", icon: Archive },
   { id: "spaces", label: "Spaces", icon: Home },
   { id: "media", label: "Media", icon: Images },
+];
+
+/**
+ * Ferryx keeps its bookmark and history managers beside the ported panels. Maho has no rail
+ * entry for them (they live in the browser's own menus), so they sit below the four Maho
+ * categories, after a divider, and stay reachable from the same rail.
+ */
+export const MAHO_LIBRARY_MANAGER_CATEGORIES: ReadonlyArray<{
+  id: MahoLibraryCategory;
+  label: string;
+  icon: LucideIcon;
+}> = [
+  { id: "bookmarks", label: "Bookmarks", icon: Bookmark },
+  { id: "history", label: "History", icon: History },
 ];
 
 const RECOVERY_NOTICE: Readonly<Record<"recoveredFromBackup" | "resetCorrupt", string>> = {
@@ -149,6 +173,25 @@ export function MahoLibraryMode({
             >
               <Icon aria-hidden="true" />
               <span className="maho-library-rail__label">{id === "archive" ? <>Archived<br />Tabs</> : label}</span>
+            </button>
+          ))}
+          <span role="presentation" aria-hidden="true" className="maho-library-rail__divider" />
+          {MAHO_LIBRARY_MANAGER_CATEGORIES.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={active === id}
+              aria-label={label}
+              title={label}
+              data-category={id}
+              data-manager="true"
+              className="maho-library-rail__item maho-library-rail__item--manager"
+              style={{ paddingBlock: LIBRARY.itemVerticalInset }}
+              onClick={() => select(id)}
+            >
+              <Icon aria-hidden="true" />
+              <span className="maho-library-rail__label">{label}</span>
             </button>
           ))}
         </nav> : null}
@@ -290,10 +333,17 @@ function ArchivePanel({ store, onOpenTab }: { store: BrowserStore; onOpenTab?: (
   const rows = useMemo(() => {
     const today = new Date().setHours(0, 0, 0, 0);
     const week = today - 7 * 86_400_000;
-    return archive.filter((entry) => matchesTerms(terms, `${entry.tab.title} ${entry.tab.url}`)
-      && (filter === "Any time" || (filter === "Today" ? entry.archivedAt >= today
-        : filter === "Past week" ? entry.archivedAt >= week : entry.archivedAt < week)));
+    return archive
+      .filter((entry) => matchesTerms(terms, `${entry.tab.title} ${entry.tab.url}`)
+        && (filter === "Any time" || (filter === "Today" ? entry.archivedAt >= today
+          : filter === "Past week" ? entry.archivedAt >= week : entry.archivedAt < week)))
+      // Newest first, so each date bucket is one contiguous run.
+      .sort((left, right) => right.archivedAt - left.archivedAt);
   }, [archive, terms, filter]);
+
+  // Maho groups the archive into date sections and shows each section's own count; the
+  // sections are built once per result set instead of being recomputed per row.
+  const sections = useMemo(() => groupArchiveRows(rows), [rows]);
 
   const restore = (browserId: string) => {
     const result = store.restoreFromArchive(browserId);
@@ -304,7 +354,7 @@ function ArchivePanel({ store, onOpenTab }: { store: BrowserStore; onOpenTab?: (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="maho-library-archive">
       <SearchField label="Search Archive" placeholder="Search archived tabs..." value={query} onChange={setQuery} autoFocus />
       <div className="maho-library-filter">
-        <span>{rows.length === 0 ? "No tabs" : `${rows.length} ${rows.length === 1 ? "tab" : "tabs"}`}</span>
+        <span data-testid="maho-library-archive-count">{archiveCountText(rows.length, archive.length)}</span>
         <select aria-label="Filter archived tabs" value={filter} onChange={(event) => setFilter(event.target.value)}>
           {["Any time", "Today", "Past week", "Older"].map((value) => <option key={value}>{value}</option>)}
         </select>
@@ -317,33 +367,60 @@ function ArchivePanel({ store, onOpenTab }: { store: BrowserStore; onOpenTab?: (
             <span>{archive.length === 0 ? "Tabs you archive will stay here until you bring them back." : "Clear the search or adjust the filter to see archived tabs."}</span>
           </li>
         ) : null}
-        {rows.map((entry, index) => {
-          const label = entry.tab.title.trim() || compactLocation(entry.tab.url);
-          const group = archiveDateGroup(entry.archivedAt);
-          return (
-            <li key={entry.tab.browserId}>
-              {index === 0 || archiveDateGroup(rows[index - 1].archivedAt) !== group ? <div className="maho-library-date">{group}<span>{rows.filter((row) => archiveDateGroup(row.archivedAt) === group).length} tabs</span></div> : null}
-              <div className="maho-library-row" onContextMenu={(event) => { event.preventDefault(); setMenu({ browserId: entry.tab.browserId, x: event.clientX, y: event.clientY }); }}>
-                <button type="button" aria-label={`Restore archived tab ${label}`} onClick={() => restore(entry.tab.browserId)} className="maho-library-row__open">
-                  <span className="maho-library-tile" aria-hidden="true">{entry.tab.faviconUrl ? <img src={entry.tab.faviconUrl} alt="" /> : label.charAt(0).toUpperCase()}</span>
-                  <span className="min-w-0 flex-1">
-                    <span className="maho-library-row__title">{label}</span>
-                    <span className="maho-library-row__subtitle">{compactLocation(entry.tab.url)}</span>
-                  </span>
-                </button>
-                <button type="button" className="maho-library-row__delete" aria-label={`Delete archived tab ${label}`} onClick={() => deleteEntry(entry.tab.browserId)}>
-                  <Trash2 aria-hidden="true" />
-                </button>
-              </div>
-            </li>
-          );
-        })}
+        {sections.map((section) => (
+          <li key={section.title} className="maho-library-section">
+            <div className="maho-library-date" role="group" aria-label={`${section.title}, ${archiveCountText(section.entries.length, section.entries.length)}`}>
+              <span>{section.title}</span>
+              <span className="maho-library-date__count" data-testid={`archive-group-count-${section.title}`}>{section.entries.length}</span>
+            </div>
+            <ul aria-label={section.title} className="maho-library-section__list">
+              {section.entries.map((entry) => {
+                const label = entry.tab.title.trim() || compactLocation(entry.tab.url);
+                return (
+                  <li key={entry.tab.browserId}>
+                    <div
+                      className="maho-library-row"
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        setMenu({ browserId: entry.tab.browserId, x: event.clientX, y: event.clientY });
+                      }}
+                    >
+                      <button type="button" aria-label={`Restore archived tab ${label}`} onClick={() => restore(entry.tab.browserId)} className="maho-library-row__open">
+                        <span className="maho-library-tile" aria-hidden="true">{entry.tab.faviconUrl ? <img src={entry.tab.faviconUrl} alt="" /> : label.charAt(0).toUpperCase()}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="maho-library-row__title">{label}</span>
+                          <span className="maho-library-row__subtitle">{compactLocation(entry.tab.url)}</span>
+                        </span>
+                      </button>
+                      <button type="button" className="maho-library-row__delete" aria-label={`Delete archived tab ${label}`} onClick={() => deleteEntry(entry.tab.browserId)}>
+                        <Trash2 aria-hidden="true" />
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </li>
+        ))}
       </ul>
-      {menu ? <div role="dialog" aria-label="Archived tab actions" className="maho-library-context" style={{ left: menu.x, top: menu.y }}><div role="menu"><button type="button" role="menuitem" onClick={() => { restore(menu.browserId); setMenu(null); }}>Restore</button><button type="button" role="menuitem" onClick={() => { deleteEntry(menu.browserId); setMenu(null); }}>Delete</button></div></div> : null}
+      {menu ? (
+        <div
+          role="dialog"
+          aria-label="Archived tab actions"
+          className="maho-library-context"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          <div role="menu">
+            <button type="button" role="menuitem" onClick={() => { restore(menu.browserId); setMenu(null); }}>Restore</button>
+            <button type="button" role="menuitem" onClick={() => { deleteEntry(menu.browserId); setMenu(null); }}>Delete</button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
+/** Maho's archive section label for one archived-at stamp. */
 export function archiveDateGroup(timestamp: number, now = Date.now()): string {
   if (!timestamp) return "Earlier";
   const date = new Date(timestamp);
@@ -358,6 +435,27 @@ export function archiveDateGroup(timestamp: number, now = Date.now()): string {
   return "Earlier";
 }
 
+/** `N tabs` / `1 tab`, and `N of M` when the list is filtered. */
+export function archiveCountText(visible: number, total: number): string {
+  if (visible === 0) return total === 0 ? "No tabs" : `No matching tabs of ${total}`;
+  const label = `${visible} ${visible === 1 ? "tab" : "tabs"}`;
+  return visible === total ? label : `${label} of ${total}`;
+}
+
+/** Groups already-filtered archive rows into Maho's ordered date sections. */
+export function groupArchiveRows<T extends { archivedAt: number }>(
+  rows: readonly T[],
+): Array<{ title: string; entries: T[] }> {
+  const sections: Array<{ title: string; entries: T[] }> = [];
+  for (const row of rows) {
+    const title = archiveDateGroup(row.archivedAt);
+    const last = sections[sections.length - 1];
+    if (last && last.title === title) last.entries.push(row);
+    else sections.push({ title, entries: [row] });
+  }
+  return sections;
+}
+
 function compactLocation(url: string): string {
   try {
     const parsed = new URL(url);
@@ -368,12 +466,64 @@ function compactLocation(url: string): string {
   }
 }
 
-function dateGroup(timestamp: number): string {
-  const today = new Date().setHours(0, 0, 0, 0);
+const IN_PROGRESS_STATUSES: ReadonlySet<string> = new Set(["pending", "inProgress", "paused"]);
+
+/** Maho's download sections: unfinished work first, then the dated history. */
+export function downloadDateGroup(status: string, timestamp: number, now = Date.now()): string {
+  if (IN_PROGRESS_STATUSES.has(status)) return "In Progress";
+  const today = new Date(now).setHours(0, 0, 0, 0);
   if (timestamp >= today) return "Today";
   if (timestamp >= today - 86_400_000) return "Yesterday";
   if (timestamp >= today - 7 * 86_400_000) return "Last Week";
   return "Older";
+}
+
+/** Section order: `In Progress` first, then Today, Yesterday, Last Week, Older. */
+const DOWNLOAD_GROUP_ORDER: ReadonlyArray<string> = ["In Progress", "Today", "Yesterday", "Last Week", "Older"];
+
+/** The file kind a download's extension names, mirroring Maho's download visual loader. */
+export type DownloadFileKind = "image" | "video" | "audio" | "archive" | "document" | "spreadsheet" | "code" | "file";
+
+const DOWNLOAD_EXTENSION_KINDS: Readonly<Record<string, DownloadFileKind>> = {
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", svg: "image", bmp: "image", avif: "image", heic: "image", ico: "image",
+  mp4: "video", webm: "video", mov: "video", mkv: "video", avi: "video", m4v: "video",
+  mp3: "audio", ogg: "audio", wav: "audio", flac: "audio", m4a: "audio", aac: "audio", opus: "audio",
+  zip: "archive", tar: "archive", gz: "archive", tgz: "archive", bz2: "archive", xz: "archive", "7z": "archive", rar: "archive", dmg: "archive", pkg: "archive", msi: "archive",
+  pdf: "document", doc: "document", docx: "document", txt: "document", md: "document", rtf: "document", odt: "document", epub: "document",
+  csv: "spreadsheet", xls: "spreadsheet", xlsx: "spreadsheet", ods: "spreadsheet", numbers: "spreadsheet",
+  js: "code", jsx: "code", ts: "code", tsx: "code", json: "code", html: "code", css: "code", py: "code", rs: "code", go: "code", java: "code", sh: "code", yml: "code", yaml: "code", toml: "code", xml: "code",
+};
+
+const DOWNLOAD_KIND_ICONS: Readonly<Record<DownloadFileKind, LucideIcon>> = {
+  image: FileImage,
+  video: FileVideo,
+  audio: FileAudio,
+  archive: FileArchive,
+  document: FileText,
+  spreadsheet: FileSpreadsheet,
+  code: FileCode,
+  file: File,
+};
+
+/** The kind for a file name; unknown and extensionless names are plain files. */
+export function downloadFileKind(fileName: string): DownloadFileKind {
+  const dot = fileName.lastIndexOf(".");
+  if (dot < 0 || dot === fileName.length - 1) return "file";
+  return DOWNLOAD_EXTENSION_KINDS[fileName.slice(dot + 1).toLowerCase()] ?? "file";
+}
+
+/** The file-type glyph for a download, chosen by extension like Maho's visual loader. */
+export function downloadFileIcon(fileName: string): LucideIcon {
+  return DOWNLOAD_KIND_ICONS[downloadFileKind(fileName)];
+}
+
+/** Maho's download timestamp: the time of day for today and yesterday, else the date. */
+export function downloadTimestampText(timestamp: number, now = Date.now()): string {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  const date = new Date(timestamp);
+  const days = Math.max(0, Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(timestamp).setHours(0, 0, 0, 0)) / 86_400_000));
+  if (days <= 1) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 function DownloadsPanel() {
@@ -383,7 +533,24 @@ function DownloadsPanel() {
     useBrowserDownloadActions();
   const sorted = useMemo(() => [...downloads]
     .filter((record) => matchesTerms(searchTerms(query), `${extractDownloadName(record.filePath, record.url)} ${record.url}`))
-    .sort((a, b) => b.createdAtMs - a.createdAtMs), [downloads, query]);
+    .sort((left, right) => {
+      // In Progress first, then newest first inside each dated section.
+      const leftGroup = downloadDateGroup(left.status, left.createdAtMs);
+      const rightGroup = downloadDateGroup(right.status, right.createdAtMs);
+      const rank = DOWNLOAD_GROUP_ORDER.indexOf(leftGroup) - DOWNLOAD_GROUP_ORDER.indexOf(rightGroup);
+      return rank !== 0 ? rank : right.createdAtMs - left.createdAtMs;
+    }), [downloads, query]);
+
+  const sections = useMemo(() => {
+    const grouped: Array<{ title: string; records: typeof sorted }> = [];
+    for (const record of sorted) {
+      const title = downloadDateGroup(record.status, record.createdAtMs);
+      const last = grouped[grouped.length - 1];
+      if (last && last.title === title) last.records.push(record);
+      else grouped.push({ title, records: [record] });
+    }
+    return grouped;
+  }, [sorted]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="maho-library-downloads">
@@ -401,33 +568,46 @@ function DownloadsPanel() {
         </div>
       ) : null}
       <div role="list" aria-label="Downloads" className="maho-library-list maho-library-download-list">
-        {sorted.map((record, index) => (
-          <div role="listitem" key={record.id}>
-            {index === 0 || dateGroup(sorted[index - 1].createdAtMs) !== dateGroup(record.createdAtMs) ? <div className="maho-library-date">{dateGroup(record.createdAtMs)}</div> : null}
-            <div className="maho-library-download-row" data-testid={`download-row-${record.id}`}>
-              <span className="maho-library-tile" aria-hidden="true"><ArrowDownToLine /></span>
-              <div className="min-w-0 flex-1">
-                <span className="maho-library-row__title">{extractDownloadName(record.filePath, record.url)}</span>
-                <span className="maho-library-row__subtitle">
-                  {record.status === "failed" ? downloadFailureLabel(record.failure, record.error) : missingFileIds.has(record.id) ? "Deleted on disk" : record.status === "cancelled" ? "Cancelled" : `${record.status === "paused" ? "Paused - " : ""}${formatBytes(record.receivedBytes)}${record.totalBytes && record.status !== "completed" ? ` of ${formatBytes(record.totalBytes)}` : ""} from ${compactLocation(record.url).split(" / ")[0]}`}
-                </span>
-                {actionErrors[record.id] ? <span role="alert" className="text-destructive text-xs">{actionErrors[record.id]}</span> : null}
-              </div>
-              <div className="maho-library-download-actions">
-                {record.status === "inProgress" || record.status === "pending" || record.status === "paused" ? (
-                  <>
-                    <progress aria-label="Download progress" max={record.totalBytes || undefined} value={record.totalBytes ? record.receivedBytes : undefined} />
-                    {record.canPause ? <button type="button" aria-label={record.status === "paused" ? "Resume download" : "Pause download"} onClick={() => void handlePause(record.id, record.status !== "paused")}>{record.status === "paused" ? "Resume" : "Pause"}</button> : null}
-                    {record.canCancel !== false ? <button type="button" aria-label="Cancel download" onClick={() => void handleCancel(record.id)}>Cancel</button> : null}
-                  </>
-                ) : record.status === "completed" && !missingFileIds.has(record.id) ? (
-                  <>
-                    <button type="button" aria-label="Open download" onClick={() => void handleOpen(record)}>Open</button>
-                    <button type="button" aria-label="Reveal in folder" onClick={() => void handleReveal(record)}>Show in folder</button>
-                  </>
-                ) : null}
-              </div>
+        {sections.map((section) => (
+          <div role="group" key={section.title} aria-label={`${section.title}, ${section.records.length}`} className="maho-library-section">
+            <div className="maho-library-date">
+              <span>{section.title}</span>
+              <span className="maho-library-date__count" data-testid={`download-group-count-${section.title}`}>{section.records.length}</span>
             </div>
+            {section.records.map((record) => {
+              const name = extractDownloadName(record.filePath, record.url);
+              const FileIcon = downloadFileIcon(name);
+              const timestamp = downloadTimestampText(record.createdAtMs);
+              return (
+                <div role="listitem" key={record.id}>
+                  <div className="maho-library-download-row" data-testid={`download-row-${record.id}`} data-file-kind={downloadFileKind(name)}>
+                    <span className="maho-library-tile" aria-hidden="true"><FileIcon /></span>
+                    <div className="min-w-0 flex-1">
+                      <span className="maho-library-row__title">{name}</span>
+                      <span className="maho-library-row__subtitle">
+                        {record.status === "failed" ? downloadFailureLabel(record.failure, record.error) : missingFileIds.has(record.id) ? "Deleted on disk" : record.status === "cancelled" ? "Cancelled" : `${record.status === "paused" ? "Paused - " : ""}${formatBytes(record.receivedBytes)}${record.totalBytes && record.status !== "completed" ? ` of ${formatBytes(record.totalBytes)}` : ""} from ${compactLocation(record.url).split(" / ")[0]}`}
+                      </span>
+                      {timestamp ? <span className="maho-library-row__timestamp" data-testid={`download-time-${record.id}`}>{timestamp}</span> : null}
+                      {actionErrors[record.id] ? <span role="alert" className="text-destructive text-xs">{actionErrors[record.id]}</span> : null}
+                    </div>
+                    <div className="maho-library-download-actions">
+                      {IN_PROGRESS_STATUSES.has(record.status) ? (
+                        <>
+                          <progress aria-label="Download progress" max={record.totalBytes || undefined} value={record.totalBytes ? record.receivedBytes : undefined} />
+                          {record.canPause ? <button type="button" aria-label={record.status === "paused" ? "Resume download" : "Pause download"} onClick={() => void handlePause(record.id, record.status !== "paused")}>{record.status === "paused" ? "Resume" : "Pause"}</button> : null}
+                          {record.canCancel !== false ? <button type="button" aria-label="Cancel download" onClick={() => void handleCancel(record.id)}>Cancel</button> : null}
+                        </>
+                      ) : record.status === "completed" && !missingFileIds.has(record.id) ? (
+                        <>
+                          <button type="button" aria-label="Open download" onClick={() => void handleOpen(record)}>Open</button>
+                          <button type="button" aria-label="Reveal in folder" onClick={() => void handleReveal(record)}>Show in folder</button>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         ))}
       </div>

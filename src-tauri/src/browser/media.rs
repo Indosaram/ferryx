@@ -337,19 +337,30 @@ pub fn browser_media_control_script(action: MediaControlAction) -> String {
     browser_media_control_script_at(action, 0)
 }
 
+/// Upper bound for a seek target: a page cannot be asked to jump further than a week of media.
+pub const MAX_SEEK_POSITION_MS: u64 = 604_800_000;
+
+/// Clamps a caller-supplied seek target. Only the number reaches the script, and only after
+/// this clamp, so an absurd value cannot become part of the page source.
+pub fn clamp_seek_position(position_ms: u64) -> u64 {
+    position_ms.min(MAX_SEEK_POSITION_MS)
+}
+
 pub fn browser_media_control_script_at(action: MediaControlAction, position_ms: u64) -> String {
+    let position_ms = clamp_seek_position(position_ms);
     if matches!(action, MediaControlAction::Seek | MediaControlAction::Previous | MediaControlAction::Next) {
         let action_name = action.as_str();
         let session_action = match action { MediaControlAction::Seek => "seekto", MediaControlAction::Previous => "previoustrack", _ => "nexttrack" };
+        // The bridge owns the dispatch: a page's own media-session handler wins, and only a seek
+        // falls back to the dominant element's currentTime. Capabilities come from the same
+        // bridge, so a button is only ever drawn for an action the page can actually take.
         return format!(r#"(() => {{
           const bridge = window.__ferryxMediaSessionBridge;
-          const handler = bridge?.handlers.get('{session_action}');
-          const elements = Array.from(document.querySelectorAll('audio,video'));
-          const target = elements.find((node) => !node.paused && !node.ended) || elements[0];
           try {{
-            if (handler) handler({{ action: '{session_action}', seekTime: {position_ms} / 1000 }});
-            else if ('{session_action}' === 'seekto' && target && Number.isFinite(target.duration)) target.currentTime = Math.min(target.duration, {position_ms} / 1000);
-            else return JSON.stringify({{ action: '{action_name}', applied: false, reason: 'unsupported-action' }});
+            const applied = typeof bridge?.dispatch === 'function'
+              ? bridge.dispatch('{session_action}', {position_ms} / 1000)
+              : false;
+            if (!applied) return JSON.stringify({{ action: '{action_name}', applied: false, reason: 'unsupported-action' }});
             return JSON.stringify({{ action: '{action_name}', applied: true }});
           }} catch (_) {{ return JSON.stringify({{ action: '{action_name}', applied: false, reason: 'media-action-failed' }}); }}
         }})()"#);
@@ -693,6 +704,85 @@ mod tests {
             serde_json::from_str(r#"{"action":"play","applied":false}"#).expect("parse");
         assert!(!narrow.applied);
         assert!(!narrow.playing);
+    }
+
+    #[test]
+    fn parses_position_duration_and_track_capabilities() {
+        let parsed = parse_media_envelope(
+            &report(json!({
+                "sessionId": "sess-1",
+                "positionMs": 42_000,
+                "durationMs": 180_000,
+                "canSeek": true,
+                "canPrevious": true,
+                "canNext": false,
+            })),
+            "b1",
+        )
+        .expect("parse");
+        assert_eq!(parsed.session_id, "sess-1");
+        assert_eq!(parsed.position_ms, 42_000);
+        assert_eq!(parsed.duration_ms, 180_000);
+        assert!(parsed.can_seek);
+        assert!(parsed.can_previous);
+        assert!(!parsed.can_next);
+    }
+
+    #[test]
+    fn position_is_clamped_to_the_duration_and_seek_needs_one() {
+        // A page can claim a position past its own duration; the card would then draw a bar
+        // past its end, so the host clamps it.
+        let past_end = parse_media_envelope(
+            &report(json!({ "positionMs": 999_000, "durationMs": 60_000, "canSeek": true })),
+            "b1",
+        )
+        .expect("parse");
+        assert_eq!(past_end.position_ms, 60_000);
+        assert_eq!(past_end.duration_ms, 60_000);
+        assert!(past_end.can_seek);
+
+        // No duration means nothing to seek within, whatever the report claims.
+        let no_duration = parse_media_envelope(
+            &report(json!({ "positionMs": 5_000, "durationMs": 0, "canSeek": true })),
+            "b1",
+        )
+        .expect("parse");
+        assert_eq!(no_duration.position_ms, 0);
+        assert!(!no_duration.can_seek);
+
+        // Capabilities are meaningless without media.
+        let idle = parse_media_envelope(
+            &report(json!({
+                "hasMedia": false,
+                "canPrevious": true,
+                "canNext": true,
+                "canSeek": true,
+                "durationMs": 10_000,
+            })),
+            "b1",
+        )
+        .expect("parse");
+        assert!(!idle.can_seek);
+        assert!(!idle.can_previous);
+        assert!(!idle.can_next);
+    }
+
+    #[test]
+    fn seek_script_carries_only_a_clamped_position() {
+        let script = browser_media_control_script_at(MediaControlAction::Seek, 30_000);
+        assert!(script.contains("bridge.dispatch('seekto', 30000 / 1000)"));
+        assert!(!script.contains("nexttrack"));
+        assert!(!script.contains("previoustrack"));
+
+        // An absurd target never reaches the page source at its full value.
+        let clamped = browser_media_control_script_at(MediaControlAction::Seek, u64::MAX);
+        assert!(clamped.contains(&format!("{} / 1000", MAX_SEEK_POSITION_MS)));
+        assert_eq!(clamp_seek_position(u64::MAX), MAX_SEEK_POSITION_MS);
+        assert_eq!(clamp_seek_position(1_500), 1_500);
+
+        let next = browser_media_control_script(MediaControlAction::Next);
+        assert!(next.contains("bridge.dispatch('nexttrack'"));
+        assert!(!next.contains("seekto"));
     }
 
     #[test]

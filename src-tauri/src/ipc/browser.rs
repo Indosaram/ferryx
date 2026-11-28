@@ -1,5 +1,5 @@
 use crate::browser::{
-    browser_find_script, browser_guest_bridge_script, browser_media_control_script,
+    browser_find_script, browser_guest_bridge_script, browser_media_control_script_at,
     cookie_from_imported, download_url_to_path, MediaControlAction,
     parse_browser_find_callback, parse_browser_guest_action, parse_cookie_file,
     BrowserAutomationAction, BrowserAutomationRequest,
@@ -3214,26 +3214,40 @@ pub async fn cmd_browser_clear_find<R: tauri::Runtime>(
     Ok(())
 }
 
-/// Now Playing: play, pause, toggle, mute or unmute the tab's dominant media element. Runs
-/// through the same page-script path the other browser commands use, for both engines.
+/// Now Playing: play, pause, toggle, mute, unmute, seek, previous or next the tab's dominant media
+/// element. Runs through the same page-script path the other browser commands use, for both
+/// engines. `position_ms` is only read for `seek` and is clamped by the script builder.
 #[tauri::command]
 pub async fn cmd_browser_media_control<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
     action: String,
+    position_ms: Option<u64>,
 ) -> Result<BrowserMediaControlResult, IpcError> {
     let action = MediaControlAction::parse(&action).ok_or_else(|| {
         IpcError::new(
             IpcErrorCode::InvalidArgument,
             format!(
-                "unknown media action `{action}`: expected one of play, pause, toggle, mute, unmute"
+                "unknown media action `{action}`: expected one of play, pause, toggle, mute, unmute, seek, previous, next"
             ),
         )
     })?;
+    // A seek target is required for a seek and meaningless for anything else; a caller that
+    // omits it would otherwise silently jump to the start of the track.
+    let position_ms = match (action, position_ms) {
+        (MediaControlAction::Seek, Some(position_ms)) => Some(position_ms),
+        (MediaControlAction::Seek, None) => {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "a seek needs a positionMs target".to_string(),
+            ))
+        }
+        (_, _) => None,
+    };
     // Fail before touching the page when the tab is gone.
     manager.get_state(&browser_id)?;
-    let script = browser_media_control_script(action);
+    let script = browser_media_control_script_at(action, position_ms.unwrap_or(0));
     let (result, _truncated) =
         eval_browser_session(&app, manager.inner(), &browser_id, &script).await?;
     let applied = result

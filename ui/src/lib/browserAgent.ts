@@ -8,7 +8,16 @@ export const BROWSER_AGENT_APPROVALS_EVENT = "browser_agent_approvals_changed";
 export const BROWSER_AGENT_HELP_REQUESTED_EVENT = "browser-agent:help-requested";
 
 /** Payload of {@link BROWSER_AGENT_HELP_REQUESTED_EVENT}. */
-export type HandoffRequestPayload = { browserId: string; reason?: string | null };
+export type HandoffRequestPayload = {
+  browserId: string;
+  reason?: string | null;
+  /**
+   * The backend's id for this one handoff, when it sends one. The help bar addresses Complete /
+   * Cancel by it so two handoffs on two tabs can never be answered by the wrong button; a host
+   * that does not send one leaves the bar addressing the request by its tab id.
+   */
+  requestId?: string | null;
+};
 
 export type GrantScope = "read" | "interact" | "eval";
 

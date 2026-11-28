@@ -58,8 +58,9 @@ pub use guest::{
 };
 pub use manager::BrowserManager;
 pub use media::{
-    browser_media_control_script, handle_media_envelope, is_media_envelope, BrowserMediaControlResult,
-    BrowserMediaState, MediaControlAction, BROWSER_MEDIA_STATE_EVENT,
+    browser_media_control_script, browser_media_control_script_at, clamp_seek_position,
+    handle_media_envelope, is_media_envelope, BrowserMediaControlResult,
+    BrowserMediaState, MediaControlAction, BROWSER_MEDIA_STATE_EVENT, MAX_SEEK_POSITION_MS,
 };
 pub use model::*;
 pub use remote_bridge_protocol::*;
