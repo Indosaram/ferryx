@@ -346,6 +346,8 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
             capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
+            // One browser command per request, on the same backend the remote UI drives.
+            capabilities.push(crate::remote::server::BROWSER_REMOTE_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
