@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync, readdirSync, statSync, cpSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync, readdirSync, statSync, cpSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -25,6 +25,7 @@ import {
   UPDATER_KEEPER_MEMBER,
   verifyShippedKeeperDigest,
   verifyMacosFfmpegBundle,
+  packageMacosCliBundle,
   assertMacosArm64,
 } from "./lib/release-platforms.mjs";
 import { parseReceipt } from "./lib/release-contract.mjs";
@@ -325,6 +326,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64"), "MOCK_CLI_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64.tar.gz"), "MOCK_CLI_BUNDLE_CONTENT");
       writeRdClientArtifact(artifactsOutDir, "darwin");
       return {
         exitCode: 0,
@@ -427,6 +429,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64"), "MOCK_CLI_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64.tar.gz"), "MOCK_CLI_BUNDLE_CONTENT");
       writeRdClientArtifact(artifactsOutDir, "darwin");
       return {
         exitCode: 0,
@@ -722,6 +725,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64"), "MOCK_CLI_CONTENT");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-arm64.tar.gz"), "MOCK_CLI_BUNDLE_CONTENT");
       writeRdClientArtifact(artifactsOutDir, "darwin");
 
       return {
@@ -745,7 +749,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
 
     assert.equal(receipt.host, "macbook");
     assert.equal(receipt.exitCode, 0);
-    assert.deepEqual(receipt.artifacts.map(({ kind }) => kind).sort(), ["cli-darwin-arm64", "dmg", "macos-updater", "rd-client-darwin-arm64"]);
+    assert.deepEqual(receipt.artifacts.map(({ kind }) => kind).sort(), ["cli-bundle-darwin-arm64", "cli-darwin-arm64", "dmg", "macos-updater", "rd-client-darwin-arm64"]);
 
     const receiptPath = join(runDir, "receipts", "build-receipt-macbook.json");
     assert.ok(existsSync(receiptPath));
@@ -2027,6 +2031,72 @@ test("finalizeMacosBundle: refuses a signed release that skips notarization", ()
           exec: fixture.exec,
         }),
       /no notaryProfile is configured/,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("packageMacosCliBundle: signs bundled FFmpeg dylibs and ferryx-cli before archiving and fails closed when runtime is missing", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-mac-cli-bundle-"));
+  try {
+    const cliPath = join(tmp, "ferryx-cli");
+    const runtimeDir = join(tmp, "runtime");
+    const stageDir = join(tmp, "stage");
+    const outArchivePath = join(tmp, "ferryx-cli-darwin-arm64.tar.gz");
+    writeFileSync(cliPath, "MAC_CLI_BIN");
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(join(runtimeDir, "libavcodec.63.dylib"), "AVCODEC");
+    writeFileSync(join(runtimeDir, "libavutil.61.dylib"), "AVUTIL");
+    symlinkSync("libavcodec.63.dylib", join(runtimeDir, "libavcodec.dylib"));
+
+    const calls = [];
+    const mockExec = (command, args) => {
+      calls.push({ command, args });
+      if (command === "tar") {
+        writeFileSync(outArchivePath, "TAR_BYTES");
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    };
+
+    packageMacosCliBundle({
+      cliPath,
+      ffmpegRuntimeDir: runtimeDir,
+      outArchivePath,
+      stageDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      exec: mockExec,
+    });
+
+    const signedTargets = calls
+      .filter((c) => c.command === "codesign" && c.args.includes("--sign"))
+      .map((c) => {
+        assert.ok(c.args.includes("--options") && c.args.includes("runtime"), "must use hardened runtime");
+        assert.ok(c.args.includes("--timestamp"), "Developer ID signing must include secure timestamp");
+        return c.args[c.args.length - 1];
+      });
+    assert.equal(signedTargets.length, 3, "must sign both real dylibs plus ferryx-cli, skipping symlinks");
+    assert.ok(signedTargets[0].endsWith("ffmpeg/libavcodec.63.dylib"));
+    assert.ok(signedTargets[1].endsWith("ffmpeg/libavutil.61.dylib"));
+    assert.ok(signedTargets[2].endsWith("/ferryx-cli"));
+
+    const verifyIdx = calls.findIndex((c) => c.command === "codesign" && c.args.includes("--verify"));
+    const tarIdx = calls.findIndex((c) => c.command === "tar");
+    assert.ok(verifyIdx > 0 && tarIdx > verifyIdx, "codesign --verify must run before tar");
+    assert.equal(existsSync(stageDir), false, "temporary stage dir must be cleaned up");
+
+    const emptyRuntime = join(tmp, "empty-runtime");
+    mkdirSync(emptyRuntime, { recursive: true });
+    assert.throws(
+      () =>
+        packageMacosCliBundle({
+          cliPath,
+          ffmpegRuntimeDir: emptyRuntime,
+          outArchivePath,
+          stageDir,
+          exec: mockExec,
+        }),
+      /has no dylibs/,
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

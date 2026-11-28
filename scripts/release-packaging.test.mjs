@@ -28,8 +28,9 @@ test("renders cask and formula whose version and hashes match SHA256SUMS", () =>
   const formula = rendered["ferryx-cli.rb"];
   assert.match(formula, /^class FerryxCli < Formula$/m);
   assert.match(formula, /^ {2}version "2026\.10\.24\.2"$/m);
-  assert.ok(formula.includes(`sha256 "${sums.get("ferryx-cli-linux-amd64")}"`));
-  assert.ok(formula.includes(`url "https://github.com/Indosaram/ferryx/releases/download/${TAG}/ferryx-cli-linux-amd64"`));
+  assert.ok(formula.includes(`sha256 "${sums.get("ferryx-cli-linux-amd64.tar.gz")}"`));
+  assert.ok(formula.includes(`url "https://github.com/Indosaram/ferryx/releases/download/${TAG}/ferryx-cli-linux-amd64.tar.gz"`));
+  assert.ok(formula.includes('libexec.install "ferryx-cli", "ffmpeg"'));
 });
 
 test("CLI output diffs cleanly against the golden fixtures", () => {
@@ -51,10 +52,10 @@ test("a missing asset in SHA256SUMS exits non-zero and writes nothing", () => {
   const out = mkdtempSync(join(tmpdir(), "ferryx-homebrew-missing-"));
   try {
     const sumsPath = join(out, "SHA256SUMS");
-    writeFileSync(sumsPath, SUMS.split("\n").filter((line) => !line.endsWith("  ferryx-cli-linux-amd64")).join("\n"));
+    writeFileSync(sumsPath, SUMS.split("\n").filter((line) => !line.endsWith("  ferryx-cli-linux-amd64.tar.gz")).join("\n"));
     const res = spawnSync(process.execPath, [SCRIPT, "--sums", sumsPath, "--tag", TAG, "--out", out], { encoding: "utf8" });
     assert.notEqual(res.status, 0);
-    assert.match(res.stderr, /ferryx-cli-linux-amd64/);
+    assert.match(res.stderr, /ferryx-cli-linux-amd64\.tar\.gz/);
     for (const name of HOMEBREW_PACKAGE_NAMES) assert.equal(existsSync(join(out, name)), false, name);
   } finally {
     rmSync(out, { recursive: true, force: true });

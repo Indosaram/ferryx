@@ -143,6 +143,8 @@ function createSyntheticReleaseFixture({
   writeFileSync(join(macDir, "Ferryx_2026.908.1_aarch64.dmg"), macDmgBuf);
   const macCliBuf = Buffer.from("mac-cli-universal-content");
   writeFileSync(join(macDir, "ferryx-cli-darwin-arm64"), macCliBuf);
+  const macCliBundleBuf = Buffer.from("mac-cli-bundle-tar-gz-content");
+  writeFileSync(join(macDir, "ferryx-cli-darwin-arm64.tar.gz"), macCliBundleBuf);
 
   const macReceipt = {
     schemaVersion: 1,
@@ -179,6 +181,15 @@ function createSyntheticReleaseFixture({
         targets: [],
       },
       {
+        kind: "cli-bundle-darwin-arm64",
+        name: "ferryx-cli-darwin-arm64.tar.gz",
+        relPath: "darwin/ferryx-cli-darwin-arm64.tar.gz",
+        bytes: macCliBundleBuf.length,
+        sha256: sha256(macCliBundleBuf),
+        signatureRelPath: null,
+        targets: [],
+      },
+      {
         kind: "dmg",
         name: "Ferryx_2026.908.1_aarch64.dmg",
         relPath: "darwin/Ferryx_2026.908.1_aarch64.dmg",
@@ -204,6 +215,8 @@ function createSyntheticReleaseFixture({
   writeFileSync(join(linuxDir, "Ferryx_2026.908.1_amd64.deb"), debBuf);
   const linuxCliBuf = Buffer.from("linux-cli-amd64-content");
   writeFileSync(join(linuxDir, "ferryx-cli-linux-amd64"), linuxCliBuf);
+  const linuxCliBundleBuf = Buffer.from("linux-cli-bundle-tar-gz-content");
+  writeFileSync(join(linuxDir, "ferryx-cli-linux-amd64.tar.gz"), linuxCliBundleBuf);
 
   const linuxReceipt = {
     schemaVersion: 1,
@@ -236,6 +249,15 @@ function createSyntheticReleaseFixture({
         relPath: "linux/ferryx-cli-linux-amd64",
         bytes: linuxCliBuf.length,
         sha256: sha256(linuxCliBuf),
+        signatureRelPath: null,
+        targets: [],
+      },
+      {
+        kind: "cli-bundle-linux-amd64",
+        name: "ferryx-cli-linux-amd64.tar.gz",
+        relPath: "linux/ferryx-cli-linux-amd64.tar.gz",
+        bytes: linuxCliBundleBuf.length,
+        sha256: sha256(linuxCliBundleBuf),
         signatureRelPath: null,
         targets: [],
       },
@@ -379,7 +401,9 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
     assert.equal(existsSync(join(outDir, "Ferryx_amd64.deb")), true);
     assert.equal(existsSync(join(outDir, "Ferryx_x64.msix")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64")), true);
+    assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64.tar.gz")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-arm64")), true);
+    assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-arm64.tar.gz")), true);
     for (const name of ["ferryx-rd-client-linux-amd64", "ferryx-rd-client-darwin-arm64", "ferryx-rd-client-windows-amd64.zip"]) {
       assert.ok(existsSync(join(outDir, name)), name);
     }

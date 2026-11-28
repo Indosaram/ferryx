@@ -281,13 +281,26 @@ test("parsePlan validates sourceDateEpoch and createdAt", () => {
 
 // ------------------- requiredKinds tests -------------------
 
-test("requiredKinds returns the standard ten kinds without NSIS migration", () => {
+test("requiredKinds returns the standard twelve kinds without NSIS migration", () => {
   const plan = makeValidPlan();
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-arm64", "rd-client-linux-amd64", "rd-client-darwin-arm64", "rd-client-windows-amd64"]);
+  assert.deepEqual(kinds, [
+    "macos-updater",
+    "dmg",
+    "appimage",
+    "deb",
+    "msix",
+    "cli-linux-amd64",
+    "cli-bundle-linux-amd64",
+    "cli-darwin-arm64",
+    "cli-bundle-darwin-arm64",
+    "rd-client-linux-amd64",
+    "rd-client-darwin-arm64",
+    "rd-client-windows-amd64",
+  ]);
 });
 
-test("requiredKinds returns eleven kinds when nsisMigration is true", () => {
+test("requiredKinds returns thirteen kinds when nsisMigration is true", () => {
   const plan = makeValidPlan({
     channels: { store: true, nsisMigration: true },
     requiredTargets: [
@@ -297,7 +310,21 @@ test("requiredKinds returns eleven kinds when nsisMigration is true", () => {
     ],
   });
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-arm64", "rd-client-linux-amd64", "rd-client-darwin-arm64", "rd-client-windows-amd64", "nsis"]);
+  assert.deepEqual(kinds, [
+    "macos-updater",
+    "dmg",
+    "appimage",
+    "deb",
+    "msix",
+    "cli-linux-amd64",
+    "cli-bundle-linux-amd64",
+    "cli-darwin-arm64",
+    "cli-bundle-darwin-arm64",
+    "rd-client-linux-amd64",
+    "rd-client-darwin-arm64",
+    "rd-client-windows-amd64",
+    "nsis",
+  ]);
 });
 
 // ------------------- parseReceipt tests -------------------
@@ -790,6 +817,45 @@ test("parseReceipt accepts receipts containing cli-darwin-arm64 from host macboo
   });
   const parsedAlt = parseReceipt(altReceipt, plan);
   assert.equal(parsedAlt.artifacts[0].name, "ferryx-cli");
+});
+
+test("parseReceipt accepts cli-bundle-linux-amd64 from omaki and cli-bundle-darwin-arm64 from macbook", () => {
+  const plan = makeValidPlan();
+  const linuxBundle = parseReceipt(
+    makeValidReceipt("omaki", plan, {
+      artifacts: [
+        {
+          kind: "cli-bundle-linux-amd64",
+          name: "ferryx-cli-linux-amd64.tar.gz",
+          relPath: "linux/ferryx-cli-linux-amd64.tar.gz",
+          bytes: 23456789,
+          sha256: "6623456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          signatureRelPath: null,
+          targets: [],
+        },
+      ],
+    }),
+    plan,
+  );
+  assert.equal(linuxBundle.artifacts[0].kind, "cli-bundle-linux-amd64");
+
+  const macBundle = parseReceipt(
+    makeValidReceipt("macbook", plan, {
+      artifacts: [
+        {
+          kind: "cli-bundle-darwin-arm64",
+          name: "ferryx-cli-darwin-arm64.tar.gz",
+          relPath: "darwin/ferryx-cli-darwin-arm64.tar.gz",
+          bytes: 23456789,
+          sha256: "7723456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          signatureRelPath: null,
+          targets: [],
+        },
+      ],
+    }),
+    plan,
+  );
+  assert.equal(macBundle.artifacts[0].kind, "cli-bundle-darwin-arm64");
 });
 
 test("parseReceipt enforces permitted hosts and targets for cli artifacts", () => {

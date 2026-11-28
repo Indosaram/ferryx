@@ -298,9 +298,11 @@ function writeRun(tmp, key) {
   const files = {
     "darwin/Ferryx_2026.908.1_aarch64.dmg": "dmg",
     "darwin/ferryx-cli-darwin-arm64": "mac cli",
+    "darwin/ferryx-cli-darwin-arm64.tar.gz": "mac cli bundle",
     "linux/Ferryx_2026.908.1_amd64.AppImage": "appimage",
     "linux/Ferryx_2026.908.1_amd64.deb": "deb",
     "linux/ferryx-cli-linux-amd64": "linux cli",
+    "linux/ferryx-cli-linux-amd64.tar.gz": "linux cli bundle",
   };
   for (const [rel, body] of Object.entries(files)) writeFileSync(join(artifacts, rel), body);
   // The release-local Store gate reads the MSIX Identity version, so this one is a real zip.
@@ -322,12 +324,14 @@ function writeRun(tmp, key) {
     art("macos-updater", "darwin/Ferryx.app.tar.gz", true, ["darwin-aarch64"]),
     art("dmg", "darwin/Ferryx_2026.908.1_aarch64.dmg", false),
     art("cli-darwin-arm64", "darwin/ferryx-cli-darwin-arm64", false),
+    art("cli-bundle-darwin-arm64", "darwin/ferryx-cli-darwin-arm64.tar.gz", false),
     writeRdClientArtifact(join(artifacts, "darwin"), "darwin"),
   ]);
   write("omaki", [
     art("appimage", "linux/Ferryx_2026.908.1_amd64.AppImage", true, ["linux-x86_64"]),
     art("deb", "linux/Ferryx_2026.908.1_amd64.deb", false),
     art("cli-linux-amd64", "linux/ferryx-cli-linux-amd64", false),
+    art("cli-bundle-linux-amd64", "linux/ferryx-cli-linux-amd64.tar.gz", false),
     writeRdClientArtifact(join(artifacts, "linux"), "linux"),
   ]);
   write("maho-win", [art("msix", "windows/Ferryx_2026.908.1.0_x64.msix", false), writeRdClientArtifact(join(artifacts, "windows"), "windows")]);

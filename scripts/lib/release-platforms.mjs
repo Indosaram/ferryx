@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -977,8 +978,8 @@ export async function signUpdaterArtifact({ artifactPath, repoDir }) {
  * Default command executor used by the macOS finalization phase.
  * Returns captured stdio; throws on nonzero exit unless `allowFailure` is set.
  */
-export function macExec(command, args, { allowFailure = false } = {}) {
-  const res = spawnSync(command, args, { encoding: "utf8" });
+export function macExec(command, args, { allowFailure = false, env } = {}) {
+  const res = spawnSync(command, args, env ? { encoding: "utf8", env } : { encoding: "utf8" });
   if (res.error) throw res.error;
   const stdout = res.stdout || "";
   const stderr = res.stderr || "";
@@ -1482,6 +1483,58 @@ export function verifyMacosFfmpegBundle({ appPath, payloadDir, exec = macExec })
   }
   if (!linksFfmpeg) throw new Error("Ferryx binary does not link FFmpeg; was the default remote-desktop feature disabled?");
   return Object.keys(manifest.runtime);
+}
+
+/**
+ * Packages the self-contained macOS `ferryx-cli-darwin-arm64.tar.gz` bundle containing
+ * `ferryx-cli` and its adjacent `ffmpeg/*.dylib` runtime (resolved via `@executable_path/ffmpeg`).
+ * When `signingIdentity` is provided, every bundled dylib and the CLI executable are signed with
+ * Hardened Runtime + secure timestamp and verified before archiving so dyld Library Validation
+ * succeeds on clean macOS hosts.
+ */
+export function packageMacosCliBundle({
+  cliPath,
+  ffmpegRuntimeDir,
+  outArchivePath,
+  stageDir,
+  signingIdentity = null,
+  exec = macExec,
+}) {
+  if (!existsSync(cliPath)) {
+    throw new Error(`macOS ferryx-cli binary not found: ${cliPath}`);
+  }
+  if (!existsSync(ffmpegRuntimeDir)) {
+    throw new Error(`macOS FFmpeg runtime directory not found for CLI bundle: ${ffmpegRuntimeDir}`);
+  }
+  const dylibEntries = readdirSync(ffmpegRuntimeDir).filter((name) => name.endsWith(".dylib"));
+  if (dylibEntries.length === 0) {
+    throw new Error(`macOS FFmpeg runtime directory has no dylibs for CLI bundle: ${ffmpegRuntimeDir}`);
+  }
+  const cliFfmpegDir = join(stageDir, "ffmpeg");
+  rmSync(stageDir, { recursive: true, force: true });
+  mkdirSync(cliFfmpegDir, { recursive: true });
+  try {
+    const stagedCli = join(stageDir, "ferryx-cli");
+    cpSync(cliPath, stagedCli);
+    cpSync(ffmpegRuntimeDir, cliFfmpegDir, { recursive: true, verbatimSymlinks: true });
+    if (signingIdentity) {
+      for (const name of readdirSync(cliFfmpegDir).sort()) {
+        if (!name.endsWith(".dylib")) continue;
+        const item = join(cliFfmpegDir, name);
+        if (!lstatSync(item).isFile()) continue;
+        exec("codesign", [...codesignArgs(signingIdentity), item]);
+      }
+      exec("codesign", [...codesignArgs(signingIdentity), stagedCli]);
+      exec("codesign", ["--verify", "--strict", stagedCli]);
+    }
+    exec(
+      "tar",
+      ["--no-xattrs", "-czf", outArchivePath, "-C", stageDir, "ferryx-cli", "ffmpeg"],
+      { env: { ...process.env, COPYFILE_DISABLE: "1" } },
+    );
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -2004,21 +2057,13 @@ export async function buildHost({
       const arm64Cli = join(aarch64Rel, "ferryx-cli");
       if (existsSync(arm64Cli)) {
         execFileSync("cp", [arm64Cli, join(artifactsOutDir, "ferryx-cli-darwin-arm64")]);
-        const cliBundleDir = join(isolatedSource, ".ferryx-cli-bundle-darwin-arm64");
-        const cliFfmpegDir = join(cliBundleDir, "ffmpeg");
-        rmSync(cliBundleDir, { recursive: true, force: true });
-        mkdirSync(cliFfmpegDir, { recursive: true });
-        execFileSync("cp", [arm64Cli, join(cliBundleDir, "ferryx-cli")]);
-        const macFfmpegRuntime = join(isolatedSource, FFMPEG_PAYLOAD_REL, "aarch64-apple-darwin", "runtime");
-        if (existsSync(macFfmpegRuntime)) {
-          execFileSync("cp", ["-R", `${macFfmpegRuntime}/.`, cliFfmpegDir]);
-        }
-        execFileSync(
-          "tar",
-          ["--no-xattrs", "-czf", join(artifactsOutDir, "ferryx-cli-darwin-arm64.tar.gz"), "-C", cliBundleDir, "ferryx-cli", "ffmpeg"],
-          { env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: "pipe" },
-        );
-        rmSync(cliBundleDir, { recursive: true, force: true });
+        packageMacosCliBundle({
+          cliPath: arm64Cli,
+          ffmpegRuntimeDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "aarch64-apple-darwin", "runtime"),
+          outArchivePath: join(artifactsOutDir, "ferryx-cli-darwin-arm64.tar.gz"),
+          stageDir: join(isolatedSource, ".ferryx-cli-bundle-darwin-arm64"),
+          signingIdentity: hostConfig.signingIdentity || null,
+        });
       }
       const arm64RdClient = join(aarch64Rel, "ferryx-rd-client");
       if (existsSync(arm64RdClient)) {

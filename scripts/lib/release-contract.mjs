@@ -80,12 +80,26 @@ export const KIND_DEFINITIONS = Object.freeze({
     stableAlias: "ferryx-cli-linux-amd64",
     allowedExtensions: ["ferryx-cli-linux-amd64", "ferryx-cli"],
   },
+  "cli-bundle-linux-amd64": {
+    permittedHost: "omaki",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-cli-linux-amd64.tar.gz",
+    allowedExtensions: ["ferryx-cli-linux-amd64.tar.gz"],
+  },
   "cli-darwin-arm64": {
     permittedHost: "macbook",
     isUpdater: false,
     expectedTargets: [],
     stableAlias: "ferryx-cli-darwin-arm64",
     allowedExtensions: ["ferryx-cli-darwin-arm64", "ferryx-cli"],
+  },
+  "cli-bundle-darwin-arm64": {
+    permittedHost: "macbook",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-cli-darwin-arm64.tar.gz",
+    allowedExtensions: ["ferryx-cli-darwin-arm64.tar.gz"],
   },
   // The remote-desktop client: remote hosts need it to drive a GUI over the paired tunnel.
   "rd-client-linux-amd64": {
@@ -459,7 +473,20 @@ export function parsePlan(value) {
  */
 export function requiredKinds(plan) {
   const p = typeof plan === "string" || !plan.schemaVersion ? parsePlan(plan) : plan;
-  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-arm64", "rd-client-linux-amd64", "rd-client-darwin-arm64", "rd-client-windows-amd64"];
+  const kinds = [
+    "macos-updater",
+    "dmg",
+    "appimage",
+    "deb",
+    "msix",
+    "cli-linux-amd64",
+    "cli-bundle-linux-amd64",
+    "cli-darwin-arm64",
+    "cli-bundle-darwin-arm64",
+    "rd-client-linux-amd64",
+    "rd-client-darwin-arm64",
+    "rd-client-windows-amd64",
+  ];
   if (p.channels && p.channels.nsisMigration) {
     kinds.push("nsis");
   }
