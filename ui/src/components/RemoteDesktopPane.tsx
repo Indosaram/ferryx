@@ -26,8 +26,10 @@ import {
   rdErrorMessage,
   rdMouseButton,
   rdRequestKeyframe,
+  rdListAudioDevices,
   rdSendClipboard,
   rdSetAudio,
+  rdSetAudioDevice,
   rdSetAudioMuted,
   rdSetOptions,
   rdSetStreamOptions,
@@ -38,6 +40,7 @@ import {
   registerRemoteDesktopShortcutCapture,
   wheelDeltaPixels,
   type RdConnectionState,
+  type RdAudioDeviceInfo,
   type RdCursorFrame,
   type RdFitMode,
   type RdFrameMessage,
@@ -312,6 +315,8 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   const [cursorMode, setCursorMode] = useState<"local" | "remote" | "hidden">("remote");
   const [scrollSensitivity, setScrollSensitivity] = useState(1);
   const [clipboardEnabled, setClipboardEnabled] = useState(true);
+  const [audioDevices, setAudioDevices] = useState<RdAudioDeviceInfo[]>([]);
+  const [selectedAudioDevice, setSelectedAudioDevice] = useState("");
   const [renderError, setRenderError] = useState<string | null>(null);
   const [fitMode, setFitMode] = useState<RdFitMode>("fit");
   const [qualityPreset, setQualityPreset] = useState<RdQualityPresetId>("balanced");
@@ -1229,6 +1234,20 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   };
 
   useEffect(() => {
+    if (!detailsOpen) return;
+    let cancelled = false;
+    void rdListAudioDevices().then(
+      (devices) => {
+        if (!cancelled) setAudioDevices(Array.isArray(devices) ? devices : []);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [detailsOpen]);
+
+  useEffect(() => {
     if (detailsOpen || openMenu || launcherPinned || showOverlay || confirmDisconnect) {
       setLauncherVisible(true);
       return;
@@ -1311,6 +1330,16 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
           if (!rdSessionId) return;
           void rdSetOptions(rdSessionId, { clipboardEnabled: enabled }).then(() => setClipboardEnabled(enabled), (error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))));
         }} />Share clipboard</label>
+        <label>Audio output <select aria-label="Audio output device" value={selectedAudioDevice} disabled={!isConnected || audioDevices.length === 0} onChange={(event) => {
+          const nextDevice = event.target.value;
+          if (!rdSessionId) return;
+          void rdSetAudioDevice(rdSessionId, nextDevice || null).then(() => setSelectedAudioDevice(nextDevice), (error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))));
+        }} className="rounded border border-border bg-background p-1">
+          <option value="">System default</option>
+          {audioDevices.map((device) => (
+            <option key={device.name} value={device.name}>{device.isDefault ? `${device.name} (Default)` : device.name}</option>
+          ))}
+        </select></label>
       </div>
       </div>
       <div

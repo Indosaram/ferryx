@@ -1,33 +1,115 @@
 import { useMemo, useState, useSyncExternalStore } from "react";
-import { Monitor, ScreenShare, Search, X } from "lucide-react";
+import { Monitor, PlugZap, ScreenShare, Search, X } from "lucide-react";
 
 import { cn } from "../../lib/cn";
+import {
+  DEFAULT_RELAY_ORIGIN,
+  nativePairedHostCommands,
+} from "../../lib/pairedHostInventory";
+import { rdErrorMessage, rdWakeOnLan } from "../../lib/remoteDesktop";
+import { loadRdHostMacs, saveRdHostMac } from "../../lib/remoteDesktopPrefs";
+import { toIpcError } from "../../lib/tauri";
 import {
   remoteDesktopStore,
   type RemoteDesktopSession,
   type RemoteDesktopState,
 } from "../../state/remoteDesktopStore";
 import { RemoteDesktopPane } from "../RemoteDesktopPane";
-import { remoteHostStore, selectHostList } from "../../state/remoteHostStore";
+import { remoteHostStore, selectHostList, type HostEndpoint } from "../../state/remoteHostStore";
 import { PairedMachineRow } from "./RemoteDesktopActivitySidebar";
 import { RemoteDesktopHostSection } from "../settings/remote/RemoteDesktopHostSection";
 import { Input } from "../ui/input";
 import { Button } from "../ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 
 function ComputerLibrary({ onSelectHost }: Pick<GlobalRemoteDesktopCanvasProps, "onSelectHost">) {
   const inventory = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState, remoteHostStore.getState);
   const [query, setQuery] = useState("");
   const [availableOnly, setAvailableOnly] = useState(false);
+  const [directOpen, setDirectOpen] = useState(false);
+  const [directOrigin, setDirectOrigin] = useState(DEFAULT_RELAY_ORIGIN);
+  const [directPin, setDirectPin] = useState("");
+  const [directLabel, setDirectLabel] = useState("");
+  const [directBusy, setDirectBusy] = useState(false);
+  const [directError, setDirectError] = useState<string | null>(null);
+  const [hostMacs, setHostMacs] = useState<Record<string, string>>(() => loadRdHostMacs());
+  const [wakeTarget, setWakeTarget] = useState<HostEndpoint | null>(null);
+  const [wakeMacDraft, setWakeMacDraft] = useState("");
+  const [wakeBusy, setWakeBusy] = useState(false);
+  const [wakeStatus, setWakeStatus] = useState<{ tone: "info" | "error"; text: string } | null>(null);
   const hosts = selectHostList(inventory);
   const filtered = hosts.filter((host) => (!availableOnly || host.online) &&
     `${host.displayName ?? host.name} ${host.address}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+
+  const submitDirectConnect = async () => {
+    const pin = directPin.trim();
+    if (!pin) {
+      setDirectError("Enter the 6-digit pairing PIN.");
+      return;
+    }
+    setDirectBusy(true);
+    setDirectError(null);
+    try {
+      const host = await nativePairedHostCommands.pair({
+        relayOrigin: directOrigin.trim() || DEFAULT_RELAY_ORIGIN,
+        pin,
+        displayLabel: directLabel.trim() || "Computer",
+      });
+      setDirectOpen(false);
+      setDirectPin("");
+      setDirectLabel("");
+      onSelectHost(host.hostId);
+      void remoteDesktopStore.connect(host.hostId, host.displayLabel || host.hostId);
+    } catch (err: unknown) {
+      setDirectError(rdErrorMessage(toIpcError(err)));
+    } finally {
+      setDirectBusy(false);
+    }
+  };
+
+  const triggerWake = async (target: HostEndpoint, mac: string) => {
+    setWakeBusy(true);
+    setWakeStatus(null);
+    try {
+      await rdWakeOnLan(mac);
+      setHostMacs(saveRdHostMac(target.hostId, mac));
+      setWakeTarget(null);
+      setWakeStatus({ tone: "info", text: `Sent Wake-on-LAN packet to ${target.displayName ?? target.name}.` });
+    } catch (err: unknown) {
+      setWakeStatus({ tone: "error", text: rdErrorMessage(toIpcError(err)) });
+    } finally {
+      setWakeBusy(false);
+    }
+  };
+
+  const handleWakeRequest = (target: HostEndpoint) => {
+    const saved = hostMacs[target.hostId];
+    if (saved) {
+      void triggerWake(target, saved);
+      return;
+    }
+    setWakeMacDraft("");
+    setWakeStatus(null);
+    setWakeTarget(target);
+  };
+
   return (
     <div data-testid="remote-desktop-library" className="h-full overflow-y-auto p-6">
       <div className="mx-auto flex max-w-5xl flex-col gap-6">
-        <header>
-          <h1 className="text-xl font-semibold text-foreground">Computers</h1>
-          <p className="mt-1 text-[13px] text-muted-foreground">Connect to a paired computer or share this computer with your devices.</p>
+        <header className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold text-foreground">Computers</h1>
+            <p className="mt-1 text-[13px] text-muted-foreground">Connect to a paired computer or share this computer with your devices.</p>
+          </div>
+          <Button type="button" size="sm" variant="outline" data-testid="rd-direct-connect-open" onClick={() => { setDirectError(null); setDirectOpen(true); }}>
+            <PlugZap aria-hidden="true" className="mr-1.5 size-4" />Direct connect
+          </Button>
         </header>
+        {wakeStatus ? (
+          <p role={wakeStatus.tone === "error" ? "alert" : "status"} data-testid="rd-wake-status" className={cn("text-[12px]", wakeStatus.tone === "error" ? "text-destructive" : "text-muted-foreground")}>
+            {wakeStatus.text}
+          </p>
+        ) : null}
         <section aria-label="This Computer (Host)" className="rounded-xl border border-border bg-card p-4">
           <h2 className="mb-3 flex items-center gap-2 text-[15px] font-semibold text-foreground"><ScreenShare aria-hidden="true" className="size-5" />This Computer (Host)</h2>
           <RemoteDesktopHostSection />
@@ -43,7 +125,7 @@ function ComputerLibrary({ onSelectHost }: Pick<GlobalRemoteDesktopCanvasProps, 
         {filtered.length === 0 ? (
           <div data-testid="remote-desktop-empty" role="status" className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border px-6 py-12 text-center text-[13px] text-muted-foreground">
             <Monitor aria-hidden="true" className="size-8" />
-            <p>{hosts.length === 0 ? "No paired computers yet. Pair a machine from Settings > Remote to get started." : "No computers match these filters."}</p>
+            <p>{hosts.length === 0 ? "No paired computers yet. Pair a machine with Direct connect or Settings > Remote." : "No computers match these filters."}</p>
           </div>
         ) : [true, false].map((online) => {
           const group = filtered.filter((host) => host.online === online);
@@ -51,7 +133,7 @@ function ComputerLibrary({ onSelectHost }: Pick<GlobalRemoteDesktopCanvasProps, 
             <section key={String(online)} aria-label={online ? "Available computers" : "Offline computers"} className="space-y-3">
               <h3 className="text-[13px] font-medium text-muted-foreground">{online ? "Available" : "Offline"} · {group.length}</h3>
               <ul className="grid grid-cols-[repeat(auto-fill,minmax(min(17rem,100%),1fr))] gap-3">
-                {group.map((host) => <PairedMachineRow key={host.hostId} host={host} active={false} library onSelect={onSelectHost} onConnect={(target) => {
+                {group.map((host) => <PairedMachineRow key={host.hostId} host={host} active={false} library onSelect={onSelectHost} onWake={handleWakeRequest} onConnect={(target) => {
                   onSelectHost(target.hostId);
                   void remoteDesktopStore.connect(target.hostId, target.displayName ?? target.name);
                 }} />)}
@@ -60,6 +142,43 @@ function ComputerLibrary({ onSelectHost }: Pick<GlobalRemoteDesktopCanvasProps, 
           ) : null;
         })}
       </div>
+      <Dialog open={directOpen} onOpenChange={setDirectOpen}>
+        <DialogContent data-testid="rd-direct-connect-dialog" className="max-w-[420px] gap-3 p-5">
+          <DialogTitle>Direct connect</DialogTitle>
+          <DialogDescription>Pair with a computer using its address and one-time 6-digit PIN.</DialogDescription>
+          <div className="space-y-2.5 text-[12px]">
+            <label className="block space-y-1">
+              <span className="text-muted-foreground">Host or relay address</span>
+              <Input aria-label="Host address" value={directOrigin} onChange={(event) => setDirectOrigin(event.target.value)} placeholder="https://relay.ferryx.dev" />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-muted-foreground">6-digit PIN</span>
+              <Input aria-label="Pairing PIN" value={directPin} onChange={(event) => setDirectPin(event.target.value)} placeholder="123456" inputMode="numeric" />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-muted-foreground">Display name (optional)</span>
+              <Input aria-label="Display name" value={directLabel} onChange={(event) => setDirectLabel(event.target.value)} placeholder="Studio Mac" />
+            </label>
+          </div>
+          {directError ? <p role="alert" className="text-[12px] text-destructive">{directError}</p> : null}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" size="sm" disabled={directBusy} onClick={() => setDirectOpen(false)}>Cancel</Button>
+            <Button type="button" size="sm" disabled={directBusy} onClick={() => void submitDirectConnect()}>Pair &amp; connect</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={wakeTarget !== null} onOpenChange={(open) => { if (!open) setWakeTarget(null); }}>
+        <DialogContent data-testid="rd-wake-dialog" className="max-w-[420px] gap-3 p-5">
+          <DialogTitle>Wake {wakeTarget?.displayName ?? wakeTarget?.name ?? "computer"}</DialogTitle>
+          <DialogDescription>Enter this computer&apos;s MAC address to send a Wake-on-LAN magic packet.</DialogDescription>
+          <Input aria-label="MAC address" value={wakeMacDraft} onChange={(event) => setWakeMacDraft(event.target.value)} placeholder="AA:BB:CC:DD:EE:FF" />
+          {wakeStatus?.tone === "error" ? <p role="alert" className="text-[12px] text-destructive">{wakeStatus.text}</p> : null}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" size="sm" disabled={wakeBusy} onClick={() => setWakeTarget(null)}>Cancel</Button>
+            <Button type="button" size="sm" disabled={wakeBusy || !wakeMacDraft.trim()} onClick={() => { if (wakeTarget) void triggerWake(wakeTarget, wakeMacDraft); }}>Send Wake packet</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

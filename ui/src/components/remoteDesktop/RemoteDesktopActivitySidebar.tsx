@@ -217,11 +217,12 @@ export function RemoteDesktopActivitySidebar({ activeHostId, onSelectHost }: Rem
   );
 }
 
-export function PairedMachineRow({ host, active, onConnect, onSelect, library = false }: {
+export function PairedMachineRow({ host, active, onConnect, onSelect, onWake, library = false }: {
   host: HostEndpoint;
   active: boolean;
   onConnect: (host: HostEndpoint) => void;
   onSelect: (hostId: string) => void;
+  onWake?: (host: HostEndpoint) => void;
   library?: boolean;
 }) {
   const session = useRemoteDesktopSession(host.hostId);
@@ -328,6 +329,18 @@ export function PairedMachineRow({ host, active, onConnect, onSelect, library = 
             {status === "error" ? "Reconnect" : "Connect"}
           </Button>
         )}
+        {!host.online && !live && onWake ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            aria-label={`Wake ${name}`}
+            data-testid={`rd-wake-${id}`}
+            onClick={() => onWake(host)}
+          >
+            Wake
+          </Button>
+        ) : null}
       </div>
     </li>
   );

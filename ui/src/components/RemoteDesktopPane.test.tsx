@@ -1114,4 +1114,27 @@ describe("RemoteDesktopPane toolbar and stats HUD wiring", () => {
     }));
     await waitFor(() => expect(window.localStorage.getItem(RD_AUDIO_MUTED_STORAGE_KEY)).toBe("true"));
   });
+
+  it("lists audio output devices when Session details open and switches output device", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_rd_connect") return { rdSessionId: "rd-1" };
+      if (command === "cmd_rd_list_audio_devices") {
+        return [
+          { name: "MacBook Speakers", isDefault: true },
+          { name: "Studio Headphones", isDefault: false },
+        ];
+      }
+      if (command === "cmd_rd_set_audio_device") return undefined;
+      return undefined;
+    });
+    await connectPane();
+    fireEvent.click(screen.getByRole("button", { name: "More session controls" }));
+    const select = await screen.findByLabelText("Audio output device");
+    await waitFor(() => expect(select).not.toBeDisabled());
+    fireEvent.change(select, { target: { value: "Studio Headphones" } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_set_audio_device", {
+      rdSessionId: "rd-1",
+      deviceName: "Studio Headphones",
+    }));
+  });
 });

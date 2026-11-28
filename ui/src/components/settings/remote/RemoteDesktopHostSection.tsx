@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { toIpcError } from "../../../lib/tauri";
+import {
+  createPairingCode,
+  listRemoteDevices,
+  revokeRemoteDevice,
+  toIpcError,
+  type CreatePairingCodeResponse,
+  type DeviceInfo,
+} from "../../../lib/tauri";
 import {
   onRdHostConsent,
   rdErrorMessage,
@@ -36,6 +43,9 @@ export function RemoteDesktopHostSettings() {
   const [state, setState] = useState<RdHostState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pairing, setPairing] = useState<CreatePairingCodeResponse | null>(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const mountedRef = useRef(true);
 
   const refresh = useCallback(() => {
@@ -48,6 +58,12 @@ export function RemoteDesktopHostSettings() {
       (err: unknown) => {
         if (mountedRef.current) setError(rdErrorMessage(toIpcError(err)));
       },
+    );
+    listRemoteDevices().then(
+      (list) => {
+        if (mountedRef.current) setDevices(Array.isArray(list) ? list : []);
+      },
+      () => undefined,
     );
   }, []);
 
@@ -93,6 +109,45 @@ export function RemoteDesktopHostSettings() {
       });
   };
 
+  const handleGeneratePin = () => {
+    setPairingBusy(true);
+    setError(null);
+    createPairingCode("control")
+      .then(
+        (response) => {
+          if (mountedRef.current) setPairing(response);
+        },
+        (err: unknown) => {
+          if (mountedRef.current) setError(rdErrorMessage(toIpcError(err)));
+        },
+      )
+      .finally(() => {
+        if (mountedRef.current) setPairingBusy(false);
+      });
+  };
+
+  const handleRespondPending = (requestId: string, approve: boolean) => {
+    setBusy(true);
+    rdHostRespond(requestId, approve)
+      .then(() => refresh(), (err: unknown) => {
+        if (mountedRef.current) setError(rdErrorMessage(toIpcError(err)));
+      })
+      .finally(() => {
+        if (mountedRef.current) setBusy(false);
+      });
+  };
+
+  const handleRevokeDevice = (deviceId: string) => {
+    setBusy(true);
+    revokeRemoteDevice(deviceId)
+      .then(() => refresh(), (err: unknown) => {
+        if (mountedRef.current) setError(rdErrorMessage(toIpcError(err)));
+      })
+      .finally(() => {
+        if (mountedRef.current) setBusy(false);
+      });
+  };
+
   const hostError = error ?? state?.error ?? null;
 
   return (
@@ -127,6 +182,37 @@ export function RemoteDesktopHostSettings() {
           );
         })}
       </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3" data-testid="rd-host-pairing-pin">
+        <div className="min-w-0">
+          <p className="text-[13px] font-medium text-foreground">Pairing PIN</p>
+          <p className="text-[12px] text-muted-foreground">
+            {pairing ? (
+              <span data-testid="rd-host-pin-code" className="font-mono font-semibold text-foreground">{pairing.code}</span>
+            ) : (
+              "Generate a one-time PIN to pair a device with this computer."
+            )}
+          </p>
+        </div>
+        <Button type="button" size="sm" variant="outline" disabled={pairingBusy} onClick={handleGeneratePin}>
+          {pairing ? "Regenerate PIN" : "Generate PIN"}
+        </Button>
+      </div>
+      {state && state.pending.length > 0 ? (
+        <div className="space-y-1.5" data-testid="rd-host-pending-requests">
+          <h3 className="text-[12px] font-medium text-foreground">Pending guest requests</h3>
+          <ul aria-label="Pending guest requests" className="space-y-1">
+            {state.pending.map((req) => (
+              <li key={req.requestId} className="flex items-center justify-between gap-2 rounded border border-border/70 px-2.5 py-1.5 text-[12px] text-foreground">
+                <span className="truncate">{req.clientName || "Guest device"}</span>
+                <span className="flex shrink-0 gap-1.5">
+                  <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => handleRespondPending(req.requestId, true)}>Allow</Button>
+                  <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => handleRespondPending(req.requestId, false)}>Deny</Button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <div className="space-y-1">
         <h3 className="text-[12px] font-medium text-foreground">Active sessions</h3>
         {state && state.sessions.length > 0 ? (
@@ -139,6 +225,23 @@ export function RemoteDesktopHostSettings() {
           </ul>
         ) : (
           <p className="text-[12px] text-muted-foreground">No one is viewing this machine.</p>
+        )}
+      </div>
+      <div className="space-y-1" data-testid="rd-host-trusted-devices">
+        <h3 className="text-[12px] font-medium text-foreground">Trusted devices</h3>
+        {devices.length > 0 ? (
+          <ul aria-label="Trusted remote desktop devices" className="space-y-1">
+            {devices.map((device) => (
+              <li key={device.id} className="flex items-center justify-between gap-2 rounded border border-border/70 px-2.5 py-1 text-[12px] text-foreground">
+                <span className="truncate">{device.name}</span>
+                <Button type="button" size="sm" variant="ghost" disabled={busy} aria-label={`Revoke ${device.name}`} onClick={() => handleRevokeDevice(device.id)}>
+                  Revoke
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-[12px] text-muted-foreground">No trusted devices yet.</p>
         )}
       </div>
     </section>

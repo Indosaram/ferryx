@@ -111,6 +111,14 @@ beforeEach(() => {
     if (command === "cmd_rd_host_state") {
       return { enabled: false, running: false, allowInput: false, allowClipboard: false, sessions: [], pending: [], error: null };
     }
+    if (command === "cmd_remote_devices") return [];
+    if (command === "cmd_remote_pairing_create") return { code: "654321", expiresInSeconds: 60 };
+    if (command === "cmd_remote_device_revoke") return true;
+    if (command === "paired_host_pair") {
+      const req = (args?.request ?? {}) as { displayLabel?: string };
+      return { hostId: "paired-new", displayLabel: req.displayLabel || "Computer" };
+    }
+    if (command === "cmd_rd_wake_on_lan") return undefined;
     return undefined;
   });
   seedHosts([
@@ -315,5 +323,63 @@ describe("Remote Desktop Activity mode", () => {
       .toBe("RD_PERMISSION_REQUIRED");
     expect(remoteDesktopConnectBlock({ authStatus: "paired", grantScope: "machine", online: false })?.code)
       .toBe("RD_HOST_OFFLINE");
+  });
+
+  it("pairs via Direct Connect and opens the session", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("rd-direct-connect-open"));
+    fireEvent.change(screen.getByLabelText("Pairing PIN"), { target: { value: "123456" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Lab Mac" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pair & connect" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("paired_host_pair", {
+      request: { relayOrigin: "https://relay.ferryx.dev", pin: "123456", displayLabel: "Lab Mac" },
+    }));
+    await waitFor(() => expect(remoteDesktopStore.getSession("paired-new")?.rdSessionId).toBe("rd-paired-new"));
+  });
+
+  it("sends Wake-on-LAN for an offline machine after prompting for its MAC address", async () => {
+    seedHosts([host({ hostId: "host-off", name: "Sleeping PC", online: false })]);
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Wake Sleeping PC" }));
+    fireEvent.change(screen.getByLabelText("MAC address"), { target: { value: "AA:BB:CC:DD:EE:FF" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send Wake packet" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_wake_on_lan", {
+      macAddress: "AA:BB:CC:DD:EE:FF",
+      broadcastAddr: null,
+    }));
+    expect(await screen.findByTestId("rd-wake-status")).toHaveTextContent("Sent Wake-on-LAN packet");
+  });
+
+  it("generates a host PIN, approves pending guest requests, and revokes trusted devices", async () => {
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "cmd_rd_supported") return true;
+      if (command === "cmd_rd_host_state") {
+        return {
+          enabled: true,
+          running: true,
+          allowInput: true,
+          allowClipboard: true,
+          sessions: [],
+          pending: [{ requestId: "req-1", clientName: "Guest iPad" }],
+          error: null,
+        };
+      }
+      if (command === "cmd_remote_devices") {
+        return [{ id: "dev-1", name: "Phone", permission: "control", createdAtMs: 1, lastSeenMs: 2 }];
+      }
+      if (command === "cmd_remote_pairing_create") return { code: "654321", expiresInSeconds: 60 };
+      if (command === "cmd_rd_host_respond") return undefined;
+      if (command === "cmd_remote_device_revoke") return true;
+      if (command === "cmd_rd_connect") return { rdSessionId: `rd-${String(args?.hostId)}` };
+      return undefined;
+    });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Generate PIN" }));
+    expect(await screen.findByTestId("rd-host-pin-code")).toHaveTextContent("654321");
+    expect(await screen.findByText("Guest iPad")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_host_respond", { requestId: "req-1", approve: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke Phone" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_remote_device_revoke", { deviceId: "dev-1" }));
   });
 });

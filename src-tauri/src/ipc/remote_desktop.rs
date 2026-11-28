@@ -2718,6 +2718,84 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn cmd_rd_list_audio_devices() -> Result<Vec<crate::ipc::remote_desktop_media::RdAudioDeviceInfo>, IpcError> {
+        crate::ipc::run_blocking(|| {
+            crate::ipc::remote_desktop_media::list_audio_output_devices()
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, error.to_string()))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_set_audio_device(
+        rd_session_id: String,
+        device_name: Option<String>,
+    ) -> Result<(), IpcError> {
+        let entry = session_or_not_found(&rd_session_id)?;
+        crate::ipc::run_blocking(move || {
+            let mut audio = entry.shared.audio.lock();
+            audio
+                .set_output_device(device_name)
+                .map_err(|error| rd_error(RD_INVALID_OPTIONS, error.to_string()))
+        })
+        .await
+    }
+
+    pub(crate) fn parse_mac_address(mac: &str) -> Result<[u8; 6], IpcError> {
+        let hex: String = mac
+            .trim()
+            .chars()
+            .filter(|ch| *ch != ':' && *ch != '-' && *ch != '.')
+            .collect();
+        if hex.len() != 12 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(rd_error(
+                RD_INVALID_OPTIONS,
+                "Enter a valid 6-byte MAC address (for example AA:BB:CC:DD:EE:FF)",
+            ));
+        }
+        let mut out = [0u8; 6];
+        for i in 0..6 {
+            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                .map_err(|_| rd_error(RD_INVALID_OPTIONS, "Invalid MAC address"))?;
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn build_wol_magic_packet(mac: [u8; 6]) -> [u8; 102] {
+        let mut packet = [0u8; 102];
+        packet[..6].fill(0xFF);
+        for i in 0..16 {
+            packet[6 + i * 6..6 + (i + 1) * 6].copy_from_slice(&mac);
+        }
+        packet
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_wake_on_lan(
+        mac_address: String,
+        broadcast_addr: Option<String>,
+    ) -> Result<(), IpcError> {
+        let mac = parse_mac_address(&mac_address)?;
+        let target = broadcast_addr
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "255.255.255.255:9".to_owned());
+        let packet = build_wol_magic_packet(mac);
+        crate::ipc::run_blocking(move || {
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, format!("Wake-on-LAN socket bind failed: {error}")))?;
+            socket
+                .set_broadcast(true)
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, format!("Wake-on-LAN broadcast failed: {error}")))?;
+            socket
+                .send_to(&packet, &target)
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, format!("Wake-on-LAN send failed: {error}")))?;
+            Ok(())
+        })
+        .await
+    }
+
+    #[tauri::command]
     pub async fn cmd_rd_clipboard_send(rd_session_id: String, text: String) -> Result<(), IpcError> {
         let entry = session_or_not_found(&rd_session_id)?;
         if text.len() > ferryx_rd_proto::MAX_CLIPBOARD_TEXT_BYTES {
@@ -3040,6 +3118,22 @@ pub mod commands {
                 crate::ipc::error::IpcErrorCode::Custom(RD_INVALID_OPTIONS.into()));
         }
 
+        #[test]
+        fn wol_mac_parsing_and_magic_packet_layout() {
+            let mac = parse_mac_address("aa:bb:cc:dd:ee:ff").unwrap();
+            assert_eq!(mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+            assert_eq!(parse_mac_address("AA-BB-CC-DD-EE-FF").unwrap(), mac);
+            assert_eq!(
+                parse_mac_address("not-a-mac").unwrap_err().code,
+                crate::ipc::error::IpcErrorCode::Custom(RD_INVALID_OPTIONS.into())
+            );
+            let packet = build_wol_magic_packet(mac);
+            assert_eq!(&packet[..6], &[0xFF; 6]);
+            for i in 0..16 {
+                assert_eq!(&packet[6 + i * 6..6 + (i + 1) * 6], &mac);
+            }
+        }
+
         #[tokio::test]
         async fn unknown_sessions_report_rd_not_found() {
             assert_not_found(cmd_rd_stats(MISSING.into()).await.unwrap_err());
@@ -3049,6 +3143,11 @@ pub mod commands {
                     .unwrap_err(),
             );
             assert_not_found(cmd_rd_set_audio(MISSING.into(), true, 0.5).await.unwrap_err());
+            assert_not_found(
+                cmd_rd_set_audio_device(MISSING.into(), Some("Built-in".into()))
+                    .await
+                    .unwrap_err(),
+            );
             assert_not_found(
                 cmd_rd_clipboard_send(MISSING.into(), "x".into()).await.unwrap_err(),
             );

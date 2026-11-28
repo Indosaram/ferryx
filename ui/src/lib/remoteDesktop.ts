@@ -579,6 +579,23 @@ export function rdHostRespond(requestId: string, approve: boolean): Promise<void
   return rdInvoke<void>("cmd_rd_host_respond", { requestId, approve });
 }
 
+export type RdAudioDeviceInfo = {
+  name: string;
+  isDefault: boolean;
+};
+
+export function rdListAudioDevices(): Promise<RdAudioDeviceInfo[]> {
+  return rdInvoke<RdAudioDeviceInfo[]>("cmd_rd_list_audio_devices");
+}
+
+export function rdSetAudioDevice(rdSessionId: string, deviceName: string | null): Promise<void> {
+  return rdInvoke<void>("cmd_rd_set_audio_device", { rdSessionId, deviceName });
+}
+
+export function rdWakeOnLan(macAddress: string, broadcastAddr?: string): Promise<void> {
+  return rdInvoke<void>("cmd_rd_wake_on_lan", { macAddress, broadcastAddr: broadcastAddr ?? null });
+}
+
 export async function onRdHostConsent(handler: (request: RdHostConsentRequest) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<RdHostConsentRequest>(RD_HOST_CONSENT_EVENT, (event) => {
