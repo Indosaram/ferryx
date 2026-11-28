@@ -131,7 +131,10 @@ if ! { command -v zig >/dev/null 2>&1 && [ "$(zig version)" = 0.17.0 ]; }; then
   zig version
 fi
 # $1 = repo url, $2 = revision
-git clone --quiet "$1" /work && cd /work
+# The sandbox runs as an unprivileged `agent` user: cloning into /work fails with
+# "Permission denied" before anything is built, so the tree lives under $HOME.
+WORK_DIR="$HOME/ferryx-build"
+git clone --quiet "$1" "$WORK_DIR" && cd "$WORK_DIR"
 # A clone has every remote branch, so the plain rev is enough; fetch only as a fallback.
 # (Do not rely on a branch name: FERRYX_SBX_REV may be a raw SHA with no branch.)
 git checkout --quiet "$2" 2>/dev/null || { git fetch --quiet origin && git checkout --quiet "$2"; }
@@ -152,7 +155,7 @@ build_payload=$(cat <<'BUILD'
 set -euo pipefail
 . "$HOME/.cargo/env"
 export PATH="$HOME/.bun/bin:$PATH"
-cd /work
+cd "$HOME/ferryx-build"
 eval "$1"
 BUILD
 )
@@ -163,8 +166,8 @@ for payload in "$provision" "$build_payload"; do
     exit 9
   }
 done
-# --name reuses an existing sandbox, which would carry a stale /work tree from an earlier
-# run. Refuse instead of removing it: another session may own a build under that name.
+# --name reuses an existing sandbox, which would carry a stale tree from an earlier run.
+# Refuse instead of removing it: another session may own a build under that name.
 existing=$("$SBX_BIN" --cloud ls 2>/dev/null || true)
 case "$existing" in
   *"$name "*|*"$name	"*)
@@ -197,7 +200,7 @@ if [ -n "${FERRYX_SBX_ARTIFACTS:-}" ]; then
   dest=${FERRYX_SBX_OUT:-$repo_dir/.sbx-out/$slug}
   mkdir -p "$dest"
   for glob in $FERRYX_SBX_ARTIFACTS; do
-    $sbx_cmd --cloud cp "$id:/work/$glob" "$dest/" >>"$log" 2>&1 || echo "artifact not found: $glob" >&2
+    $sbx_cmd --cloud cp "$id:~/ferryx-build/$glob" "$dest/" >>"$log" 2>&1 || echo "artifact not found: $glob" >&2
   done
   echo "artifacts -> $dest" | tee -a "$log"
 fi
