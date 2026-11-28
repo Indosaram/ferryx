@@ -5,6 +5,7 @@ pub mod agent_hook;
 pub mod api_catalog;
 pub mod crash_report;
 pub mod file_cp;
+pub mod host_ref;
 pub mod billing;
 pub mod direct_trust;
 pub mod join_link;

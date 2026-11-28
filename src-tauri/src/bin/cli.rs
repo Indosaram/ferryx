@@ -37,6 +37,22 @@ fn main() {
     if args.get(1).is_some_and(|arg| arg == "rd-bridge") {
         std::process::exit(ferryx_lib::cli::run_rd_bridge_cli());
     }
+    // `ferryx-cli <host> <group> ...`: the paired host may lead, and a group that cannot
+    // reach one is refused here instead of running against this machine under a host name.
+    let args = match ferryx_lib::cli::host_ref::apply_host_prefix(&args) {
+        Ok(args) => args,
+        Err(refusal) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": false,
+                    "code": refusal.code,
+                    "message": refusal.message,
+                })
+            );
+            std::process::exit(ferryx_lib::cli::host_ref::EXIT_REFUSED);
+        }
+    };
     // Only the groups named in CLI_GROUPS dispatch here; everything else falls through to
     // the launch-mode handling below.
     let group = args.get(1).map(String::as_str).filter(|arg| CLI_GROUPS.contains(arg));
