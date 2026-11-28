@@ -2955,6 +2955,8 @@ mod tests {
 
     #[test]
     fn a_browser_request_round_trips_with_and_without_a_host() {
+        // The wire form is what matters, and `DaemonRequest` carries no `PartialEq`: compare the
+        // re-serialized value instead of deriving one across a hundred unrelated variants.
         let local = DaemonRequest::Browser {
             browser_id: "b1".into(),
             command: "navigate".into(),
@@ -2972,15 +2974,25 @@ mod tests {
         assert!(line.contains("\"browserId\":\"b1\""), "{line}");
         assert!(line.contains("\"command\":\"navigate\""), "{line}");
         let back: DaemonRequest = serde_json::from_str(&line).unwrap();
-        assert_eq!(back, local);
+        assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::to_value(&local).unwrap());
 
+        // The same request naming a host keeps every other field and adds only the host.
         let remote = DaemonRequest::Browser {
+            browser_id: "b1".into(),
+            command: "navigate".into(),
+            params: Some(serde_json::json!({ "url": "https://example.com" })),
             host_id: Some("air".into()),
-            ..local
+            document_generation: None,
+            browser_instance_id: None,
+            desktop_epoch: None,
+            lease_epoch: None,
+            device_id: None,
+            connection_id: None,
         };
         let line = serde_json::to_string(&remote).unwrap();
         assert!(line.contains("\"hostId\":\"air\""), "{line}");
-        assert_eq!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), remote);
+        let back: DaemonRequest = serde_json::from_str(&line).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::to_value(&remote).unwrap());
     }
 
     // Re-explore-4 G2: a discovered provider session names the conversation only. If it claimed
