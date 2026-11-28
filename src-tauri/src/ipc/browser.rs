@@ -5824,6 +5824,45 @@ pub async fn console_browser_session<R: tauri::Runtime>(
     Ok(entries)
 }
 
+fn encode_browser_thumbnail(bytes: &[u8]) -> Result<String, IpcError> {
+    let image = image::load_from_memory(bytes)
+        .map_err(|error| BrowserError::AutomationFailed(format!("thumbnail decode: {error}")))?;
+    let thumbnail = image.thumbnail(208, 120);
+    let mut png = std::io::Cursor::new(Vec::new());
+    thumbnail.write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| BrowserError::AutomationFailed(format!("thumbnail encode: {error}")))?;
+    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png.into_inner())))
+}
+
+#[tauri::command]
+pub async fn cmd_browser_capture_thumbnail<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+) -> Result<String, IpcError> {
+    // The shared capture path preserves typed Unsupported refusals on other platforms.
+    let snapshot = crate::browser::agent::page::capture(
+        &app, manager.inner(), &browser_id, SnapshotOptions::png().with_bounds(208, 120),
+    ).await?;
+    encode_browser_thumbnail(&snapshot.bytes)
+}
+
+#[cfg(test)]
+mod thumbnail_tests {
+    #[test]
+    fn thumbnail_is_bounded_png_and_invalid_bytes_are_rejected() {
+        use base64::Engine;
+        let image = image::DynamicImage::new_rgb8(1000, 500);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let data = super::encode_browser_thumbnail(png.get_ref()).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data.strip_prefix("data:image/png;base64,").unwrap()).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (208, 104));
+        assert!(super::encode_browser_thumbnail(b"invalid").is_err());
+    }
+}
+
 pub async fn screenshot_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,

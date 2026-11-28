@@ -1009,7 +1009,10 @@ export function selectFolders(state: BrowserStoreState, spaceId: string = state.
 }
 
 export function selectMruTabs(state: BrowserStoreState): BrowserStoreTab[] {
-  return state.mru.flatMap((browserId) => (state.tabs[browserId] ? [state.tabs[browserId]] : []));
+  const recent = state.mru.flatMap((browserId) => (state.tabs[browserId] ? [state.tabs[browserId]] : []));
+  const used = new Set(state.mru);
+  return [...recent, ...Object.values(state.tabs).filter((tab) => !used.has(tab.browserId))
+    .sort((left, right) => right.lastActiveAt - left.lastActiveAt || left.order - right.order)];
 }
 
 export function selectActiveBrowserId(state: BrowserStoreState, spaceId: string = state.activeSpaceId): string | null {

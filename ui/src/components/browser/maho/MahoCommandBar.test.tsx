@@ -16,6 +16,10 @@ vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
 import {
   MahoCommandBar,
   buildMahoCommandBarResults,
+  expandMahoSiteSearch,
+  matchMahoSiteSearch,
+  MAHO_SITE_SEARCHES,
+  type MahoCommandBarMode,
   type MahoCommandBarInput,
 } from "./MahoCommandBar";
 import { DEFAULT_BROWSER_SETTINGS } from "../../../lib/browserSettings";
@@ -120,6 +124,45 @@ describe("buildMahoCommandBarResults", () => {
     expect(results[0].url).toBe("https://duckduckgo.com/?q=how%20to%20rust");
   });
 
+  it("keeps every open tab, including duplicate URLs, in all-tabs mode", () => {
+    const results = buildMahoCommandBarResults(input({ mode: "all-tabs", query: "docs",
+      tabs: Array.from({ length: 8 }, (_, index) => tab({ browserId: `tab-${index}`, url: "https://docs.test", title: "Docs" })),
+      bookmarks: [bookmark("saved", "https://other-docs.test", "Docs")],
+    }));
+    expect(results).toHaveLength(8);
+    expect(results.every((row) => row.source === "tab")).toBe(true);
+  });
+
+  it("expands supported site search tokens and rejects unsafe or missing templates", () => {
+    expect(expandMahoSiteSearch("https://example.com/?q=%s&other={searchTerms}", "a & b"))
+      .toBe("https://example.com/?q=a+%26+b&other=a+%26+b");
+    expect(expandMahoSiteSearch("javascript:{query}", "alert(1)")).toBeNull();
+    expect(expandMahoSiteSearch("https://example.com/", "query")).toBeNull();
+    expect(matchMahoSiteSearch("github.com rust tools", MAHO_SITE_SEARCHES)?.url)
+      .toBe("https://github.com/search?q=rust+tools");
+    expect(matchMahoSiteSearch("@youtube cats", MAHO_SITE_SEARCHES)?.engine.name).toBe("YouTube");
+  });
+
+  it("caps visible results at five while reserving the search fallback", () => {
+    const results = buildMahoCommandBarResults(input({
+      query: "docs",
+      tabs: Array.from({ length: 8 }, (_, index) => tab({
+        browserId: `docs-${index}`,
+        url: `https://docs-${index}.test`,
+        title: `Docs ${index}`,
+      })),
+    }));
+    expect(results).toHaveLength(5);
+    expect(results[4]).toMatchObject({ source: "action", isSearch: true });
+  });
+
+  it("retains the open tab favicon for presentation", () => {
+    const results = buildMahoCommandBarResults(input({
+      tabs: [tab({ browserId: "icon", url: "https://icon.test", faviconUrl: "https://icon.test/favicon.ico" })],
+    }));
+    expect(results[0].faviconUrl).toBe("https://icon.test/favicon.ico");
+  });
+
   it("behaves like a recency-ordered tab switcher before anything is typed", () => {
     const results = buildMahoCommandBarResults(input({
       tabs: [
@@ -143,7 +186,7 @@ describe("MahoCommandBar", () => {
     events.listen.mockImplementation(async () => () => {});
   });
 
-  function renderBar(props: { open: boolean; initialQuery?: string; mode?: "navigate" | "new-tab" } = { open: true }) {
+  function renderBar(props: { open: boolean; initialQuery?: string; mode?: MahoCommandBarMode } = { open: true }) {
     const onClose = vi.fn();
     const onNavigate = vi.fn();
     const onSelectOpenTab = vi.fn();
@@ -159,6 +202,60 @@ describe("MahoCommandBar", () => {
     );
     return { ...view, onClose, onNavigate, onSelectOpenTab };
   }
+
+  it("runs a filtered command without navigating", () => {
+    const run = vi.fn();
+    const onNavigate = vi.fn();
+    const onClose = vi.fn();
+    render(<MahoCommandBar open commands={[{ id: "reload", title: "Reload tab", run }]}
+      onClose={onClose} onNavigate={onNavigate} onSelectOpenTab={vi.fn()} />);
+    const field = screen.getByRole("combobox");
+    fireEvent.change(field, { target: { value: ">reload" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("routes domain queries and supports Tab entry and Escape exit from site search", () => {
+    const { onNavigate, onClose } = renderBar();
+    const field = screen.getByRole("combobox");
+    fireEvent.change(field, { target: { value: "github.com rust tools" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onNavigate).toHaveBeenLastCalledWith("https://github.com/search?q=rust+tools", "current");
+    fireEvent.change(field, { target: { value: "youtube.com" } });
+    fireEvent.keyDown(field, { key: "Tab" });
+    expect(field).toHaveValue("");
+    fireEvent.change(field, { target: { value: "cats" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onNavigate).toHaveBeenLastCalledWith("https://www.youtube.com/results?search_query=cats", "current");
+    onClose.mockClear();
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(field).toHaveValue("");
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("picks a site search engine with a working keyboard-focused input", () => {
+    const { onNavigate } = renderBar();
+    fireEvent.click(screen.getByRole("button", { name: "Choose search mode or engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Wikipedia" }));
+    const field = screen.getByRole("combobox");
+    expect(field).toHaveFocus();
+    fireEvent.change(field, { target: { value: "ferries" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onNavigate).toHaveBeenCalledWith("https://en.wikipedia.org/w/index.php?search=ferries", "current");
+  });
+
+  it("uses the tab favicon and preserves the active-descendant relationship", () => {
+    browserStore.upsertTab({
+      browserId: "tab-icon", url: "https://icon.test", title: "Icon",
+      faviconUrl: "https://icon.test/favicon.ico",
+    });
+    renderBar();
+    const option = screen.getByRole("option");
+    expect(option.querySelector("img")).toHaveAttribute("src", "https://icon.test/favicon.ico");
+    expect(screen.getByRole("combobox")).toHaveAttribute("aria-activedescendant", option.id);
+  });
 
   it("maps Enter, Cmd/Ctrl+Enter and Shift+Enter to current, new-tab and mini", () => {
     const { onNavigate } = renderBar();

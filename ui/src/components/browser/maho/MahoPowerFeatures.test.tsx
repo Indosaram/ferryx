@@ -48,7 +48,7 @@ import {
   saveAutoArchiveHours,
 } from "./mahoAutoArchive";
 import { MahoNowPlayingCard } from "./MahoNowPlayingCard";
-import { MahoTabSwitcher } from "./MahoTabSwitcher";
+import { fitMahoSwitcher, MahoTabSwitcher } from "./MahoTabSwitcher";
 import { planTidyGroups, tidyDomainOf, tidyTodayTabs } from "./mahoTabTidy";
 import { browserMediaStore, type BrowserMediaState } from "../../../lib/browserMedia";
 import { useNativeTerminalVisibility } from "../../../lib/nativeTerminalVisibility";
@@ -151,9 +151,58 @@ describe("MahoTabSwitcher", () => {
     const cards = screen.getAllByRole("option");
     expect(cards.map((card) => card.getAttribute("data-browser-id"))).toEqual(["tab-c", "tab-b", "tab-a"]);
     expect(cards[0]).toHaveAttribute("aria-selected", "true");
-    // Each card carries the host and the Space badge.
-    expect(cards[0].textContent).toContain("tab-c.example.com");
-    expect(screen.getAllByTestId("maho-tab-switcher-space-badge")[0].textContent).toContain("Personal");
+    expect(cards[0]).toHaveAccessibleName("Gamma");
+    expect(cards[0]).toHaveStyle({ width: "220px" });
+  });
+
+  it("fits the source card geometry before reducing the visible count", () => {
+    expect(fitMahoSwitcher(2000, 10)).toEqual({ count: 7, width: 220 });
+    expect(fitMahoSwitcher(900, 4)).toEqual({ count: 4, width: 203 });
+    expect(fitMahoSwitcher(500, 8)).toEqual({ count: 2, width: 153 });
+    expect(fitMahoSwitcher(200, 8)).toEqual({ count: 1, width: 140 });
+    expect(fitMahoSwitcher(900, 0)).toEqual({ count: 0, width: 140 });
+    expect(fitMahoSwitcher(0, 3)).toEqual({ count: 3, width: 220 });
+    expect(fitMahoSwitcher(Number.NaN, 3)).toEqual({ count: 3, width: 220 });
+  });
+
+  it("includes untouched tabs after the touched MRU entries", () => {
+    const store = makeStore();
+    addTab(store, "tab-a");
+    addTab(store, "tab-b");
+    addTab(store, "tab-c");
+    store.touch("tab-b");
+    expect(selectMruTabs(store.getState()).map((tab) => tab.browserId)).toEqual(["tab-b", "tab-a", "tab-c"]);
+  });
+
+  it("renders supplied snapshots and the favicon fallback", () => {
+    const store = makeStore();
+    addTab(store, "tab-a", { faviconUrl: "https://a.test/icon.png" });
+    addTab(store, "tab-b", { faviconUrl: "https://b.test/icon.png" });
+    render(<MahoTabSwitcher open tabs={selectMruTabs(store.getState())} selectedIndex={0}
+      onSelect={vi.fn()} onClose={vi.fn()} store={store}
+      thumbnails={{ "tab-b": "https://b.test/snapshot.png" }} />);
+    expect(document.querySelector(".maho-switcher-thumbnail"))
+      .toHaveAttribute("src", "https://b.test/snapshot.png");
+    expect(document.querySelector(".maho-switcher-fallback"))
+      .toHaveAttribute("src", "https://a.test/icon.png");
+  });
+
+  it("commits the fitted more slot to the all-tabs callback, not a tab", () => {
+    const store = makeStore();
+    for (let index = 0; index < 10; index += 1) addTab(store, `tab-${index}`);
+    const onSelect = vi.fn();
+    const onClose = vi.fn();
+    const onShowAllTabs = vi.fn();
+    render(<MahoTabSwitcher open tabs={selectMruTabs(store.getState())} selectedIndex={0}
+      onSelect={onSelect} onClose={onClose} onShowAllTabs={onShowAllTabs} store={store} />);
+    const options = screen.getAllByRole("option");
+    const more = options[options.length - 1];
+    expect(more).not.toHaveAttribute("data-browser-id");
+    fireEvent.mouseEnter(more);
+    fireEvent.keyUp(window, { key: "Control" });
+    expect(onShowAllTabs).toHaveBeenCalledTimes(1);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("cycles with Tab and commits the highlighted tab when Control is released", () => {
@@ -204,6 +253,17 @@ describe("MahoTabSwitcher", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("does not reverse Shift+Tab twice after a backward opening", () => {
+    const store = makeStore();
+    addTab(store, "tab-a");
+    addTab(store, "tab-b");
+    addTab(store, "tab-c");
+    render(<MahoTabSwitcher open direction="backward" tabs={selectMruTabs(store.getState())}
+      selectedIndex={2} onSelect={vi.fn()} onClose={vi.fn()} store={store} />);
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
+  });
+
   it("cancels on Esc without selecting", () => {
     const store = makeStore();
     addTab(store, "tab-a");
@@ -211,6 +271,7 @@ describe("MahoTabSwitcher", () => {
 
     const { onSelect, onClose } = renderSwitcher(store);
     fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyUp(window, { key: "Control" });
 
     expect(onSelect).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalledTimes(1);

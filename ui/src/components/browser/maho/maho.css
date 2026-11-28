@@ -1067,3 +1067,135 @@
     animation-duration: 0s !important;
   }
 }
+
+/* ---- command bar parity ---- */
+/* maho_command_overlay_view.cc / maho_command_result_row_view.cc and
+   maho_ctrl_tab_{layout.h,switcher_view.cc,switcher_card_view.cc}. */
+.maho-command-backdrop,
+.maho-switcher-backdrop {
+  --maho-command-surface: rgb(23 25 32 / 69%);
+  --maho-command-text: rgb(243 243 247);
+  --maho-command-muted: rgb(143 143 159);
+  --maho-command-selection: rgb(210 155 145 / 44%);
+  --maho-command-border: rgb(255 255 255 / 7%);
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+:root[data-theme="light"] .maho-command-backdrop {
+  --maho-command-surface: rgb(246 248 252 / 88%);
+  --maho-command-text: rgb(45 51 74);
+  --maho-command-muted: rgb(128 136 166);
+  --maho-command-selection: rgb(120 55 50 / 11%);
+  --maho-command-border: rgb(141 152 181 / 13%);
+}
+
+.maho-command-panel {
+  box-sizing: border-box;
+  width: 744px;
+  max-width: 100%;
+  max-height: 100%;
+  overflow-y: auto;
+  border: 1px solid var(--maho-command-border);
+  border-radius: 24px;
+  padding: 10px 8px 8px;
+  color: var(--maho-command-text);
+  background: var(--maho-command-surface);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 25%), 0 1px 2px rgb(0 0 0 / 45%);
+  -webkit-backdrop-filter: blur(30px) saturate(140%);
+  backdrop-filter: blur(30px) saturate(140%);
+}
+
+.maho-command-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  margin: 0 6px;
+  padding: 0 12px;
+  border-radius: 14px;
+}
+
+.maho-command-glyph {
+  display: inline-flex;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+}
+
+.maho-command-glyph svg { width: 18px; height: 18px; }
+.maho-command-glyph img { width: 24px; height: 24px; object-fit: contain; }
+
+.maho-command-input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  border: 0;
+  padding: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: 500 15px/24px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.maho-command-input::placeholder { color: color-mix(in srgb, var(--maho-command-text) 64%, transparent); }
+.maho-command-input::selection { background: rgb(88 129 214 / 38%); }
+.maho-command-results { display: flex; flex-direction: column; gap: 2px; }
+.maho-command-result { flex: 0 0 44px; height: 44px; padding: 0 6px; cursor: pointer; }
+.maho-command-result-content { display: flex; align-items: center; gap: 8px; height: 100%; padding: 0 12px; border-radius: 10px; }
+.maho-command-result[aria-selected="true"] .maho-command-result-content { background: var(--maho-command-selection); }
+.maho-command-result-text { display: flex; align-items: baseline; gap: 5px; min-width: 0; flex: 1; }
+.maho-command-result-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 500; }
+.maho-command-result-metadata { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--maho-command-muted); font-size: 12px; }
+.maho-command-switch-tab { display: flex; flex-shrink: 0; align-items: center; gap: 6px; padding-left: 8px; color: color-mix(in srgb, var(--maho-command-text) 78%, transparent); font-size: 12px; }
+.maho-command-chevron { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 12px; background: rgb(255 255 255 / 24%); }
+.maho-command-chevron svg { width: 14px; height: 14px; }
+.maho-command-result[aria-selected="true"] .maho-command-chevron { background: white; color: var(--maho-space-accent, var(--sidebar-primary)); }
+.maho-command-empty { margin: 0; padding: 8px 40px 4px; color: var(--maho-command-muted); text-align: center; font-size: 12px; }
+.maho-command-empty[data-compact="true"] { padding-top: 6px; padding-bottom: 3px; }
+
+.maho-switcher-panel {
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 24px;
+  overflow-x: auto;
+  border: 1px solid rgb(255 255 255 / 13%);
+  border-radius: 16px;
+  background: var(--maho-command-surface);
+  color: rgb(234 234 234);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 25%);
+  -webkit-backdrop-filter: blur(30px);
+  backdrop-filter: blur(30px);
+}
+
+.maho-switcher-cards { display: flex; align-items: center; gap: 12px; }
+.maho-switcher-card { position: relative; box-sizing: border-box; display: flex; flex: 0 0 auto; flex-direction: column; gap: 4px; padding: 6px; border-radius: 10px; cursor: pointer; }
+/* Views borders paint over content without consuming its layout insets. */
+.maho-switcher-card::after { position: absolute; inset: 0; border: 2px solid transparent; border-radius: 10px; content: ""; pointer-events: none; }
+.maho-switcher-card[aria-selected="true"] { background: rgb(255 255 255 / 20%); }
+.maho-switcher-card[aria-selected="true"]::after { border-color: rgb(110 169 255); }
+.maho-switcher-preview { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px; background: rgb(255 255 255 / 14%); }
+.maho-switcher-fallback { width: 48px; height: 48px; object-fit: contain; }
+.maho-switcher-thumbnail { width: 100%; height: 100%; object-fit: fill; }
+.maho-switcher-footer { display: flex; flex: 0 0 36px; align-items: center; gap: 6px; min-width: 0; padding: 0 4px; }
+.maho-switcher-favicon { flex: 0 0 16px; width: 16px; height: 16px; }
+.maho-switcher-favicon img { width: 16px; height: 16px; object-fit: contain; }
+.maho-switcher-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.maho-switcher-more { box-sizing: border-box; display: flex; flex: 0 0 120px; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 6px; border: 2px solid rgb(255 255 255 / 25%); border-radius: 10px; color: rgb(207 207 210); cursor: pointer; font-size: 13px; }
+.maho-switcher-more span + span { color: rgb(136 136 140); font-size: 12px; }
+.maho-switcher-more[aria-selected="true"] { border-color: rgb(110 169 255); }
+.maho-command-mode-chip { display: inline-flex; flex-shrink: 0; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--sidebar-primary) 16%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--sidebar-primary) 8%, transparent); color: var(--sidebar-primary); font-size: 12px; }
+.maho-command-mode-chip i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.maho-command-picker-button { flex-shrink: 0; padding: 4px 10px; border: 1px solid var(--maho-command-border); border-radius: 8px; background: rgb(255 255 255 / 6%); color: var(--maho-command-text); font-size: 12px; }
+.maho-command-picker { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 18px; }
+.maho-command-picker button { padding: 4px 8px; border-radius: 8px; color: var(--maho-command-text); font-size: 12px; }
+.maho-command-picker button:hover, .maho-command-picker button:focus-visible { background: var(--maho-command-selection); }
+/* ---- end command bar parity ---- */

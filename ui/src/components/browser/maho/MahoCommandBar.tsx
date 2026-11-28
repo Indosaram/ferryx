@@ -16,12 +16,9 @@
 // (or on unmount) removes the surface again - the observed mutation is what
 // releases occlusion, immediately, with no state to leak.
 //
-// Styling is scoped: Ferryx semantic Tailwind tokens (`bg-popover`, `border-border`,
-// ...) plus the Maho geometry numbers from `mahoTokens.ts` applied inline. No new
-// global CSS, and the Space swatch is the only per-Space color, painted from the
-// store value.
+// Geometry maps to maho_command_overlay_view.cc and maho_command_result_row_view.cc.
 
-import { Globe, History, Search, Star, X, type LucideIcon } from "lucide-react";
+import { ChevronRight, Globe } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -41,21 +38,54 @@ import {
   type BrowserSearchEngine,
   type BrowserSettingsState,
 } from "../../../lib/browserSettings";
-import { isMacShortcutPlatform } from "../../../lib/shortcuts";
 import {
+  browserStore,
+  type BrowserStore,
   DEFAULT_SPACE_COLOR,
   DEFAULT_SPACE_NAME,
   useBrowserStore,
   type BrowserSpace,
   type BrowserStoreTab,
 } from "../../../state/browserStore";
-import { MAHO_LAYOUT_TOKENS } from "./mahoTokens";
 
 /** Where a chosen result lands. `mini` is the transient Mini Pane slot. */
 export type MahoCommandBarTarget = "current" | "new-tab" | "mini";
 
 /** `navigate` is the `Cmd+L` face; `new-tab` is the `Cmd+T` face. */
-export type MahoCommandBarMode = "navigate" | "new-tab";
+export type MahoCommandBarMode = "navigate" | "new-tab" | "all-tabs" | "commands";
+
+export type MahoBrowserCommand = { id: string; title: string; run: () => void; disabled?: boolean };
+export type MahoSiteSearch = { keyword: string; name: string; urlTemplate: string };
+
+// MahoCommandModel::ExpandSiteSearchTemplate accepts all three template tokens.
+export const MAHO_SITE_SEARCHES: readonly MahoSiteSearch[] = [
+  { keyword: "google.com", name: "Google", urlTemplate: "https://www.google.com/search?q={query}" },
+  { keyword: "duckduckgo.com", name: "DuckDuckGo", urlTemplate: "https://duckduckgo.com/?q={query}" },
+  { keyword: "bing.com", name: "Bing", urlTemplate: "https://www.bing.com/search?q={query}" },
+  { keyword: "search.brave.com", name: "Brave", urlTemplate: "https://search.brave.com/search?q={query}" },
+  { keyword: "youtube.com", name: "YouTube", urlTemplate: "https://www.youtube.com/results?search_query={query}" },
+  { keyword: "github.com", name: "GitHub", urlTemplate: "https://github.com/search?q={query}" },
+  { keyword: "wikipedia.org", name: "Wikipedia", urlTemplate: "https://en.wikipedia.org/w/index.php?search={query}" },
+];
+
+export function expandMahoSiteSearch(template: string, query: string): string | null {
+  if (!query.trim() || !/\{query\}|\{searchTerms\}|%s/.test(template)) return null;
+  const expanded = template.replace(/\{query\}|\{searchTerms\}|%s/g, encodeURIComponent(query.trim()).replace(/%20/g, "+"));
+  try {
+    const url = new URL(expanded);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch { return null; }
+}
+
+export function matchMahoSiteSearch(query: string, engines: readonly MahoSiteSearch[]) {
+  const match = /^@?(\S+)\s+(.+)$/.exec(query.trim());
+  if (!match) return null;
+  const keyword = match[1].toLowerCase().replace(/^www\./, "");
+  const engine = engines.find((entry) => entry.keyword === keyword || entry.name.toLowerCase() === keyword);
+  if (!engine) return null;
+  const url = expandMahoSiteSearch(engine.urlTemplate, match[2]);
+  return url ? { engine, url, query: match[2] } : null;
+}
 
 export type MahoCommandBarSource = "tab" | "bookmark" | "history" | "action";
 
@@ -72,6 +102,8 @@ export type MahoCommandBarResult = {
   spaceName?: string;
   spaceColor?: string;
   favorite: boolean;
+  faviconUrl?: string;
+  commandId?: string;
   /** The action row would run a web search rather than navigate to an address. */
   isSearch: boolean;
   score: number;
@@ -86,6 +118,7 @@ export type MahoCommandBarInput = {
   bookmarks: readonly Bookmark[];
   history: readonly BrowserHistoryEntry[];
   settings: BrowserSettingsState;
+  mode?: MahoCommandBarMode;
 };
 
 export type MahoCommandBarProps = {
@@ -93,6 +126,9 @@ export type MahoCommandBarProps = {
   /** Prefills the field (`Cmd+L` seeds the current address). */
   initialQuery?: string;
   mode?: MahoCommandBarMode;
+  commands?: readonly MahoBrowserCommand[];
+  siteSearches?: readonly MahoSiteSearch[];
+  store?: BrowserStore;
   onClose: () => void;
   /** An open tab was chosen: switch to it rather than navigate. */
   onSelectOpenTab: (browserId: string) => void;
@@ -109,7 +145,7 @@ const SOURCE_WEIGHT: Readonly<Record<MahoCommandBarSource, number>> = {
 
 /** A favorite is a pinned open tab: same tier, one step ahead of a plain tab. */
 const FAVORITE_BONUS = 25;
-const MAX_RESULTS = 8;
+const MAX_RESULTS = 5;
 
 const ENGINE_LABELS: Readonly<Record<BrowserSearchEngine, string>> = {
   duckduckgo: "DuckDuckGo",
@@ -165,9 +201,10 @@ function actionRow(query: string, settings: BrowserSettingsState): MahoCommandBa
  */
 export function buildMahoCommandBarResults(input: MahoCommandBarInput): MahoCommandBarResult[] {
   const query = input.query.trim();
+  const allTabs = input.mode === "all-tabs";
   const byUrl = new Map<string, MahoCommandBarResult>();
   const consider = (candidate: MahoCommandBarResult) => {
-    const key = normalizeSuggestionUrl(candidate.url);
+    const key = allTabs ? candidate.id : normalizeSuggestionUrl(candidate.url);
     const existing = byUrl.get(key);
     if (!existing || candidate.score > existing.score) byUrl.set(key, candidate);
   };
@@ -188,13 +225,14 @@ export function buildMahoCommandBarResults(input: MahoCommandBarInput): MahoComm
       spaceName: space?.name ?? DEFAULT_SPACE_NAME,
       spaceColor: space?.color ?? DEFAULT_SPACE_COLOR,
       favorite,
+      faviconUrl: tab.faviconUrl,
       isSearch: false,
       score: SOURCE_WEIGHT.tab + match + (favorite ? FAVORITE_BONUS : 0),
       recency: tab.lastActiveAt,
     });
   }
 
-  if (query) {
+  if (query && !allTabs) {
     for (const bookmark of input.bookmarks) {
       const title = bookmark.title.trim() || compactUrl(bookmark.url);
       const match = candidateScore(query, bookmark.url, title);
@@ -233,6 +271,7 @@ export function buildMahoCommandBarResults(input: MahoCommandBarInput): MahoComm
     || right.recency - left.recency
     || left.title.localeCompare(right.title));
 
+  if (allTabs) return ranked;
   const action = actionRow(query, input.settings);
   if (!action) return ranked.slice(0, MAX_RESULTS);
   // The same page is already offered by a tab/bookmark/history row, which can open it in a
@@ -249,17 +288,13 @@ export function buildMahoCommandBarResults(input: MahoCommandBarInput): MahoComm
   return action.isSearch ? [...ranked.slice(0, room), action] : [action, ...ranked.slice(0, room)];
 }
 
-function rowIcon(row: MahoCommandBarResult): LucideIcon {
-  if (row.source === "history") return History;
-  if (row.source === "bookmark" || row.favorite) return Star;
-  if (row.source === "action" && row.isSearch) return Search;
-  return Globe;
-}
-
 export function MahoCommandBar({
   open,
   initialQuery,
   mode = "navigate",
+  commands = [],
+  siteSearches = MAHO_SITE_SEARCHES,
+  store = browserStore,
   onClose,
   onSelectOpenTab,
   onNavigate,
@@ -272,21 +307,43 @@ export function MahoCommandBar({
   const listboxId = useId();
   const { settings } = useBrowserSettings();
   const { tree } = useBookmarks();
-  const tabs = useBrowserStore((state) => state.tabs);
-  const spaces = useBrowserStore((state) => state.spaces);
-  const isMac = isMacShortcutPlatform();
-  const newTabModifier = isMac ? "Cmd" : "Ctrl";
+  const tabs = useBrowserStore((state) => state.tabs, store);
+  const spaces = useBrowserStore((state) => state.spaces, store);
+  const [siteSearch, setSiteSearch] = useState<MahoSiteSearch | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const commandsMode = mode === "commands" || query.startsWith(">");
+  const matchedSite = siteSearch || mode === "all-tabs" ? null : matchMahoSiteSearch(query, siteSearches);
+  const siteUrl = siteSearch ? expandMahoSiteSearch(siteSearch.urlTemplate, query) : matchedSite?.url;
+  const activeSite = siteSearch ?? matchedSite?.engine;
+  const enterSiteSearch = useCallback((engine: MahoSiteSearch) => {
+    setSiteSearch(engine);
+    setQuery("");
+    setSelectedIndex(0);
+    setPickerOpen(false);
+    inputRef.current?.focus();
+  }, []);
 
   const results = useMemo(
-    () => buildMahoCommandBarResults({
-      query,
-      tabs: Object.values(tabs),
-      spaces,
-      bookmarks: tree.bookmarks,
-      history: settings.rememberBrowsingHistory ? history : [],
-      settings,
-    }),
-    [history, query, settings, spaces, tabs, tree.bookmarks],
+    (): MahoCommandBarResult[] => {
+      if (commandsMode) {
+        const filter = query.replace(/^>\s*/, "").trim();
+        return commands.filter((command) => !command.disabled && (!filter || candidateScore(filter, command.id, command.title) > 0))
+          .map((command) => ({ id: `command:${command.id}`, commandId: command.id, source: "action", title: command.title,
+            url: "", subtitle: "", favorite: false, isSearch: false, score: 0, recency: 0 }));
+      }
+      if (activeSite) return siteUrl ? [{ id: "action:site-search", source: "action", title: siteSearch ? query : matchedSite?.query ?? query,
+        url: siteUrl, subtitle: activeSite.name, favorite: false, isSearch: true, score: 0, recency: 0 }] : [];
+      return buildMahoCommandBarResults({
+        query,
+        tabs: Object.values(tabs),
+        spaces,
+        bookmarks: tree.bookmarks,
+        history: settings.rememberBrowsingHistory ? history : [],
+        settings,
+        mode,
+      });
+    },
+    [activeSite, commands, commandsMode, history, matchedSite?.query, mode, query, settings, siteSearch, siteUrl, spaces, tabs, tree.bookmarks],
   );
 
   // Opening remembers who had focus and takes it. Kept on `open` alone so a second face
@@ -309,6 +366,8 @@ export function MahoCommandBar({
   useEffect(() => {
     if (!open) return;
     setQuery(initialQuery ?? "");
+    setSiteSearch(null);
+    setPickerOpen(false);
     setSelectedIndex(0);
   }, [initialQuery, mode, open]);
 
@@ -324,11 +383,17 @@ export function MahoCommandBar({
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
+      if (pickerOpen) { setPickerOpen(false); inputRef.current?.focus(); return; }
+      if (siteSearch || query.startsWith(">")) {
+        setSiteSearch(null);
+        setQuery("");
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
-  }, [onClose, open]);
+  }, [onClose, open, pickerOpen, query, siteSearch]);
 
   // Keep the highlight inside the list as the query narrows it.
   useEffect(() => {
@@ -350,6 +415,11 @@ export function MahoCommandBar({
 
   const commit = useCallback((row: MahoCommandBarResult | undefined, target: MahoCommandBarTarget) => {
     if (!row) return;
+    if (row.commandId) {
+      onClose();
+      commands.find((command) => command.id === row.commandId)?.run();
+      return;
+    }
     const matchesTypedAddress = typedAddressKey !== null
       && normalizeSuggestionUrl(row.url) === typedAddressKey;
     const resolved = target === "current"
@@ -363,9 +433,16 @@ export function MahoCommandBar({
     }
     onNavigate(row.url, resolved);
     onClose();
-  }, [mode, onClose, onNavigate, onSelectOpenTab, typedAddressKey]);
+  }, [commands, mode, onClose, onNavigate, onSelectOpenTab, typedAddressKey]);
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === "Tab" && !event.shiftKey && !commandsMode && mode !== "all-tabs") {
+      const keyword = query.trim().replace(/^@/, "").toLowerCase();
+      const engine = siteSearches.find((entry) => entry.keyword === keyword || entry.name.toLowerCase() === keyword);
+      if (engine) { event.preventDefault(); enterSiteSearch(engine); return; }
+    }
+    if (event.key === "Backspace" && !query && siteSearch) { setSiteSearch(null); return; }
     if (event.key === "ArrowDown") {
       event.preventDefault();
       if (results.length === 0) return;
@@ -387,18 +464,16 @@ export function MahoCommandBar({
         ? "new-tab"
         : "current";
     commit(results[boundedIndex], target);
-  }, [boundedIndex, commit, results]);
+  }, [boundedIndex, commandsMode, commit, enterSiteSearch, mode, query, results, siteSearch, siteSearches]);
 
   if (!open) return null;
 
   const activeOptionId = results.length > 0 ? `${listboxId}-option-${boundedIndex}` : undefined;
-  const placeholder = mode === "new-tab"
-    ? "Search or enter an address to open in a new tab"
-    : "Search tabs, favorites, bookmarks, history or enter an address";
+  const contextFavicon = results.find((row) => row.url === query)?.faviconUrl;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 px-4 pt-[12vh] backdrop-blur-sm"
+      className="maho-command-backdrop"
       onMouseDown={onClose}
     >
       <div
@@ -406,14 +481,13 @@ export function MahoCommandBar({
         aria-modal="true"
         aria-label="Maho command bar"
         data-maho-command-bar="true"
-        className="w-full max-w-2xl overflow-hidden rounded-xl border border-border bg-popover text-foreground shadow-2xl"
+        className="maho-command-panel"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div
-          className="flex items-center gap-2 border-b border-border px-3"
-          style={{ height: MAHO_LAYOUT_TOKENS.searchPill.height }}
-        >
-          <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <div className="maho-command-search-row">
+          <span className="maho-command-glyph" aria-hidden="true">
+            {query ? contextFavicon ? <img src={contextFavicon} alt="" /> : <Globe /> : null}
+          </span>
           <input
             ref={inputRef}
             role="combobox"
@@ -424,33 +498,36 @@ export function MahoCommandBar({
             aria-activedescendant={activeOptionId}
             data-testid="maho-command-bar-input"
             value={query}
-            placeholder={placeholder}
+            placeholder={commandsMode ? "Search commands…" : activeSite ? "Search…" : mode === "all-tabs" ? "Search tabs…" : "Search or Enter URL…"}
             onChange={(event) => {
               setQuery(event.target.value);
               setSelectedIndex(0);
             }}
             onKeyDown={handleKeyDown}
-            className="h-full min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            className="maho-command-input"
           />
-          <button
-            type="button"
-            aria-label="Close command bar"
-            onClick={onClose}
-            className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-          >
-            <X className="size-4" aria-hidden="true" />
-          </button>
+          {commandsMode || activeSite || mode === "all-tabs" ? (
+            <span className="maho-command-mode-chip"><i />{commandsMode ? "Commands" : activeSite?.name ?? "Tabs"}</span>
+          ) : null}
+          <button type="button" className="maho-command-picker-button" aria-label="Choose search mode or engine"
+            aria-expanded={pickerOpen} onClick={() => setPickerOpen((current) => !current)}>Search</button>
         </div>
+        {pickerOpen ? (
+          <div className="maho-command-picker" role="group" aria-label="Search modes and engines">
+            <button type="button" onClick={() => { setSiteSearch(null); setQuery(">"); setPickerOpen(false); inputRef.current?.focus(); }}>Commands</button>
+            {siteSearches.map((engine) => <button type="button" key={engine.keyword}
+              onClick={() => enterSiteSearch(engine)}>{engine.name}</button>)}
+          </div>
+        ) : null}
 
         <div
           id={listboxId}
           role="listbox"
           aria-label="Command bar results"
           data-testid="maho-command-bar-results"
-          className="max-h-[55vh] overflow-y-auto p-1 scrollbar-sleek"
+          className="maho-command-results scrollbar-sleek"
         >
           {results.map((row, index) => {
-            const Icon = rowIcon(row);
             const selected = index === boundedIndex;
             return (
               <div
@@ -463,78 +540,37 @@ export function MahoCommandBar({
                 data-browser-id={row.browserId}
                 onMouseEnter={() => setSelectedIndex(index)}
                 onClick={() => commit(row, "current")}
-                className={`flex cursor-pointer items-center gap-2 px-2 ${
-                  selected ? "bg-accent text-accent-foreground" : "text-foreground"
-                }`}
-                style={{
-                  height: MAHO_LAYOUT_TOKENS.rows.height,
-                  borderRadius: MAHO_LAYOUT_TOKENS.rows.cornerRadius,
-                }}
+                className="maho-command-result"
               >
-                <Icon
-                  className="shrink-0 text-muted-foreground"
-                  style={{
-                    width: MAHO_LAYOUT_TOKENS.rows.iconSize,
-                    height: MAHO_LAYOUT_TOKENS.rows.iconSize,
-                  }}
-                  aria-hidden="true"
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm">{row.title}</span>
-                  <span className="block truncate font-mono text-[10px] text-muted-foreground">{row.subtitle}</span>
-                </span>
-                {row.spaceName ? (
-                  <span
-                    data-testid="maho-command-bar-space-badge"
-                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-px text-[10px] text-muted-foreground"
-                  >
-                    <span
-                      className="size-1.5 rounded-full"
-                      style={{ backgroundColor: row.spaceColor }}
-                      aria-hidden="true"
-                    />
-                    {row.spaceName}
+                <span className="maho-command-result-content">
+                  <span className="maho-command-glyph" aria-hidden="true">
+                    {row.faviconUrl ? <img src={row.faviconUrl} alt="" /> : <Globe />}
                   </span>
-                ) : null}
-                {row.favorite ? (
-                  <Star
-                    className="shrink-0 text-muted-foreground"
-                    style={{ width: MAHO_LAYOUT_TOKENS.rows.iconSize, height: MAHO_LAYOUT_TOKENS.rows.iconSize }}
-                    aria-label="Favorite"
-                  />
-                ) : null}
+                  <span className="maho-command-result-text">
+                    <span className="maho-command-result-title">{row.title}</span>
+                    {query.trim() && row.subtitle ? (
+                      <span className="maho-command-result-metadata">— {row.subtitle}</span>
+                    ) : null}
+                  </span>
+                  {row.source === "tab" ? (
+                    <span className="maho-command-switch-tab">
+                      <span>Switch to Tab</span>
+                      <span className="maho-command-chevron"><ChevronRight aria-hidden="true" /></span>
+                    </span>
+                  ) : null}
+                </span>
               </div>
             );
           })}
         </div>
 
         {results.length === 0 ? (
-          <div className="px-3 py-8 text-center text-xs text-muted-foreground">
-            No matching tabs, bookmarks or history.
+          <div className="maho-command-empty" data-compact={Boolean(query.trim())}>
+            {query.trim() ? `No results for “${query.trim()}”` : "Type to search tabs, history, and URLs"}
           </div>
         ) : null}
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
-          <Hint keys={["Up", "Down"]} label="Navigate" />
-          <Hint keys={["Enter"]} label={mode === "new-tab" ? "Open in new tab" : "Open"} />
-          <Hint keys={[`${newTabModifier}+Enter`]} label="New tab" />
-          <Hint keys={["Shift+Enter"]} label="Mini pane" />
-          <Hint keys={["Esc"]} label="Close" />
-        </div>
       </div>
     </div>
-  );
-}
-
-function Hint({ keys, label }: { keys: readonly string[]; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1">
-      {keys.map((key) => (
-        <kbd key={key} className="rounded border border-border bg-muted px-1 py-px text-foreground">
-          {key}
-        </kbd>
-      ))}
-      <span>{label}</span>
-    </span>
   );
 }

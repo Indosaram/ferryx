@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  captureBrowserThumbnail,
   browserAutomationAct,
   browserAutomationSnapshot,
   browserDownloadErrorRegistered,
@@ -36,6 +37,17 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+describe("browser thumbnails", () => {
+  it("invokes native thumbnail capture and preserves typed platform refusals", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce("data:image/png;base64,cG5n");
+    await expect(captureBrowserThumbnail("tab-a")).resolves.toBe("data:image/png;base64,cG5n");
+    expect(invoke).toHaveBeenLastCalledWith("cmd_browser_capture_thumbnail", { browserId: "tab-a" });
+    const refusal = { code: "UNSUPPORTED", message: "Native capture unavailable" };
+    vi.mocked(invoke).mockRejectedValueOnce(refusal);
+    await expect(captureBrowserThumbnail("tab-b")).rejects.toBe(refusal);
+  });
+});
 
 describe("browser tab shortcut helpers", () => {
   it("classifies guest-forwarded tab actions", () => {

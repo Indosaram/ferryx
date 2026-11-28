@@ -33,8 +33,13 @@ import {
   type ReactNode,
 } from "react";
 
+import { emit } from "@tauri-apps/api/event";
 import { copyTextToClipboard } from "../../../lib/clipboard";
 import {
+  BROWSER_SHORTCUT_REQUESTED_EVENT,
+  captureBrowserThumbnail,
+  onBrowserStateChanged,
+  type BrowserShortcutAction,
   closeBrowser,
   createBrowser,
   navigateBrowser,
@@ -230,6 +235,54 @@ export function useMahoBrowserShell({
   widthRef.current = width;
 
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [thumbnails, setThumbnails] = useState<Readonly<Record<string, string>>>({});
+
+  useEffect(() => {
+    let disposed = false;
+    let unsupported = false;
+    let previousId = selectActiveBrowserId(store.getState());
+    const inFlight = new Set<string>();
+    const recapture = new Set<string>();
+    const refresh = async (browserId: string) => {
+      if (disposed || unsupported || !store.getState().tabs[browserId]) return;
+      if (inFlight.has(browserId)) { recapture.add(browserId); return; }
+      inFlight.add(browserId);
+      try {
+        const data = await captureBrowserThumbnail(browserId);
+        if (!disposed && store.getState().tabs[browserId]) {
+          setThumbnails((current) => ({ ...current, [browserId]: data }));
+        }
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? error.code : null;
+        if (code === "UNSUPPORTED") unsupported = true;
+        console.warn("Browser thumbnail capture failed", browserId, error);
+      } finally {
+        inFlight.delete(browserId);
+        if (recapture.delete(browserId)) void refresh(browserId);
+      }
+    };
+    if (previousId) void refresh(previousId);
+    const unsubscribe = store.subscribe((next) => {
+      const nextId = selectActiveBrowserId(next);
+      if (previousId && previousId !== nextId) void refresh(previousId);
+      previousId = nextId;
+      setThumbnails((current) => {
+        const ids = Object.keys(current);
+        return ids.some((id) => !next.tabs[id])
+          ? Object.fromEntries(ids.filter((id) => next.tabs[id]).map((id) => [id, current[id]]))
+          : current;
+      });
+    });
+    const unlisten = onBrowserStateChanged((event) => {
+      if (event.loading === false) void refresh(event.browserId);
+    });
+    void unlisten.catch((error) => console.warn("Browser thumbnail subscription failed", error));
+    return () => {
+      disposed = true;
+      unsubscribe();
+      void unlisten.then((stop) => stop(), () => undefined);
+    };
+  }, [store]);
   const [commandBar, setCommandBar] = useState<{
     open: boolean;
     mode: MahoCommandBarMode;
@@ -436,6 +489,11 @@ export function useMahoBrowserShell({
     void copyTextToClipboard(url).catch(() => undefined);
   }, []);
 
+  const dispatchBrowserAction = (action: BrowserShortcutAction) => {
+    void emit(BROWSER_SHORTCUT_REQUESTED_EVENT, { action, browserId: activeBrowserId ?? "" })
+      .catch((error) => toast.error(String(error)));
+  };
+
   const drawer = active && drawerOpen ? (
     <aside
       data-testid="activity-drawer-browser"
@@ -545,6 +603,20 @@ export function useMahoBrowserShell({
         open={commandBar.open}
         initialQuery={commandBar.initialQuery}
         mode={commandBar.mode}
+        store={store}
+        commands={[
+          { id: "new-tab", title: "New tab", run: handleNewTab },
+          { id: "close-tab", title: "Close tab", run: closeActiveTab, disabled: !activeBrowserId },
+          { id: "reload", title: "Reload tab", run: () => { if (activeBrowserId) handleCanvasReload(activeBrowserId); }, disabled: !activeBrowserId },
+          { id: "copy-url", title: "Copy URL", run: () => { if (activeTab) copyUrl(activeTab.url); }, disabled: !activeTab },
+          { id: "library", title: "Open library", run: () => { setLibraryOpen(true); if (!drawerOpen) dispatchBrowserAction("sidebar-toggle"); } },
+          { id: "tidy", title: "Tidy tabs", run: handleTidy },
+          { id: "sidebar", title: "Toggle sidebar", run: () => dispatchBrowserAction("sidebar-toggle") },
+          { id: "split-right", title: "Split right", run: () => dispatchBrowserAction("split-right") },
+          { id: "split-down", title: "Split down", run: () => dispatchBrowserAction("split-down") },
+          { id: "back", title: "Go back", run: () => { if (activeBrowserId) void goBackInBrowserTab(activeBrowserId).catch((error) => toast.error(String(error))); }, disabled: !activeTab?.canGoBack },
+          { id: "forward", title: "Go forward", run: () => { if (activeBrowserId) void goForwardInBrowserTab(activeBrowserId).catch((error) => toast.error(String(error))); }, disabled: !activeTab?.canGoForward },
+        ]}
         onClose={closeCommandBar}
         onSelectOpenTab={activateTab}
         onNavigate={handleCommandBarNavigate}
@@ -554,6 +626,8 @@ export function useMahoBrowserShell({
         direction={switcher.direction}
         tabs={mruTabs}
         selectedIndex={switcher.index}
+        thumbnails={thumbnails}
+        onShowAllTabs={() => openCommandBar("all-tabs")}
         onSelect={activateTab}
         onClose={() => setSwitcher({ open: false, direction: "forward", index: 0 })}
         store={store}

@@ -194,6 +194,10 @@ export async function deliverDesignFeedback(request: { sessionId: string; memo: 
   return invoke<DesignFeedbackDelivery>("cmd_design_feedback_deliver", request);
 }
 
+export async function captureBrowserThumbnail(browserId: string): Promise<string> {
+  return invoke<string>("cmd_browser_capture_thumbnail", { browserId });
+}
+
 const browserLifecycleQueues = new Map<string, Promise<void>>();
 
 function enqueueBrowserLifecycle(browserId: string, operation: () => Promise<void>): Promise<void> {

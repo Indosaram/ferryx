@@ -2254,6 +2254,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_focus,
         cmd_browser_focus_app,
         cmd_browser_get_state,
+        cmd_browser_capture_thumbnail,
         cmd_browser_find,
         cmd_browser_clear_find,
         cmd_browser_media_control,

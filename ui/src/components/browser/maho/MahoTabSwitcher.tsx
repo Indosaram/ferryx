@@ -16,12 +16,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   browserStore,
-  useBrowserStore,
   type BrowserStore,
   type BrowserStoreTab,
 } from "../../../state/browserStore";
-import { displayHost } from "./mahoBrowserTabActions";
-import { MAHO_LAYOUT_TOKENS } from "./mahoTokens";
 
 /** `forward` is Ctrl+Tab (next MRU), `backward` is Ctrl+Shift+Tab. */
 export type MahoTabSwitcherDirection = "forward" | "backward";
@@ -35,6 +32,8 @@ export type MahoTabSwitcherProps = {
   selectedIndex: number;
   onSelect: (browserId: string) => void;
   onClose: () => void;
+  onShowAllTabs?: () => void;
+  thumbnails?: Readonly<Record<string, string>>;
   store?: BrowserStore;
 };
 
@@ -44,6 +43,20 @@ function clampIndex(index: number, length: number): number {
   return Math.min(Math.max(Math.trunc(index), 0), length - 1);
 }
 
+// maho_ctrl_tab_layout.h: fit cards before reducing the visible count.
+export function fitMahoSwitcher(availableWidth: number, total: number) {
+  if (!Number.isFinite(availableWidth) || availableWidth <= 0) {
+    return { count: Math.min(total, 7), width: 220 };
+  }
+  for (let count = Math.min(total, 7); count > 0; count -= 1) {
+    const more = total > count;
+    const fixed = 50 + (more ? 120 : 0) + (count + Number(more) - 1) * 12;
+    const width = Math.floor((availableWidth - fixed) / count);
+    if (width >= 140) return { count, width: Math.min(width, 220) };
+  }
+  return { count: Math.min(total, 1), width: 140 };
+}
+
 export function MahoTabSwitcher({
   open,
   direction = "forward",
@@ -51,9 +64,16 @@ export function MahoTabSwitcher({
   selectedIndex,
   onSelect,
   onClose,
+  onShowAllTabs,
+  thumbnails,
   store = browserStore,
 }: MahoTabSwitcherProps) {
-  const spaces = useBrowserStore((state) => state.spaces, store);
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+  const layout = fitMahoSwitcher(windowWidth - 32, tabs.length);
+  // Until the shell supplies its palette callback, keep every tab reachable.
+  const visibleCount = onShowAllTabs ? layout.count : tabs.length;
+  const hasMore = tabs.length > visibleCount;
+  const slotCount = visibleCount + Number(hasMore);
   const [highlight, setHighlight] = useState(0);
   // Mirrored in a ref so a key handler always reads the live highlight without
   // resubscribing the window listeners in the middle of a Control+Tab hold.
@@ -71,24 +91,43 @@ export function MahoTabSwitcher({
   // parent that re-renders with the same props does not fight the highlight.
   useEffect(() => {
     if (!open) return;
-    applyHighlight(clampIndex(selectedIndex, tabs.length));
-  }, [applyHighlight, open, selectedIndex, tabs.length]);
+    applyHighlight(clampIndex(selectedIndex, slotCount));
+  }, [applyHighlight, open, selectedIndex, slotCount]);
+
+  useEffect(() => {
+    if (!open) return;
+    const resize = () => setWindowWidth(window.innerWidth);
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    document.querySelector(`[data-maho-tab-switcher] [data-slot="${highlight}"]`)
+      ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [highlight, open]);
 
   const commit = useCallback((index: number) => {
     if (committedRef.current) return;
     committedRef.current = true;
-    const tab = tabs[clampIndex(index, tabs.length)];
+    if (hasMore && index === visibleCount) {
+      onClose();
+      onShowAllTabs?.();
+      return;
+    }
+    const tab = tabs[clampIndex(index, visibleCount)];
     if (tab) {
       onSelect(tab.browserId);
       // Committing is a use: it moves the tab to the head of the MRU list.
       store.touch(tab.browserId);
     }
     onClose();
-  }, [onClose, onSelect, store, tabs]);
+  }, [hasMore, onClose, onSelect, onShowAllTabs, store, tabs, visibleCount]);
 
   // The handlers read through this ref, so a highlight change never tears them down.
-  const handlers = useRef({ commit, length: tabs.length, direction });
-  handlers.current = { commit, length: tabs.length, direction };
+  const handlers = useRef({ commit, length: slotCount });
+  handlers.current = { commit, length: slotCount };
 
   // A fresh opening may commit again; resetting on `open` alone keeps a mid-hold
   // re-render (a new `onClose` identity, a tab count change) from re-arming it.
@@ -106,6 +145,7 @@ export function MahoTabSwitcher({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        committedRef.current = true;
         onClose();
         return;
       }
@@ -126,8 +166,7 @@ export function MahoTabSwitcher({
       }
       if (event.key !== "Tab") return;
       event.preventDefault();
-      const base = handlers.current.direction === "backward" ? -1 : 1;
-      cycle(event.shiftKey ? -base : base);
+      cycle(event.shiftKey ? -1 : 1);
     };
     const handleKeyUp = (event: KeyboardEvent) => {
       // Releasing Control is the commit gesture: the key that opened the switcher
@@ -146,11 +185,11 @@ export function MahoTabSwitcher({
 
   if (!open) return null;
 
-  const bounded = clampIndex(highlight, tabs.length);
+  const bounded = clampIndex(highlight, slotCount);
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6 backdrop-blur-sm"
+      className="maho-switcher-backdrop"
       data-testid="maho-tab-switcher-backdrop"
       onMouseDown={onClose}
     >
@@ -160,17 +199,16 @@ export function MahoTabSwitcher({
         aria-label="Tab switcher"
         data-maho-tab-switcher="true"
         data-direction={direction}
-        className="w-full max-w-3xl rounded-xl border border-border bg-popover p-3 text-foreground shadow-2xl"
+        className="maho-switcher-panel"
         onMouseDown={(event) => event.stopPropagation()}
       >
         {tabs.length === 0 ? (
-          <p className="px-2 py-6 text-center text-xs text-muted-foreground">No open tabs</p>
+          <p className="maho-command-empty">No open tabs</p>
         ) : (
-          <div role="listbox" aria-label="Tabs by recent use" className="flex flex-wrap gap-2">
-            {tabs.map((tab, index) => {
-              const space = spaces[tab.spaceId];
+          <div role="listbox" aria-label="Tabs by recent use" className="maho-switcher-cards">
+            {tabs.slice(0, visibleCount).map((tab, index) => {
               const selected = index === bounded;
-              const label = tab.title.trim() || displayHost(tab.url);
+              const label = tab.title.trim() || tab.url;
               return (
                 <div
                   key={tab.browserId}
@@ -179,57 +217,45 @@ export function MahoTabSwitcher({
                   aria-label={label}
                   data-testid={`maho-tab-switcher-card-${index}`}
                   data-browser-id={tab.browserId}
+                  data-slot={index}
                   data-selected={selected ? "true" : undefined}
                   onMouseEnter={() => applyHighlight(index)}
                   onClick={() => commit(index)}
-                  className={`flex cursor-pointer flex-col justify-between gap-1 border px-2 py-2 ${
-                    selected
-                      ? "border-border bg-accent text-accent-foreground"
-                      : "border-transparent bg-muted/40 text-foreground"
-                  }`}
-                  style={{
-                    width: 188,
-                    minHeight: MAHO_LAYOUT_TOKENS.rows.height * 1.9,
-                    borderRadius: MAHO_LAYOUT_TOKENS.rows.cornerRadius,
-                  }}
+                  className="maho-switcher-card"
+                  style={{ width: layout.width }}
                 >
-                  <span className="flex items-center gap-1.5">
-                    {tab.faviconUrl ? (
-                      <img src={tab.faviconUrl} alt="" className="size-3.5 shrink-0 rounded-sm" />
+                  <span className="maho-switcher-preview" style={{ height: Math.max(1, Math.floor((layout.width - 12) * 120 / 208)) }}>
+                    {thumbnails?.[tab.browserId] ? (
+                      <img src={thumbnails[tab.browserId]} alt="" className="maho-switcher-thumbnail" />
+                    ) : tab.faviconUrl ? (
+                      <img src={tab.faviconUrl} alt="" className="maho-switcher-fallback" />
                     ) : null}
-                    <span className="min-w-0 flex-1 truncate text-xs">{label}</span>
                   </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
-                      {displayHost(tab.url)}
+                  <span className="maho-switcher-footer">
+                    <span className="maho-switcher-favicon">
+                      {tab.faviconUrl ? <img src={tab.faviconUrl} alt="" /> : null}
                     </span>
-                    {space ? (
-                      <span
-                        data-testid="maho-tab-switcher-space-badge"
-                        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-px text-[10px] text-muted-foreground"
-                      >
-                        <span
-                          className="size-1.5 rounded-full"
-                          style={{ backgroundColor: space.color }}
-                          aria-hidden="true"
-                        />
-                        {space.name}
-                      </span>
-                    ) : null}
+                    <span className="maho-switcher-title">{label}</span>
                   </span>
                 </div>
               );
             })}
+            {hasMore ? (
+              <div
+                role="option"
+                aria-selected={bounded === visibleCount}
+                data-slot={visibleCount}
+                className="maho-switcher-more"
+                style={{ height: 52 + Math.max(1, Math.floor((layout.width - 12) * 120 / 208)) }}
+                onMouseEnter={() => applyHighlight(visibleCount)}
+                onClick={() => commit(visibleCount)}
+              >
+                <span>+{tabs.length - visibleCount} more</span>
+                <span>Show all tabs</span>
+              </div>
+            ) : null}
           </div>
         )}
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-1 pt-2 text-[10px] text-muted-foreground">
-          {["Tab", "Enter", "Esc"].map((key) => (
-            <kbd key={key} className="rounded border border-border bg-muted px-1 py-px text-foreground">
-              {key}
-            </kbd>
-          ))}
-          <span>Release Control or Enter to switch, Esc to cancel</span>
-        </div>
       </div>
     </div>
   );

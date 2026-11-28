@@ -235,10 +235,11 @@ describe("browserStore", () => {
       store.touch("b1");
       store.touch("b3");
       expect(store.getState().mru).toEqual(["b3", "b1"]);
-      expect(selectMruTabs(store.getState()).map((tab) => tab.browserId)).toEqual(["b3", "b1"]);
+      expect(selectMruTabs(store.getState()).map((tab) => tab.browserId)).toEqual(["b3", "b1", "b2"]);
 
       store.closeTab("b3");
       expect(store.getState().mru).toEqual(["b1"]);
+      expect(selectMruTabs(store.getState()).map((tab) => tab.browserId)).toEqual(["b1", "b2"]);
     });
   });
 
