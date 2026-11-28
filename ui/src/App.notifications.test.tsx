@@ -347,6 +347,7 @@ vi.mock("./state/workspaceRuntime", () => ({
 let sidebarProps: {
   onResetAgentState?: (worktree: import("./lib/types").Worktree) => Promise<void>;
   onFocusSupervisorSession?: (sessionRef: string) => void;
+  inboxCount?: number;
   attention?: unknown;
 } = {};
 vi.mock("./components/Sidebar", () => ({
@@ -1091,6 +1092,14 @@ describe("App notification coordinator wiring", () => {
       expect(typeof sidebarProps.onFocusSupervisorSession).toBe("function");
       expect(sidebarProps.attention).toBeUndefined();
       expect(view.queryByTestId("attention-inbox")).toBeNull();
+    });
+
+    it("hands the sidebar the panel's decision count for its Inbox button", async () => {
+      panel.load.mockResolvedValue(panelSnapshotFixture);
+      render(<App />);
+      await act(async () => { await Promise.all(panel.load.mock.results.map((result) => result.value)); });
+
+      expect(sidebarProps.inboxCount).toBe(panelSnapshotFixture.decisions.length);
     });
 
     // Defect 2: non-mac platforms use ctrlKey instead of metaKey

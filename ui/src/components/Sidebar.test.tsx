@@ -496,6 +496,37 @@ describe("Sidebar navigation", () => {
     expect(onCreateWorktree).not.toHaveBeenCalled();
   });
 
+  it("puts the Inbox at the titlebar's right end and opens its popup from there", async () => {
+    renderSidebar({ projects, activeProjectId: "maho-workspace", inboxCount: 2 });
+
+    const titlebar = screen.getByTestId("sidebar-drag-region");
+    const inboxButton = within(titlebar).getByRole("button", { name: "Open inbox (2)" });
+    // The button is the last control in the titlebar, after the sidebar's own actions.
+    const controls = within(titlebar).getAllByRole("button");
+    expect(controls[controls.length - 1]).toBe(inboxButton);
+    expect(within(inboxButton).getByTestId("inbox-badge")).toHaveTextContent("2");
+
+    // The popup is not mounted until the button asks for it.
+    expect(screen.queryByTestId("inbox-popover")).toBeNull();
+    fireEvent.click(inboxButton);
+    expect(await screen.findByTestId("inbox-popover")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Inbox" })).toBeInTheDocument();
+  });
+
+  it("closes the Inbox popup from its close button and from Escape", async () => {
+    renderSidebar({ projects, activeProjectId: "maho-workspace", inboxCount: 1 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open inbox (1)" }));
+    expect(await screen.findByTestId("inbox-popover")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close inbox" }));
+    expect(screen.queryByTestId("inbox-popover")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open inbox (1)" }));
+    expect(await screen.findByTestId("inbox-popover")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTestId("inbox-popover")).toBeNull();
+  });
+
   it("gives every project row its own add-worktree action bound to that exact project", () => {
     const onCreateWorktree = vi.fn();
     const onSelectProject = vi.fn();
@@ -713,7 +744,7 @@ describe("Sidebar navigation", () => {
     renderSidebar();
     const dragBackground = screen.getByTestId("sidebar-drag-region");
     expect(dragBackground).toHaveAttribute("data-tauri-drag-region");
-    for (const name of ["Hide sidebar", "Add project"]) {
+    for (const name of ["Hide sidebar", "Add project", "Open inbox"]) {
       expect(screen.getByRole("button", { name })).toHaveClass("no-drag");
     }
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveClass("no-drag");
@@ -902,7 +933,7 @@ describe("Sidebar navigation", () => {
       ...overrides,
     });
 
-    it("opens on the one Supervisor panel, full height, with no lanes view or Inbox beside it", async () => {
+    it("opens on the one Supervisor panel, full height, with no Inbox tab beside it", async () => {
       renderSidebar(panelProps());
       expect(await screen.findByTestId("supervisor-panel")).toBeInTheDocument();
       expect(screen.getByRole("tab", { name: "Supervisor" })).toHaveAttribute("aria-selected", "true");

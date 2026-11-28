@@ -1,4 +1,4 @@
-import { PanelLeftClose, Plus } from "lucide-react";
+import { Inbox, PanelLeftClose, Plus } from "lucide-react";
 import { createContext, Fragment, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
@@ -31,6 +31,10 @@ export type SidebarViewActions = {
   readonly openSettings?: () => void;
   readonly openResources?: () => void;
   readonly onViewChange?: (view: SidebarViewId) => void;
+  /** Opens the Inbox popup: the decisions waiting on the owner, at the titlebar's right end. */
+  readonly openInbox?: () => void;
+  /** Decisions waiting on the owner; shown on the button so the popup is worth opening. */
+  readonly inboxCount?: number;
 };
 
 /** Desktop-only drag-and-drop wrappers; the view renders plain sections when absent. */
@@ -56,6 +60,8 @@ export type SidebarViewProps = {
   readonly titlebarLeading?: ReactNode;
   readonly titlebarProps?: Readonly<Record<string, string | boolean | undefined>>;
   readonly shortcuts?: { readonly hideSidebar?: string; readonly addProject?: string; readonly settings?: string };
+  /** True while the Inbox popup is open, so the button reads as expanded. */
+  readonly inboxOpen?: boolean;
   /** Container-supplied header extras (menus, slot activation, add worktree). */
   readonly projectChrome?: (
     project: SidebarProjectNode,
@@ -79,6 +85,7 @@ export function SidebarView({
   titlebarLeading,
   titlebarProps,
   shortcuts = {},
+  inboxOpen = false,
   projectChrome,
   renderRow,
   reorder,
@@ -88,7 +95,8 @@ export function SidebarView({
   const worktreesHidden = activeView !== "worktrees";
   const collapsed = new Set(model.collapsedGroupIds);
   const entries = filterSidebarModel(model, filter.query);
-  const showTitlebar = Boolean(titlebarLeading || actions.hideSidebar || actions.addProject);
+  const showTitlebar = Boolean(titlebarLeading || actions.hideSidebar || actions.addProject || actions.openInbox);
+  const inboxCount = actions.inboxCount ?? 0;
 
   const sections = entries.map(({ group: project, rows, forceExpanded }) => {
     const expanded = forceExpanded || !collapsed.has(project.groupId);
@@ -155,6 +163,27 @@ export function SidebarView({
           {actions.addProject ? (
             <IconButton data-shortcut={shortcuts.addProject} label="Add project" className="no-drag" size="sm" onClick={actions.addProject}>
               <Plus className="size-3.5" />
+            </IconButton>
+          ) : null}
+          {actions.openInbox ? (
+            <IconButton
+              data-testid="inbox-open-button"
+              label={inboxCount > 0 ? `Open inbox (${inboxCount})` : "Open inbox"}
+              aria-haspopup="dialog"
+              aria-expanded={inboxOpen || undefined}
+              className="no-drag relative ml-auto"
+              size="sm"
+              onClick={actions.openInbox}
+            >
+              <Inbox className="size-3.5" />
+              {inboxCount > 0 ? (
+                <span
+                  data-testid="inbox-badge"
+                  className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
+                >
+                  {inboxCount > 9 ? "9+" : inboxCount}
+                </span>
+              ) : null}
             </IconButton>
           ) : null}
         </div>

@@ -10,6 +10,7 @@ import {
 import type { RegisteredProject } from "../lib/tauri";
 import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
 import { sidebarParityFixture } from "../components/sidebar/sidebarParityFixture";
+import { panelSnapshotFixture } from "../lib/supervisorPanel/fixtures";
 import "../index.css";
 import "../settings-runtime.css";
 
@@ -17,8 +18,10 @@ import "../settings-runtime.css";
 // Query params: width (px, default 236), theme (light|dark, default dark). The Sidebar has no
 // filter input, so a `filter` param is accepted and ignored.
 // `fixture=parity` renders the shared sidebar parity fixture the remote QA harness also renders.
+// `inbox=1` opens the Supervisor panel with the Inbox popup already showing its fixture decisions.
 const params = new URLSearchParams(location.search);
 const parity = params.get("fixture") === "parity";
+const inbox = params.get("inbox") === "1";
 const parsedWidth = Number(params.get("width"));
 const width = Number.isFinite(parsedWidth) && parsedWidth > 0 ? Math.round(parsedWidth) : 236;
 document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
@@ -55,6 +58,8 @@ mockIPC((command) => {
   switch (command) {
     case "cmd_ssh_list_hosts": return [omarchy];
     case "cmd_native_sidebar_context_menu": return null;
+    // The Inbox reads the Supervisor panel's snapshot; the fixture is what the panel QA renders.
+    case "cmd_supervisor_panel": return panelSnapshotFixture;
     case "plugin:event|listen": return 1;
     case "plugin:event|unlisten": return null;
     default: return null;
@@ -151,7 +156,47 @@ if (parity) {
   updateListingFailures(() => sidebarParityFixture.listingFailures);
 }
 const root = document.getElementById("root");
-if (root && parity) {
+if (root && inbox) {
+  // Panel mode is what offers the Inbox button, so this branch is the one the desktop runs.
+  ReactDOM.createRoot(root).render(
+    <div data-testid="sidebar-qa-root" className="flex overflow-hidden bg-background" style={{ width: `${width}px`, height: "100vh" }}>
+      <Sidebar
+        open
+        projects={projects}
+        activeProjectId={LOCAL_ID}
+        worktrees={ferryxWorktrees}
+        inactiveProjectWorktrees={{
+          [REMOTE_ID]: [relayWorktrees[0]],
+          [REMOTE_LATENCY_ID]: [relayWorktrees[1]],
+          [SITE_ID]: siteWorktrees,
+        }}
+        agents={agents}
+        activePath={activePath}
+        statuses={statuses}
+        unreadWorktreePaths={unreadWorktreePaths}
+        activityByWorktreePath={activityByWorktreePath}
+        onSelectProject={markFixture("fixtureSelectedProject")}
+        onSelectWorktree={markFixture("fixtureSelectedWorktree")}
+        onCreateWorktree={markFixture("fixtureCreateWorktree")}
+        onOpenSettings={() => markFixture("fixtureOpenSettings")()}
+        onFocusSupervisorSession={(sessionRef) => {
+          document.documentElement.dataset.fixtureFocusSession = sessionRef;
+        }}
+        inboxCount={panelSnapshotFixture.decisions.length}
+      />
+    </div>,
+  );
+  // Click the real button rather than rendering the popup directly: the gate covers the wiring.
+  const openInbox = () => {
+    const button = document.querySelector<HTMLElement>('[data-testid="inbox-open-button"]');
+    if (!button) return window.setTimeout(openInbox, 50);
+    button.click();
+    window.setTimeout(() => {
+      document.documentElement.dataset.qaReady = "true";
+    }, 150);
+  };
+  window.setTimeout(openInbox, 50);
+} else if (root && parity) {
   const fixture = sidebarParityFixture;
   ReactDOM.createRoot(root).render(
     <div data-testid="sidebar-qa-root" className="flex overflow-hidden bg-background" style={{ width: `${width}px`, height: "100vh" }}>

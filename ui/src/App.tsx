@@ -5847,6 +5847,7 @@ function WorkspaceApp({
           onOpenResources={() => setIsResourcesOpen(true)}
 
           onFocusSupervisorSession={handleFocusSupervisorSession}
+          inboxCount={supervisorDecisionCount}
           revealGroupRequest={revealGroupRequest}
           onRevealGroupHandled={handleRevealGroupHandled}
           footerSlot={

@@ -53,6 +53,7 @@ import { sidebarParityFixture as fx } from "./sidebarParityFixture";
 const DESKTOP_ONLY_CONTROLS: readonly { readonly role: string; readonly name: RegExp; readonly keepText?: boolean }[] = [
   { role: "button", name: /^Hide sidebar$/ },
   { role: "button", name: /^Add project$/ },
+  { role: "button", name: /^Open inbox/ },
   { role: "button", name: /^Settings$/ },
   { role: "button", name: /^System resources$/ },
   { role: "separator", name: /^Resize sidebar$/ },

@@ -67,6 +67,7 @@ import { agentStatesByPath, useSidebarModel } from "./sidebar/useSidebarModel";
 import { sidebarSessionSignals } from "./sidebar/sidebarSessionSignals";
 import { supervisorTypingIn } from "./sidebar/sidebarSupervisor";
 import { SidebarView, type SidebarReorder } from "./sidebar/SidebarView";
+import { InboxPopover } from "./sidebar/InboxPopover";
 import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow } from "./sidebar/SidebarWorktreeRow";
 import type { SectionId } from "./settings/types";
@@ -162,6 +163,8 @@ type SidebarProps = {
    * falls back to `isMac ? 72 : 0`.
    */
   trafficLightClearancePx?: number;
+  /** Decisions waiting on the owner, shown on the titlebar's Inbox button. */
+  inboxCount?: number;
 };
 
 /**
@@ -210,15 +213,17 @@ export function Sidebar({
   view,
   hideViewTabs = false,
   trafficLightClearancePx,
+  inboxCount = 0,
 }: SidebarProps) {
   // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
-  // advanced features. The project tree is the other view; there is no Inbox view.
+  // advanced features. The project tree is the other view; the Inbox is a popup, not a view.
   const panelMode = onFocusSupervisorSession !== undefined;
   const widthRange = widthMode
     ? SIDEBAR_RANGE_BY_MODE[widthMode]
     : panelMode ? SUPERVISOR_SIDEBAR_RANGE : DEFAULT_SIDEBAR_RANGE;
   const [chosenView, setChosenView] = useState<SidebarViewId>(panelMode ? "supervisor" : "worktrees");
   const sidebarView: SidebarViewId = panelMode ? view ?? chosenView : "worktrees";
+  const [inboxOpen, setInboxOpen] = useState(false);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   const loadWidth = useCallback(
@@ -739,6 +744,8 @@ export function Sidebar({
             openResources: onOpenResources ?? noop,
             // The desktop rail is the view switch there; standalone keeps the in-sidebar tabs.
             onViewChange: panelMode && !hideViewTabs ? setChosenView : undefined,
+            openInbox: () => setInboxOpen(true),
+            inboxCount,
           }}
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
@@ -756,6 +763,7 @@ export function Sidebar({
             );
           })()}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
+          inboxOpen={inboxOpen}
           shortcuts={{
             hideSidebar: hide ? "sidebar.left.toggle" : undefined,
             addProject: "project.add",
@@ -767,6 +775,10 @@ export function Sidebar({
         />
 
         {footerSlot}
+
+        {inboxOpen ? (
+          <InboxPopover onClose={() => setInboxOpen(false)} onFocusSession={onFocusSupervisorSession ?? noop} />
+        ) : null}
 
         <div
           role="separator"

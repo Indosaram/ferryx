@@ -1,11 +1,7 @@
 import { useMemo, useState } from 'react';
 
 import { cn } from '../../lib/cn';
-import {
-  STALE_DECISION_MESSAGE,
-  type PanelActionResult,
-  type PanelActions,
-} from '../../lib/supervisorPanel/actions';
+import type { PanelActionResult, PanelActions } from '../../lib/supervisorPanel/actions';
 import type { PanelSnapshot, SessionHealth, SessionRef } from '../../lib/supervisorPanel/contract';
 import { buildPrLaneView, type WorktreeOnBranch } from '../../lib/supervisorPanel/prLane';
 import type { PrLane } from '../../lib/supervisorPanel/contract';
@@ -13,13 +9,12 @@ import type { LegacyGoal } from '../../lib/supervisorPanel/legacyGoals';
 import {
   buildPanelView,
   type ActionView,
-  type DecisionView,
   type SessionGlyph,
 } from '../../lib/supervisorPanel/model';
 import { ActionLog } from './ActionLog';
 import { Composer } from './Composer';
 import type { VoiceConversationProps } from '../supervisor/VoiceConversationButton';
-import { DecisionCard } from './DecisionCard';
+import { LiveDecision } from './LiveDecision';
 import { RulesLine } from './RulesLine';
 import { HandlingRow, SessionRow } from './Rows';
 import { PrSection } from './PrSection';
@@ -99,50 +94,6 @@ function SectionHeading({ title, count, touch }: { title: string; count: number;
       <span className="flex-1">{title}</span>
       <span className="tabular-nums">{count}</span>
     </h2>
-  );
-}
-
-function Decision({
-  decision,
-  actions,
-  touch,
-}: {
-  decision: DecisionView;
-  actions: PanelActions;
-  touch?: boolean;
-}) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const options = useMemo(() => {
-    const byIndex = [...decision.options].sort((a, b) => a.index - b.index);
-    return byIndex.map((option) => option.label);
-  }, [decision.options]);
-  const answer = async (optionIndex: number) => {
-    if (pending) return;
-    setPending(true);
-    setError(null);
-    const result = await actions.answer(
-      { sessionRef: decision.sessionRef, promptId: decision.promptId, screenRevision: decision.screenRevision },
-      optionIndex,
-    );
-    setPending(false);
-    if (!result.ok) setError(result.stale ? STALE_DECISION_MESSAGE : result.message);
-  };
-  const recommended = decision.options.find((option) => option.recommended);
-  return (
-    <DecisionCard
-      touch={touch}
-      sessionName={decision.sessionTitle}
-      computer={decision.hostLabel ?? ''}
-      question={decision.question}
-      command={decision.command}
-      options={options}
-      recommendation={recommended ? { index: recommended.index, reason: decision.reason } : null}
-      onAnswer={(index) => void answer(index)}
-      onOpenTerminal={() => actions.openSession(decision.sessionRef)}
-      pending={pending}
-      error={error}
-    />
   );
 }
 
@@ -266,7 +217,7 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
         <section aria-label="Needs you" className="flex flex-col gap-3">
           <SectionHeading title="Needs you" count={needsYouCount} touch={touch} />
           {view.decisions.map((decision) => (
-            <Decision key={decision.sessionRef} decision={decision} actions={actions} touch={touch} />
+            <LiveDecision key={decision.sessionRef} decision={decision} actions={actions} touch={touch} />
           ))}
           {waitingRows.length > 0 ? <div className="flex flex-col gap-1">{waitingRows.map(sessionRow)}</div> : null}
         </section>
