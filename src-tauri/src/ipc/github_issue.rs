@@ -286,10 +286,18 @@ impl Capture {
 /// momentarily exhausted process table. Both clear on their own, so retrying briefly is correct
 /// where surfacing an error would make an ordinary parallel test run fail at random.
 fn spawn_gh(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    spawn_gh_with(|| command.spawn())
+}
+
+/// The retry loop itself, with the spawn supplied so the policy can be tested without
+/// provoking a real transient failure.
+fn spawn_gh_with(
+    mut spawn: impl FnMut() -> std::io::Result<std::process::Child>,
+) -> std::io::Result<std::process::Child> {
     const TRANSIENT: [i32; 2] = [libc::ETXTBSY, libc::EAGAIN];
     let mut attempt = 0u32;
     loop {
-        match command.spawn() {
+        match spawn() {
             Ok(child) => return Ok(child),
             Err(error) if attempt < GH_SPAWN_RETRIES && TRANSIENT.contains(&error.raw_os_error().unwrap_or(0)) => {
                 attempt += 1;
@@ -1263,6 +1271,49 @@ mod tests {
                     .code,
                 IpcErrorCode::ParseError
             );
+        }
+
+        #[test]
+        fn retries_a_transient_spawn_failure_until_it_succeeds() {
+            let mut calls = 0;
+            let outcome = spawn_gh_with(|| {
+                calls += 1;
+                if calls < 3 {
+                    Err(std::io::Error::from_raw_os_error(libc::ETXTBSY))
+                } else {
+                    // Any real child proves the loop returned rather than retried.
+                    Ok(std::process::Command::new("true")
+                        .spawn()
+                        .or_else(|_| std::process::Command::new("sleep").arg("0").spawn())
+                        .expect("a trivial child must be available"))
+                }
+            });
+            assert!(outcome.is_ok(), "a transient failure must not surface");
+            assert_eq!(calls, 3, "the loop must keep retrying until it succeeds");
+        }
+
+        #[test]
+        fn gives_up_after_the_retry_budget_is_spent() {
+            let mut calls = 0;
+            let error = spawn_gh_with(|| {
+                calls += 1;
+                Err(std::io::Error::from_raw_os_error(libc::EAGAIN))
+            })
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EAGAIN));
+            assert_eq!(calls, GH_SPAWN_RETRIES + 1, "one try plus the whole budget");
+        }
+
+        #[test]
+        fn does_not_retry_a_permanent_spawn_failure() {
+            let mut calls = 0;
+            let error = spawn_gh_with(|| {
+                calls += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(calls, 1, "a missing executable is not transient");
         }
 
         #[test]
