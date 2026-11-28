@@ -23,6 +23,7 @@ vi.mock("../../../lib/browserTauri", () => ({
   reloadBrowser: vi.fn(() => Promise.resolve()),
   setBrowserVisible: vi.fn(() => Promise.resolve()),
   setBrowserBounds: vi.fn(() => Promise.resolve()),
+  focusBrowser: vi.fn(() => Promise.resolve()),
 }));
 
 import {
@@ -32,7 +33,15 @@ import {
   type BrowserStore,
 } from "../../../state/browserStore";
 import { browserViewportCoordinator } from "../../../lib/browserViewportCoordinator";
-import { setBrowserVisible } from "../../../lib/browserTauri";
+import { focusBrowser, setBrowserVisible } from "../../../lib/browserTauri";
+import { MAHO_MINI_PANE_PREFS_STORAGE_KEY } from "../../../lib/storageKeys";
+import {
+  DEFAULT_MINI_PANE_GEOMETRY,
+  DEFAULT_MINI_PANE_HEIGHT,
+  DEFAULT_MINI_PANE_WIDTH,
+  MINI_PANE_VIEWPORT_MARGIN,
+  saveMahoMiniPaneGeometry,
+} from "../../../lib/mahoMiniPanePrefs";
 import { MahoMiniPane } from "./MahoMiniPane";
 
 function makeStore(): BrowserStore {
@@ -69,7 +78,7 @@ describe("MahoMiniPane", () => {
     expect(probe).toHaveAttribute("data-chrome", "maho-minimal");
     expect(probe).toHaveAttribute("data-visible", "true");
     // The address field is centered on the bare host, Maho-style.
-    expect(screen.getByRole("textbox", { name: "Mini address" })).toHaveValue("example.com/docs");
+    expect(screen.getByRole("textbox", { name: "Address" })).toHaveValue("example.com");
     expect(screen.getByTestId("maho-mini-space-chip")).toHaveTextContent("Personal");
   });
 
@@ -235,9 +244,141 @@ describe("MahoMiniPane", () => {
     expect(screen.getByTestId("browser-pane-probe")).toHaveAttribute("data-browser-id", "mini-1");
   });
 
+  it("compacts without destroying the session and expands the same browser", () => {
+    const store = makeStore();
+    seed(store, "mini-1");
+    store.setMini("mini-1");
+    const props = paneProps(store);
+    render(<MahoMiniPane {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Compact Mini window" }));
+    expect(screen.getByTestId("maho-mini-pane")).toHaveAttribute("data-compact", "true");
+    expect(screen.queryByTestId("browser-pane-probe")).toBeNull();
+    expect(props.onDestroyMiniSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Mini window" }));
+    expect(screen.getByTestId("browser-pane-probe")).toHaveAttribute("data-browser-id", "mini-1");
+  });
+
+  it("copies the full URL rather than the displayed host", () => {
+    const store = makeStore();
+    seed(store, "mini-1", "https://example.com/docs");
+    store.setMini("mini-1");
+    const onCopyUrl = vi.fn();
+    render(<MahoMiniPane {...paneProps(store)} onCopyUrl={onCopyUrl} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(onCopyUrl).toHaveBeenCalledWith("https://example.com/docs");
+  });
+
   it("renders nothing without a mini slot", () => {
     const store = makeStore();
     render(<MahoMiniPane store={store} onDestroyMiniSession={vi.fn()} />);
     expect(screen.queryByTestId("maho-mini-pane")).toBeNull();
+  });
+});
+
+describe("MahoMiniPane as Peek's card", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    browserViewportCoordinator.reset();
+    vi.mocked(focusBrowser).mockClear();
+  });
+
+  function openMini(url = "https://www.docs.example.co.uk/guide"): { store: BrowserStore; props: ReturnType<typeof paneProps> } {
+    const store = makeStore();
+    seed(store, "mini-1", url);
+    expect(store.setMini("mini-1").ok).toBe(true);
+    return { store, props: paneProps(store) };
+  }
+
+  it("presents a rounded card over the canvas edge, docked to the right margin", () => {
+    const { props } = openMini();
+    render(<MahoMiniPane {...props} />);
+
+    const card = screen.getByTestId("maho-mini-pane");
+    expect(card).toHaveAttribute("data-presentation", "peek");
+    expect(card).toHaveAttribute("data-docked", "true");
+    expect(card.className).toContain("maho-mini-card");
+    expect(card.style.width).toBe(`${DEFAULT_MINI_PANE_WIDTH}px`);
+    expect(card.style.height).toBe(`${DEFAULT_MINI_PANE_HEIGHT}px`);
+    expect(card.style.position).toBe("fixed");
+    // Docked to the canvas's right margin, not to a 0 offset that would clip the shadow.
+    expect(card.style.right).toBe(`${MINI_PANE_VIEWPORT_MARGIN}px`);
+    expect(card.style.left).toBe("");
+  });
+
+  it("shortens the address pill and tab label to the registrable domain", () => {
+    const { props } = openMini("https://www.docs.example.co.uk/guide");
+    render(<MahoMiniPane {...props} />);
+
+    expect(screen.getByRole("textbox", { name: "Address" })).toHaveValue("example.co.uk");
+    expect(screen.getByRole("textbox", { name: "Address" })).toHaveAttribute("title", "example.co.uk");
+  });
+
+  it("keeps a hosting-platform subdomain whole instead of folding it to the platform", () => {
+    const { props } = openMini("https://ferryx.github.io/ferryx/");
+    render(<MahoMiniPane {...props} />);
+
+    expect(screen.getByRole("textbox", { name: "Address" })).toHaveValue("ferryx.github.io");
+  });
+
+  it("forwards keyboard focus to the native page when the page area is clicked", () => {
+    const { props } = openMini();
+    const onFocusPage = vi.fn();
+    render(<MahoMiniPane {...props} onFocusPage={onFocusPage} />);
+
+    fireEvent.pointerDown(screen.getByTestId("maho-mini-page"));
+    expect(onFocusPage).toHaveBeenCalledTimes(1);
+    expect(onFocusPage).toHaveBeenCalledWith("mini-1");
+  });
+
+  it("calls focusBrowser when the host does not supply its own focus forwarding", () => {
+    const { props } = openMini();
+    render(<MahoMiniPane {...props} />);
+
+    fireEvent.pointerDown(screen.getByTestId("maho-mini-page"));
+    expect(vi.mocked(focusBrowser)).toHaveBeenCalledWith("mini-1");
+  });
+
+  it("restores the stored card geometry, including a dragged position", () => {
+    const { props } = openMini();
+    saveMahoMiniPaneGeometry({ width: 440, height: 560, x: 88, y: 132 }, window.localStorage);
+    render(<MahoMiniPane {...props} />);
+
+    const card = screen.getByTestId("maho-mini-pane");
+    expect(card).toHaveAttribute("data-docked", "false");
+    expect(card.style.width).toBe("440px");
+    expect(card.style.height).toBe("560px");
+    expect(card.style.left).toBe("88px");
+    expect(card.style.top).toBe("132px");
+  });
+
+  it("reads an unusable stored geometry as the docked default instead of failing", () => {
+    const { props } = openMini();
+    window.localStorage.setItem(MAHO_MINI_PANE_PREFS_STORAGE_KEY, "{not json");
+    render(<MahoMiniPane {...props} />);
+
+    const card = screen.getByTestId("maho-mini-pane");
+    expect(card).toHaveAttribute("data-docked", "true");
+    expect(card.style.width).toBe(`${DEFAULT_MINI_PANE_GEOMETRY.width}px`);
+  });
+
+  it("takes geometry from the host, and drags by the bar and resizes from the corner grip", () => {
+    const { props } = openMini();
+    render(<MahoMiniPane {...props} initialGeometry={{ width: 420, height: 500, x: 40, y: 60 }} />);
+
+    const card = screen.getByTestId("maho-mini-pane");
+    expect(card.style.left).toBe("40px");
+
+    // Both gestures are exposed as grab surfaces; the page area itself is never a drag handle.
+    expect(document.querySelector('[data-maho-mini-drag="move"]')).not.toBeNull();
+    expect(document.querySelector('[data-maho-mini-drag="resize"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Resize Mini window" })).toBeInTheDocument();
+  });
+
+  it("hides the card without dropping the session when the host hides it", () => {
+    const { store, props } = openMini();
+    render(<MahoMiniPane {...props} visible={false} />);
+
+    expect(screen.getByTestId("maho-mini-pane")).toHaveAttribute("data-visible", "false");
+    expect(store.getState().miniBrowserId).toBe("mini-1");
   });
 });

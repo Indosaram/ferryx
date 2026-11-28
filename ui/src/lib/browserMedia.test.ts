@@ -41,6 +41,12 @@ function mediaState(overrides: Partial<BrowserMediaState> = {}): BrowserMediaSta
     playing: true,
     muted: false,
     hasMedia: true,
+    sessionId: "session-1",
+    positionMs: 0,
+    durationMs: 0,
+    canSeek: false,
+    canPrevious: false,
+    canNext: false,
     ...overrides,
   };
 }

@@ -22,6 +22,8 @@ export const DEFAULT_SPACE_COLOR = "#6C8CFF";
 export const MAX_FAVORITES = 12;
 /** Most-recently-used switcher depth. */
 export const MAX_MRU_ENTRIES = 100;
+/** How many dismissed Now Playing sessions are remembered. */
+export const MAX_DISMISSED_MEDIA_SESSIONS = 50;
 
 export type BrowserSection = "favorite" | "pinned" | "today";
 
@@ -107,6 +109,11 @@ export type BrowserStoreState = {
   miniBrowserId: string | null;
   /** browserId -> the split pane currently showing it. */
   splitAttachments: Readonly<Record<string, BrowserSplitAttachment>>;
+  /**
+   * Now Playing sessions the user dismissed, keyed by the page's media session id. Keyed by
+   * session rather than by tab so a new track in the same tab shows the card again.
+   */
+  dismissedMediaSessionIds: readonly string[];
 };
 
 export type BrowserStoreErrorCode =
@@ -184,6 +191,9 @@ export type BrowserStoreActions = {
   detachSplit: (browserId: string) => boolean;
   /** Worktree deletion: only the split references go, the tabs stay. */
   detachAllForWorkspace: (workspaceId: string) => number;
+
+  /** Hides the Now Playing card for one media session; a new session shows it again. */
+  dismissMediaSession: (sessionId: string) => void;
 };
 
 export type BrowserStore = BrowserStoreActions & {
@@ -312,6 +322,7 @@ export function createDefaultBrowserState(spaceId: string = DEFAULT_SPACE_ID): B
     activeBrowserIdBySpace: {},
     miniBrowserId: null,
     splitAttachments: {},
+    dismissedMediaSessionIds: [],
   };
 }
 
@@ -341,6 +352,7 @@ function serializeBrowserState(state: BrowserStoreState): string {
     activeBrowserIdBySpace,
     miniBrowserId,
     splitAttachments,
+    dismissedMediaSessionIds: [...state.dismissedMediaSessionIds],
   });
 }
 
@@ -452,6 +464,12 @@ function parseBrowserState(raw: string | null, storageStamp: number): BrowserSto
     splitAttachments[browserId] = { workspaceId, tabId, leafId };
   }
 
+  const dismissedMediaSessionIds: string[] = [];
+  for (const candidate of Array.isArray(root.dismissedMediaSessionIds) ? root.dismissedMediaSessionIds : []) {
+    const sessionId = readString(candidate);
+    if (sessionId && !dismissedMediaSessionIds.includes(sessionId)) dismissedMediaSessionIds.push(sessionId);
+  }
+
   return {
     spaces,
     folders,
@@ -462,6 +480,7 @@ function parseBrowserState(raw: string | null, storageStamp: number): BrowserSto
     activeBrowserIdBySpace,
     miniBrowserId: miniBrowserId && tabs[miniBrowserId] ? miniBrowserId : null,
     splitAttachments,
+    dismissedMediaSessionIds,
   };
 }
 
@@ -1010,6 +1029,19 @@ export function createBrowserStore(options: BrowserStoreOptions = {}): BrowserSt
       }
       if (removed > 0) setState((current) => ({ ...current, splitAttachments }));
       return removed;
+    },
+
+    dismissMediaSession(sessionId) {
+      const id = sessionId.trim();
+      if (!id) return;
+      setState((prev) => (prev.dismissedMediaSessionIds.includes(id)
+        ? prev
+        : {
+            ...prev,
+            // A dismissal only matters until the session ends, so the list is a bounded
+            // history rather than an ever-growing log of every track ever dismissed.
+            dismissedMediaSessionIds: [...prev.dismissedMediaSessionIds, id].slice(-MAX_DISMISSED_MEDIA_SESSIONS),
+          }));
     },
   };
 

@@ -46,6 +46,18 @@ pub struct BrowserMediaState {
     pub playing: bool,
     pub muted: bool,
     pub has_media: bool,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub position_ms: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub can_seek: bool,
+    #[serde(default)]
+    pub can_previous: bool,
+    #[serde(default)]
+    pub can_next: bool,
 }
 
 impl BrowserMediaState {
@@ -60,6 +72,8 @@ impl BrowserMediaState {
             playing: false,
             muted: false,
             has_media: false,
+            session_id: String::new(), position_ms: 0, duration_ms: 0,
+            can_seek: false, can_previous: false, can_next: false,
         }
     }
 }
@@ -83,6 +97,18 @@ struct MediaReport {
     muted: bool,
     #[serde(default)]
     has_media: bool,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    position_ms: u64,
+    #[serde(default)]
+    duration_ms: u64,
+    #[serde(default)]
+    can_seek: bool,
+    #[serde(default)]
+    can_previous: bool,
+    #[serde(default)]
+    can_next: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +168,12 @@ impl MediaReport {
             playing: has_media && self.playing,
             muted: has_media && self.muted,
             has_media,
+            session_id: clamp_text(&self.session_id, 128),
+            duration_ms: self.duration_ms.min(604_800_000),
+            position_ms: self.position_ms.min(self.duration_ms).min(604_800_000),
+            can_seek: has_media && self.can_seek && self.duration_ms > 0,
+            can_previous: has_media && self.can_previous,
+            can_next: has_media && self.can_next,
         }
     }
 }
@@ -165,10 +197,7 @@ pub fn parse_media_envelope(raw: &str, browser_id: &str) -> Option<BrowserMediaS
 
 /// The key two reports are compared by: the same key means nothing changed.
 pub fn media_state_key(state: &BrowserMediaState) -> String {
-    format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-        state.title, state.artist, state.album, state.artwork_url, state.playing, state.muted
-    )
+    serde_json::to_string(state).expect("media state is serializable")
 }
 
 /// Per-tab rate limit plus change detection: at most [`MAX_MEDIA_EVENTS_PER_SECOND`] events in
@@ -259,10 +288,13 @@ pub enum MediaControlAction {
     Toggle,
     Mute,
     Unmute,
+    Seek,
+    Previous,
+    Next,
 }
 
 impl MediaControlAction {
-    pub const ALL: [Self; 5] = [Self::Play, Self::Pause, Self::Toggle, Self::Mute, Self::Unmute];
+    pub const ALL: [Self; 8] = [Self::Play, Self::Pause, Self::Toggle, Self::Mute, Self::Unmute, Self::Seek, Self::Previous, Self::Next];
 
     pub fn parse(raw: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|action| action.as_str() == raw.trim())
@@ -275,6 +307,9 @@ impl MediaControlAction {
             Self::Toggle => "toggle",
             Self::Mute => "mute",
             Self::Unmute => "unmute",
+            Self::Seek => "seek",
+            Self::Previous => "previous",
+            Self::Next => "next",
         }
     }
 }
@@ -299,6 +334,37 @@ pub struct BrowserMediaControlResult {
 /// The page script that drives the dominant media element. The action is a literal from a closed
 /// set, so no page- or caller-provided string is ever spliced into the script body.
 pub fn browser_media_control_script(action: MediaControlAction) -> String {
+    browser_media_control_script_at(action, 0)
+}
+
+/// Upper bound for a seek target: a page cannot be asked to jump further than a week of media.
+pub const MAX_SEEK_POSITION_MS: u64 = 604_800_000;
+
+/// Clamps a caller-supplied seek target. Only the number reaches the script, and only after
+/// this clamp, so an absurd value cannot become part of the page source.
+pub fn clamp_seek_position(position_ms: u64) -> u64 {
+    position_ms.min(MAX_SEEK_POSITION_MS)
+}
+
+pub fn browser_media_control_script_at(action: MediaControlAction, position_ms: u64) -> String {
+    let position_ms = clamp_seek_position(position_ms);
+    if matches!(action, MediaControlAction::Seek | MediaControlAction::Previous | MediaControlAction::Next) {
+        let action_name = action.as_str();
+        let session_action = match action { MediaControlAction::Seek => "seekto", MediaControlAction::Previous => "previoustrack", _ => "nexttrack" };
+        // The bridge owns the dispatch: a page's own media-session handler wins, and only a seek
+        // falls back to the dominant element's currentTime. Capabilities come from the same
+        // bridge, so a button is only ever drawn for an action the page can actually take.
+        return format!(r#"(() => {{
+          const bridge = window.__ferryxMediaSessionBridge;
+          try {{
+            const applied = typeof bridge?.dispatch === 'function'
+              ? bridge.dispatch('{session_action}', {position_ms} / 1000)
+              : false;
+            if (!applied) return JSON.stringify({{ action: '{action_name}', applied: false, reason: 'unsupported-action' }});
+            return JSON.stringify({{ action: '{action_name}', applied: true }});
+          }} catch (_) {{ return JSON.stringify({{ action: '{action_name}', applied: false, reason: 'media-action-failed' }}); }}
+        }})()"#);
+    }
     // Only this action's branch is emitted: the script never carries the other controls.
     let branch = match action {
         MediaControlAction::Play => "{\n        const started = target.play();\n        if (started && typeof started.catch === 'function') started.catch(() => {});\n        break;\n      }",
@@ -308,6 +374,7 @@ pub fn browser_media_control_script(action: MediaControlAction) -> String {
         }
         MediaControlAction::Mute => "target.muted = true; break;",
         MediaControlAction::Unmute => "target.muted = false; break;",
+        MediaControlAction::Seek | MediaControlAction::Previous | MediaControlAction::Next => unreachable!(),
     };
     format!(
         r#"(() => {{
@@ -343,7 +410,13 @@ pub fn browser_media_control_script(action: MediaControlAction) -> String {
 
 /// The pull form of the shared reporter: one JSON snapshot, used for Chromium engine tabs.
 pub fn browser_media_snapshot_script() -> String {
-    ferryx_browser_engine_protocol::media_snapshot_script()
+    media_reporter_script("null")
+}
+
+pub fn media_reporter_script(post: &str) -> String {
+    let reporter = ferryx_browser_engine_protocol::media_reporter_script("null");
+    let function = reporter.strip_suffix("(null)").or_else(|| reporter.strip_suffix("(null);")).unwrap_or(&reporter);
+    format!("({})({}, {})", include_str!("media_session_bridge.js"), post, function)
 }
 
 /// How often a Chromium engine tab is polled for its media state.
@@ -440,6 +513,8 @@ mod tests {
             playing,
             muted: false,
             has_media: !title.is_empty(),
+            session_id: String::new(), position_ms: 0, duration_ms: 0,
+            can_seek: false, can_previous: false, can_next: false,
         }
     }
 
@@ -454,6 +529,8 @@ mod tests {
             playing: true,
             muted: false,
             has_media: true,
+            session_id: String::new(), position_ms: 0, duration_ms: 0,
+            can_seek: false, can_previous: false, can_next: false,
         })
         .expect("serialize");
         assert_eq!(
@@ -467,6 +544,8 @@ mod tests {
                 "playing": true,
                 "muted": false,
                 "hasMedia": true,
+                "sessionId": "", "positionMs": 0, "durationMs": 0,
+                "canSeek": false, "canPrevious": false, "canNext": false,
             })
         );
     }
@@ -586,7 +665,7 @@ mod tests {
         }
         assert_eq!(MediaControlAction::parse("play"), Some(MediaControlAction::Play));
         assert_eq!(MediaControlAction::parse("  mute "), Some(MediaControlAction::Mute));
-        for raw in ["", "eval", "play;alert(1)", "PLAY", "seek"] {
+        for raw in ["", "eval", "play;alert(1)", "PLAY"] {
             assert_eq!(MediaControlAction::parse(raw), None, "{raw}");
         }
     }
@@ -606,7 +685,7 @@ mod tests {
         for action in MediaControlAction::ALL {
             let script = browser_media_control_script(action);
             assert!(script.contains("applied: true"));
-            assert!(script.contains("hasMedia: true"));
+            if matches!(action, MediaControlAction::Play | MediaControlAction::Pause | MediaControlAction::Toggle | MediaControlAction::Mute | MediaControlAction::Unmute) { assert!(script.contains("hasMedia: true")); }
         }
     }
 
@@ -628,9 +707,88 @@ mod tests {
     }
 
     #[test]
+    fn parses_position_duration_and_track_capabilities() {
+        let parsed = parse_media_envelope(
+            &report(json!({
+                "sessionId": "sess-1",
+                "positionMs": 42_000,
+                "durationMs": 180_000,
+                "canSeek": true,
+                "canPrevious": true,
+                "canNext": false,
+            })),
+            "b1",
+        )
+        .expect("parse");
+        assert_eq!(parsed.session_id, "sess-1");
+        assert_eq!(parsed.position_ms, 42_000);
+        assert_eq!(parsed.duration_ms, 180_000);
+        assert!(parsed.can_seek);
+        assert!(parsed.can_previous);
+        assert!(!parsed.can_next);
+    }
+
+    #[test]
+    fn position_is_clamped_to_the_duration_and_seek_needs_one() {
+        // A page can claim a position past its own duration; the card would then draw a bar
+        // past its end, so the host clamps it.
+        let past_end = parse_media_envelope(
+            &report(json!({ "positionMs": 999_000, "durationMs": 60_000, "canSeek": true })),
+            "b1",
+        )
+        .expect("parse");
+        assert_eq!(past_end.position_ms, 60_000);
+        assert_eq!(past_end.duration_ms, 60_000);
+        assert!(past_end.can_seek);
+
+        // No duration means nothing to seek within, whatever the report claims.
+        let no_duration = parse_media_envelope(
+            &report(json!({ "positionMs": 5_000, "durationMs": 0, "canSeek": true })),
+            "b1",
+        )
+        .expect("parse");
+        assert_eq!(no_duration.position_ms, 0);
+        assert!(!no_duration.can_seek);
+
+        // Capabilities are meaningless without media.
+        let idle = parse_media_envelope(
+            &report(json!({
+                "hasMedia": false,
+                "canPrevious": true,
+                "canNext": true,
+                "canSeek": true,
+                "durationMs": 10_000,
+            })),
+            "b1",
+        )
+        .expect("parse");
+        assert!(!idle.can_seek);
+        assert!(!idle.can_previous);
+        assert!(!idle.can_next);
+    }
+
+    #[test]
+    fn seek_script_carries_only_a_clamped_position() {
+        let script = browser_media_control_script_at(MediaControlAction::Seek, 30_000);
+        assert!(script.contains("bridge.dispatch('seekto', 30000 / 1000)"));
+        assert!(!script.contains("nexttrack"));
+        assert!(!script.contains("previoustrack"));
+
+        // An absurd target never reaches the page source at its full value.
+        let clamped = browser_media_control_script_at(MediaControlAction::Seek, u64::MAX);
+        assert!(clamped.contains(&format!("{} / 1000", MAX_SEEK_POSITION_MS)));
+        assert_eq!(clamp_seek_position(u64::MAX), MAX_SEEK_POSITION_MS);
+        assert_eq!(clamp_seek_position(1_500), 1_500);
+
+        let next = browser_media_control_script(MediaControlAction::Next);
+        assert!(next.contains("bridge.dispatch('nexttrack'"));
+        assert!(!next.contains("seekto"));
+    }
+
+    #[test]
     fn snapshot_script_is_the_pull_form_of_the_shared_reporter() {
         let script = browser_media_snapshot_script();
-        assert!(script.contains("(null)"));
+        assert!(script.contains("null"));
         assert!(script.contains("navigator.mediaSession"));
     }
 }

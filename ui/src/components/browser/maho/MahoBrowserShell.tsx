@@ -97,8 +97,6 @@ export type BrowserModeShortcutDetail = { action: MahoBrowserShortcutAction };
 
 /** The drawer's resize step, matching the other drawers' keyboard affordance. */
 const KEYBOARD_STEP = 16;
-/** The Mini Pane's column, matching the canvas overlay width. */
-const MINI_PANE_WIDTH = 320;
 
 const RANGE = SIDEBAR_RANGE_BY_MODE.browser;
 
@@ -197,6 +195,8 @@ export type MahoBrowserShellOptions = {
   activity: BrowserAgentActivity;
   /** Hands a tab to the fullscreen Browser mode from anywhere (Now Playing, promoted mini). */
   onRevealBrowser?: (browserId: string) => void;
+  /** Opens the rail so the chip's Details can reveal the Agent Tasks section. */
+  onOpenDrawer?: () => void;
   store?: BrowserStore;
 };
 
@@ -219,6 +219,7 @@ export function useMahoBrowserShell({
   drawerOpen,
   activity,
   onRevealBrowser,
+  onOpenDrawer,
   store = browserStore,
 }: MahoBrowserShellOptions): MahoBrowserShellElements {
   const state = useBrowserStore((snapshot) => snapshot, store);
@@ -545,7 +546,17 @@ export function useMahoBrowserShell({
           onNewTab={handleNewTab}
           onTidy={handleTidy}
           onCopyUrl={copyUrl}
-          controlActivity={<MahoControlActivityChip activity={activity} />}
+          controlActivity={(
+            <MahoControlActivityChip
+              activity={activity}
+              // Details reveals the Agent Tasks section, which lives in the drawer: with the drawer
+              // up that section is already on screen, so the chip drops the button instead of
+              // expanding a second copy of the same rows.
+              onDetails={onOpenDrawer}
+              onSelectTab={revealTab}
+              showDetails={!drawerOpen}
+            />
+          )}
           agentSection={<MahoAgentTasksSection activity={activity} onSelectTab={activateTab} />}
           nowPlayingSlot={<MahoNowPlayingCard store={store} onSelectTab={revealTab} />}
           libraryOpen={libraryOpen}
@@ -661,19 +672,18 @@ export type MahoBrowserMiniPaneProps = {
 };
 
 /**
- * The Transient Mini Pane's right split slot for the modes the canvas does not draw. It is
- * the only mini host outside Browser mode, which is what keeps one `browserId` on one surface:
- * Browser mode renders the mini inside its canvas overlay instead.
+ * The Transient Mini Pane's slot for the modes the canvas does not draw. It is the only mini
+ * host outside Browser mode, which is what keeps one `browserId` on one surface: Browser mode
+ * renders the mini inside its canvas overlay instead.
+ *
+ * The pane is Peek's floating card (`position: fixed`, see `MahoMiniPane`), so this slot is a
+ * zero-footprint host: it must not reserve a column of its own beside the terminal.
  */
 export function MahoBrowserMiniPane({ visible, store = browserStore }: MahoBrowserMiniPaneProps) {
   const miniBrowserId = useBrowserStore((snapshot) => snapshot.miniBrowserId, store);
   if (!visible || !miniBrowserId) return null;
   return (
-    <div
-      data-testid="maho-mini-slot"
-      className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-l border-border bg-background"
-      style={{ width: `${MINI_PANE_WIDTH}px` }}
-    >
+    <div data-testid="maho-mini-slot" className="contents">
       <MahoMiniPane
         store={store}
         visible

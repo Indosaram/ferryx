@@ -1048,14 +1048,11 @@
   background-color: var(--maho-space-surface-hover);
 }
 
+/* The Mini Pane is Peek's floating card: `position: fixed`, so this overlay must not reserve a
+   column of its own. `display: contents` drops the wrapper's box while keeping the node (and its
+   test id) for the shell to place the pane beside the canvas. */
 .maho-canvas__overlay {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  width: 320px;
-  min-height: 0;
-  overflow: hidden;
-  border-left: 1px solid var(--maho-space-surface-hover);
+  display: contents;
 }
 
 /* ---- sidebar parity ---- */
@@ -1402,3 +1399,139 @@
 .maho-command-picker button { padding: 4px 8px; border-radius: 8px; color: var(--maho-command-text); font-size: 12px; }
 .maho-command-picker button:hover, .maho-command-picker button:focus-visible { background: var(--maho-command-selection); }
 /* ---- end command bar parity ---- */
+
+/* ---- panels parity ---- */
+/* Source: library_overlay, sidebar archive/downloads/now-playing/control views. */
+[data-maho-library="true"] {
+  color: var(--maho-space-foreground, var(--foreground));
+  background: var(--maho-space-gradient, none) no-repeat;
+  background-color: var(--maho-space-surface, var(--sidebar));
+  background-size: 380px 380px;
+}
+.maho-library-overlay { max-width: 100%; border-radius: 0; box-shadow: none; }
+.maho-library-content { position: relative; background: transparent; border-inline-start: 1px solid var(--border); }
+.maho-library-close { position: absolute; inset-inline-end: 2px; top: 0; z-index: 1; }
+.maho-library-rail { background: transparent; justify-content: center; padding-inline-end: 8px; }
+.maho-library-rail__item { transform: translateY(-28px); flex-shrink: 0; gap: 4px; padding-inline: 6px; }
+.maho-library-rail__item svg { width: 22px; height: 22px; }
+.maho-library-rail__label { font-size: 12px; line-height: 11px; text-align: center; }
+.maho-library-rail__item[aria-selected="true"] { background: var(--maho-space-surface-hover, var(--surface-hover)); color: var(--maho-space-foreground, var(--foreground)); }
+.maho-library-search-wrap { padding: 16px 16px 12px; }
+.maho-library-search { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-radius: 8px; background: var(--maho-space-surface-hover, var(--surface-hover)); color: var(--maho-space-muted-foreground, var(--muted-foreground)); font-size: 13px; }
+.maho-library-search:focus-within { outline: 2px solid var(--maho-space-accent, var(--ring)); outline-offset: 1px; }
+.maho-library-filter { display: flex; align-items: center; justify-content: space-between; padding: 0 16px 8px; font-size: 12px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-library-filter select { height: 24px; border-radius: 6px; background: transparent; color: inherit; }
+.maho-library-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 18px 10px 10px; }
+.maho-library-date { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 4px 8px; font-size: 12px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-library-date__count { padding: 0 5px; border-radius: 8px; background: var(--maho-space-surface-hover, var(--surface-hover)); font-size: 11px; }
+.maho-library-section { list-style: none; }
+.maho-library-section__list { list-style: none; margin: 0; padding: 0; }
+.maho-library-rail__divider { display: block; width: 24px; height: 1px; margin: 6px auto; flex-shrink: 0; background: var(--border); }
+.maho-library-rail__item--manager svg { width: 18px; height: 18px; }
+.maho-library-context { position: fixed; z-index: 40; min-width: 140px; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--popover, var(--background)); box-shadow: 0 8px 24px rgb(0 0 0 / 18%); }
+.maho-library-context [role="menu"] { display: flex; flex-direction: column; }
+.maho-library-context [role="menuitem"] { padding: 6px 10px; border-radius: 6px; text-align: start; font-size: 13px; }
+.maho-library-context [role="menuitem"]:hover, .maho-library-context [role="menuitem"]:focus-visible { background: var(--maho-space-surface-hover, var(--surface-hover)); }
+.maho-library-row__timestamp { display: block; margin-top: 1px; font-size: 11px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-library-row { display: flex; align-items: center; margin-bottom: 2px; border-radius: 10px; }
+.maho-library-row:hover, .maho-library-row:focus-within { background: var(--maho-space-surface-hover, var(--surface-hover)); }
+.maho-library-row__open { display: flex; flex: 1; min-width: 0; align-items: center; gap: 8px; padding: 6px 8px; text-align: start; }
+.maho-library-tile { display: flex; width: 28px; height: 28px; flex-shrink: 0; align-items: center; justify-content: center; border-radius: 8px; background: var(--maho-space-surface-hover, var(--surface-hover)); font-size: 14px; font-weight: 700; }
+.maho-library-tile img { width: 18px; height: 18px; object-fit: contain; }
+.maho-library-manager-list { padding: 0 18px 10px 10px; }
+.maho-library-manager-list > li { border-radius: 10px; padding: 6px 8px; }
+.maho-library-manager-list button { font-size: 13px; }
+.maho-library-manager-list button > span { display: block; margin: 2px 0 0; font: inherit; font-size: 12px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-library-row__title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.maho-library-row__subtitle { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; font-size: 12px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-library-row__delete { padding: 6px; opacity: 0; }
+.maho-library-row__delete svg { width: 14px; height: 14px; }
+.maho-library-row:hover .maho-library-row__delete, .maho-library-row:focus-within .maho-library-row__delete { opacity: 1; }
+.maho-library-empty { display: flex; flex: 1; min-height: 220px; align-items: center; justify-content: center; flex-direction: column; gap: 12px; padding: 24px; text-align: center; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-library-empty > svg { width: 48px; height: 48px; stroke-width: 1.25; }
+.maho-library-empty strong { font-size: 15px; font-weight: 500; color: var(--maho-space-foreground, var(--foreground)); }
+.maho-library-empty > span { max-width: 220px; font-size: 13px; }
+.maho-library-download-row { display: flex; align-items: center; gap: 8px; border-radius: 10px; padding: 6px 8px; font-size: 13px; }
+.maho-library-download-row:hover { background: var(--maho-space-surface-hover, var(--surface-hover)); }
+.maho-library-download-row .maho-library-tile svg { width: 18px; height: 18px; }
+.maho-library-download-actions { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-library-download-actions progress { width: 48px; height: 3px; accent-color: var(--maho-space-accent, var(--primary)); }
+.maho-library-download-actions button { border-radius: 6px; padding: 3px; }
+.maho-library-download-actions button:hover { background: var(--maho-space-surface-hover, var(--surface-hover)); }
+.maho-mini-bar { display: flex; flex-shrink: 0; height: 46px; align-items: center; gap: 6px; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--background); font-size: 12px; cursor: grab; touch-action: none; }
+/* Peek's card: a rounded, shadowed panel floating over the canvas edge, not a split column. */
+.maho-mini-card { z-index: 40; border: 1px solid var(--border); border-radius: 16px; background: var(--background); box-shadow: 0 18px 48px -12px rgb(0 0 0 / 0.45), 0 4px 14px -6px rgb(0 0 0 / 0.3); }
+.maho-mini-card[data-docked="true"] .maho-mini-bar:active { cursor: grabbing; }
+.maho-mini-card[data-visible="false"] { visibility: hidden; }
+.maho-mini-resize { display: block; position: absolute; inset-block-end: 0; inset-inline-end: 0; width: 16px; height: 16px; cursor: nwse-resize; touch-action: none; background: linear-gradient(135deg, transparent 50%, var(--border) 50%); border-end-end-radius: 16px; }
+.maho-mini-resize:hover { background: linear-gradient(135deg, transparent 50%, var(--maho-space-accent, var(--primary)) 50%); }
+.maho-mini-integrated { display: flex; flex: 1; min-width: 0; height: 32px; align-items: center; gap: 6px; padding: 0 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--muted); }
+.maho-mini-space { display: flex; min-width: 0; max-width: 96px; align-items: center; gap: 5px; padding: 4px 6px; color: var(--muted-foreground); }
+.maho-mini-address { flex: 1; min-width: 0; max-width: 112px; height: 26px; margin-inline: auto; background: transparent; text-align: center; outline: none; }
+.maho-mini-copy.maho-top-bar__button { width: 24px; height: 24px; flex-shrink: 0; }
+.maho-mini-copy svg { width: 14px; height: 14px; }
+.maho-mini-promote-control { display: flex; width: 210px; max-width: 42%; height: 28px; flex-shrink: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--muted); overflow: hidden; }
+.maho-mini-promote { display: flex; flex: 1; min-width: 0; align-items: center; justify-content: center; gap: 6px; padding: 0 7px; }
+.maho-mini-promote kbd { border: 0; font: inherit; white-space: nowrap; color: var(--muted-foreground); }
+.maho-mini-choose { display: flex; width: 30px; align-items: center; justify-content: center; position: relative; border-inline-start: 1px solid var(--border); }
+.maho-mini-choose > svg { width: 10px; height: 10px; }
+.maho-mini-choose select { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+.maho-mini-toggle.maho-top-bar__button { width: 28px; height: 28px; flex-shrink: 0; }
+.maho-mini-pane[data-compact="true"] .maho-mini-space,
+.maho-mini-pane[data-compact="true"] .maho-mini-copy,
+.maho-mini-pane[data-compact="true"] .maho-mini-promote-control,
+.maho-mini-pane[data-compact="true"] .maho-mini-page { display: none; }
+.maho-mini-pane[data-compact="true"] .maho-mini-address { max-width: none; }
+.maho-now-playing { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 12px; color: var(--maho-space-foreground, var(--foreground)); background: var(--maho-space-surface-hover, var(--muted)); }
+.maho-now-playing__metadata { display: none; }
+.maho-now-playing:hover .maho-now-playing__metadata, .maho-now-playing:focus-within .maho-now-playing__metadata { display: block; }
+.maho-now-playing__title-row, .maho-now-playing__controls { display: flex; align-items: center; gap: 8px; }
+.maho-now-playing__title-row { gap: 4px; font-size: 13px; }
+.maho-now-playing__title-row button svg { width: 12px; height: 12px; }
+.maho-now-playing__artist { margin-top: 6px; font-size: 12px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-now-playing__progress { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.maho-now-playing__time { flex-shrink: 0; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-now-playing__seek { flex: 1; min-width: 0; height: 14px; accent-color: var(--maho-space-accent, var(--primary)); cursor: pointer; }
+.maho-now-playing__seek:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 8px; }
+.maho-now-playing__controls > button { display: flex; position: relative; width: 26px; height: 26px; padding: 0; align-items: center; justify-content: center; border-radius: 6px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-now-playing__controls > button svg { width: 14px; height: 14px; }
+.maho-now-playing__source img { width: 16px; height: 16px; object-fit: contain; }
+.maho-mini-address:focus-visible { outline: 2px solid var(--ring); border-radius: 8px; }
+.maho-mini-choose:focus-within { outline: 2px solid var(--ring); outline-offset: -2px; }
+.maho-now-playing__controls > [data-testid="maho-now-playing-toggle"] { width: 32px; height: 32px; }
+.maho-now-playing__controls > [data-testid="maho-now-playing-toggle"] svg { width: 18px; height: 18px; }
+.maho-now-playing__notes { position: absolute; pointer-events: none; animation: maho-media-note 2400ms linear infinite; }
+@keyframes maho-media-note { from { opacity: 0; transform: translateY(8px); } 50% { opacity: 0.8; } to { opacity: 0; transform: translateY(-12px); } }
+.maho-control-activity { min-width: 0; }
+.maho-control-activity__chip { display: flex; min-height: 32px; min-width: 0; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 10px; font-size: 12px; color: var(--maho-space-foreground, var(--foreground)); }
+.maho-control-activity__chip > svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--maho-space-accent, var(--primary)); }
+.maho-control-activity__status, .maho-control-activity__target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.maho-control-activity__status { font-weight: 500; }
+.maho-control-activity__target { flex-grow: 2; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-control-activity__chip > button { flex-shrink: 0; }
+.maho-agent-tasks { font-size: 12px; color: var(--maho-space-foreground, var(--foreground)); }
+.maho-agent-tasks__header { display: flex; width: 100%; gap: 4px; padding: 2px 4px; text-align: start; }
+.maho-agent-tasks__row { display: flex; align-items: center; gap: 4px; padding: 2px 4px; }
+.maho-agent-tasks__row > button:last-child { flex-shrink: 0; }
+.maho-agent-banner-wrap { padding: 8px 12px; font-size: 13px; }
+.maho-agent-banner { display: flex; width: fit-content; max-width: 100%; min-height: 34px; margin-inline: auto; align-items: center; gap: 8px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 17px; background: var(--muted); }
+.maho-agent-banner > button { border-radius: 10px; background: var(--primary); color: var(--primary-foreground); }
+.maho-agent-banner__dot { display: block; width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--primary); animation: maho-agent-pulse 1200ms ease-in-out infinite; }
+@keyframes maho-agent-pulse { 50% { opacity: 0.7; transform: scale(1.4); } }
+.maho-agent-help-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+/* The controlled banner slides in from the top edge, Maho's 220ms EASE_OUT reveal. */
+.maho-agent-banner-wrap { animation: maho-agent-banner-slide 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes maho-agent-banner-slide { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+/* Compact strip: glyph, plane tag and the kill switch only; the prose elides away. */
+.maho-control-activity[data-compact="true"] .maho-control-activity__chip { min-height: 26px; gap: 4px; padding: 2px 6px; }
+.maho-control-activity__plane { flex-shrink: 0; padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; font-size: 9px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-control-activity__receipt { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+.maho-agent-tasks__receipt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--maho-space-muted-foreground, var(--muted-foreground)); }
+@media (prefers-reduced-motion: reduce) { .maho-agent-banner-wrap { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .maho-now-playing__notes, .maho-agent-banner__dot { animation: none; } }
+/* A disconnected or failed agent is a warning state, not the ordinary accent. */
+.maho-control-activity__chip[data-state="disconnected"],
+.maho-control-activity__chip[data-state="error"] { border-color: var(--destructive); }
+.maho-control-activity__chip[data-state="disconnected"] > svg,
+.maho-control-activity__chip[data-state="error"] > svg { color: var(--destructive); }
+/* ---- end panels parity ---- */

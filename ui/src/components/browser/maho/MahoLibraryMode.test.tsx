@@ -12,7 +12,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createBrowserStore, type BrowserStore } from "../../../state/browserStore";
 import { useNativeTerminalVisibility } from "../../../lib/nativeTerminalVisibility";
-import { MahoLibraryMode } from "./MahoLibraryMode";
+import {
+  MahoLibraryMode,
+  archiveCountText,
+  archiveDateGroup,
+  downloadDateGroup,
+  downloadFileKind,
+  groupArchiveRows,
+} from "./MahoLibraryMode";
 
 type Call = { command: string; args: Record<string, unknown> };
 
@@ -114,27 +121,31 @@ beforeEach(() => {
 });
 
 describe("category rail", () => {
-  it("renders the four Maho categories and switches panels", async () => {
+  it("renders Maho's categories in order and keeps the managers reachable", async () => {
     host.history = [
       { url: "https://a.example/", title: "A page", visitCount: 1, lastVisitedAt: 5_000, frecency: 100 },
     ];
     render(<MahoLibraryMode store={makeStore()} defaultCategory="archive" />);
 
     const rail = screen.getByRole("tablist", { name: "Browser library" });
+    // Downloads and Archived Tabs lead the rail exactly as in Maho; Spaces follows, and the
+    // bookmark/history managers stay reachable after the divider. Media is opt-in.
     expect(within(rail).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual([
-      "Archive",
       "Downloads",
+      "Archived Tabs",
+      "Spaces",
       "Bookmarks",
       "History",
     ]);
-    expect(within(rail).getByRole("tab", { name: "Archive" })).toHaveAttribute("aria-selected", "true");
+    expect(within(rail).getAllByRole("tab").slice(3).every((tab) => tab.getAttribute("data-manager") === "true")).toBe(true);
+    expect(within(rail).getByRole("tab", { name: "Archived Tabs" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("maho-library-archive")).toBeInTheDocument();
 
     // Downloads reads the registry; it answers with an empty list here.
     fireEvent.click(within(rail).getByRole("tab", { name: "Downloads" }));
     expect(screen.getByRole("tab", { name: "Downloads" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByTestId("maho-library-downloads")).toBeInTheDocument();
-    expect(await screen.findByText("No downloads yet.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Search downloads" })).toBeInTheDocument();
 
     fireEvent.click(within(rail).getByRole("tab", { name: "Bookmarks" }));
     expect(await screen.findByTestId("maho-library-bookmarks")).toBeInTheDocument();
@@ -144,6 +155,16 @@ describe("category rail", () => {
     expect(screen.getByTestId("maho-library-history")).toBeInTheDocument();
     const row = await screen.findByRole("button", { name: "History: A page" });
     expect(row).toBeInTheDocument();
+  });
+
+  it("adds the Media category only when the owner enables it", () => {
+    const { rerender } = render(<MahoLibraryMode store={makeStore()} />);
+    expect(screen.queryByRole("tab", { name: "Media" })).toBeNull();
+    rerender(<MahoLibraryMode store={makeStore()} showMedia />);
+    const labels = screen.getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"));
+    expect(labels).toContain("Media");
+    // Maho's own order: the four categories, then the Ferryx managers.
+    expect(labels.slice(0, 4)).toEqual(["Downloads", "Archived Tabs", "Spaces", "Media"]);
   });
 
   it("reports the chosen category to its owner and opens a history entry", async () => {
@@ -180,14 +201,14 @@ describe("archive", () => {
     const onOpenTab = vi.fn();
     render(<MahoLibraryMode store={store} onOpenTab={onOpenTab} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restore GitHub to Today" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore archived tab GitHub" }));
 
     const state = store.getState();
     expect(state.tabs.github).toBeDefined();
     expect(state.tabs.github.section).toBe("today");
     expect(state.archive).toHaveLength(0);
     expect(onOpenTab).toHaveBeenCalledWith("github");
-    expect(screen.getByText("Nothing archived yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore archived tab GitHub" })).toBeNull();
   });
 
   it("filters archived tabs by title and URL", async () => {
@@ -196,10 +217,214 @@ describe("archive", () => {
     archiveClosedTab(store, "docs", "Docs");
     render(<MahoLibraryMode store={store} />);
 
-    expect(screen.getByRole("button", { name: "Restore GitHub to Today" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Search archive"), { target: { value: "docs" } });
-    expect(screen.queryByRole("button", { name: "Restore GitHub to Today" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Restore Docs to Today" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore archived tab GitHub" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search Archive"), { target: { value: "docs" } });
+    expect(screen.queryByRole("button", { name: "Restore archived tab GitHub" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Restore archived tab Docs" })).toBeInTheDocument();
+  });
+});
+
+describe("download controls", () => {
+  it("searches filenames and keeps completed file actions wired", async () => {
+    host.downloads = [
+      { id: "report", url: "https://example.com/report.pdf", filePath: "/downloads/report.pdf", status: "completed", receivedBytes: 1024, totalBytes: 1024, createdAtMs: 1, updatedAtMs: 1 },
+      { id: "photo", url: "https://example.com/photo.png", filePath: "/downloads/photo.png", status: "completed", receivedBytes: 2048, totalBytes: 2048, createdAtMs: 2, updatedAtMs: 2 },
+    ];
+    render(<MahoLibraryMode store={makeStore()} defaultCategory="downloads" />);
+    await screen.findByTestId("download-row-report");
+    fireEvent.change(screen.getByRole("textbox", { name: "Search downloads" }), { target: { value: "report" } });
+    expect(screen.queryByTestId("download-row-photo")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("download-row-report")).getByRole("button", { name: "Open download" }));
+    await waitFor(() => expect(host.calls).toContainEqual({ command: "cmd_open_file_path", args: { path: "/downloads/report.pdf", editor: "system" } }));
+  });
+
+  it("puts an In Progress group first and counts every group", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    try {
+      const now = Date.now();
+      host.downloads = [
+        { id: "old", url: "https://example.com/old.zip", filePath: "/downloads/old.zip", status: "completed", receivedBytes: 10, totalBytes: 10, createdAtMs: now - 20 * 86_400_000, updatedAtMs: now },
+        { id: "done", url: "https://example.com/done.pdf", filePath: "/downloads/done.pdf", status: "completed", receivedBytes: 20, totalBytes: 20, createdAtMs: now - 1_000, updatedAtMs: now },
+        { id: "live", url: "https://example.com/live.iso", filePath: "/downloads/live.iso", status: "inProgress", receivedBytes: 30, totalBytes: 100, createdAtMs: now - 5_000, updatedAtMs: now, canPause: true },
+      ];
+      render(<MahoLibraryMode store={makeStore()} defaultCategory="downloads" />);
+      await screen.findByTestId("download-row-live");
+
+      // The unfinished download is in the first group even though it is older than the
+      // completed one: Maho's section order, not the timestamp, decides.
+      expect(screen.getByTestId("download-group-count-In Progress")).toHaveTextContent("1");
+      expect(screen.getByTestId("download-group-count-Today")).toHaveTextContent("1");
+      expect(screen.getByTestId("download-group-count-Older")).toHaveTextContent("1");
+      const groups = Array.from(document.querySelectorAll('[data-testid^="download-group-count-"]'))
+        .map((node) => node.getAttribute("data-testid"));
+      expect(groups[0]).toBe("download-group-count-In Progress");
+      expect(downloadDateGroup("paused", now)).toBe("In Progress");
+      expect(downloadDateGroup("completed", now - 30 * 86_400_000)).toBe("Older");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives each row its file-type icon and a timestamp", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    try {
+      const now = Date.now();
+      host.downloads = [
+        { id: "image", url: "https://example.com/a.png", filePath: "/downloads/a.png", status: "completed", receivedBytes: 1, totalBytes: 1, createdAtMs: now - 2_000, updatedAtMs: now },
+        { id: "code", url: "https://example.com/b.rs", filePath: "/downloads/b.rs", status: "completed", receivedBytes: 1, totalBytes: 1, createdAtMs: now - 30 * 86_400_000, updatedAtMs: now },
+      ];
+      render(<MahoLibraryMode store={makeStore()} defaultCategory="downloads" />);
+      await screen.findByTestId("download-row-image");
+
+      expect(screen.getByTestId("download-row-image")).toHaveAttribute("data-file-kind", "image");
+      expect(screen.getByTestId("download-row-code")).toHaveAttribute("data-file-kind", "code");
+      // Today's rows show a clock time, older ones a date; both are non-empty.
+      expect(screen.getByTestId("download-time-image")).not.toBeEmptyDOMElement();
+      expect(screen.getByTestId("download-time-code")).not.toBeEmptyDOMElement();
+      expect(downloadFileKind("archive.tar.gz")).toBe("archive");
+      expect(downloadFileKind("README")).toBe("file");
+      expect(downloadFileKind("trailing.")).toBe("file");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("archive controls", () => {
+  it("deletes an archived tab without restoring it", () => {
+    const store = makeStore();
+    archiveClosedTab(store, "docs", "Docs");
+    render(<MahoLibraryMode store={store} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete archived tab Docs" }));
+    expect(store.getState().archive).toHaveLength(0);
+    expect(store.getState().tabs.docs).toBeUndefined();
+  });
+
+  it("groups the archive into date sections that each carry their own count", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    try {
+      const store = makeStore();
+      archiveClosedTab(store, "today-a", "Today A");
+      archiveClosedTab(store, "today-b", "Today B");
+      // Backdate one entry a day so it lands in Yesterday, exactly as Maho buckets it.
+      store.setState((state) => ({
+        ...state,
+        archive: state.archive.map((entry) => (entry.tab.browserId === "today-b"
+          ? { ...entry, archivedAt: entry.archivedAt - 86_400_000 }
+          : entry)),
+      }));
+
+      render(<MahoLibraryMode store={store} />);
+
+      expect(archiveDateGroup(Date.now())).toBe("Today");
+      expect(screen.getByTestId("archive-group-count-Today")).toHaveTextContent("1");
+      expect(screen.getByTestId("archive-group-count-Yesterday")).toHaveTextContent("1");
+      // Each section is a list of its own rows, labelled by the bucket name.
+      const yesterday = screen.getByRole("list", { name: "Yesterday" });
+      expect(within(yesterday).getByRole("button", { name: "Restore archived tab Today B" })).toBeInTheDocument();
+      expect(within(screen.getByRole("list", { name: "Today" })).queryByRole("button", { name: "Restore archived tab Today B" })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers Restore and Delete on the archived row's context menu", () => {
+    const store = makeStore();
+    archiveClosedTab(store, "docs", "Docs");
+    const onOpenTab = vi.fn();
+    render(<MahoLibraryMode store={store} onOpenTab={onOpenTab} />);
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Restore archived tab Docs" }).closest(".maho-library-row") as Element);
+
+    const menu = screen.getByRole("dialog", { name: "Archived tab actions" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Restore", "Delete"]);
+
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Restore" }));
+    expect(store.getState().tabs.docs).toBeDefined();
+    expect(store.getState().archive).toHaveLength(0);
+    expect(onOpenTab).toHaveBeenCalledWith("docs");
+    expect(screen.queryByRole("dialog", { name: "Archived tab actions" })).toBeNull();
+  });
+
+  it("deletes from the context menu and closes it on Escape", () => {
+    const store = makeStore();
+    archiveClosedTab(store, "docs", "Docs");
+    render(<MahoLibraryMode store={store} />);
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Restore archived tab Docs" }).closest(".maho-library-row") as Element);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Archived tab actions" })).toBeNull();
+    expect(store.getState().archive).toHaveLength(1);
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Restore archived tab Docs" }).closest(".maho-library-row") as Element);
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Archived tab actions" })).getByRole("menuitem", { name: "Delete" }));
+    expect(store.getState().archive).toHaveLength(0);
+    expect(store.getState().tabs.docs).toBeUndefined();
+  });
+
+  it("shows an SVG illustration in the empty state", () => {
+    render(<MahoLibraryMode store={makeStore()} />);
+    const empty = screen.getByText("Nothing archived yet").closest(".maho-library-empty") as HTMLElement;
+    expect(empty.querySelector("svg")).not.toBeNull();
+    expect(empty.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("filters archived tabs by date with a fixed clock", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    try {
+      const store = makeStore();
+      archiveClosedTab(store, "docs", "Docs");
+      render(<MahoLibraryMode store={store} />);
+      fireEvent.change(screen.getByRole("combobox", { name: "Filter archived tabs" }), { target: { value: "Older" } });
+      expect(screen.queryByRole("button", { name: "Restore archived tab Docs" })).toBeNull();
+      fireEvent.change(screen.getByRole("combobox", { name: "Filter archived tabs" }), { target: { value: "Today" } });
+      expect(screen.getByRole("button", { name: "Restore archived tab Docs" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dismisses the covering library on Escape", () => {
+    const onClose = vi.fn();
+    render(<MahoLibraryMode store={makeStore()} overlay onClose={onClose} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+});
+
+describe("archive bucketing helpers", () => {
+  it("names Maho's date buckets from a day offset", () => {
+    const now = 1_700_000_000_000;
+    expect(archiveDateGroup(now, now)).toBe("Today");
+    expect(archiveDateGroup(now - 86_400_000, now)).toBe("Yesterday");
+    expect(archiveDateGroup(now - 3 * 86_400_000, now)).toBe("3 days ago");
+    expect(archiveDateGroup(now - 10 * 86_400_000, now)).toBe("Last 2 weeks");
+    expect(archiveDateGroup(now - 40 * 86_400_000, now)).toBe("Earlier");
+    expect(archiveDateGroup(0, now)).toBe("Earlier");
+  });
+
+  it("builds one section per contiguous bucket and counts each", () => {
+    const now = Date.now();
+    const rows = [
+      { archivedAt: now, id: "a" },
+      { archivedAt: now - 60_000, id: "b" },
+      { archivedAt: now - 2 * 86_400_000, id: "c" },
+    ];
+    const sections = groupArchiveRows(rows);
+    expect(sections.map((section) => section.title)).toEqual(["Today", "2 days ago"]);
+    expect(sections[0].entries.map((row) => row.id)).toEqual(["a", "b"]);
+    expect(sections[1].entries.map((row) => row.id)).toEqual(["c"]);
+  });
+
+  it("pluralises the visible/total count and never hides the total", () => {
+    expect(archiveCountText(0, 0)).toBe("No tabs");
+    expect(archiveCountText(1, 1)).toBe("1 tab");
+    expect(archiveCountText(3, 3)).toBe("3 tabs");
+    expect(archiveCountText(2, 9)).toBe("2 tabs of 9");
   });
 });
 

@@ -63,7 +63,7 @@ import {
   openBrowserInWorktreeSplit,
   resolveBrowserTabSwitch,
 } from "./lib/worktreeBrowserBridge";
-import { browserStore } from "./state/browserStore";
+import { browserStore, selectActiveBrowserId, useBrowserStore } from "./state/browserStore";
 import {
   BROWSER_MODE_SHORTCUT_EVENT,
   MahoBrowserMiniPane,
@@ -5582,12 +5582,21 @@ function WorkspaceApp({
   // Browser mode's whole surface lives in one hook: the Maho drawer, the canvas, the Command Bar
   // and the Ctrl+Tab switcher. Splitting it this way keeps the always-mounted worktree surface
   // exactly where it was while still giving every Browser surface one owner of its state.
-  const browserActivity = useBrowserAgentActivity();
+  // Background-tab attribution: the chip must say the agent is working elsewhere instead of
+  // claiming the tab in front of the user, so the hook needs to know which tab that is.
+  const visibleBrowserId = useBrowserStore((snapshot) => selectActiveBrowserId(snapshot), browserStore);
+  const browserActivity = useBrowserAgentActivity({ visibleBrowserId });
   const mahoBrowser = useMahoBrowserShell({
     active: activityMode === "browser",
     drawerOpen: isSidebarOpen,
     activity: browserActivity,
     onRevealBrowser: handleOpenBrowserFullscreen,
+    // The chip's Details reveals the Agent Tasks section, which lives in the drawer. Opening it
+    // also persists the drawer, the way selecting a mode with a drawer does.
+    onOpenDrawer: isSidebarOpen ? undefined : () => {
+      setIsSidebarOpen(true);
+      persistSidebarOpen(true);
+    },
   });
   const isMacPlatform = isMacShortcutPlatform();
   return (
