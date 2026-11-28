@@ -1078,13 +1078,18 @@
   --maho-command-muted: rgb(143 143 159);
   --maho-command-selection: rgb(210 155 145 / 44%);
   --maho-command-border: rgb(255 255 255 / 7%);
+  /* kMahoColorCommandBarInputFill / InputBorder (maho_color_mixer.cc AddCommandBarColors). */
+  --maho-command-input-fill: rgb(34 36 43 / 69%);
+  --maho-command-input-border: rgb(255 255 255 / 5.5%);
   position: fixed;
   inset: 0;
   z-index: 50;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 32px 16px;
+  /* Maho centers the popup in the window but keeps kPopupMinTopMarginDp (62) above it and
+     kPopupMinBottomMarginDp (32) below it (maho_command_overlay_controller.cc ClampPopupY). */
+  padding: 62px 16px 32px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -1094,6 +1099,8 @@
   --maho-command-muted: rgb(128 136 166);
   --maho-command-selection: rgb(120 55 50 / 11%);
   --maho-command-border: rgb(141 152 181 / 13%);
+  --maho-command-input-fill: rgb(252 253 255 / 88%);
+  --maho-command-input-border: rgb(163 174 203 / 16%);
 }
 
 .maho-command-panel {
@@ -1119,7 +1126,9 @@
   height: 44px;
   margin: 0 6px;
   padding: 0 12px;
+  border: 1px solid var(--maho-command-input-border);
   border-radius: 14px;
+  background: var(--maho-command-input-fill);
 }
 
 .maho-command-glyph {
@@ -1148,7 +1157,9 @@
 
 .maho-command-input::placeholder { color: color-mix(in srgb, var(--maho-command-text) 64%, transparent); }
 .maho-command-input::selection { background: rgb(88 129 214 / 38%); }
-.maho-command-results { display: flex; flex-direction: column; gap: 2px; }
+/* Maho clips the result list to a fixed kFixedResultsHeightDp: kMaxVisibleRows (5) x
+   kRowHeightDp (44) + 4 x kResultRowSpacingDp (2) = 228, so the panel never resizes per query. */
+.maho-command-results { display: flex; flex-direction: column; gap: 2px; height: 228px; overflow-y: auto; }
 .maho-command-result { flex: 0 0 44px; height: 44px; padding: 0 6px; cursor: pointer; }
 .maho-command-result-content { display: flex; align-items: center; gap: 8px; height: 100%; padding: 0 12px; border-radius: 10px; }
 .maho-command-result[aria-selected="true"] .maho-command-result-content { background: var(--maho-command-selection); }

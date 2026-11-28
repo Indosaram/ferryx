@@ -1,13 +1,13 @@
 // Browser-rendered harness for Browser mode: the real Maho drawer and canvas from
 // `useMahoBrowserShell`, over mocked IPC. A native webview cannot exist in a plain browser,
 // so the page area shows the app background where the engine would draw.
-// URL params: `?state=empty|page`, `?theme=light|dark`.
+// URL params: `?state=empty|page`, `?theme=light|dark`, `?open=command`.
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import React from "react";
 import ReactDOM from "react-dom/client";
 
 import "../index.css";
-import { useMahoBrowserShell } from "../components/browser/maho/MahoBrowserShell";
+import { BROWSER_MODE_SHORTCUT_EVENT, useMahoBrowserShell } from "../components/browser/maho/MahoBrowserShell";
 import type { BrowserAgentActivity } from "../components/browser/maho/MahoAgentControl";
 import { APPEARANCE_SETTINGS_STORAGE_KEY } from "../lib/storageKeys";
 import { browserStore } from "../state/browserStore";
@@ -61,6 +61,12 @@ function Harness() {
       {shell.overlays}
     </div>
   );
+}
+
+if (params.get("open") === "command") {
+  window.setTimeout(() => {
+    window.dispatchEvent(new CustomEvent(BROWSER_MODE_SHORTCUT_EVENT, { detail: { action: "command-bar" } }));
+  }, 300);
 }
 
 const el = document.getElementById("root");
