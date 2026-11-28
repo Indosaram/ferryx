@@ -1,8 +1,70 @@
 //! MachineClient hooks for the direct path: pick the request base, report direct
 //! transport loss, and start the background negotiator once trust is known.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+use parking_lot::Mutex;
 use url::Url;
+
+const UNPINNED_KICK_TTL: Duration = Duration::from_secs(60);
+const KICK_CACHE_MAX_ENTRIES: usize = 256;
+
+#[derive(Clone, Copy, Debug)]
+enum KickState {
+    InFlight,
+    UnpinnedUntil(Instant),
+}
+
+static KICK_STATE: LazyLock<Mutex<HashMap<(String, u64), KickState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Claims a `kick()` slot for `(host_id, generation)`. Returns `false` if a
+/// lookup is already in flight or if this generation recently resolved as unpinned.
+fn try_claim_kick(host_id: &str, generation: u64, now: Instant) -> bool {
+    let mut state = KICK_STATE.lock();
+    let key = (host_id.to_owned(), generation);
+    if let Some(entry) = state.get(&key) {
+        match *entry {
+            KickState::InFlight => return false,
+            KickState::UnpinnedUntil(until) if now < until => return false,
+            KickState::UnpinnedUntil(_) => {}
+        }
+    }
+    if state.len() >= KICK_CACHE_MAX_ENTRIES && !state.contains_key(&key) {
+        state.retain(|_, entry| match *entry {
+            KickState::InFlight => true,
+            KickState::UnpinnedUntil(until) => now < until,
+        });
+        if state.len() >= KICK_CACHE_MAX_ENTRIES {
+            state.retain(|_, entry| matches!(*entry, KickState::InFlight));
+        }
+    }
+    state.insert(key, KickState::InFlight);
+    true
+}
+
+struct KickClaimGuard {
+    key: (String, u64),
+    unpinned_until: Option<Instant>,
+}
+
+impl KickClaimGuard {
+    fn mark_unpinned(&mut self, until: Instant) {
+        self.unpinned_until = Some(until);
+    }
+}
+
+impl Drop for KickClaimGuard {
+    fn drop(&mut self) {
+        let mut state = KICK_STATE.lock();
+        if let Some(until) = self.unpinned_until {
+            state.insert(self.key.clone(), KickState::UnpinnedUntil(until));
+        } else if matches!(state.get(&self.key), Some(KickState::InFlight)) {
+            state.remove(&self.key);
+        }
+    }
+}
 
 use super::client::ClientError;
 use super::direct_connect::{ensure_direct as start_direct, is_running, DirectAttempt};
@@ -127,9 +189,25 @@ pub(crate) fn kick(http: &reqwest::Client, host: &HostView, lease: &CredentialLe
     };
     #[cfg(test)]
     let test_attempt = TEST_ATTEMPT.try_with(|(_, sender)| sender.clone()).ok();
+    #[cfg(test)]
+    let bypass_kick_cache = test_attempt.is_some();
+    #[cfg(not(test))]
+    let bypass_kick_cache = false;
+    let claim = if !bypass_kick_cache {
+        if !try_claim_kick(&host.host_id, generation, Instant::now()) {
+            return;
+        }
+        Some(KickClaimGuard {
+            key: (host.host_id.clone(), generation),
+            unpinned_until: None,
+        })
+    } else {
+        None
+    };
     let http = http.clone();
     let host = host.clone();
     tokio::spawn(async move {
+        let mut claim = claim;
         let attempt = load_attempt(dir, &host, bearer).await;
         if *cancelled.borrow_and_update() {
             return;
@@ -140,8 +218,12 @@ pub(crate) fn kick(http: &reqwest::Client, host: &HostView, lease: &CredentialLe
             return;
         }
         let Some(attempt) = attempt else {
+            if let Some(guard) = claim.as_mut() {
+                guard.mark_unpinned(Instant::now() + UNPINNED_KICK_TTL);
+            }
             return;
         };
+        drop(claim);
         let cancelled = async move {
             // borrow_and_update first: a flag already set before subscribe counts.
             while !*cancelled.borrow_and_update() {
@@ -159,12 +241,11 @@ async fn load_attempt(
     host: &HostView,
     bearer: String,
 ) -> Option<DirectAttempt> {
-    // A pinned host must not wait on account availability before it can negotiate.
-    if trusted_key(DirectTrustStore::at(&dir), host.machine_id.clone())
-        .await
-        .is_some()
-    {
-        return load_attempt_in(dir, host, bearer, None).await;
+    // Read direct-trust.json once; a pinned host proceeds immediately without
+    // waiting on account availability.
+    let pinned = trusted_key(DirectTrustStore::at(&dir), host.machine_id.clone()).await;
+    if pinned.is_some() {
+        return load_attempt_with_pinned(dir, host, bearer, pinned, None).await;
     }
     let http = super::direct_autotrust::account_http();
     let account_key = if super::direct_trust::auto_trust_enabled() {
@@ -174,10 +255,11 @@ async fn load_attempt(
     } else {
         None
     };
-    load_attempt_in(
+    load_attempt_with_pinned(
         dir,
         host,
         bearer,
+        None,
         account_key.as_deref().map(|key| (&http, key)),
     )
     .await
@@ -189,6 +271,7 @@ async fn load_attempt(
 /// On a trust miss, a client enrolled with an account fetches the host's account-signed peer
 /// record from the account origin it enrolled with, verifies it, pins it and continues. Every
 /// failure (not enrolled, no pin, network, bad record) is logged and leaves the route on the relay.
+#[cfg(test)]
 pub(crate) async fn load_attempt_in(
     dir: std::path::PathBuf,
     host: &HostView,
@@ -196,6 +279,16 @@ pub(crate) async fn load_attempt_in(
     auto_trust: Option<(&reqwest::Client, &str)>,
 ) -> Option<DirectAttempt> {
     let pinned = trusted_key(DirectTrustStore::at(&dir), host.machine_id.clone()).await;
+    load_attempt_with_pinned(dir, host, bearer, pinned, auto_trust).await
+}
+
+async fn load_attempt_with_pinned(
+    dir: std::path::PathBuf,
+    host: &HostView,
+    bearer: String,
+    pinned: Option<ed25519_dalek::VerifyingKey>,
+    auto_trust: Option<(&reqwest::Client, &str)>,
+) -> Option<DirectAttempt> {
     if pinned.is_none() && auto_trust.is_none() {
         return None;
     }
@@ -723,6 +816,29 @@ mod tests {
         assert!(attempt(bare.path(), &host_view("host-m"), Some(&account_public)).await.is_none());
         assert_eq!(DirectTrustStore::at(bare.path()).trusted_key("host-m").unwrap(), None);
         stub.abort();
+    }
+
+    #[test]
+    fn kick_negative_cache_deduplicates_in_flight_and_unpinned_hosts_per_generation() {
+        let host = "https://relay.test/host/unpinned-cache-test";
+        let now = Instant::now();
+        assert!(try_claim_kick(host, 1, now));
+        // In-flight deduplication suppresses concurrent kicks for the same generation.
+        assert!(!try_claim_kick(host, 1, now));
+        // A newer generation is not suppressed by an older generation's claim.
+        assert!(try_claim_kick(host, 2, now));
+        let mut guard = KickClaimGuard {
+            key: (host.to_owned(), 1),
+            unpinned_until: None,
+        };
+        guard.mark_unpinned(now + UNPINNED_KICK_TTL);
+        drop(guard);
+        assert!(!try_claim_kick(host, 1, now + Duration::from_secs(30)));
+        assert!(try_claim_kick(host, 1, now + UNPINNED_KICK_TTL));
+        // Clean up test keys.
+        let mut state = KICK_STATE.lock();
+        state.remove(&(host.to_owned(), 1));
+        state.remove(&(host.to_owned(), 2));
     }
 }
 

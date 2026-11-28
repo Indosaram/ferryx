@@ -418,7 +418,10 @@ pub mod base64_serde {
         S: Serializer,
         T: AsRef<[u8]>,
     {
-        serializer.serialize_str(&STANDARD.encode(bytes.as_ref()))
+        serializer.collect_str(&base64::display::Base64Display::new(
+            bytes.as_ref(),
+            &STANDARD,
+        ))
     }
 
     /// Decodes straight from the borrowed or transient input string; no owned copy first.

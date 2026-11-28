@@ -10,7 +10,7 @@ use super::compression::{CompressionStep, MemoryUsage};
 use super::cursor::CursorState;
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
-use super::guards::SelectionGestureGuard;
+use super::guards::{RenderPassHandles, SelectionGestureGuard};
 use super::key::KeyEvent;
 use super::key_encoder::{encode_key_event, encode_key_event_with_option_as_alt};
 use super::lifecycle::{create_native_terminal, teardown_native_terminal};
@@ -140,6 +140,7 @@ pub struct NativeTerminal {
     handle: NonNull<GhosttyTerminalImpl>,
     context: Box<TerminalContext>,
     gesture: SelectionGestureGuard,
+    render_handles: parking_lot::Mutex<Option<RenderPassHandles>>,
     image_cache: std::cell::RefCell<super::images::ImageCache>,
     synchronized_output_deadline: Option<tokio::time::Instant>,
     /// Start of this terminal's monotonic Kitty animation clock. libghostty requires one clock
@@ -159,6 +160,9 @@ unsafe impl Send for NativeTerminal {}
 
 impl Drop for NativeTerminal {
     fn drop(&mut self) {
+        // CRITICAL: Free cached render handles before tearing down the terminal,
+        // because RenderState holds state derived from the terminal's pages.
+        self.render_handles.get_mut().take();
         self.gesture.free_with_terminal(self.handle.as_ptr());
         teardown_native_terminal(self.handle);
     }
@@ -179,6 +183,7 @@ impl NativeTerminal {
             handle,
             context,
             gesture,
+            render_handles: parking_lot::Mutex::new(None),
             image_cache: Default::default(),
             synchronized_output_deadline: None,
             animation_epoch: std::time::Instant::now(),
@@ -565,6 +570,8 @@ impl NativeTerminal {
 
 impl TerminalEngine for NativeTerminal {
     fn reset(&mut self) {
+        // Release cached render state before resetting terminal pages.
+        self.render_handles.get_mut().take();
         // SAFETY: Category: Foreign State Mutation.
         // Invariant: self.handle is verified non-null and valid terminal instance.
         unsafe {
@@ -706,7 +713,10 @@ impl TerminalEngine for NativeTerminal {
     }
 
     fn render_snapshot(&self) -> Result<RenderSnapshot, NativeTerminalError> {
-        let mut snapshot = capture_render_snapshot(self.handle.as_ptr())?;
+        let mut snapshot = {
+            let mut handles = self.render_handles.lock();
+            capture_render_snapshot(self.handle.as_ptr(), &mut handles)?
+        };
         let capture = self
             .image_cache
             .borrow_mut()
@@ -2032,5 +2042,64 @@ mod tests {
             );
         }
         assert_eq!(terminal.selection_text().unwrap(), None);
+    }
+
+    #[test]
+    fn render_snapshot_reuses_cached_handles_across_updates_and_resets_cleanly() {
+        let mut terminal = NativeTerminal::new(20, 4).expect("create native terminal");
+        assert!(terminal.render_handles.lock().is_none());
+
+        terminal.feed_str("hello").unwrap();
+        let snap1 = terminal.render_snapshot().unwrap();
+        assert_eq!(snap1.row_text(0).trim_end(), "hello");
+
+        let ptrs_after_first = {
+            let guard = terminal.render_handles.lock();
+            let h = guard.as_ref().expect("handles must be cached after first snapshot");
+            (
+                h.render_state.0.as_ptr() as usize,
+                h.row_iterator.0.as_ptr() as usize,
+                h.row_cells.0.as_ptr() as usize,
+            )
+        };
+
+        // Mutate text, resize, switch to alt screen and back — handles stay cached and reused.
+        terminal.feed_str(" world").unwrap();
+        let snap2 = terminal.render_snapshot().unwrap();
+        assert_eq!(snap2.row_text(0).trim_end(), "hello world");
+
+        terminal.resize(30, 6, 8, 16).unwrap();
+        let snap3 = terminal.render_snapshot().unwrap();
+        assert_eq!((snap3.cols, snap3.rows), (30, 6));
+        assert_eq!(snap3.row_text(0).trim_end(), "hello world");
+
+        terminal.feed(b"\x1b[?1049h\x1b[HALT").unwrap();
+        let snap_alt = terminal.render_snapshot().unwrap();
+        assert_eq!(snap_alt.row_text(0).trim_end(), "ALT");
+
+        terminal.feed(b"\x1b[?1049l").unwrap();
+        let snap_back = terminal.render_snapshot().unwrap();
+        assert_eq!(snap_back.row_text(0).trim_end(), "hello world");
+
+        let ptrs_after_reuse = {
+            let guard = terminal.render_handles.lock();
+            let h = guard.as_ref().expect("handles must remain cached");
+            (
+                h.render_state.0.as_ptr() as usize,
+                h.row_iterator.0.as_ptr() as usize,
+                h.row_cells.0.as_ptr() as usize,
+            )
+        };
+        assert_eq!(
+            ptrs_after_first, ptrs_after_reuse,
+            "render_state, row_iterator, and row_cells handles must be reused across frames"
+        );
+
+        // Reset clears cached handles; subsequent snapshot cleanly re-allocates and reads blank screen.
+        terminal.reset();
+        assert!(terminal.render_handles.lock().is_none());
+        let snap_after_reset = terminal.render_snapshot().unwrap();
+        assert_eq!(snap_after_reset.row_text(0).trim_end(), "");
+        assert!(terminal.render_handles.lock().is_some());
     }
 }

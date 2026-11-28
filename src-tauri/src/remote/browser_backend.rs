@@ -232,6 +232,24 @@ pub struct BrowserCommandResult {
     pub value: Option<serde_json::Value>,
 }
 
+/// Zero-copy or owned broadcast receiver for browser screencast frames.
+///
+/// Backends storing `Arc<[u8]>` fan out a single frame allocation across all
+/// viewers without cloning 1-2 MiB per viewer per frame.
+pub enum FrameStreamReceiver {
+    Shared(tokio::sync::broadcast::Receiver<Arc<[u8]>>),
+    Owned(tokio::sync::broadcast::Receiver<Vec<u8>>),
+}
+
+impl FrameStreamReceiver {
+    pub async fn recv(&mut self) -> Result<Arc<[u8]>, tokio::sync::broadcast::error::RecvError> {
+        match self {
+            Self::Shared(rx) => rx.recv().await,
+            Self::Owned(rx) => rx.recv().await.map(Arc::from),
+        }
+    }
+}
+
 pub trait RemoteBrowserBackend: Send + Sync {
     fn list_sessions<'a>(
         &'a self,
@@ -263,6 +281,17 @@ pub trait RemoteBrowserBackend: Send + Sync {
             Err(RemoteBrowserError::Unavailable(
                 "Browser screencast frame subscription unavailable on this backend".into(),
             ))
+        })
+    }
+
+    fn subscribe_shared_frames<'a>(
+        &'a self,
+        browser_id: &'a str,
+    ) -> BoxFuture<'a, Result<FrameStreamReceiver, RemoteBrowserError>> {
+        Box::pin(async move {
+            self.subscribe_frames(browser_id)
+                .await
+                .map(FrameStreamReceiver::Owned)
         })
     }
 
@@ -551,7 +580,7 @@ pub struct LocalIpcBrowserBackend {
     #[cfg(unix)]
     io_timeout: std::time::Duration,
     frame_senders:
-        Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>,
+        Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Arc<[u8]>>>>>,
     active_subscriptions: Arc<tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
@@ -594,10 +623,20 @@ impl LocalIpcBrowserBackend {
     }
 
     pub fn publish_frame(&self, browser_id: &str, frame: Vec<u8>) {
-        let senders = self.frame_senders.lock();
+        let mut senders = self.frame_senders.lock();
         if let Some(sender) = senders.get(browser_id) {
-            let _ = sender.send(frame);
+            if sender.receiver_count() == 0 {
+                senders.remove(browser_id);
+            } else {
+                let _ = sender.send(Arc::from(frame));
+            }
         }
+    }
+
+    fn prune_empty_frame_senders(
+        senders: &parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Arc<[u8]>>>>,
+    ) {
+        senders.lock().retain(|_, tx| tx.receiver_count() > 0);
     }
 
     pub fn encode_ipc_frame(
@@ -1059,6 +1098,36 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
         browser_id: &'a str,
     ) -> BoxFuture<'a, Result<tokio::sync::broadcast::Receiver<Vec<u8>>, RemoteBrowserError>> {
         Box::pin(async move {
+            let shared = self.subscribe_shared_frames(browser_id).await?;
+            let FrameStreamReceiver::Shared(mut shared_rx) = shared else {
+                return Err(RemoteBrowserError::Unavailable(
+                    "Unexpected frame stream kind".into(),
+                ));
+            };
+            let (tx, rx) = tokio::sync::broadcast::channel(16);
+            tokio::spawn(async move {
+                loop {
+                    match shared_rx.recv().await {
+                        Ok(frame) => {
+                            if tx.receiver_count() == 0 {
+                                break;
+                            }
+                            let _ = tx.send(frame.to_vec());
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            Ok(rx)
+        })
+    }
+
+    fn subscribe_shared_frames<'a>(
+        &'a self,
+        browser_id: &'a str,
+    ) -> BoxFuture<'a, Result<FrameStreamReceiver, RemoteBrowserError>> {
+        Box::pin(async move {
             if self.socket_path.is_empty() {
                 return Err(RemoteBrowserError::Unavailable(
                     "Local IPC socket path empty".into(),
@@ -1070,10 +1139,11 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                 ));
             }
             let mut senders = self.frame_senders.lock();
+            senders.retain(|id, tx| id == browser_id || tx.receiver_count() > 0);
             let sender = senders
                 .entry(browser_id.to_string())
                 .or_insert_with(|| tokio::sync::broadcast::channel(16).0);
-            Ok(sender.subscribe())
+            Ok(FrameStreamReceiver::Shared(sender.subscribe()))
         })
     }
 
@@ -1279,12 +1349,14 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                         break;
                     };
                     if c_type == Self::IPC_CONTENT_TYPE_IMAGE {
+                        let shared: Arc<[u8]> = Arc::from(p_buf);
                         let guard = senders.lock();
                         if let Some(tx) = guard.get(&b_id) {
-                            let _ = tx.send(p_buf);
+                            let _ = tx.send(shared);
                         }
                     }
                 }
+                Self::prune_empty_frame_senders(&senders);
             });
 
             self.active_subscriptions
@@ -1310,6 +1382,7 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
             {
                 task.abort();
             }
+            Self::prune_empty_frame_senders(&self.frame_senders);
             let req = crate::ipc::browser_cli::RemoteBrowserOperation::UnsubscribeViewer {
                 browser_id: browser_id.to_string(),
                 subscription_id: subscription_id.to_string(),

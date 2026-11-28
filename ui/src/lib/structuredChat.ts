@@ -153,6 +153,40 @@ export const STRUCTURED_CHAT_MODEL_PREFERENCES_FAILED = "Those model preferences
 /** Default long-poll cadence; `0` disables the loop and leaves `poll()` to the caller. */
 export const STRUCTURED_CHAT_DEFAULT_POLL_MS = 1500;
 
+/**
+ * How many `media` blobs one lane keeps. The journal can name thousands of attachments over a long
+ * session, and every one of them is bytes held in the renderer; the transcript only ever draws the
+ * window on screen, so a bounded LRU is enough and unbounded growth is not.
+ */
+export const STRUCTURED_CHAT_MEDIA_CACHE_MAX = 64;
+
+/**
+ * Insert one media blob as the newest cache entry, dropping the oldest past `max`. Insertion order
+ * is the recency order, so a re-read of a held key moves it to the end instead of keeping it in the
+ * slot it first landed in. An evicted entry's object URL, when a renderer minted one, is released.
+ */
+export function structuredMediaCachePut(
+  cache: Readonly<Record<string, StructuredMediaBlob>>,
+  key: string,
+  blob: StructuredMediaBlob,
+  max: number = STRUCTURED_CHAT_MEDIA_CACHE_MAX,
+): Readonly<Record<string, StructuredMediaBlob>> {
+  const keys = Object.keys(cache).filter((existing) => existing !== key);
+  keys.push(key);
+  const drop = Math.max(0, keys.length - Math.max(1, max));
+  for (const evictedKey of keys.slice(0, drop)) {
+    const url = (cache[evictedKey] as { readonly objectUrl?: unknown } | undefined)?.objectUrl;
+    if (typeof url === "string" && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+      URL.revokeObjectURL(url);
+    }
+  }
+  const next: Record<string, StructuredMediaBlob> = {};
+  for (const existing of keys.slice(drop)) {
+    next[existing] = existing === key ? blob : cache[existing];
+  }
+  return next;
+}
+
 export interface StructuredQueuedMessage {
   readonly id: string;
   readonly text: string;
@@ -597,13 +631,60 @@ export function useStructuredChat({
     patch((previous) => ({ ...previous, capabilities: result.data }));
   }, [patch]);
 
-  // Seed once, then long-poll the tail while visible.
+  // Seed once, then long-poll the tail while the pane is mounted-visible *and* the window is on
+  // screen. A `setTimeout` scheduled after each settle, not an `interval`, means a slow host is
+  // never asked twice for the same window; hiding the window or the pane stops the asks entirely
+  // and `visibilitychange` resumes them, so a backgrounded app does no journal work at all.
   useEffect(() => {
-    if (!visible || sessionId === null) return;
-    void read("history");
-    if (pollMs <= 0) return;
-    const timer = setInterval(() => void read("events"), pollMs);
-    return () => clearInterval(timer);
+    if (sessionId === null) return;
+    const onScreen = () => visible && (typeof document === "undefined" || !document.hidden);
+    let cancelled = false;
+    let seeded = false;
+    let inFlight = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const stopTimer = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const schedule = () => {
+      stopTimer();
+      if (cancelled || pollMs <= 0) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void tick();
+      }, pollMs);
+    };
+    const tick = async (): Promise<void> => {
+      if (cancelled || inFlight || !onScreen()) return;
+      inFlight = true;
+      try {
+        if (!seeded) {
+          seeded = true;
+          await read("history");
+        } else {
+          await read("events");
+        }
+      } finally {
+        inFlight = false;
+        if (!cancelled && onScreen()) schedule();
+      }
+    };
+    const onVisibilityChange = () => {
+      if (cancelled) return;
+      if (!onScreen()) {
+        stopTimer();
+        return;
+      }
+      // Coming back is one catch-up read, not a burst: the timer is armed again after it settles.
+      if (timer === null && !inFlight) void tick();
+    };
+    if (onScreen()) void tick();
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      cancelled = true;
+      stopTimer();
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [visible, sessionId, pollMs, read]);
 
   // A session the gateway marks `ended` has no provider process, so it has no open turn - even
@@ -1335,7 +1416,7 @@ export function useStructuredChat({
           }));
           return null;
         }
-        setMedia((previous) => ({ ...previous, [key]: result.data }));
+        setMedia((previous) => structuredMediaCachePut(previous, key, result.data));
         return result.data;
       } finally {
         mediaReads.current.delete(key);

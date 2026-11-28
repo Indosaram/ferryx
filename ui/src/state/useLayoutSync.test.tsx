@@ -1,10 +1,19 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   layoutGet: vi.fn(),
   layoutPut: vi.fn(),
+}));
+
+const syncMocks = vi.hoisted(() => ({
+  stubLoop: false,
+  toSharedLayoutSpy: vi.fn(),
+  localChanged: vi.fn(),
+  start: vi.fn(() => Promise.resolve()),
+  stop: vi.fn(),
+  lastApplyRemote: null as null | ((doc: SharedLayout) => void),
 }));
 
 vi.mock("../lib/tauri", async (importOriginal) => ({
@@ -13,9 +22,31 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   layoutPut: mocks.layoutPut,
 }));
 
+vi.mock("./layoutSync", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./layoutSync")>();
+  return {
+    ...actual,
+    toSharedLayout: (...args: Parameters<typeof actual.toSharedLayout>) => {
+      syncMocks.toSharedLayoutSpy(...args);
+      return actual.toSharedLayout(...args);
+    },
+    createLayoutSyncLoop: (options: Parameters<typeof actual.createLayoutSyncLoop>[0]) => {
+      if (!syncMocks.stubLoop) {
+        return actual.createLayoutSyncLoop(options);
+      }
+      syncMocks.lastApplyRemote = options.applyRemote;
+      return {
+        start: syncMocks.start,
+        stop: syncMocks.stop,
+        localChanged: syncMocks.localChanged,
+      };
+    },
+  };
+});
+
 import type { PairedDaemonProjectAdapter } from "../lib/pairedDaemonProject";
-import { isTerminalTab, type RegisteredProject, type Worktree } from "../lib/types";
-import { createLayoutState } from "./layout";
+import { isTerminalTab, type RegisteredProject, type TerminalSession, type WorkspaceTab, type Worktree } from "../lib/types";
+import { createLayoutState, layoutReducer } from "./layout";
 import type { SharedLayout, SharedTab } from "./layoutSync";
 import { useLayoutSync } from "./useLayoutSync";
 import type { WorkspaceAction, WorkspaceState } from "./workspaceStore";
@@ -405,5 +436,228 @@ describe("useLayoutSync detached-pane enrichment", () => {
     });
     expect(enrichedRestores(calls)).toHaveLength(0);
     unmount();
+  });
+});
+
+function localTerminalTab(id: string, sessionId: string, label = id): WorkspaceTab {
+  return { id, label, sessionId };
+}
+
+function makeSession(
+  id: string,
+  backendSessionId: string | null,
+  overrides: Partial<TerminalSession> = {},
+): TerminalSession {
+  return {
+    id,
+    cwd: "/repo",
+    workspaceId: "ws-1",
+    worktree: null,
+    backendSessionId,
+    lifecycle: "working",
+    processState: "running",
+    ...overrides,
+  };
+}
+
+function makeState(
+  layout: WorkspaceState["layout"],
+  sessions: Record<string, TerminalSession>,
+): WorkspaceState {
+  return {
+    workspaceId: "ws-1",
+    worktrees: [],
+    activeWorktreePath: null,
+    sessions,
+    layout,
+    unreadTabIds: {},
+    unreadWorktreePaths: {},
+  };
+}
+
+const fastPathProject: RegisteredProject = {
+  workspaceId: "ws-1",
+  repoRoot: "/repo",
+};
+
+function FastPathHarness({
+  state,
+  dispatch,
+  enabled = true,
+}: {
+  state: WorkspaceState;
+  dispatch: (action: WorkspaceAction) => void;
+  enabled?: boolean;
+}) {
+  useLayoutSync({ project: fastPathProject, state, dispatch, enabled });
+  return null;
+}
+
+describe("useLayoutSync fast-path guard", () => {
+  beforeEach(() => {
+    syncMocks.stubLoop = true;
+    syncMocks.toSharedLayoutSpy.mockClear();
+    syncMocks.localChanged.mockClear();
+    syncMocks.start.mockClear();
+    syncMocks.stop.mockClear();
+    syncMocks.lastApplyRemote = null;
+  });
+
+  afterEach(() => {
+    cleanup();
+    syncMocks.stubLoop = false;
+  });
+
+  it("skips toSharedLayout when state.layout and every session backendSessionId are unchanged", () => {
+    const layout = createLayoutState([localTerminalTab("tab-1", "s1")], "tab-1");
+    const s1 = makeSession("s1", "backend-1");
+    const dispatch = vi.fn();
+
+    const { rerender } = render(
+      <FastPathHarness state={makeState(layout, { s1 })} dispatch={dispatch} />,
+    );
+
+    // Mount initializes snapshot once inside the loop effect; the change-watcher effect hits fast path.
+    expect(syncMocks.toSharedLayoutSpy).toHaveBeenCalledTimes(1);
+    syncMocks.toSharedLayoutSpy.mockClear();
+
+    // Unrelated session metadata update (cwd / lifecycle) with identical layout and backendSessionId.
+    rerender(
+      <FastPathHarness
+        state={makeState(layout, {
+          s1: makeSession("s1", "backend-1", { cwd: "/repo/subdir", lifecycle: "exited" }),
+        })}
+        dispatch={dispatch}
+      />,
+    );
+
+    expect(syncMocks.toSharedLayoutSpy).not.toHaveBeenCalled();
+    expect(syncMocks.localChanged).not.toHaveBeenCalled();
+  });
+
+  it("runs toSharedLayout and signals localChanged when a session backendSessionId changes or session count changes", () => {
+    const layout = createLayoutState([localTerminalTab("tab-1", "s1")], "tab-1");
+    const dispatch = vi.fn();
+
+    const { rerender } = render(
+      <FastPathHarness state={makeState(layout, { s1: makeSession("s1", "backend-1") })} dispatch={dispatch} />,
+    );
+    syncMocks.toSharedLayoutSpy.mockClear();
+    syncMocks.localChanged.mockClear();
+
+    // Changing backendSessionId must bypass the fast path and notify the sync loop.
+    rerender(
+      <FastPathHarness state={makeState(layout, { s1: makeSession("s1", "backend-2") })} dispatch={dispatch} />,
+    );
+    expect(syncMocks.toSharedLayoutSpy).toHaveBeenCalledTimes(1);
+    expect(syncMocks.localChanged).toHaveBeenCalledTimes(1);
+
+    syncMocks.toSharedLayoutSpy.mockClear();
+    syncMocks.localChanged.mockClear();
+
+    // Adding an extra session changes session count and must bypass the fast path.
+    rerender(
+      <FastPathHarness
+        state={makeState(layout, {
+          s1: makeSession("s1", "backend-2"),
+          s2: makeSession("s2", null),
+        })}
+        dispatch={dispatch}
+      />,
+    );
+    expect(syncMocks.toSharedLayoutSpy).toHaveBeenCalledTimes(1);
+    expect(syncMocks.localChanged).not.toHaveBeenCalled();
+
+    syncMocks.toSharedLayoutSpy.mockClear();
+
+    // Removing that session changes session count again and must bypass the fast path.
+    rerender(
+      <FastPathHarness
+        state={makeState(layout, {
+          s1: makeSession("s1", "backend-2"),
+        })}
+        dispatch={dispatch}
+      />,
+    );
+    expect(syncMocks.toSharedLayoutSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("bypasses the fast path when state.layout changes", () => {
+    const layout1 = createLayoutState([localTerminalTab("tab-1", "s1")], "tab-1");
+    const sessions = {
+      s1: makeSession("s1", "backend-1"),
+      s2: makeSession("s2", "backend-2"),
+    };
+    const dispatch = vi.fn();
+
+    const { rerender } = render(
+      <FastPathHarness state={makeState(layout1, sessions)} dispatch={dispatch} />,
+    );
+    syncMocks.toSharedLayoutSpy.mockClear();
+    syncMocks.localChanged.mockClear();
+
+    const layout2 = layoutReducer(layout1, {
+      type: "SPLIT_PANE",
+      tabId: "tab-1",
+      direction: "horizontal",
+      sessionId: "s2",
+      ratio: 0.5,
+    });
+    rerender(<FastPathHarness state={makeState(layout2, sessions)} dispatch={dispatch} />);
+
+    expect(syncMocks.toSharedLayoutSpy).toHaveBeenCalledTimes(1);
+    expect(syncMocks.localChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps prevLayoutRef and prevBackendIdsRef in sync inside applyRemote so committing remote state hits the fast path", () => {
+    const initialLayout = createLayoutState([localTerminalTab("tab-1", "s1")], "tab-1");
+    const initialState = makeState(initialLayout, {
+      s1: makeSession("s1", "backend-1"),
+    });
+    let restoredState: WorkspaceState | null = null;
+    const dispatch = vi.fn((action: WorkspaceAction) => {
+      if (action.type === "RESTORE_WORKSPACE") {
+        restoredState = action.state;
+      }
+    });
+
+    const { rerender } = render(<FastPathHarness state={initialState} dispatch={dispatch} />);
+    syncMocks.toSharedLayoutSpy.mockClear();
+    syncMocks.localChanged.mockClear();
+
+    const remoteDoc: SharedLayout = {
+      workspaceId: "ws-1",
+      revision: 2,
+      tabs: [
+        {
+          id: "tab-1",
+          kind: "terminal",
+          label: "tab-1",
+          pinned: false,
+          paneTree: {
+            type: "split",
+            direction: "horizontal",
+            ratio: 0.5,
+            first: { type: "leaf", leafId: "leaf-a", backendSessionId: "backend-1" },
+            second: { type: "leaf", leafId: "leaf-b", backendSessionId: "backend-remote" },
+          },
+        },
+      ],
+    };
+
+    act(() => {
+      syncMocks.lastApplyRemote?.(remoteDoc);
+    });
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(restoredState).not.toBeNull();
+    // applyRemote called toSharedLayout once to compute the applied baseline.
+    expect(syncMocks.toSharedLayoutSpy).toHaveBeenCalledTimes(1);
+    syncMocks.toSharedLayoutSpy.mockClear();
+
+    // Committing the exact restored layout & sessions must hit the fast path with zero re-serialization.
+    rerender(<FastPathHarness state={restoredState!} dispatch={dispatch} />);
+    expect(syncMocks.toSharedLayoutSpy).not.toHaveBeenCalled();
+    expect(syncMocks.localChanged).not.toHaveBeenCalled();
   });
 });

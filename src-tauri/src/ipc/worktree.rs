@@ -19,6 +19,22 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
 
+#[cfg(feature = "desktop")]
+static DIRTY_SNAPSHOTS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "desktop")]
+fn record_dirty_snapshot(canonical: std::path::PathBuf, is_dirty: bool) -> bool {
+    let previous = DIRTY_SNAPSHOTS.lock().insert(canonical, is_dirty);
+    matches!(previous, Some(previous_dirty) if previous_dirty != is_dirty)
+}
+
+#[cfg(feature = "desktop")]
+fn clear_dirty_snapshot(path: &std::path::Path) {
+    DIRTY_SNAPSHOTS.lock().remove(path);
+}
+
 pub(crate) fn worktree_response(response: DaemonResponse) -> Result<DaemonResponse, IpcError> {
     match response {
         DaemonResponse::WorktreeError { error } => Err(error),
@@ -113,7 +129,13 @@ pub async fn cmd_worktree_list<R: Runtime>(
             run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
         let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
         let remote_worktrees =
-            crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await?;
+            crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root)
+                .await
+                .inspect_err(|err| {
+                    if err.code == IpcErrorCode::IoError {
+                        crate::ssh::runtime::invalidate(&host);
+                    }
+                })?;
         let worktrees = remote_worktrees
             .into_iter()
             .map(|wt| Worktree {
@@ -312,19 +334,22 @@ async fn delete_worktree<R: Runtime>(
     let event_identity = identity.clone();
 
     WorkspaceRegistry::validate_workspace_id(&workspace_id).map_err(IpcError::from)?;
-    // Capture the managed path before the daemon removes the checkout/record.
-    // Resolution stats every managed dir and reads worktree settings, so it runs on
-    // the blocking pool: no synchronous filesystem or settings I/O on an async thread.
-    let deleted_path = {
+    // Capture both the raw managed path and its canonical form before the daemon removes the
+    // checkout/record, since `DIRTY_SNAPSHOTS` keys on the canonical path when the checkout exists.
+    // Resolution stats every managed dir and reads worktree settings, so both run on the blocking
+    // pool: no synchronous filesystem or settings I/O on an async thread.
+    let (deleted_path, canonical_deleted_path) = {
         let registry = registry.clone();
         let workspace_id = workspace_id.clone();
         let identity = identity.clone();
         run_blocking(move || {
-            registry
+            let deleted_path = registry
                 .manager(&workspace_id)
                 .map_err(IpcError::from)?
                 .worktree_path_for(&identity.ws_id, &identity.slug)
-                .map_err(IpcError::from)
+                .map_err(IpcError::from)?;
+            let canonical_deleted_path = std::fs::canonicalize(&deleted_path).ok();
+            Ok((deleted_path, canonical_deleted_path))
         })
         .await?
     };
@@ -342,6 +367,10 @@ async fn delete_worktree<R: Runtime>(
         _ => return Err(IpcError::internal("Unexpected worktree response")),
     };
     registry.bump_revision();
+    clear_dirty_snapshot(&deleted_path);
+    if let Some(ref canonical_path) = canonical_deleted_path {
+        clear_dirty_snapshot(canonical_path);
+    }
 
     // The disk-scan cache is optional app state: a host that never managed it
     // (a test harness, or a future embedder) must still be able to delete a
@@ -432,9 +461,13 @@ pub async fn cmd_worktree_status<R: Runtime>(
         let (manager, worktree) = registry
             .resolve_worktree(&workspace_id, &identity)
             .map_err(IpcError::from)?;
-        manager
-            .observe_dirty_state(&worktree.path)
-            .map_err(IpcError::from)
+        let canonical = manager
+            .canonical_allowed_path(&worktree.path)
+            .map_err(IpcError::from)?;
+        let status =
+            crate::worktree::git_status_porcelain(&canonical).map_err(IpcError::from)?;
+        let changed = record_dirty_snapshot(canonical, status.is_dirty);
+        Ok((status, changed))
     })
     .await?;
 
@@ -449,17 +482,70 @@ pub async fn cmd_worktree_status<R: Runtime>(
     Ok(status)
 }
 
-/// Reads Changes panel status once after resolving the managed worktree or jailed checkout.
-/// Sidebar dirty tracking and events remain the responsibility of `cmd_worktree_status`.
+/// Status for the Changes panel: resolves the target once, runs `git_changes_status` once,
+/// and for managed worktrees derives `is_dirty` to update dirty tracking and emit `DirtyChanged`
+/// when toggled.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_worktree_changes_status<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
     request: WorktreePushRequest,
 ) -> Result<DirtyState, IpcError> {
-    let WorktreePushRequest { workspace_id, worktree, worktree_path } = request;
-    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, git_changes_status).await
+    let WorktreePushRequest {
+        workspace_id,
+        worktree,
+        worktree_path,
+    } = request;
+    let event_workspace_id = workspace_id.clone();
+    let event_identity = worktree.clone();
+    let registry = (*registry).clone();
+
+    let (status, changed) = run_blocking(move || {
+        let (canonical, track_dirty) = match (worktree, worktree_path) {
+            (Some(identity), None) => {
+                let (manager, resolved) = registry
+                    .resolve_worktree(&workspace_id, &identity)
+                    .map_err(IpcError::from)?;
+                let canonical = manager
+                    .canonical_allowed_path(&resolved.path)
+                    .map_err(IpcError::from)?;
+                (canonical, true)
+            }
+            (None, Some(path)) => (
+                registry
+                    .resolve_checkout_path(&workspace_id, &path)
+                    .map_err(IpcError::from)?,
+                false,
+            ),
+            _ => {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    "Pass exactly one of worktree or worktreePath",
+                ))
+            }
+        };
+        let status = git_changes_status(&canonical).map_err(IpcError::from)?;
+        let changed = if track_dirty {
+            record_dirty_snapshot(canonical, status.is_dirty)
+        } else {
+            false
+        };
+        Ok((status, changed))
+    })
+    .await?;
+
+    if changed {
+        if let Some(identity) = event_identity {
+            emit_worktree_changed(
+                &app,
+                event_workspace_id,
+                identity,
+                WorktreeChangeKind::DirtyChanged,
+            )?;
+        }
+    }
+    Ok(status)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1268,5 +1354,80 @@ mod change_event_tests {
         assert!(cmd_worktree_stage(app.handle().clone(), app.state(), both).await.is_err());
         // Nothing outside the jail, nor any refused request, emitted an event.
         assert!(rx.try_recv().is_err(), "refused targets must not emit worktree_changed");
+    }
+
+    #[tokio::test]
+    async fn changes_status_tracks_managed_dirty_toggles_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        run_git(&repo, &["config", "user.name", "Status fixture"]).unwrap();
+        run_git(&repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        run_git(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+        run_git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+
+        let registry = WorkspaceRegistry::new();
+        registry.register("status-ws", &repo).unwrap();
+        let manager = registry.manager("status-ws").unwrap();
+        let identity = WorktreeIdentity {
+            ws_id: "status-ws".into(),
+            slug: "wt".into(),
+        };
+        let path = manager.worktree_path_for("status-ws", "wt").unwrap();
+        let wt = manager
+            .create_worktree(CreateWorktreeOptions::new("status-ws", "wt", path))
+            .unwrap();
+
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+            let payload: WorktreeChangedPayload = serde_json::from_str(event.payload()).unwrap();
+            tx.send(payload).unwrap();
+        });
+
+        let req = || WorktreePushRequest {
+            workspace_id: "status-ws".into(),
+            worktree: Some(identity.clone()),
+            worktree_path: None,
+        };
+
+        // First observation establishes baseline (clean) without emitting.
+        let clean = cmd_worktree_changes_status(app.handle().clone(), app.state(), req())
+            .await
+            .unwrap();
+        assert!(!clean.is_dirty);
+        assert!(rx.try_recv().is_err());
+
+        // Creating an untracked file inside a nested dir flips clean -> dirty and expands `-uall`.
+        std::fs::create_dir(wt.path.join("nested")).unwrap();
+        std::fs::write(wt.path.join("nested/a.txt"), b"hello").unwrap();
+        let dirty = cmd_worktree_changes_status(app.handle().clone(), app.state(), req())
+            .await
+            .unwrap();
+        assert!(dirty.is_dirty);
+        assert!(dirty.files.iter().any(|f| f.path == "nested/a.txt"));
+        let toggled = rx.try_recv().expect("clean -> dirty must emit DirtyChanged");
+        assert_eq!(toggled.kind, WorktreeChangeKind::DirtyChanged);
+        assert_eq!(toggled.worktree, Some(identity.clone()));
+
+        // Steady dirty state must not re-emit.
+        let still_dirty = cmd_worktree_changes_status(app.handle().clone(), app.state(), req())
+            .await
+            .unwrap();
+        assert!(still_dirty.is_dirty);
+        assert!(rx.try_recv().is_err());
+
+        // Removing the file flips dirty -> clean and emits DirtyChanged again.
+        std::fs::remove_dir_all(wt.path.join("nested")).unwrap();
+        let clean_again = cmd_worktree_changes_status(app.handle().clone(), app.state(), req())
+            .await
+            .unwrap();
+        assert!(!clean_again.is_dirty);
+        let toggled_back = rx.try_recv().expect("dirty -> clean must emit DirtyChanged");
+        assert_eq!(toggled_back.kind, WorktreeChangeKind::DirtyChanged);
     }
 }

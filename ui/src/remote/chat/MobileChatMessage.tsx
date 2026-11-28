@@ -110,17 +110,43 @@ export interface MobileChatMessageProps {
   announceLevel?: AnnounceLevel;
 }
 
-/** The "Worked for" time of a running turn, ticking on its own between polls. */
-function useTickingDuration(startedAt: number | undefined, fallback: string | undefined): string | undefined {
+/**
+ * The "Worked for" time of a running turn, isolated in a leaf so its 1s tick never re-renders the
+ * parent message's markdown or tool rows, and paused while `document.hidden`.
+ */
+const WorkedDuration: React.FC<{
+  startedAt: number | undefined;
+  fallback: string | undefined;
+}> = React.memo(function WorkedDuration({ startedAt, fallback }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (startedAt === undefined) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const isHidden = () => typeof document !== "undefined" && document.hidden;
+    const start = () => {
+      if (timer !== null) return;
+      setNow(Date.now());
+      timer = setInterval(() => setNow(Date.now()), 1000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVisibilityChange = () => {
+      if (isHidden()) stop();
+      else start();
+    };
+    if (!isHidden()) start();
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stop();
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [startedAt]);
-  return startedAt === undefined ? fallback : formatWorkedDuration(Math.max(0, now - startedAt));
-}
+  return <>{startedAt === undefined ? fallback : formatWorkedDuration(Math.max(0, now - startedAt))}</>;
+});
 
 interface WorkRowsContainerProps {
   children: React.ReactNode;
@@ -162,7 +188,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   className,
 }) => {
   const isUser = role === "user";
-  const durationLabel = useTickingDuration(durationStartedAt, settledDurationLabel);
+  const hasDuration = durationStartedAt !== undefined || Boolean(settledDurationLabel);
   // A native turn's start is an ISO instant; it prints as a local time like every other turn.
   const formattedTime = formatReferenceTimestamp(timestamp);
   const [copied, setCopied] = useState(false);
@@ -222,7 +248,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   const hasWork = hasRichParts
     ? filteredParts.some((part) => part.kind === "tool" || part.kind === "thinking")
     : legacyToolCalls.length > 0;
-  const workFolded = Boolean(durationLabel) && hasWork && !workExpanded;
+  const workFolded = hasDuration && hasWork && !workExpanded;
 
   useEffect(() => {
     return () => {
@@ -484,7 +510,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
           <ReferenceTurnUsage meta={referenceMeta} />
           <ReferenceTurnSkills parts={richParts} />
 
-          {durationLabel && hasWork && (
+          {hasDuration && hasWork && (
             <button
               type="button"
               data-testid="worked-for-toggle"
@@ -499,11 +525,11 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
                   workExpanded && "rotate-90",
                 )}
               />
-              <span>Worked for {durationLabel}</span>
+              <span>Worked for <WorkedDuration startedAt={durationStartedAt} fallback={settledDurationLabel} /></span>
             </button>
           )}
 
-          {!hasRichParts && (!durationLabel || workExpanded) && legacyToolCalls.length > 0 && (
+          {!hasRichParts && (!hasDuration || workExpanded) && legacyToolCalls.length > 0 && (
             <WorkRowsContainer count={legacyToolCalls.length}>
               {legacyToolCalls.map((tc, index) =>
                 tc.kind === "thinking" ? (

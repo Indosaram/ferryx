@@ -4,7 +4,7 @@ use std::ffi::{c_int, c_void};
 
 use super::color::ColorRgb;
 use super::error::NativeTerminalError;
-use super::snapshot::{CellSnapshot, CellWide};
+use super::snapshot::{CellSnapshot, CellText, CellWide};
 use super::sys::constants::{GHOSTTY_STYLE_COLOR_PALETTE, GHOSTTY_STYLE_COLOR_RGB};
 use super::sys::ffi::{ghostty_cell_get, ghostty_render_state_row_cells_get};
 use super::sys::types::{
@@ -80,7 +80,7 @@ pub fn extract_cell_snapshot(
 
     let text = if g_res == GHOSTTY_SUCCESS {
         if buf_desc.len == 0 {
-            String::new()
+            CellText::default()
         } else {
             if buf_desc.len > stack_buf.len() {
                 return Err(NativeTerminalError::InvalidValue(
@@ -89,7 +89,7 @@ pub fn extract_cell_snapshot(
             }
             let slice = &stack_buf[..buf_desc.len];
             std::str::from_utf8(slice)
-                .map(|s| s.to_string())
+                .map(CellText::from)
                 .map_err(|e| NativeTerminalError::InvalidUtf8(e.to_string()))?
         }
     } else if g_res == GHOSTTY_OUT_OF_SPACE {
@@ -118,11 +118,11 @@ pub fn extract_cell_snapshot(
             ));
         }
         std::str::from_utf8(&heap_buf[..heap_desc.len])
-            .map(|s| s.to_string())
+            .map(CellText::from)
             .map_err(|e| NativeTerminalError::InvalidUtf8(e.to_string()))?
     } else {
         NativeTerminalError::from_c_result(g_res, "row_cells_get(GraphemesUtf8)")?;
-        String::new()
+        CellText::default()
     };
 
     let mut raw_cell: GhosttyCell = 0;

@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use super::manifest::{load_manifest_from_str, CompiledManifest, CompiledRule, RuleState};
-use super::region::ScreenInput;
+use super::manifest::{
+    load_manifest_from_str, matcher_needs_lower, CompiledManifest, RuleState,
+};
+use super::region::{Region, RegionView, ScreenInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -21,19 +24,65 @@ pub struct Detection {
     pub manifest_id: String,
 }
 
-pub struct DetectionEngine {
-    manifests: Vec<CompiledManifest>,
+struct IndexedRule {
+    manifest_idx: usize,
+    rule_idx: usize,
+    priority: i32,
+    global_order: usize,
+    region_idx: usize,
+    needs_lower: bool,
 }
 
-struct MatchCandidate<'a> {
-    manifest_id: &'a str,
-    rule: &'a CompiledRule,
-    global_order: usize,
+struct CachedRegion<'a> {
+    view: RegionView<'a>,
+    text_lower: Option<String>,
+}
+
+pub struct DetectionEngine {
+    manifests: Vec<CompiledManifest>,
+    regions: Vec<Region>,
+    /// Flattened rules pre-sorted by `(priority DESC, global_order ASC)` so `detect()`
+    /// can return immediately on the first matching rule with identical semantics.
+    sorted_rules: Vec<IndexedRule>,
 }
 
 impl DetectionEngine {
     pub fn new(manifests: Vec<CompiledManifest>) -> Self {
-        Self { manifests }
+        let mut region_ids: HashMap<Region, usize> = HashMap::new();
+        let mut regions: Vec<Region> = Vec::new();
+        let mut sorted_rules: Vec<IndexedRule> = Vec::new();
+        let mut global_order = 0usize;
+
+        for (manifest_idx, manifest) in manifests.iter().enumerate() {
+            for (rule_idx, rule) in manifest.rules.iter().enumerate() {
+                let region_idx = *region_ids.entry(rule.region.clone()).or_insert_with(|| {
+                    let idx = regions.len();
+                    regions.push(rule.region.clone());
+                    idx
+                });
+                sorted_rules.push(IndexedRule {
+                    manifest_idx,
+                    rule_idx,
+                    priority: rule.priority,
+                    global_order,
+                    region_idx,
+                    needs_lower: matcher_needs_lower(&rule.matcher),
+                });
+                global_order += 1;
+            }
+        }
+
+        sorted_rules.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.global_order.cmp(&b.global_order))
+        });
+
+        Self {
+            manifests,
+            regions,
+            sorted_rules,
+        }
     }
 
     pub fn detect(
@@ -41,59 +90,54 @@ impl DetectionEngine {
         input: &ScreenInput,
         previous: Option<AgentActivity>,
     ) -> Option<Detection> {
-        let mut matches: Vec<MatchCandidate> = Vec::new();
-        let mut global_order = 0;
+        let mut resolved: Vec<Option<CachedRegion<'_>>> = Vec::with_capacity(self.regions.len());
+        resolved.resize_with(self.regions.len(), || None);
 
-        for manifest in &self.manifests {
-            for rule in &manifest.rules {
-                if rule.matches(input) {
-                    matches.push(MatchCandidate {
-                        manifest_id: &manifest.id,
-                        rule,
-                        global_order,
+        for entry in &self.sorted_rules {
+            let manifest = &self.manifests[entry.manifest_idx];
+            let rule = &manifest.rules[entry.rule_idx];
+            let cached = resolved[entry.region_idx].get_or_insert_with(|| CachedRegion {
+                view: self.regions[entry.region_idx].resolve(input),
+                text_lower: None,
+            });
+            let matched = if entry.needs_lower {
+                let lower = cached
+                    .text_lower
+                    .get_or_insert_with(|| cached.view.text.to_lowercase());
+                rule.matcher.matches(&cached.view, lower)
+            } else {
+                rule.matcher.matches(&cached.view, "")
+            };
+            if matched {
+                if rule.skip_state_update || rule.state == RuleState::Unknown {
+                    return previous.map(|prev| Detection {
+                        state: prev,
+                        rule_id: rule.id.clone(),
+                        manifest_id: manifest.id.clone(),
                     });
                 }
-                global_order += 1;
-            }
-        }
 
-        // Sort by priority descending; ties broken by declaration order (ascending global_order).
-        matches.sort_by(|a, b| {
-            b.rule
-                .priority
-                .cmp(&a.rule.priority)
-                .then_with(|| a.global_order.cmp(&b.global_order))
-        });
+                let state = match rule.state {
+                    RuleState::Working => AgentActivity::Working,
+                    RuleState::Blocked => AgentActivity::Blocked,
+                    RuleState::Idle => AgentActivity::Idle,
+                    RuleState::Unknown => unreachable!(),
+                };
 
-        if let Some(winner) = matches.first() {
-            if winner.rule.skip_state_update || winner.rule.state == RuleState::Unknown {
-                return previous.map(|prev| Detection {
-                    state: prev,
-                    rule_id: winner.rule.id.clone(),
-                    manifest_id: winner.manifest_id.to_string(),
+                return Some(Detection {
+                    state,
+                    rule_id: rule.id.clone(),
+                    manifest_id: manifest.id.clone(),
                 });
             }
-
-            let state = match winner.rule.state {
-                RuleState::Working => AgentActivity::Working,
-                RuleState::Blocked => AgentActivity::Blocked,
-                RuleState::Idle => AgentActivity::Idle,
-                RuleState::Unknown => unreachable!(),
-            };
-
-            Some(Detection {
-                state,
-                rule_id: winner.rule.id.clone(),
-                manifest_id: winner.manifest_id.to_string(),
-            })
-        } else {
-            // No rule matched: HOLD previous state
-            previous.map(|prev| Detection {
-                state: prev,
-                rule_id: String::new(),
-                manifest_id: String::new(),
-            })
         }
+
+        // No rule matched: HOLD previous state
+        previous.map(|prev| Detection {
+            state: prev,
+            rule_id: String::new(),
+            manifest_id: String::new(),
+        })
     }
 }
 

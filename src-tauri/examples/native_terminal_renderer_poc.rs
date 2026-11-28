@@ -16,7 +16,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 fn blank_cell() -> CellSnapshot {
     CellSnapshot {
-        text: String::new(),
+        text: Default::default(),
         wide: CellWide::Narrow,
         fg: None,
         bg: None,
@@ -51,7 +51,7 @@ fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
 
     for (col, text) in "Hello Ferryx Native WGPU Terminal!".chars().enumerate() {
         let mut cell = blank_cell();
-        cell.text = text.to_string();
+        cell.text = text.into();
         cell.fg = Some(accent);
         cell.bold = true;
         grid[0][col] = cell;
@@ -60,7 +60,7 @@ fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
     let cjk_cells = ["東", "", "京", "", " ", "🦀", "", " ", "e\u{0301}"];
     for (col, text) in cjk_cells.into_iter().enumerate() {
         let mut cell = blank_cell();
-        cell.text = text.to_string();
+        cell.text = text.into();
         cell.wide = match col {
             0 | 2 | 5 => CellWide::Wide,
             1 | 3 | 6 => CellWide::SpacerTail,
@@ -74,7 +74,7 @@ fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
         b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()-_=+[]";
     for col in 0..cols as usize {
         let mut cell = blank_cell();
-        cell.text = (long_line[col % long_line.len()] as char).to_string();
+        cell.text = (long_line[col % long_line.len()] as char).into();
         grid[2][col] = cell;
     }
 
@@ -121,7 +121,7 @@ fn run_headless(output: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error
     let mut timings = Vec::with_capacity(iters);
     for i in 0..iters {
         snap.cursor.x = (10 + (i % 70)) as u16;
-        snap.grid[0][0].text = format!("{}", i % 10);
+        snap.grid[0][0].text = format!("{}", i % 10).into();
         let t0 = Instant::now();
         let frame = rend
             .render_snapshot(&snap, Some(&sel))

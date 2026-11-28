@@ -127,6 +127,7 @@ export function LocalChatPane({ session, agentType, active, visible, onShowTermi
             toolCallVisibility={toolCallVisibility}
             announceLevel={announceLevel}
             active={active}
+            visible={visible}
           />
         </div>
       </div>

@@ -10,8 +10,11 @@ use wgpu::util::DeviceExt;
 #[derive(Default)]
 pub struct ImageTextures {
     textures: HashMap<u64, wgpu::BindGroup>,
+    sampler: Option<wgpu::Sampler>,
     #[cfg(test)]
     pub upload_count: usize,
+    #[cfg(test)]
+    pub sampler_create_count: usize,
 }
 
 pub struct ImageDraw {
@@ -111,11 +114,17 @@ impl ImageTextures {
                     size,
                 );
                 let view = texture.create_view(&Default::default());
-                let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                    label: Some("Kitty image sampler"),
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    ..Default::default()
+                let sampler = self.sampler.get_or_insert_with(|| {
+                    #[cfg(test)]
+                    {
+                        self.sampler_create_count += 1;
+                    }
+                    device.create_sampler(&wgpu::SamplerDescriptor {
+                        label: Some("Kitty image sampler"),
+                        mag_filter: wgpu::FilterMode::Linear,
+                        min_filter: wgpu::FilterMode::Linear,
+                        ..Default::default()
+                    })
                 });
                 let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Kitty image binding"),
@@ -131,7 +140,7 @@ impl ImageTextures {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
+                            resource: wgpu::BindingResource::Sampler(sampler),
                         },
                     ],
                 });

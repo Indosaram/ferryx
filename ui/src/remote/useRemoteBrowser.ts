@@ -75,7 +75,14 @@ export function useRemoteBrowser({
   const currentStreamIdRef = useRef<number | null>(null);
   const lastDecodedSeqRef = useRef<number>(-1);
   const currentUrlRef = useRef<string | null>(null);
-  const unconfirmedFrameTimeRef = useRef<number | null>(null);
+  const ackDeadlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearAckDeadline = useCallback(() => {
+    if (ackDeadlineTimerRef.current !== null) {
+      clearTimeout(ackDeadlineTimerRef.current);
+      ackDeadlineTimerRef.current = null;
+    }
+  }, []);
 
   // Decompose options to prevent infinite useEffect triggers from object identity
   const format = options?.format ?? "jpeg";
@@ -91,13 +98,14 @@ export function useRemoteBrowser({
   }, [format, quality, intervalMs, maxEdge]);
 
   const clearFrameBuffer = useCallback(() => {
+    clearAckDeadline();
     if (currentUrlRef.current) {
       URL.revokeObjectURL(currentUrlRef.current);
       currentUrlRef.current = null;
     }
     setImageUrl(null);
     setFrame(null);
-  }, []);
+  }, [clearAckDeadline]);
 
   const reconnect = useCallback(() => {
     // Tear down current connection immediately
@@ -113,7 +121,7 @@ export function useRemoteBrowser({
   }, [clearFrameBuffer]);
 
   const confirmPresented = useCallback((streamId: number, seq: number) => {
-    unconfirmedFrameTimeRef.current = null;
+    clearAckDeadline();
     const isHidden = typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden);
     if (isHidden) return;
     if (clientRef.current) {
@@ -123,7 +131,7 @@ export function useRemoteBrowser({
         clientRef.current.ackFrame(streamId, seq);
       }
     }
-  }, []);
+  }, [clearAckDeadline]);
 
   const sendAck = confirmPresented;
 
@@ -254,7 +262,17 @@ export function useRemoteBrowser({
 
           setImageUrl(newUrl);
           setFrame(incomingFrame);
-          unconfirmedFrameTimeRef.current = Date.now();
+          // One-shot ACK deadline timer: enforces ACK window expiry without 1s polling (R4-13).
+          clearAckDeadline();
+          ackDeadlineTimerRef.current = setTimeout(() => {
+            ackDeadlineTimerRef.current = null;
+            if (cancelled) return;
+            setError(new Error("ACK deadline expired: unconfirmed frame presentation stalled"));
+            if (clientRef.current) {
+              clientRef.current.close();
+            }
+            setStatus("closed");
+          }, 10000);
           setStatus((prev) => (prev === "paused" ? "streaming" : prev));
 
           // Presentation-gated ACK: do NOT ACK immediately here on blob creation.
@@ -316,12 +334,14 @@ export function useRemoteBrowser({
     intervalMs,
     maxEdge,
     reconnectNonce,
+    clearAckDeadline,
     clearFrameBuffer,
   ]);
 
-  // Viewer heartbeat loop: emit heartbeats independently of driver ownership while connected (R4-13)
+  // Viewer heartbeat loop: emit heartbeats independently of driver ownership while actively connected (R4-13).
+  // Skips heartbeat while paused (e.g. backgrounded tab) so hidden viewers stay quiet.
   useEffect(() => {
-    if (!clientRef.current || (status !== "streaming" && status !== "ready" && status !== "paused")) {
+    if (!clientRef.current || (status !== "streaming" && status !== "ready")) {
       return;
     }
 
@@ -358,28 +378,12 @@ export function useRemoteBrowser({
     return () => clearTimeout(timer);
   }, [status]);
 
-  // Live ACK deadline sweeper: enforces ACK window expiry even without new drive events (R4-13)
+  // Clear any armed one-shot ACK deadline timer whenever we leave the streaming state.
   useEffect(() => {
     if (status !== "streaming") {
-      unconfirmedFrameTimeRef.current = null;
-      return;
+      clearAckDeadline();
     }
-
-    const checkInterval = setInterval(() => {
-      if (
-        unconfirmedFrameTimeRef.current !== null &&
-        Date.now() - unconfirmedFrameTimeRef.current > 10000
-      ) {
-        setError(new Error("ACK deadline expired: unconfirmed frame presentation stalled"));
-        if (clientRef.current) {
-          clientRef.current.close();
-        }
-        setStatus("closed");
-      }
-    }, 1000);
-
-    return () => clearInterval(checkInterval);
-  }, [status]);
+  }, [status, clearAckDeadline]);
 
   return {
     status,

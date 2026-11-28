@@ -20,7 +20,22 @@ fn is_noise_path(roots: &[PathBuf], path: &std::path::Path) -> bool {
             previous = None;
             continue;
         };
-        if name == "target" || name == "node_modules" {
+        if matches!(
+            name.to_str(),
+            Some(
+                "target"
+                    | "node_modules"
+                    | ".next"
+                    | "dist"
+                    | "build"
+                    | ".turbo"
+                    | ".cache"
+                    | ".venv"
+                    | "__pycache__"
+                    | ".ferryx-worktrees"
+                    | ".orca-worktrees"
+            )
+        ) {
             return true;
         }
         if previous == Some(std::ffi::OsStr::new(".git")) && (name == "objects" || name == "logs") {
@@ -292,5 +307,34 @@ mod tests {
         // Then missing paths are skipped and the live project is still watched recursively.
         assert_eq!(watched_live, Some(true), "live project must stay watched");
         assert!(!watched_vanished, "a vanished parent must never be watched");
+    }
+
+    #[test]
+    fn is_noise_path_filters_build_cache_and_worktree_trees_below_watched_root() {
+        let root = PathBuf::from("/tmp/build/workspace");
+        let roots = vec![root.clone()];
+        for dir in [
+            "target",
+            "node_modules",
+            ".next",
+            "dist",
+            "build",
+            ".turbo",
+            ".cache",
+            ".venv",
+            "__pycache__",
+            ".ferryx-worktrees",
+            ".orca-worktrees",
+        ] {
+            assert!(
+                is_noise_path(&roots, &root.join(dir).join("artifact")),
+                "expected {dir} to be classified as noise"
+            );
+        }
+        assert!(is_noise_path(&roots, &root.join(".git/objects/ab/1234")));
+        assert!(is_noise_path(&roots, &root.join(".git/logs/HEAD")));
+        // A normal file under a root whose own ancestor contains `build` must still report.
+        assert!(!is_noise_path(&roots, &root.join("src/main.rs")));
+        assert!(!is_noise_path(&roots, &root.join(".git/HEAD")));
     }
 }

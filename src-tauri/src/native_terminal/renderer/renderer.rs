@@ -1,5 +1,7 @@
 //! Ferryx Native Terminal WGPU Renderer Implementation.
 
+use std::sync::Arc;
+
 use wgpu::util::DeviceExt;
 
 use super::atlas::GlyphAtlas;
@@ -7,10 +9,10 @@ use super::gpu_context::GpuContext;
 use super::images::{image_background_occluders, ImageTextures};
 use super::instances::prepare_visible_glyphs;
 use super::pass::{
-    encode_terminal_passes_with_surface_options, TerminalPassOptions, TerminalPassResources,
-    TerminalPassTarget,
+    encode_terminal_passes_with_surface_options, FrameVertexBuffers, TerminalPassOptions,
+    TerminalPassResources, TerminalPassTarget,
 };
-use super::pipeline::{GlyphInstance, RectInstance, RenderPipelines, ScreenUniform};
+use super::pipeline::{RectInstance, RenderPipelines, ScreenUniform};
 use super::render_target::{RenderTarget, TARGET_FORMAT};
 use super::row_cache::RowCacheManager;
 use super::types::{GlyphAtlasStats, OffscreenFrame, RendererConfig, SelectionSnapshot};
@@ -42,7 +44,7 @@ pub struct OffscreenViewportOptions<'a> {
 
 pub struct NativeTerminalRenderer {
     config: RendererConfig,
-    pipelines: RenderPipelines,
+    pipelines: Arc<RenderPipelines>,
     atlas: GlyphAtlas,
     target: Option<RenderTarget>,
     uniform_buffer: wgpu::Buffer,
@@ -50,6 +52,9 @@ pub struct NativeTerminalRenderer {
     atlas_bind_group: wgpu::BindGroup,
     row_cache: RowCacheManager,
     image_textures: ImageTextures,
+    vertex_buffers: FrameVertexBuffers,
+    viewport_bg_scratch: Vec<RectInstance>,
+    overlay_scratch: Vec<RectInstance>,
     #[cfg(test)]
     preparation_attempts: usize,
     #[cfg(test)]
@@ -74,7 +79,7 @@ impl NativeTerminalRenderer {
     }
 
     fn with_gpu(config: RendererConfig, gpu: GpuContext) -> Result<Self, NativeTerminalError> {
-        let pipelines = RenderPipelines::new(&gpu.device);
+        let pipelines = gpu.render_pipelines();
         let atlas = GlyphAtlas::new(&gpu.device);
 
         let uniform_buffer = gpu
@@ -127,6 +132,9 @@ impl NativeTerminalRenderer {
             atlas_bind_group,
             row_cache: RowCacheManager::new(),
             image_textures: ImageTextures::default(),
+            vertex_buffers: FrameVertexBuffers::default(),
+            viewport_bg_scratch: Vec::new(),
+            overlay_scratch: Vec::new(),
             #[cfg(test)]
             preparation_attempts: 0,
             #[cfg(test)]
@@ -139,7 +147,7 @@ impl NativeTerminalRenderer {
         &mut self,
         snapshot: &RenderSnapshot,
         selection: Option<&SelectionSnapshot>,
-    ) -> Result<(Vec<RectInstance>, Vec<GlyphInstance>, u16, u16), NativeTerminalError> {
+    ) -> Result<(u16, u16), NativeTerminalError> {
         #[cfg(test)]
         {
             self.preparation_attempts = 1;
@@ -213,9 +221,14 @@ impl NativeTerminalRenderer {
     pub fn update_config(&mut self, config: RendererConfig) -> Result<(), NativeTerminalError> {
         config.validate()?;
         if self.config != config {
+            let geometry_changed = self.config.cell_width_px != config.cell_width_px
+                || self.config.cell_height_px != config.cell_height_px
+                || self.config.device_scale_factor != config.device_scale_factor;
             self.config = config;
-            self.atlas.clear();
-            self.target = None;
+            if geometry_changed {
+                self.atlas.clear();
+                self.target = None;
+            }
         }
         Ok(())
     }
@@ -254,7 +267,7 @@ impl NativeTerminalRenderer {
         selection: Option<&SelectionSnapshot>,
     ) -> Result<OffscreenFrame, NativeTerminalError> {
         let (width_px, height_px) = self.validate_and_dims(snapshot)?;
-        let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
+        let (rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
         let images = self.image_textures.prepare(
             &self.gpu.device,
             &self.gpu.queue,
@@ -263,7 +276,12 @@ impl NativeTerminalRenderer {
             &self.config,
             [0.0; 2],
         )?;
-        let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
+        let occluders = image_background_occluders(
+            snapshot,
+            &self.config,
+            selection,
+            self.row_cache.bg_instances(),
+        );
 
         if self
             .target
@@ -307,8 +325,9 @@ impl NativeTerminalRenderer {
                 width: width_px,
                 height: height_px,
             },
-            &bg,
-            &glyph,
+            self.row_cache.bg_instances(),
+            self.row_cache.glyph_instances(),
+            &mut self.vertex_buffers,
             TerminalPassOptions {
                 clear_color,
                 scissor: None,
@@ -340,7 +359,7 @@ impl NativeTerminalRenderer {
         format: wgpu::TextureFormat,
     ) -> Result<(u16, u16), NativeTerminalError> {
         let (_, _) = self.validate_and_dims(snapshot)?;
-        let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
+        let (rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
         let images = self.image_textures.prepare(
             &self.gpu.device,
             &self.gpu.queue,
@@ -349,7 +368,12 @@ impl NativeTerminalRenderer {
             &self.config,
             [0.0; 2],
         )?;
-        let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
+        let occluders = image_background_occluders(
+            snapshot,
+            &self.config,
+            selection,
+            self.row_cache.bg_instances(),
+        );
 
         let mut encoder = self
             .gpu
@@ -381,8 +405,9 @@ impl NativeTerminalRenderer {
                 width: width_px,
                 height: height_px,
             },
-            &bg,
-            &glyph,
+            self.row_cache.bg_instances(),
+            self.row_cache.glyph_instances(),
+            &mut self.vertex_buffers,
             TerminalPassOptions {
                 clear_color,
                 scissor: None,
@@ -446,45 +471,51 @@ impl NativeTerminalRenderer {
             ));
         }
 
-        let (bg, mut glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
+        let (rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
+        let vx = viewport.x as f32;
+        let vy = viewport.y as f32;
         let images = self.image_textures.prepare(
             &self.gpu.device,
             &self.gpu.queue,
             &self.pipelines,
             snapshot,
             &self.config,
-            [viewport.x as f32, viewport.y as f32],
+            [vx, vy],
         )?;
-        let mut occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
+        let mut occluders = image_background_occluders(
+            snapshot,
+            &self.config,
+            selection,
+            self.row_cache.bg_instances(),
+        );
         for rect in &mut occluders {
-            rect.rect[0] += viewport.x as f32;
-            rect.rect[1] += viewport.y as f32;
+            rect.rect[0] += vx;
+            rect.rect[1] += vy;
         }
 
         let default_bg_color = self.config.theme.background;
-        let mut final_bg = Vec::with_capacity(bg.len() + 1);
+        let bg_src = self.row_cache.bg_instances();
+        self.viewport_bg_scratch.clear();
+        self.viewport_bg_scratch.reserve(bg_src.len() + 1);
         // Base viewport rectangle ensuring 100% native child view coverage including any residual gutter
-        final_bg.push(RectInstance {
-            rect: [
-                viewport.x as f32,
-                viewport.y as f32,
-                viewport.width as f32,
-                viewport.height as f32,
-            ],
+        self.viewport_bg_scratch.push(RectInstance {
+            rect: [vx, vy, viewport.width as f32, viewport.height as f32],
             color: default_bg_color,
         });
-
-        for mut instance in bg {
-            instance.rect[0] += viewport.x as f32;
-            instance.rect[1] += viewport.y as f32;
-            final_bg.push(instance);
+        self.viewport_bg_scratch.extend(bg_src.iter().map(|instance| {
+            let mut shifted = *instance;
+            shifted.rect[0] += vx;
+            shifted.rect[1] += vy;
+            shifted
+        }));
+        if viewport.x != 0 || viewport.y != 0 {
+            for instance in self.row_cache.glyph_instances_mut() {
+                instance.rect[0] += vx;
+                instance.rect[1] += vy;
+            }
         }
-        for instance in &mut glyph {
-            instance.rect[0] += viewport.x as f32;
-            instance.rect[1] += viewport.y as f32;
-        }
 
-        let mut overlay_instances = Vec::new();
+        self.overlay_scratch.clear();
         if let Some(overlay) = scrollbar_overlay {
             if overlay.visible {
                 if let Some(metrics) = overlay.metrics {
@@ -495,14 +526,14 @@ impl NativeTerminalRenderer {
                         metrics.len,
                         self.config.theme.foreground,
                     ) {
-                        overlay_instances.push(rect);
+                        self.overlay_scratch.push(rect);
                     }
                 }
             }
         }
         if attention_frame {
             let thickness = ATTENTION_FRAME_THICKNESS_LOGICAL_PX * self.config.device_scale_factor;
-            overlay_instances.extend(compute_attention_frame_rects(
+            self.overlay_scratch.extend(compute_attention_frame_rects(
                 viewport,
                 thickness,
                 include_bottom_band,
@@ -531,8 +562,9 @@ impl NativeTerminalRenderer {
                 width: surface_width_px,
                 height: surface_height_px,
             },
-            &final_bg,
-            &glyph,
+            &self.viewport_bg_scratch,
+            self.row_cache.glyph_instances(),
+            &mut self.vertex_buffers,
             TerminalPassOptions {
                 clear_color: wgpu::Color {
                     r: default_bg_color[0] as f64,
@@ -541,7 +573,7 @@ impl NativeTerminalRenderer {
                     a: default_bg_color[3] as f64,
                 },
                 scissor: Some(viewport),
-                overlay: &overlay_instances,
+                overlay: &self.overlay_scratch,
                 images: &images,
                 image_occluders: &occluders,
             },
@@ -674,6 +706,47 @@ mod tests {
             .unwrap();
         assert!(std::sync::Arc::ptr_eq(&first.gpu.device, &second.gpu.device));
         assert!(std::sync::Arc::ptr_eq(&first.gpu.queue, &second.gpu.queue));
+        assert!(std::sync::Arc::ptr_eq(&first.pipelines, &second.pipelines));
+    }
+
+    #[test]
+    fn theme_only_update_config_preserves_glyph_atlas_and_recolors_rows() {
+        let initial = dense_config();
+        let mut renderer = NativeTerminalRenderer::new(initial).unwrap();
+        let snapshot = dense_snapshot(8, 2, 0, 4);
+        let before = renderer.render_snapshot(&snapshot, None).unwrap();
+        let gen_before = renderer.atlas.generation;
+        let entries_before = renderer.glyph_atlas_stats().entry_count;
+        assert!(entries_before > 0);
+
+        let rethemed = RendererConfig {
+            theme: super::super::types::RendererTheme {
+                background: [0.1, 0.2, 0.3, 1.0],
+                foreground: [0.9, 0.8, 0.1, 1.0],
+                ..initial.theme
+            },
+            ..initial
+        };
+        renderer.update_config(rethemed).unwrap();
+        assert_eq!(renderer.atlas.generation, gen_before);
+        assert_eq!(renderer.glyph_atlas_stats().entry_count, entries_before);
+
+        let after = renderer.render_snapshot(&snapshot, None).unwrap();
+        assert_eq!(renderer.atlas.generation, gen_before);
+        assert_eq!(renderer.glyph_atlas_stats().entry_count, entries_before);
+        assert_eq!(after.rebuilt_row_count, snapshot.rows);
+        assert_eq!(after.reused_row_count, 0);
+        assert_ne!(before.pixels, after.pixels);
+    }
+
+    #[test]
+    fn reusable_vertex_buffers_do_not_reallocate_on_steady_state_frames() {
+        let mut renderer = NativeTerminalRenderer::new(dense_config()).unwrap();
+        let snapshot = dense_snapshot(8, 2, 0, 4);
+        let first = renderer.render_snapshot(&snapshot, None).unwrap();
+        let second = renderer.render_snapshot(&snapshot, None).unwrap();
+        assert_eq!(first.pixels, second.pixels);
+        assert_eq!(renderer.vertex_buffers.allocation_counts(), (1, 1, 0, 0));
     }
 
     fn dense_config() -> RendererConfig {
@@ -699,7 +772,7 @@ mod tests {
             let row = i / (cols as usize / 2);
             let col = (i % (cols as usize / 2)) * 2;
             grid[row][col] = CellSnapshot {
-                text: hangul(start + i as u32),
+                text: hangul(start + i as u32).into(),
                 wide: CellWide::Wide,
                 ..Default::default()
             };
@@ -913,7 +986,7 @@ mod tests {
                 raster.buffer().iter().all(|&b| b == 0),
                 "fixture must be empty"
             );
-            snapshot.grid[i / 40][(i % 40) * 2].text = text;
+            snapshot.grid[i / 40][(i % 40) * 2].text = text.into();
         }
         // When: the last new covered key forces recovery with the empty classifications.
         let frame = renderer.render_snapshot(&snapshot, None).unwrap();
@@ -1170,6 +1243,7 @@ mod tests {
                 "text z={z}"
             );
         }
+        assert_eq!(renderer.image_textures.sampler_create_count, 1);
     }
 
     fn assert_payload(renderer: &NativeTerminalRenderer, label: &str) {

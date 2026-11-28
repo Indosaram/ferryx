@@ -4,7 +4,7 @@ use fxsh::messages::SubscribeAck;
 use fxsh::types::Delta;
 use fxsh::Uuid;
 
-use crate::replica::{delta_encoded_len, merge};
+use crate::replica::{delta_encoded_len, merge_owned};
 
 pub const QUEUE_BYTES_LIMIT: usize = 4 * 1024 * 1024;
 pub const QUEUE_MSG_LIMIT: usize = 256;
@@ -212,11 +212,10 @@ impl Subscription {
         if self.resync_pending || self.is_closed() {
             return;
         }
-        if let Some(merged) = merge(self.queue.make_contiguous()) {
+        if let Some(merged) = merge_owned(self.queue.drain(..)) {
             self.base = merged.new_revision;
             fx.push(Effect::SendDelta(merged));
         }
-        self.queue.clear();
         self.queue_bytes = 0;
     }
 }

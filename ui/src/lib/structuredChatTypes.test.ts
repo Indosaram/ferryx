@@ -285,4 +285,14 @@ describe("structured contracts", () => {
       "/api/v1/structured-chat/sessions/s1/turns",
     );
   });
+
+  it("uses append-only fast path and preserves reference when incoming seqs are identical", () => {
+    const p1: StructuredPart = { seq: 1, tsMs: 10, type: "userMessage", text: "a" };
+    const p2: StructuredPart = { seq: 2, tsMs: 20, type: "assistantMessage", text: "b" };
+    const p3: StructuredPart = { seq: 3, tsMs: 30, type: "userMessage", text: "c" };
+    const base = mergeStructuredParts([], [p1, p2]);
+    const appended = mergeStructuredParts(base, [p3]);
+    expect(appended).toEqual([p1, p2, p3]);
+    expect(mergeStructuredParts(appended, [p1, p2])).toBe(appended);
+  });
 });

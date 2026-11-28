@@ -798,6 +798,7 @@ async fn session_with(
     provider: ProbeProvider,
     events_rx: mpsc::UnboundedReceiver<ProviderEvent>,
 ) -> Arc<SessionHandle> {
+    let journal_path = temp.join(format!("{session_id}.jsonl"));
     let handle = Arc::new(SessionHandle {
         session_id: session_id.to_owned(),
         provider_id: "probe".into(),
@@ -813,6 +814,8 @@ async fn session_with(
             },
             state: SessionState::Running,
             parts: Vec::new(),
+            published_seq: 0,
+            parts_loaded: true,
             next_seq: 1,
             turn_ids: Vec::new(),
             turn_snapshots: HashMap::new(),
@@ -821,8 +824,9 @@ async fn session_with(
             active_turn: None,
             last_completed_turn: None,
             events_tx: watch::channel(0).0,
-            journal_path: temp.join(format!("{session_id}.jsonl")),
+            journal_path: journal_path.clone(),
         }),
+        journal: tokio::sync::Mutex::new(SessionJournal::new(journal_path)),
     });
     spawn_event_pump(Arc::clone(&handle), events_rx);
     store
@@ -1077,6 +1081,7 @@ async fn history_pages_cover_every_part_exactly_once() {
             });
         }
         inner.next_seq = 26;
+        inner.published_seq = 25;
     }
 
     let mut seen: Vec<u64> = Vec::new();

@@ -958,7 +958,10 @@ mod tests {
         assert!(stopped.lock().await.is_none());
 
         let task = tokio::spawn(std::future::pending::<()>());
-        let running = tokio::sync::Mutex::new(Some(Generation { tasks: vec![task] }));
+        let running = tokio::sync::Mutex::new(Some(Generation {
+            tasks: vec![task],
+            mhc_supervisor: None,
+        }));
         assert!(restart_if_running(&running, start).await.unwrap());
         assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

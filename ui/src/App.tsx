@@ -846,28 +846,40 @@ export function deriveFocusedTerminal(
       });
     });
   // Every waiting or unseen-done session of every project, so the phone Inbox spans the host.
-  const sessionAttention = [[workspaceId, state] as const, ...snapshots.filter(([id]) => id !== workspaceId)]
-    .flatMap(([id, snapshot]) =>
-      [snapshot.layout, ...Object.values(snapshot.worktreeLayouts ?? {})].flatMap((ownerLayout) =>
-        ownerLayout.tabs.filter(isTerminalTab).flatMap((tab) => [...getTabSessionIds(snapshot, tab.id)].flatMap((sessionId) => {
+  const seenAttentionSessionIds = new Set<string>();
+  const sessionAttention: Array<{
+    backendSessionId: string;
+    workspaceId: string;
+    worktreeSlug: string | null;
+    state: "waiting" | "done";
+    agentType?: string;
+  }> = [];
+  for (const [id, snapshot] of [[workspaceId, state] as const, ...snapshots.filter(([sid]) => sid !== workspaceId)]) {
+    const worktreesByPath = new Map(snapshot.worktrees.map((wt) => [wt.path, wt]));
+    for (const ownerLayout of [snapshot.layout, ...Object.values(snapshot.worktreeLayouts ?? {})]) {
+      for (const tab of ownerLayout.tabs) {
+        if (!isTerminalTab(tab)) continue;
+        for (const sessionId of getTabSessionIds(snapshot, tab.id)) {
           const activity = selectSessionActivity(snapshot, sessionId, attentionBySessionId);
           const drawn = activity ? activityStateOfGroup(groupOf(activity)) : null;
           const paneSession = snapshot.sessions[sessionId];
           const backendSessionId = publishableBackendSessionId(paneSession?.backendSessionId);
-          if (!backendSessionId || !activity || (drawn !== "waiting" && drawn !== "done")) return [];
+          if (!backendSessionId || !activity || (drawn !== "waiting" && drawn !== "done")) continue;
+          if (seenAttentionSessionIds.has(backendSessionId)) continue;
+          seenAttentionSessionIds.add(backendSessionId);
           const panePath = paneSession.worktreePath ?? paneSession.cwd;
-          const paneWorktree = panePath ? snapshot.worktrees.find((wt) => wt.path === panePath) : undefined;
-          return [{
+          const paneWorktree = panePath ? worktreesByPath.get(panePath) : undefined;
+          sessionAttention.push({
             backendSessionId,
             workspaceId: id,
             worktreeSlug: (paneWorktree ? worktreeIdentity(paneWorktree) : null)?.slug ?? null,
             state: drawn,
             ...(activity.agentType ? { agentType: activity.agentType } : {}),
-          }];
-        })),
-      ),
-    )
-    .filter((entry, index, all) => all.findIndex((other) => other.backendSessionId === entry.backendSessionId) === index);
+          });
+        }
+      }
+    }
+  }
   const focusedGroup = state.layout.focusedGroupId
     ? state.layout.tabGroups?.[state.layout.focusedGroupId]
     : undefined;

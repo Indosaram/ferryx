@@ -25,6 +25,9 @@ import { useSshHosts } from "../lib/sshHosts";
 import type { RemoteContext } from "../lib/machineNavigation";
 import { remoteHostStore } from "../state/remoteHostStore";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
+
+const SIDEBAR_POINTER_SENSOR_OPTIONS = { activationConstraint: { distance: 5 } };
+const SIDEBAR_KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates };
 import {
   clampSidebarWidth,
   loadCollapsedProjects,
@@ -260,8 +263,8 @@ export function Sidebar({
   const menuAbortRef = useRef<AbortController | null>(null);
   useEffect(() => () => menuAbortRef.current?.abort(), []);
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(PointerSensor, SIDEBAR_POINTER_SENSOR_OPTIONS),
+    useSensor(KeyboardSensor, SIDEBAR_KEYBOARD_SENSOR_OPTIONS),
   );
 
   const projectGroups = useMemo(() => groupProjects(projects), [projects]);

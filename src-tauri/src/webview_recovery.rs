@@ -62,17 +62,28 @@ impl WebviewCrashLoopGuard {
     pub fn decide(&self, label: &str, now: Instant) -> ReloadDecision {
         let window = self.window;
         let mut reloads = self.reloads.lock();
-        let granted = reloads.entry(label.to_string()).or_default();
-        while granted
-            .front()
-            .is_some_and(|timestamp| now.saturating_duration_since(*timestamp) >= window)
-        {
-            granted.pop_front();
+        reloads.retain(|_, granted| {
+            while granted
+                .front()
+                .is_some_and(|timestamp| now.saturating_duration_since(*timestamp) >= window)
+            {
+                granted.pop_front();
+            }
+            !granted.is_empty()
+        });
+        if let Some(granted) = reloads.get_mut(label) {
+            if granted.len() >= self.max_reloads {
+                return ReloadDecision::Suppress;
+            }
+            granted.push_back(now);
+            return ReloadDecision::Reload;
         }
-        if granted.len() >= self.max_reloads {
+        if self.max_reloads == 0 {
             return ReloadDecision::Suppress;
         }
+        let mut granted = VecDeque::with_capacity(self.max_reloads);
         granted.push_back(now);
+        reloads.insert(label.to_string(), granted);
         ReloadDecision::Reload
     }
 }
@@ -204,6 +215,23 @@ mod tests {
         assert_eq!(guard.decide("main", at(base, 20)), ReloadDecision::Suppress);
         assert_eq!(guard.decide("ws-secondary", at(base, 20)), ReloadDecision::Reload);
         assert_eq!(guard.decide("browser-123", at(base, 20)), ReloadDecision::Reload);
+    }
+
+    #[test]
+    fn expired_labels_are_removed_when_their_history_empties() {
+        let guard = WebviewCrashLoopGuard::default();
+        let base = Instant::now();
+
+        assert_eq!(
+            guard.decide("browser-ephemeral", at(base, 0)),
+            ReloadDecision::Reload
+        );
+        assert!(guard.reloads.lock().contains_key("browser-ephemeral"));
+
+        assert_eq!(guard.decide("main", at(base, 60)), ReloadDecision::Reload);
+        let reloads = guard.reloads.lock();
+        assert!(!reloads.contains_key("browser-ephemeral"));
+        assert_eq!(reloads.len(), 1);
     }
 
     #[cfg(feature = "desktop")]

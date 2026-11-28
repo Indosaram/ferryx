@@ -1,8 +1,109 @@
-use super::{direct, SshHost};
+use super::{direct, SshAuthMethod, SshHost};
 use crate::ipc::{IpcError, IpcErrorCode};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+const ENV_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+fn auth_method_key(method: SshAuthMethod) -> &'static str {
+    match method {
+        SshAuthMethod::Agent => "agent",
+        SshAuthMethod::Key => "key",
+        SshAuthMethod::Password => "password",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EnvCacheKey {
+    connection: super::master::ConnectionKey,
+    auth_method: &'static str,
+}
+
+impl EnvCacheKey {
+    fn of(host: &SshHost) -> Self {
+        Self {
+            connection: super::master::ConnectionKey::of(host),
+            auth_method: auth_method_key(host.auth_method),
+        }
+    }
+}
+
+struct CachedEnvironment {
+    env: RemoteEnvironment,
+    cached_at: Instant,
+}
+
+struct EnvCache {
+    entries: Mutex<HashMap<EnvCacheKey, CachedEnvironment>>,
+}
+
+impl EnvCache {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get(
+        &self,
+        host: &SshHost,
+        platform: Option<RemotePlatform>,
+        now: Instant,
+    ) -> Option<RemoteEnvironment> {
+        let key = EnvCacheKey::of(host);
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let expired = match entries.get(&key) {
+            Some(entry) => now.saturating_duration_since(entry.cached_at) >= ENV_CACHE_TTL,
+            None => return None,
+        };
+        if expired {
+            entries.remove(&key);
+            return None;
+        }
+        entries
+            .get(&key)
+            .filter(|entry| platform.map_or(true, |expected| expected == entry.env.platform))
+            .map(|entry| entry.env.clone())
+    }
+
+    fn insert(&self, host: &SshHost, env: RemoteEnvironment, now: Instant) {
+        let key = EnvCacheKey::of(host);
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries.retain(|_, entry| now.saturating_duration_since(entry.cached_at) < ENV_CACHE_TTL);
+        entries.insert(
+            key,
+            CachedEnvironment {
+                env,
+                cached_at: now,
+            },
+        );
+    }
+
+    fn invalidate(&self, host: &SshHost) {
+        let key = EnvCacheKey::of(host);
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+}
+
+static ENV_CACHE: LazyLock<EnvCache> = LazyLock::new(EnvCache::new);
+
+/// Evicts any cached [`RemoteEnvironment`] for `host` so the next call re-probes.
+/// Callers should invoke this after transport or executor errors.
+pub fn invalidate(host: &SshHost) {
+    ENV_CACHE.invalidate(host);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -181,25 +282,52 @@ pub async fn detect_for(
             }
         }
     }
-    let environment = detect_uncached(host, platform).await?;
+    let environment = detect_cached_with(
+        &ENV_CACHE,
+        host,
+        platform,
+        Instant::now(),
+        |executor, script, timeout| async move {
+            let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+            direct::bounded_output(&plan, timeout)
+                .await
+                .map_err(|mut err| {
+                    let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+                    details["operation"] = "environment_detection_probe".into();
+                    details["executor"] = executor.program().into();
+                    err
+                })
+        },
+    )
+    .await?;
     super::mux_client::remember_environment(host, &environment);
     Ok(environment)
 }
 
-async fn detect_uncached(
+async fn detect_cached_with<F, Fut>(
+    cache: &EnvCache,
     host: &SshHost,
     platform: Option<RemotePlatform>,
-) -> Result<RemoteEnvironment, IpcError> {
-    detect_with(host, platform, |executor, script, timeout| async move {
-        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
-            details["operation"] = "environment_detection_probe".into();
-            details["executor"] = executor.program().into();
-            err
-        })
-    })
-    .await
+    now: Instant,
+    run: F,
+) -> Result<RemoteEnvironment, IpcError>
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    if let Some(cached) = cache.get(host, platform, now) {
+        return Ok(cached);
+    }
+    match detect_with(host, platform, run).await {
+        Ok(env) => {
+            cache.insert(host, env.clone(), now);
+            Ok(env)
+        }
+        Err(err) => {
+            cache.invalidate(host);
+            Err(err)
+        }
+    }
 }
 
 /// Exit code 255 is ssh's own failure code, but a remote command may also exit 255.
@@ -917,6 +1045,150 @@ mod tests {
                 RemoteExecutor::Sh
             ],
             "Step timeout with no exit code falls through and tries all candidate executors"
+        );
+    }
+
+    fn posix_probe_ok(script: &str) -> Vec<u8> {
+        let marker = script
+            .split("FERRYX_ENV_V1_")
+            .nth(1)
+            .unwrap()
+            .split('\\')
+            .next()
+            .unwrap();
+        format!("FERRYX_ENV_V1_{marker}\0posix\0Linux\0/home/u\0/tmp\01\0").into_bytes()
+    }
+
+    #[tokio::test]
+    async fn env_cache_hits_within_ttl_and_reprobes_after_expiry() {
+        let cache = EnvCache::new();
+        let host = probe_host();
+        let now = Instant::now();
+        let mut calls = 0;
+
+        let first = detect_cached_with(
+            &cache,
+            &host,
+            Some(RemotePlatform::Posix),
+            now,
+            |_, script, _| {
+                calls += 1;
+                std::future::ready(Ok(posix_probe_ok(&script)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls, 1);
+
+        let second = detect_cached_with(
+            &cache,
+            &host,
+            Some(RemotePlatform::Posix),
+            now + Duration::from_secs(60),
+            |_, script, _| {
+                calls += 1;
+                std::future::ready(Ok(posix_probe_ok(&script)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second, first);
+        assert_eq!(calls, 1, "cache hit within 5m TTL must not spawn a probe");
+
+        let refreshed = detect_cached_with(
+            &cache,
+            &host,
+            Some(RemotePlatform::Posix),
+            now + ENV_CACHE_TTL,
+            |_, script, _| {
+                calls += 1;
+                std::future::ready(Ok(posix_probe_ok(&script)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(refreshed, first);
+        assert_eq!(calls, 2, "expired entry must trigger a fresh probe");
+    }
+
+    #[tokio::test]
+    async fn env_cache_isolates_auth_methods_and_invalidates_on_error() {
+        let cache = EnvCache::new();
+        let now = Instant::now();
+        let agent_host = probe_host();
+        let mut key_host = probe_host();
+        key_host.auth_method = SshAuthMethod::Key;
+        let mut calls = 0;
+
+        let _ = detect_cached_with(
+            &cache,
+            &agent_host,
+            Some(RemotePlatform::Posix),
+            now,
+            |_, script, _| {
+                calls += 1;
+                std::future::ready(Ok(posix_probe_ok(&script)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls, 1);
+
+        // Same host with a different auth method must not reuse the cached entry.
+        let _ = detect_cached_with(
+            &cache,
+            &key_host,
+            Some(RemotePlatform::Posix),
+            now,
+            |_, script, _| {
+                calls += 1;
+                std::future::ready(Ok(posix_probe_ok(&script)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls, 2);
+
+        // Explicit invalidation forces a re-probe on the next call.
+        cache.invalidate(&agent_host);
+        let _ = detect_cached_with(
+            &cache,
+            &agent_host,
+            Some(RemotePlatform::Posix),
+            now,
+            |_, script, _| {
+                calls += 1;
+                std::future::ready(Ok(posix_probe_ok(&script)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls, 3);
+
+        // A platform mismatch bypasses the cached Posix entry and invalidates on error.
+        let err = detect_cached_with(
+            &cache,
+            &agent_host,
+            Some(RemotePlatform::Windows),
+            now,
+            |_, _, _| {
+                calls += 1;
+                std::future::ready(Err(error(
+                    IpcErrorCode::IoError,
+                    "transport",
+                    "Connection refused",
+                )
+                .with_details(serde_json::json!({
+                    "exitCode": 255,
+                    "stderr": "ssh: connect to host example.test port 22: Connection refused\n",
+                }))))
+            },
+        )
+        .await;
+        assert!(err.is_err());
+        assert!(
+            cache.get(&agent_host, None, now).is_none(),
+            "probe error must clear any previously cached entry"
         );
     }
 }

@@ -262,7 +262,7 @@ impl RetainedHistory {
     /// the state every published-then-idle session is in, which is the state the footprint is
     /// measured in; the outstanding unit is transient and bounded per session.
     pub fn retained_bytes(&self) -> usize {
-        self.len() + self.splitter.pending().bytes.len()
+        self.len() + self.splitter.pending_len()
     }
 
     pub fn text_bytes(&self) -> usize {

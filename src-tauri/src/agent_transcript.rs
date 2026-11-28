@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -249,22 +250,28 @@ pub fn read_conversation_from_bytes(
 }
 
 fn parse_conversation<R: BufRead>(
-    reader: R,
+    mut reader: R,
     limit: usize,
     before: Option<usize>,
 ) -> (Vec<ConversationMessage>, usize) {
-    let mut all_messages: Vec<ConversationMessage> = Vec::new();
+    let mut window: VecDeque<ConversationMessage> = VecDeque::with_capacity(limit.min(1024));
     let mut malformed_lines = 0;
     let mut current_ordinal = 0;
+    let mut line = String::new();
 
-    for line_res in reader.lines() {
-        let line = match line_res {
-            Ok(l) => l,
+    loop {
+        if before.is_some_and(|cursor| current_ordinal >= cursor) {
+            break;
+        }
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
             Err(_) => {
                 malformed_lines += 1;
-                continue;
+                break;
             }
-        };
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -290,88 +297,84 @@ fn parse_conversation<R: BufRead>(
             continue;
         };
 
+        let ordinal = current_ordinal;
+        current_ordinal += 1;
+
+        if limit == 0 {
+            continue;
+        }
+
         let role = body.role.unwrap_or_else(|| "user".to_string());
         let mut text = String::new();
         let mut thinking = String::new();
         let mut tool_calls: Vec<ToolCallSummary> = Vec::new();
 
         if let Some(content) = body.content {
-            if let Some(s) = content.as_str() {
-                text.push_str(s);
-            } else if let Some(arr) = content.as_array() {
-                for item in arr {
-                    if let Ok(part) = serde_json::from_value::<ContentPart>(item.clone()) {
-                        let kind = part.part_type.clone();
-                        match kind.as_deref() {
-                            Some("text") => {
-                                if let Some(t) = part.text {
-                                    text.push_str(&t);
-                                }
-                            }
-                            Some("thinking") => {
-                                if let Some(t) = part.thinking.or(part.text) {
-                                    if !t.trim().is_empty() {
-                                        if !thinking.is_empty() {
-                                            thinking.push_str("\n\n");
-                                        }
-                                        thinking.push_str(&t);
+            match content {
+                serde_json::Value::String(s) => text.push_str(&s),
+                serde_json::Value::Array(arr) => {
+                    for item in arr {
+                        if let Ok(part) = serde_json::from_value::<ContentPart>(item) {
+                            match part.part_type.as_deref() {
+                                Some("text") => {
+                                    if let Some(t) = part.text {
+                                        text.push_str(&t);
                                     }
                                 }
+                                Some("thinking") => {
+                                    if let Some(t) = part.thinking.or(part.text) {
+                                        if !t.trim().is_empty() {
+                                            if !thinking.is_empty() {
+                                                thinking.push_str("\n\n");
+                                            }
+                                            thinking.push_str(&t);
+                                        }
+                                    }
+                                }
+                                Some("toolCall") => {
+                                    let arguments =
+                                        part.arguments.unwrap_or(serde_json::Value::Null);
+                                    tool_calls.push(ToolCallSummary {
+                                        id: part.id,
+                                        name: part.name.unwrap_or_else(|| "tool".to_string()),
+                                        summary: tool_call_summary(&arguments),
+                                        input: tool_call_input(&arguments),
+                                    });
+                                }
+                                _ => {}
                             }
-                            Some("toolCall") => {
-                                let arguments = part.arguments.unwrap_or(serde_json::Value::Null);
-                                tool_calls.push(ToolCallSummary {
-                                    id: part.id,
-                                    name: part.name.unwrap_or_else(|| "tool".to_string()),
-                                    summary: tool_call_summary(&arguments),
-                                    input: tool_call_input(&arguments),
-                                });
-                            }
-                            _ => {}
                         }
                     }
                 }
+                _ => {}
             }
         }
 
         let is_tool_result = role == "toolResult";
-        let tool_name = if is_tool_result { body.tool_name.clone() } else { None };
-
-        if role == "toolResult" && text.is_empty() {
+        if is_tool_result && text.is_empty() {
             let tool = body.tool_name.as_deref().unwrap_or("tool");
             text = format!("← {tool} result");
         }
+        let tool_name = if is_tool_result { body.tool_name } else { None };
 
-        all_messages.push(ConversationMessage {
-            ordinal: current_ordinal,
+        if window.len() == limit {
+            window.pop_front();
+        }
+        window.push_back(ConversationMessage {
+            ordinal,
             role,
             text,
             id: record.id,
-            timestamp: record.timestamp.clone(),
+            timestamp: record.timestamp,
             thinking: (!thinking.is_empty()).then_some(thinking),
             tool_calls,
             tool_call_id: if is_tool_result { body.tool_call_id } else { None },
             tool_name,
             is_error: if is_tool_result { body.is_error } else { None },
         });
-        current_ordinal += 1;
     }
 
-    let filtered: Vec<ConversationMessage> = match before {
-        Some(cursor) => all_messages
-            .into_iter()
-            .filter(|m| m.ordinal < cursor)
-            .collect(),
-        None => all_messages,
-    };
-
-    let result_messages = if filtered.len() > limit {
-        filtered[filtered.len() - limit..].to_vec()
-    } else {
-        filtered
-    };
-
-    (result_messages, malformed_lines)
+    (Vec::from(window), malformed_lines)
 }
 
 /// Where a paired host keeps a session's transcript, resolved from the daemon's durable store.

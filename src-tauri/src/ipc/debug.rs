@@ -138,15 +138,97 @@ pub fn switch_debug_sink_enabled(debug_build: bool, env_flag: Option<&str>) -> b
     debug_build || env_flag == Some("1")
 }
 
+/// The opt-in flag is read once per process: the sink is consulted on every keystroke and every
+/// rendered frame, and a `getenv` syscall on that path is pure overhead for a value that cannot
+/// change without restarting the app. Tests read the environment directly, so they skip the cache.
+#[cfg(not(test))]
+static SWITCH_DEBUG_ENV_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn switch_debug_env_opted_in() -> bool {
+    // Unit tests flip `FERRYX_SWITCH_DEBUG` between cases, so they must observe the current
+    // environment; a process-wide `OnceLock` would freeze whichever value the first test set.
+    std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1")
+}
+
+#[cfg(not(test))]
+fn switch_debug_env_opted_in() -> bool {
+    *SWITCH_DEBUG_ENV_ENABLED
+        .get_or_init(|| std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1"))
+}
+
 fn switch_debug_sink_enabled_here() -> bool {
-    switch_debug_sink_enabled(
-        cfg!(debug_assertions),
-        std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref(),
+    cfg!(debug_assertions) || switch_debug_env_opted_in()
+}
+
+/// Whether per-keystroke / per-frame events are worth constructing at all. Release builds keep
+/// them off unless `FERRYX_SWITCH_DEBUG=1`, so a hot path can skip the `serde_json::json!` tree
+/// instead of paying for an event the sink would drop.
+#[cfg(test)]
+pub fn high_frequency_switch_debug_enabled() -> bool {
+    // A `--release` test build must still produce the events its assertions read, so test builds
+    // keep full fidelity and only a real release binary takes the skip.
+    true
+}
+
+/// Whether per-keystroke / per-frame events are worth constructing at all. Release builds keep
+/// them off unless `FERRYX_SWITCH_DEBUG=1`, so a hot path can skip the `serde_json::json!` tree
+/// instead of paying for an event the sink would drop.
+#[cfg(not(test))]
+pub fn high_frequency_switch_debug_enabled() -> bool {
+    switch_debug_sink_enabled_here()
+}
+
+/// Events that fire at keystroke or frame cadence. In a release build one append per event is the
+/// dominant disk cost of an idle-or-streaming pane, and none of them is worth that by default.
+/// Anomaly-shaped variants (`…stage.slow`, `…stage.stall`, drops, failures) stay rare and keep
+/// persisting, so a release build can still explain a stuck pane.
+pub fn is_high_frequency_event(event: &str) -> bool {
+    if event.starts_with("terminal.surface.input.stage.") {
+        // `stage.slow` is the rare "this stage exceeded its budget" anomaly, not a per-keystroke
+        // stage transition; it must survive the release gate.
+        return !event.ends_with(".slow");
+    }
+    matches!(
+        event,
+        "terminal.surface.input.accepted"
+            | "terminal.surface.input.dispatch"
+            | "terminal.surface.input.sent"
+            | "terminal.surface.presented"
+            | "terminal.surface.presentation.receipt"
+            // The per-chunk render receipt is the one render event that fires at frame cadence.
+            // `terminal.render.attach`/`reattach`/`redraw` are rare, user-driven lifecycle events.
+            | "terminal.render.vt_consumed"
     )
 }
 
 pub fn should_persist_event(event: &str) -> bool {
     should_persist_entry(switch_debug_sink_enabled_here(), event)
+}
+
+/// Sink-level gate: the persistence policy above, minus the high-frequency events a release build
+/// only keeps when explicitly opted in. Rare lifecycle, error and anomaly events still persist.
+#[cfg(test)]
+pub fn should_persist_to_disk(event: &str) -> bool {
+    // Same reasoning as `high_frequency_switch_debug_enabled`: test builds, including release test
+    // runs, must observe every event they assert on.
+    should_persist_event(event)
+}
+
+/// Sink-level gate: the persistence policy above, minus the high-frequency events a release build
+/// only keeps when explicitly opted in. Rare lifecycle, error and anomaly events still persist.
+#[cfg(not(test))]
+pub fn should_persist_to_disk(event: &str) -> bool {
+    should_persist_to_disk_entry(switch_debug_sink_enabled_here(), event)
+}
+
+/// [`should_persist_to_disk`] with the build/opt-in decision passed in, so the release gate is
+/// testable without depending on how the test binary itself was compiled.
+pub fn should_persist_to_disk_entry(enabled: bool, event: &str) -> bool {
+    if !enabled && is_high_frequency_event(event) {
+        return false;
+    }
+    should_persist_entry(enabled, event)
 }
 
 pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
@@ -390,7 +472,7 @@ pub fn sanitize_switch_debug_details(_event: &str, details: &Value) -> Value {
 
 pub(crate) fn log_native_switch_debug(entry: Value) {
     let event = entry.get("event").and_then(Value::as_str).unwrap_or("").to_string();
-    if !should_persist_event(&event) {
+    if !should_persist_to_disk(&event) {
         return;
     }
     let Some(_guard) = SinkTaskGuard::try_acquire() else {
@@ -527,7 +609,7 @@ fn close_cached_switch_debug_files() {
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_switch_debug_log(mut entry: SwitchDebugEntry) -> Result<(), IpcError> {
-    if !should_persist_event(&entry.event) {
+    if !should_persist_to_disk(&entry.event) {
         return Ok(());
     }
     let Some(guard) = SinkTaskGuard::try_acquire() else {
@@ -920,6 +1002,64 @@ mod tests {
     fn release_builds_ignore_any_other_flag_value() {
         assert!(!switch_debug_sink_enabled(false, Some("true")));
         assert!(!switch_debug_sink_enabled(false, Some("0")));
+    }
+
+    /// The per-keystroke and per-frame events are the disk cost of a release build. Without the
+    /// `FERRYX_SWITCH_DEBUG=1` opt-in they must never reach the sink, however allowlisted they are
+    /// in `should_persist_entry`.
+    #[test]
+    fn release_builds_drop_high_frequency_events_unless_opted_in() {
+        for event in [
+            "terminal.surface.input.accepted",
+            "terminal.surface.input.dispatch",
+            "terminal.surface.input.sent",
+            "terminal.surface.input.stage.backend_write_start",
+            "terminal.surface.input.stage.backend_write",
+            "terminal.surface.input.stage.backend_write_result",
+            "terminal.surface.presented",
+            "terminal.surface.presentation.receipt",
+            "terminal.render.vt_consumed",
+        ] {
+            assert!(
+                is_high_frequency_event(event),
+                "{event} must be classified as high frequency"
+            );
+            assert!(
+                !should_persist_to_disk_entry(false, event),
+                "a release build must not persist {event} without the opt-in"
+            );
+            // The opt-in restores full fidelity, and so does a debug build.
+            assert!(should_persist_to_disk_entry(true, event));
+        }
+    }
+
+    /// The gate must not swallow the rare events that make a release log useful: errors, drops,
+    /// stalls, watchdog findings, and slow-stage anomalies all still persist by default.
+    #[test]
+    fn release_builds_keep_rare_and_anomaly_events() {
+        for event in [
+            "terminal.surface.input.failed",
+            "terminal.surface.input.error.recovering",
+            "terminal.surface.input.dropped.overflow",
+            "terminal.surface.input.gate.unclaimed",
+            "terminal.surface.input.slow",
+            "terminal.surface.input.in_flight_slow",
+            "terminal.surface.input.stall.resolved",
+            "terminal.surface.input.stage.slow",
+            "app.watchdog.hang_detected",
+            "terminal.render.attach",
+            "worktree.select.requested",
+            "terminal.open.discarded",
+        ] {
+            assert!(
+                !is_high_frequency_event(event),
+                "{event} is rare and must stay outside the high-frequency set"
+            );
+            assert!(
+                should_persist_to_disk_entry(false, event),
+                "a release build must still persist {event}"
+            );
+        }
     }
 }
 

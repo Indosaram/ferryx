@@ -245,6 +245,29 @@ mod file_descriptor_limit_tests {
         assert_eq!(file_descriptor_limit_target(256, 4096), 4096);
         assert_eq!(file_descriptor_limit_target(8192, 4096), 8192);
     }
+
+    #[test]
+    fn scroll_render_coalescer_coalesces_per_session_until_cleared() {
+        let coalescer = super::ScrollRenderCoalescer::default();
+        let flag_a = coalescer
+            .try_schedule("session-a")
+            .expect("first schedule for session-a must succeed");
+        assert!(
+            coalescer.try_schedule("session-a").is_none(),
+            "second schedule while pending must coalesce"
+        );
+        let flag_b = coalescer
+            .try_schedule("session-b")
+            .expect("different session schedules independently");
+
+        flag_a.store(false, std::sync::atomic::Ordering::Release);
+        assert!(
+            coalescer.try_schedule("session-a").is_some(),
+            "cleared session must accept a new schedule"
+        );
+        assert!(coalescer.try_schedule("session-b").is_none());
+        flag_b.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -806,6 +829,33 @@ fn macos_first_responder_has_marked_text(event: &objc2_app_kit::NSEvent) -> bool
     composing
 }
 
+#[cfg(feature = "desktop")]
+#[cfg(target_os = "macos")]
+static MACOS_WINDOW_NUMBER_CACHE: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<isize, String>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "desktop")]
+#[cfg(target_os = "macos")]
+fn macos_window_number<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<isize> {
+    use objc2_app_kit::NSWindow;
+    let raw_window = window.ns_window().ok()?;
+    if raw_window.is_null() {
+        return None;
+    }
+    // SAFETY: Tauri returns a live NSWindow pointer; monitors run on the main thread.
+    let ns_window = unsafe { &*(raw_window as *const NSWindow) };
+    Some(ns_window.windowNumber())
+}
+
+#[cfg(feature = "desktop")]
+#[cfg(target_os = "macos")]
+fn evict_macos_window_number_cache(label: &str) {
+    MACOS_WINDOW_NUMBER_CACHE
+        .lock()
+        .retain(|_, cached_label| cached_label != label);
+}
+
 /// The app window (`main` or `ws-*`) whose NSWindow has `window_number`, if any.
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
@@ -813,23 +863,40 @@ fn macos_app_window_by_number<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     window_number: isize,
 ) -> Option<tauri::Window<R>> {
-    use objc2_app_kit::NSWindow;
     if window_number == 0 {
         return None;
     }
-    app.windows()
-        .into_iter()
-        .filter(|(label, _)| window_registry::is_app_window_label(label))
-        .map(|(_, window)| window)
-        .find(|window| {
-            window.ns_window().is_ok_and(|raw_window| {
-                !raw_window.is_null() && {
-                    // SAFETY: Tauri returns a live NSWindow pointer; monitors run on the main thread.
-                    let ns_window = unsafe { &*(raw_window as *const NSWindow) };
-                    ns_window.windowNumber() == window_number
-                }
-            })
-        })
+    // Fast path: resolve cached label directly via `get_window` without cloning the full
+    // `app.windows()` map on every scroll/click/key tick, then verify the live `windowNumber`
+    // so closed or recycled NSWindow numbers can never return a stale window.
+    if let Some(label) = MACOS_WINDOW_NUMBER_CACHE
+        .lock()
+        .get(&window_number)
+        .cloned()
+    {
+        if let Some(window) = app.get_window(&label) {
+            if macos_window_number(&window) == Some(window_number) {
+                return Some(window);
+            }
+        }
+    }
+    let mut refreshed = Vec::new();
+    let mut matched = None;
+    for (label, window) in app.windows() {
+        if !window_registry::is_app_window_label(&label) {
+            continue;
+        }
+        if let Some(num) = macos_window_number(&window) {
+            refreshed.push((num, label));
+            if num == window_number {
+                matched = Some(window);
+            }
+        }
+    }
+    let mut cache = MACOS_WINDOW_NUMBER_CACHE.lock();
+    cache.clear();
+    cache.extend(refreshed);
+    matched
 }
 
 /// The app window an NSEvent was delivered to, else the focused app window (an event without a
@@ -1226,6 +1293,38 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Coalesces redundant main-thread scroll renders per session while preserving every
+/// synchronous VT scroll delta applied in the event monitor.
+#[cfg(any(all(target_os = "macos", feature = "native-terminal"), test))]
+#[derive(Default, Clone)]
+struct ScrollRenderCoalescer {
+    pending: std::sync::Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        >,
+    >,
+}
+
+#[cfg(any(all(target_os = "macos", feature = "native-terminal"), test))]
+impl ScrollRenderCoalescer {
+    fn try_schedule(&self, session_id: &str) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        let flag = {
+            let mut map = self.pending.lock();
+            if map.len() > 64 {
+                map.retain(|_, flag| flag.load(std::sync::atomic::Ordering::Acquire));
+            }
+            std::sync::Arc::clone(map.entry(session_id.to_string()).or_insert_with(|| {
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+            }))
+        };
+        if !flag.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            Some(flag)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "native-terminal"))]
 fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
     app: &tauri::App<R>,
@@ -1240,6 +1339,7 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
         .state::<NativeTerminalSurfaceHostState>()
         .inner()
         .clone();
+    let scroll_coalescer = ScrollRenderCoalescer::default();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
         if let Some(window) = macos_app_window_by_number(&app_handle, event.windowNumber()) {
@@ -1324,30 +1424,50 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                             )
                                             .is_ok() =>
                                         {
-                                            let surface_window = window.clone();
-                                            let state_inner = surface_host.clone();
-                                            let session_id_clone = session_id.clone();
-                                            let bounds =
-                                                surface_host.session_logical_bounds(&session_id);
-                                            let _ = window.run_on_main_thread(move || {
-                                                match bounds {
-                                                    Some(logical_bounds) => {
-                                                        let _ = state_inner.render(
-                                                            &surface_window,
-                                                            crate::native_terminal::surface_host::NativeTerminalBoundsRequest {
-                                                                session_id: session_id_clone,
-                                                                bounds: logical_bounds,
-                                                            },
+                                            if let Some(pending_flag) =
+                                                scroll_coalescer.try_schedule(&session_id)
+                                            {
+                                                let clear_on_err = Arc::clone(&pending_flag);
+                                                let surface_window = window.clone();
+                                                let state_inner = surface_host.clone();
+                                                let session_id_clone = session_id.clone();
+                                                if window
+                                                    .run_on_main_thread(move || {
+                                                        // Clear before rendering so a scroll tick
+                                                        // arriving during/after this render schedules
+                                                        // a fresh frame.
+                                                        pending_flag.store(
+                                                            false,
+                                                            std::sync::atomic::Ordering::Release,
                                                         );
-                                                    }
-                                                    None => {
-                                                        let _ = state_inner.get_receipt(
-                                                            &surface_window,
-                                                            &session_id_clone,
-                                                        );
-                                                    }
+                                                        match state_inner
+                                                            .session_logical_bounds(&session_id_clone)
+                                                        {
+                                                            Some(logical_bounds) => {
+                                                                let _ = state_inner.render(
+                                                                    &surface_window,
+                                                                    crate::native_terminal::surface_host::NativeTerminalBoundsRequest {
+                                                                        session_id: session_id_clone,
+                                                                        bounds: logical_bounds,
+                                                                    },
+                                                                );
+                                                            }
+                                                            None => {
+                                                                let _ = state_inner.get_receipt(
+                                                                    &surface_window,
+                                                                    &session_id_clone,
+                                                                );
+                                                            }
+                                                        }
+                                                    })
+                                                    .is_err()
+                                                {
+                                                    clear_on_err.store(
+                                                        false,
+                                                        std::sync::atomic::Ordering::Release,
+                                                    );
                                                 }
-                                            });
+                                            }
                                         }
                                         Ok(crate::native_terminal::TerminalWheelOutcome::None) => {}
                                         Ok(crate::native_terminal::TerminalWheelOutcome::ScrollViewport(_)) => {
@@ -1703,10 +1823,15 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::DragDrop(drag_event) = event {
-                if crate::ipc::debug::switch_debug_sink_enabled(
-                    cfg!(debug_assertions),
-                    std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref(),
-                ) {
+                static SWITCH_DEBUG_ENABLED: std::sync::OnceLock<bool> =
+                    std::sync::OnceLock::new();
+                let switch_debug = *SWITCH_DEBUG_ENABLED.get_or_init(|| {
+                    crate::ipc::debug::switch_debug_sink_enabled(
+                        cfg!(debug_assertions),
+                        std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref(),
+                    )
+                });
+                if switch_debug {
                     let wall_time_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
@@ -3288,6 +3413,8 @@ fn requery_display_refresh<R: tauri::Runtime>(window: &tauri::Window<R>) {
 /// Window-destroy hook. Closing a window releases only GUI-side resources; it never stops,
 /// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
 fn handle_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    #[cfg(target_os = "macos")]
+    evict_macos_window_number_cache(window.label());
     // Sessions are never killed by closing a window (plan 3.6): ownership is released and the
     // remaining window is told so it can adopt them as background tabs.
     handle_app_window_destroyed(window);

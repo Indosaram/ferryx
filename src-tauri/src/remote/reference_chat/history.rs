@@ -1960,10 +1960,114 @@ pub fn reference_history_page_from_remote_bytes(
     reference_history_page_from_window(stream, identity, window_start, body, limit, cursor)
 }
 
+const REFERENCE_HISTORY_PAGE_CACHE_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct HistoryFileStamp {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    len: u64,
+    mtime: std::time::SystemTime,
+}
+
+impl HistoryFileStamp {
+    fn read(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            #[cfg(unix)]
+            dev: meta.dev(),
+            #[cfg(unix)]
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime: meta.modified().ok()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HistoryPageCacheKey {
+    path: PathBuf,
+    stamp: HistoryFileStamp,
+    stream_id: String,
+    kind: ReferenceNativeHistoryKind,
+    provider_session_id: Option<String>,
+    agent_running: bool,
+    limit: usize,
+    cursor: Option<(String, u64)>,
+}
+
+struct CachedHistoryPage {
+    page: ReferenceHistoryPage,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct ReferenceHistoryPageCacheInner {
+    entries: HashMap<HistoryPageCacheKey, CachedHistoryPage>,
+    clock: u64,
+}
+
+#[derive(Default)]
+struct ReferenceHistoryPageCache {
+    inner: Mutex<ReferenceHistoryPageCacheInner>,
+}
+
+impl ReferenceHistoryPageCache {
+    fn get(&self, key: &HistoryPageCacheKey) -> Option<ReferenceHistoryPage> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.clock = inner.clock.wrapping_add(1);
+        let now = inner.clock;
+        let entry = inner.entries.get_mut(key)?;
+        entry.last_used = now;
+        Some(entry.page.clone())
+    }
+
+    fn insert(&self, key: HistoryPageCacheKey, page: ReferenceHistoryPage) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.clock = inner.clock.wrapping_add(1);
+        let now = inner.clock;
+        if !inner.entries.contains_key(&key)
+            && inner.entries.len() >= REFERENCE_HISTORY_PAGE_CACHE_CAPACITY
+        {
+            if let Some(lru_key) = inner
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(k, _)| k.clone())
+            {
+                inner.entries.remove(&lru_key);
+            }
+        }
+        inner
+            .entries
+            .insert(key, CachedHistoryPage { page, last_used: now });
+    }
+}
+
+static REFERENCE_HISTORY_PAGE_CACHE: OnceLock<ReferenceHistoryPageCache> = OnceLock::new();
+
+fn global_reference_history_page_cache() -> &'static ReferenceHistoryPageCache {
+    REFERENCE_HISTORY_PAGE_CACHE.get_or_init(ReferenceHistoryPageCache::default)
+}
+
 /// Read one page of a local store, off the async reactor.
 ///
 /// The read is synchronous file I/O and the paging parses the whole window, so both are handed
-/// to [`crate::ipc::run_blocking`].
+/// to [`crate::ipc::run_blocking`]. Unchanged file-backed transcripts are served from a bounded
+/// [`HistoryFileStamp`]-keyed LRU cache so repeated polls skip reading and hashing megabytes.
 pub async fn read_reference_history_page(
     stream: &ReferenceHistoryStream,
     identity: &ReferenceHistoryIdentity,
@@ -1996,31 +2100,59 @@ pub async fn read_reference_history_page(
         })
         .await;
     }
+    let normalized_limit = normalize_reference_history_limit(limit)?;
+    ensure_history_cursor_stream(stream, cursor)?;
     let stream = stream.clone();
     let identity = identity.clone();
     let cursor = cursor.cloned();
     crate::ipc::run_blocking(move || {
         let page = (|| -> Result<ReferenceHistoryPage, ScopeError> {
+            let pre_stamp = HistoryFileStamp::read(&path);
+            let cache_key = pre_stamp.map(|stamp| HistoryPageCacheKey {
+                path: path.clone(),
+                stamp,
+                stream_id: stream.stream_id.clone(),
+                kind,
+                provider_session_id: identity.provider_session_id().map(str::to_string),
+                agent_running: identity.agent_running,
+                limit: normalized_limit,
+                cursor: cursor
+                    .as_ref()
+                    .map(|c| (c.stream_id.clone(), c.offset)),
+            });
+            if let Some(key) = cache_key.as_ref() {
+                if let Some(cached) = global_reference_history_page_cache().get(key) {
+                    return Ok(cached);
+                }
+            }
             // A pi store past the branch cap is disclosed like a branch past it: the pane shows
             // its own output rather than an error that leaves it with nothing.
-            let window = match read_reference_history_window(&path, kind) {
+            let page = match read_reference_history_window(&path, kind) {
                 Err(error)
                     if kind == ReferenceNativeHistoryKind::Pi
                         && error.code == ScopeErrorCode::PayloadTooLarge =>
                 {
                     ensure_history_cursor_stream(&stream, cursor.as_ref())?;
-                    return Ok(unreadable_page(&stream, super::history_pi::PI_BRANCH_UNREADABLE));
+                    unreadable_page(&stream, super::history_pi::PI_BRANCH_UNREADABLE)
                 }
-                other => other?,
+                other => {
+                    let window = other?;
+                    reference_history_page_from_window(
+                        &stream,
+                        &identity,
+                        window.start,
+                        &window.bytes,
+                        normalized_limit,
+                        cursor.as_ref(),
+                    )?
+                }
             };
-            reference_history_page_from_window(
-                &stream,
-                &identity,
-                window.start,
-                &window.bytes,
-                limit,
-                cursor.as_ref(),
-            )
+            if let Some(key) = cache_key {
+                if HistoryFileStamp::read(&path) == Some(key.stamp) {
+                    global_reference_history_page_cache().insert(key, page.clone());
+                }
+            }
+            Ok(page)
         })();
         Ok::<_, crate::ipc::error::IpcError>(page)
     })
@@ -4291,6 +4423,88 @@ mod tests {
                 .and_then(|meta| meta.usage.as_ref())
                 .and_then(|usage| usage.output_tokens),
             Some(5)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_reference_history_page_caches_by_file_stamp_and_invalidates_on_mutation() {
+        let home = TempHome::new();
+        let path = home.write_session("--w--", "2026-10-06_cache.jsonl", THREE_TURNS);
+        let identity = bound_identity("omo", "sess-cache", "cache");
+        let stream = omo_stream(&home, &identity);
+
+        let first = read_reference_history_page(&stream, &identity, 2, None)
+            .await
+            .expect("first page read");
+        let stamp_before = HistoryFileStamp::read(&path).expect("file stamp");
+        let key_before = HistoryPageCacheKey {
+            path: path.clone(),
+            stamp: stamp_before,
+            stream_id: stream.stream_id.clone(),
+            kind: stream.kind,
+            provider_session_id: identity.provider_session_id().map(str::to_string),
+            agent_running: identity.agent_running,
+            limit: 2,
+            cursor: None,
+        };
+        assert_eq!(
+            global_reference_history_page_cache().get(&key_before),
+            Some(first.clone()),
+            "first read must populate the file-stamp page cache"
+        );
+
+        let second = read_reference_history_page(&stream, &identity, 2, None)
+            .await
+            .expect("cached page read");
+        assert_eq!(second, first);
+
+        // Appending a new turn changes the file length (and mtime), invalidating the cache immediately.
+        let mut extended = String::from(THREE_TURNS);
+        extended.push_str(
+            r#"{"type":"message","id":"m7","message":{"role":"user","content":"fourth prompt"}}"#,
+        );
+        extended.push('\n');
+        std::fs::write(&path, &extended).expect("append fourth turn");
+        let updated = read_reference_history_page(&stream, &identity, 2, None)
+            .await
+            .expect("updated page read");
+        assert_ne!(updated.turns, first.turns, "file mutation must bypass stale cache entry");
+
+        // Standalone LRU eviction check: capacity is strictly bounded at 16 and evicts LRU.
+        let cache = ReferenceHistoryPageCache::default();
+        let make_key = |idx: u64| HistoryPageCacheKey {
+            path: PathBuf::from(format!("/tmp/lru-{idx}.jsonl")),
+            stamp: HistoryFileStamp {
+                #[cfg(unix)]
+                dev: 1,
+                #[cfg(unix)]
+                ino: idx,
+                len: idx,
+                mtime: std::time::UNIX_EPOCH + std::time::Duration::from_secs(idx),
+            },
+            stream_id: format!("s-{idx}"),
+            kind: ReferenceNativeHistoryKind::Omo,
+            provider_session_id: None,
+            agent_running: false,
+            limit: 10,
+            cursor: None,
+        };
+        for idx in 0..REFERENCE_HISTORY_PAGE_CACHE_CAPACITY as u64 {
+            cache.insert(make_key(idx), first.clone());
+        }
+        // Touch entry 0 so entry 1 becomes least recently used.
+        assert!(cache.get(&make_key(0)).is_some());
+        cache.insert(make_key(REFERENCE_HISTORY_PAGE_CACHE_CAPACITY as u64), first.clone());
+        assert_eq!(
+            cache.inner.lock().unwrap().entries.len(),
+            REFERENCE_HISTORY_PAGE_CACHE_CAPACITY
+        );
+        assert!(cache.get(&make_key(0)).is_some(), "recently used entry 0 must stay cached");
+        assert!(cache.get(&make_key(1)).is_none(), "least recently used entry 1 must be evicted");
+        assert!(
+            cache
+                .get(&make_key(REFERENCE_HISTORY_PAGE_CACHE_CAPACITY as u64))
+                .is_some()
         );
     }
 }

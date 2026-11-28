@@ -4366,6 +4366,9 @@ fn supervisor_role() -> Value {
 /// crate's MCP server has no per-call hook, so the role is followed on this interval: a
 /// takeover elsewhere refuses this process's supervisor reads within one interval.
 const MCP_ROLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+/// Slower role recheck interval when no supervisor lease is configured on this machine,
+/// avoiding 5s IPC chatter against the daemon on single-machine hubs.
+const MCP_ROLE_RECHECK_UNLEASED: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The daemon's `role` answer, `None` when the daemon cannot be asked (absent, older, or slow).
 async fn ask_daemon_role() -> Option<Value> {
@@ -4404,19 +4407,22 @@ fn mcp_refusal(
     }
 }
 
-/// Re-reads the role every [`MCP_ROLE_RECHECK`] and hands the refusal to `set` (the hub
-/// crate's standby state in production). A process that started on standby has no hub
-/// database open, so once this machine serves it refuses until restarted instead of
-/// answering from its empty store. Never returns.
+/// Re-reads the role every [`MCP_ROLE_RECHECK`] (or [`MCP_ROLE_RECHECK_UNLEASED`] when no
+/// supervisor lease is configured) and hands changed refusals to `set` (the hub crate's
+/// standby state in production). A process that started on standby has no hub database open,
+/// so once this machine serves it refuses until restarted instead of answering from its empty
+/// store. Never returns.
 async fn follow_mcp_role<A, Fut, S>(started_on_standby: bool, lease_configured: bool, mut ask: A, set: S)
 where
     A: FnMut() -> Fut,
     Fut: std::future::Future<Output = Option<Value>>,
     S: Fn(Option<ferryx_hub::supervisor::request::RequestFailure>),
 {
-    let mut ticks = tokio::time::interval(MCP_ROLE_RECHECK);
+    let interval = if lease_configured { MCP_ROLE_RECHECK } else { MCP_ROLE_RECHECK_UNLEASED };
+    let mut ticks = tokio::time::interval(interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticks.tick().await;
+    let mut last_refusal: Option<Option<ferryx_hub::supervisor::request::RequestFailure>> = None;
     loop {
         ticks.tick().await;
         let answer = ask().await;
@@ -4427,7 +4433,10 @@ where
                 "ferryx-cli mcp started without the hub database; restart it to serve supervisor state",
             ));
         }
-        set(refusal);
+        if last_refusal.as_ref() != Some(&refusal) {
+            last_refusal = Some(refusal.clone());
+            set(refusal);
+        }
     }
 }
 
@@ -5030,6 +5039,7 @@ fn live_hub(running: bool, config: &HubConfig, lease: ferryx_hub::control::LiveL
 
 struct Generation {
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    mhc_supervisor: Option<ferryx_hub::meta::mhc_supervisor::MhcSupervisor>,
 }
 
 impl Generation {
@@ -5037,11 +5047,27 @@ impl Generation {
     /// reconciles only after the predecessor dispatcher stopped. On every platform: a setup
     /// restart, a lease stand-down and `hub stop` end the generation before the next starts.
     async fn end(self) {
+        if let Some(mhc) = &self.mhc_supervisor {
+            mhc.begin_stop();
+        }
         for task in &self.tasks {
             task.abort();
         }
         for task in self.tasks {
             let _ = task.await;
+        }
+        if let Some(mhc) = self.mhc_supervisor {
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                mhc.stop_engine(),
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    "mhc supervisor engine did not finish stopping within 2s during generation teardown"
+                );
+            }
         }
     }
 }
@@ -5625,6 +5651,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let pool = launch.hub.pool.clone();
         let (owner, fallback) = (lead_owner.clone(), lead_fallback.clone());
         let binary = ferryx_hub::meta::supervisor::mhc_bin();
+        let kibitzer_mhc = mhc_supervisor.clone();
         tasks.push(tokio::spawn(async move {
             let lead = ferryx_hub::lanes::lead::resolve(&pool, &owner, &fallback).await;
             if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_lead(&pool, &lead).await {
@@ -5632,7 +5659,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             }
             let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
             // With the mhc supervisor configured it is the only model; there is no fallback.
-            let model: std::sync::Arc<dyn ferryx_hub::lanes::kibitzer::ModelTurn> = match mhc_supervisor {
+            let model: std::sync::Arc<dyn ferryx_hub::lanes::kibitzer::ModelTurn> = match kibitzer_mhc {
                 Some(runtime) => std::sync::Arc::new(runtime.model()),
                 None => std::sync::Arc::new(ferryx_hub::meta::backend::RpcModel::new(binary)),
             };
@@ -5732,7 +5759,10 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     for task in &tasks {
         HUB_TASKS.track(task);
     }
-    Generation { tasks }
+    Generation {
+        tasks,
+        mhc_supervisor,
+    }
 }
 
 async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {
@@ -7223,6 +7253,57 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), vec![Some("SUPERVISOR_UNAVAILABLE".to_owned())]);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn follow_mcp_role_skips_unchanged_updates_and_slows_when_unleased() {
+        let serving = json!({"standby": false});
+        let standby = json!({"standby": true, "holderMachineId": "mach-b", "holderLabel": "Laptop B"});
+        let answers = Arc::new(std::sync::Mutex::new(
+            vec![
+                Some(serving.clone()),
+                Some(serving.clone()),
+                Some(serving.clone()),
+                Some(standby.clone()),
+                Some(standby),
+            ]
+            .into_iter(),
+        ));
+        let seen: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+        let record = Arc::clone(&seen);
+        let task = tokio::spawn(follow_mcp_role(
+            false,
+            true,
+            move || {
+                let next = answers.lock().unwrap().next().flatten();
+                async move { next }
+            },
+            move |refusal| {
+                record.lock().unwrap().push(refusal.map(|r| r.code));
+            },
+        ));
+        tokio::time::sleep(MCP_ROLE_RECHECK * 5 + std::time::Duration::from_millis(1)).await;
+        task.abort();
+        // Five ticks with only one state transition produce two `set` calls, not five.
+        assert_eq!(*seen.lock().unwrap(), vec![None, Some("SUPERVISOR_STANDBY".to_owned())]);
+
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let poll_counter = Arc::clone(&polls);
+        let unleased = tokio::spawn(follow_mcp_role(
+            false,
+            false,
+            move || {
+                poll_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let serving = serving.clone();
+                async move { Some(serving) }
+            },
+            |_| {},
+        ));
+        tokio::time::sleep(MCP_ROLE_RECHECK * 3).await;
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        tokio::time::sleep(MCP_ROLE_RECHECK_UNLEASED).await;
+        unleased.abort();
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn a_supervisor_goal_send_records_a_supervisor_proposal() {
         let pool = lane_pool().await;
@@ -7341,14 +7422,23 @@ mod tests {
             let _alive = alive;
             std::future::pending::<()>().await;
         });
-        (Generation { tasks: vec![task] }, ended)
+        (
+            Generation {
+                tasks: vec![task],
+                mhc_supervisor: None,
+            },
+            ended,
+        )
     }
 
     /// Stands in for `open_generation` (stored replies, supervisor pane, then the tasks):
     /// counts how often a start reached it.
     async fn counting_spawn(calls: &std::sync::atomic::AtomicUsize) -> Generation {
         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Generation { tasks: Vec::new() }
+        Generation {
+            tasks: Vec::new(),
+            mhc_supervisor: None,
+        }
     }
 
     #[tokio::test]
@@ -7627,7 +7717,12 @@ mod tests {
                 },
                 || {
                     restarts.fetch_add(1, Ordering::SeqCst);
-                    async { Some(Generation { tasks: Vec::new() }) }
+                    async {
+                        Some(Generation {
+                            tasks: Vec::new(),
+                            mhc_supervisor: None,
+                        })
+                    }
                 },
             )
             .await;
@@ -7650,7 +7745,12 @@ mod tests {
             &running,
             || async { Ok("c".repeat(64)) },
             || async { false },
-            || async { Some(Generation { tasks: Vec::new() }) },
+            || async {
+                Some(Generation {
+                    tasks: Vec::new(),
+                    mhc_supervisor: None,
+                })
+            },
         )
         .await;
         assert_eq!(result.err().map(|error| error.code), Some("SUPERVISOR_UNAVAILABLE".to_owned()));
@@ -7670,7 +7770,10 @@ mod tests {
             let promoted_tx = promoted_tx.clone();
             async move {
                 let _ = promoted_tx.send(());
-                Some(Generation { tasks: Vec::new() })
+                Some(Generation {
+                    tasks: Vec::new(),
+                    mhc_supervisor: None,
+                })
             }
         }));
         let limit = std::time::Duration::from_secs(10);
@@ -7780,7 +7883,10 @@ mod tests {
         async fn spawn(&self, launch: &HubLaunch) -> Generation {
             self.pools.lock().unwrap().push(launch.hub.pool.clone());
             self.spawned.send_modify(|spawned| *spawned += 1);
-            Generation { tasks: Vec::new() }
+            Generation {
+                tasks: Vec::new(),
+                mhc_supervisor: None,
+            }
         }
     }
 
@@ -8089,7 +8195,10 @@ mod tests {
         async fn launch_pane(&self, _launch: &HubLaunch, _cwd: &str, _command: &[String]) {}
 
         async fn spawn(&self, _launch: &HubLaunch) -> Generation {
-            Generation { tasks: Vec::new() }
+            Generation {
+                tasks: Vec::new(),
+                mhc_supervisor: None,
+            }
         }
     }
 

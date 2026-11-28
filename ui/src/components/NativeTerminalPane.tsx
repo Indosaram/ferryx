@@ -2449,6 +2449,10 @@ export function NativeTerminalPane({
   }, [handleTerminalClick, refreshScrollbar, scheduleScrollbarHide, scrollToTrackPosition, sendMouse, targetSessionId, visible]);
 
   useEffect(() => {
+    if (!visible) {
+      setIsCmdHeld(false);
+      return;
+    }
     const handleKeyChange = (event: globalThis.KeyboardEvent) => {
       const isMac = isMacShortcutPlatform();
       const held = isMac ? event.metaKey : event.ctrlKey;
@@ -2467,7 +2471,7 @@ export function NativeTerminalPane({
       window.removeEventListener("keyup", handleKeyChange, true);
       window.removeEventListener("blur", handleBlur);
     };
-  }, []);
+  }, [visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId) return;

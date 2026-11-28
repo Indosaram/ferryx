@@ -288,6 +288,22 @@ fn saved_loopback_http_origin(origin: &str) -> bool {
         && normalize_origin_policy(origin, false).is_err()
 }
 
+/// Freshest record per origin wins; a host that moved keeps one entry per origin.
+fn merge_origins(origins: Vec<PublishedOrigin>) -> Vec<PublishedOrigin> {
+    let mut merged: Vec<PublishedOrigin> = Vec::with_capacity(origins.len());
+    for origin in origins {
+        if origin.origin.trim().is_empty() {
+            continue;
+        }
+        match merged.iter_mut().find(|kept| kept.origin == origin.origin) {
+            Some(kept) if kept.observed_at <= origin.observed_at => *kept = origin,
+            Some(_) => {}
+            None => merged.push(origin),
+        }
+    }
+    merged
+}
+
 fn insecure_entries(disk: &Disk, loopback_http: bool) -> BTreeMap<String, String> {
     let mut marked = BTreeMap::new();
     if loopback_http {
@@ -714,26 +730,35 @@ impl Inventory {
         origins: Vec<PublishedOrigin>,
     ) -> Result<()> {
         self.validate_generation(id, generation)?;
+        let merged = merge_origins(origins);
+        // Short-circuit when the merged (kind, origin) list is unchanged and no observation
+        // timestamp needs a freshness refresh (origins expire at 10m; refreshing at >=5m keeps
+        // them live while avoiding disk rewrites on every probe).
+        const ORIGIN_REFRESH_WINDOW_MS: u64 = 5 * 60 * 1000;
+        let current = &self
+            .disk
+            .hosts
+            .get(id)
+            .ok_or(InventoryError::StaleGeneration)?
+            .published_origins;
+        let unchanged = current.len() == merged.len()
+            && current.iter().zip(merged.iter()).all(|(cur, next)| {
+                cur.kind == next.kind
+                    && cur.origin == next.origin
+                    && next.observed_at.saturating_sub(cur.observed_at) < ORIGIN_REFRESH_WINDOW_MS
+            });
+        if unchanged {
+            return Ok(());
+        }
         let mut candidate = self.disk.clone();
-        let row = candidate
+        candidate
             .hosts
             .get_mut(id)
-            .ok_or(InventoryError::StaleGeneration)?;
-        // Freshest record per origin wins; a host that moved keeps one entry per origin.
-        let mut merged: Vec<PublishedOrigin> = Vec::with_capacity(origins.len());
-        for origin in origins {
-            if origin.origin.trim().is_empty() {
-                continue;
-            }
-            match merged.iter_mut().find(|kept| kept.origin == origin.origin) {
-                Some(kept) if kept.observed_at <= origin.observed_at => *kept = origin,
-                Some(_) => {}
-                None => merged.push(origin),
-            }
-        }
-        row.published_origins = merged;
-        let id = id.to_owned();
-        self.commit(candidate, &id)
+            .ok_or(InventoryError::StaleGeneration)?
+            .published_origins = merged;
+        // Persist without invalidating: origins carry no authority, so a live lease must
+        // survive a host moving between networks.
+        self.write_disk(candidate)
     }
     /// Auth failure must name a captured generation; an old 401 cannot revoke a re-pair.
     pub fn mark_auth_unavailable(
@@ -795,5 +820,78 @@ impl Inventory {
             host_id: id.clone(),
             generation: self.disk.hosts[&id].generation,
         })
+    }
+}
+
+#[cfg(test)]
+mod publish_origins_perf_tests {
+    use super::*;
+
+    #[test]
+    fn republishing_identical_origins_skips_disk_and_preserves_live_leases() {
+        let root = tempfile::Builder::new()
+            .prefix("perf-inventory-")
+            .tempdir()
+            .unwrap();
+        let mut store = Inventory::open(root.path()).unwrap();
+        let pairing = Pairing {
+            relay_origin: "https://relay.example".into(),
+            machine_id: "machine-idempotent".into(),
+            display_label: "Machine idempotent".into(),
+            grant_scope: GrantScope::Machine,
+            device_token: "fixture-token-idempotent".into(),
+        };
+        let saved = store.pair(&pairing).unwrap();
+        store
+            .set_online(&saved.host_id, saved.generation, true)
+            .unwrap();
+        let origins = vec![
+            PublishedOrigin {
+                kind: PublishedOriginKind::Tailscale,
+                origin: "https://100.64.0.9:43821".into(),
+                observed_at: 1_000,
+            },
+            PublishedOrigin {
+                kind: PublishedOriginKind::Lan,
+                origin: "https://192.168.1.9:43821".into(),
+                observed_at: 1_000,
+            },
+        ];
+        store
+            .publish_origins(&saved.host_id, saved.generation, origins.clone())
+            .unwrap();
+        let lease = store.capture(&saved.host_id, saved.generation).unwrap();
+        let cancelled = lease.cancellation();
+        let file = root.path().join(FILE_NAME);
+        let before = std::fs::read(&file).unwrap();
+        // Blocking the temp staging path guarantees any disk write attempt would fail and fence.
+        let temp = file.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::create_dir(&temp).unwrap();
+        // Same (kind, origin) with same or newer observed_at must short-circuit cleanly.
+        store
+            .publish_origins(&saved.host_id, saved.generation, origins)
+            .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        assert!(!*cancelled.borrow(), "identical publication must not cancel live lease");
+        assert_eq!(lease.token().unwrap(), pairing.device_token);
+        assert!(store.list()[0].online, "identical publication must keep online state");
+        std::fs::remove_dir(&temp).unwrap();
+
+        // A real origin change persists via write_disk without cancelling live leases.
+        let updated = vec![PublishedOrigin {
+            kind: PublishedOriginKind::Lan,
+            origin: "https://192.168.1.10:43821".into(),
+            observed_at: 2_000,
+        }];
+        store
+            .publish_origins(&saved.host_id, saved.generation, updated.clone())
+            .unwrap();
+        assert!(!*cancelled.borrow(), "changed origins must not cancel live lease");
+        assert!(lease.token().is_ok());
+        assert!(store.list()[0].online);
+        drop(store);
+        let reopened = Inventory::open(root.path()).unwrap();
+        assert_eq!(reopened.list()[0].published_origins, updated);
+        root.close().unwrap();
     }
 }

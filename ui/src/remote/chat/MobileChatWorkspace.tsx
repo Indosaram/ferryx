@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ChevronLeft, Terminal as TerminalIcon } from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
@@ -261,17 +261,23 @@ export function applyToolCallVisibility<T>(
   visibility: ToolCallVisibility,
   toolCalls: readonly T[] | undefined,
 ): T[] | undefined {
-  if (!toolCalls || toolCalls.length === 0 || visibility === "all") return toolCalls ? [...toolCalls] : undefined;
+  if (!toolCalls || toolCalls.length === 0 || visibility === "all") {
+    return toolCalls as T[] | undefined;
+  }
   // Approvals, questions, and errors always show (activity-log.md). A failed call is the one
   // row every mode keeps, so it survives hide-all and zen instead of vanishing with the rest.
   const isFailed = (call: T) =>
     typeof call === "object" && call !== null && "status" in call && (call as { status?: unknown }).status === "error";
   if (visibility === "hide-all" || visibility === "zen") {
     const failed = toolCalls.filter(isFailed);
-    return failed.length > 0 ? failed : undefined;
+    if (failed.length === 0) return undefined;
+    return failed.length === toolCalls.length ? (toolCalls as T[]) : failed;
   }
   // The status field exists only on the tool-call shape, never on thinking blocks.
-  return toolCalls.filter((call) => isFailed(call) || !((typeof call === "object" && call !== null && "status" in call) && (call as { status?: unknown }).status === "success"));
+  const kept = toolCalls.filter(
+    (call) => isFailed(call) || !((typeof call === "object" && call !== null && "status" in call) && (call as { status?: unknown }).status === "success"),
+  );
+  return kept.length === toolCalls.length ? (toolCalls as T[]) : kept;
 }
 
 /**
@@ -619,6 +625,14 @@ const MobileChatWorkspaceBody: React.FC<
     }
   }, []);
 
+  const minimapRafRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (minimapRafRef.current !== null) {
+      window.cancelAnimationFrame(minimapRafRef.current);
+      minimapRafRef.current = null;
+    }
+  }, []);
+
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -626,14 +640,19 @@ const MobileChatWorkspaceBody: React.FC<
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const atBottom = distanceFromBottom < FOLLOW_THRESHOLD_PX;
     viewportRef.current = snapshotViewport(el.scrollTop, el.scrollHeight, el.clientHeight, messages);
-    if (minimapVisible()) {
-      const topById = new Map<string, number>();
-      const containerRect = el.getBoundingClientRect();
-      for (const node of Array.from(el.querySelectorAll<HTMLElement>("[data-message-id]"))) {
-        const id = node.dataset.messageId;
-        if (id) topById.set(id, node.getBoundingClientRect().top - containerRect.top + el.scrollTop);
-      }
-      setMinimapViewport({ scrollTop: el.scrollTop, viewportHeight: el.clientHeight, topById });
+    if (minimapVisible() && minimapRafRef.current === null) {
+      minimapRafRef.current = window.requestAnimationFrame(() => {
+        minimapRafRef.current = null;
+        const container = scrollContainerRef.current;
+        if (!container || !minimapVisible()) return;
+        const topById = new Map<string, number>();
+        const containerRect = container.getBoundingClientRect();
+        for (const node of Array.from(container.querySelectorAll<HTMLElement>("[data-message-id]"))) {
+          const id = node.dataset.messageId;
+          if (id) topById.set(id, node.getBoundingClientRect().top - containerRect.top + container.scrollTop);
+        }
+        setMinimapViewport({ scrollTop: container.scrollTop, viewportHeight: container.clientHeight, topById });
+      });
     }
     setIsAtBottom(atBottom);
     setShowScrollPill(!atBottom);
@@ -690,7 +709,10 @@ const MobileChatWorkspaceBody: React.FC<
   const hasMessages = messages.length > 0;
   const starterPrompts = chatStarterPrompts(agentType, worktreeLabel);
   // The page discloses abandoned branches once; a turn never repeats them.
-  const abandoned = pageAbandoned ?? aggregateReferenceAbandoned(messages);
+  const abandoned = useMemo(
+    () => pageAbandoned ?? aggregateReferenceAbandoned(messages),
+    [pageAbandoned, messages],
+  );
 
   // PageUp/PageDown page the stream itself (the composer pages its own text); IME-buffered
   // keydowns are refused, matching the reference page-scroll controller.
@@ -766,7 +788,8 @@ const MobileChatWorkspaceBody: React.FC<
   const heroProject = worktreeLabel?.trim() || workspaceLabel?.trim() || null;
 
   // Zen keeps the reply that closes a turn; a legacy turn carries no phase to say which it is.
-  const finalIds = finalReplyIds(messages);
+  const finalIds = useMemo(() => finalReplyIds(messages), [messages]);
+  const minimapItems = useMemo(() => deriveTimelineMinimapItems(messages), [messages]);
 
   // The live turn is the last assistant row: while the pane runs, that row carries the pane's
   // activity so the announcer can read it, and the moment the turn ends it goes idle, which is
@@ -994,7 +1017,7 @@ const MobileChatWorkspaceBody: React.FC<
       <TimelineMinimap
         messages={messages}
         currentIndex={resolveTimelineMinimapCurrentIndex({
-          items: deriveTimelineMinimapItems(messages),
+          items: minimapItems,
           topById: minimapViewport.topById,
           scrollTop: minimapViewport.scrollTop,
           viewportHeight: minimapViewport.viewportHeight,

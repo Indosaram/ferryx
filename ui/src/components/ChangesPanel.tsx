@@ -1,5 +1,5 @@
 import { Columns2, GitCommitHorizontal, RefreshCw, Rows2, Upload } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "../lib/cn";
 import { highlightLines } from "../lib/previewHighlight";
@@ -178,7 +178,6 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
   const [patch, setPatch] = useState<string | null>(null);
   const [diffError, setDiffError] = useState<StructuredIpcError | null>(null);
   const [mode, setMode] = useState<DiffViewMode>("unified");
-  const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<null | "stage" | "commit" | "push">(null);
   const [actionError, setActionError] = useState<StructuredIpcError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -247,10 +246,11 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
     return () => window.removeEventListener("focus", onFocus);
   }, [active, refresh]);
 
-  // Reload the diff whenever the selection or the file list changes (the file may have changed).
+  // Reload the diff whenever the selection or the file list changes while active.
   useEffect(() => {
+    if (!active) return;
     void loadDiff(selection);
-  }, [groups, loadDiff, selection]);
+  }, [active, groups, loadDiff, selection]);
 
   const toggleStage = async (group: ChangeGroup, path: string) => {
     if (inFlight.current) return;
@@ -270,7 +270,7 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
     }
   };
 
-  const commit = async () => {
+  const commit = useCallback(async (message: string, onSuccess: () => void) => {
     const trimmed = message.trim();
     if (!trimmed || inFlight.current) return;
     inFlight.current = true;
@@ -279,7 +279,7 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
     setNotice(null);
     try {
       const sha = await commitWorktree({ ...request, message });
-      setMessage("");
+      onSuccess();
       setNotice(`Committed ${sha.slice(0, 8)}`);
     } catch (error) {
       setActionError(toIpcError(error));
@@ -288,9 +288,9 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
       setBusy(null);
       await refresh();
     }
-  };
+  }, [refresh, request]);
 
-  const push = async () => {
+  const push = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy("push");
@@ -306,11 +306,10 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
       setBusy(null);
       await refresh();
     }
-  };
+  }, [refresh, request]);
 
-  const rows = useMemo(() => (patch ? parseUnifiedDiff(patch) : []), [patch]);
-  const highlighted = useMemo(() => (patch ? highlightLines(patch, "diff") : null), [patch]);
   const empty = loaded && groups.workingTree.length === 0 && groups.staged.length === 0;
+  const selectionUntracked = Boolean(selection && selection.group === "workingTree" && isUntracked(groups, selection.path));
 
   return (
     <div data-testid="changes-panel" data-worktree-path={worktreePath} className="flex h-full min-h-0 w-full flex-col bg-background text-foreground">
@@ -377,115 +376,180 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
           </div>
         </div>
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-3">
-            <span className="min-w-0 flex-1 truncate font-mono text-xs">
-              {selection ? selection.path : ""}
-              {selection ? (
-                <span className="ml-2 font-sans text-[10px] text-muted-foreground">
-                  {selection.group === "staged" ? "Staged" : "Working tree"}
-                </span>
-              ) : null}
-            </span>
-            <SegmentedControl<DiffViewMode>
-              label="Diff layout"
-              value={mode}
-              onChange={setMode}
-              className="w-40"
-              options={[
-                { value: "unified", label: <span className="inline-flex items-center gap-1"><Rows2 className="size-3" />Unified</span>, ariaLabel: "Unified" },
-                { value: "split", label: <span className="inline-flex items-center gap-1"><Columns2 className="size-3" />Split</span>, ariaLabel: "Split" },
-              ]}
-            />
-          </div>
-          <div data-testid="changes-diff" data-mode={mode} className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-5 scrollbar-sleek">
-            {diffError ? (
-              <div role="alert" data-error-code={diffError.code} className="px-3 py-2 text-destructive">{errorText(diffError)}</div>
-            ) : !selection ? null : rows.length === 0 && patch !== null ? (
-              <div role="status" className="px-3 py-4 font-sans text-muted-foreground">
-                {selection.group === "workingTree" && isUntracked(groups, selection.path)
-                  ? "New untracked file with no text preview (empty, binary or too large)."
-                  : "No textual diff for this file."}
-              </div>
-            ) : mode === "unified" ? (
-              <div className="min-w-max py-1">
-                {rows.map((row) => (
-                  <div key={row.index} data-testid="diff-row" data-kind={row.kind} className={cn("flex", ROW_TONE[row.kind], GUTTER_TONE[row.kind])}>
-                    <span aria-hidden className="w-10 shrink-0 select-none pr-1 text-right text-muted-foreground/70 tabular-nums">{row.oldLine ?? ""}</span>
-                    <span aria-hidden className="w-10 shrink-0 select-none pr-2 text-right text-muted-foreground/70 tabular-nums">{row.newLine ?? ""}</span>
-                    <DiffText row={row} html={highlighted?.[row.index]} />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="py-1">
-                {splitRows(rows).map((pair, i) =>
-                  pair.full ? (
-                    <div key={i} data-testid="diff-row" data-kind={pair.full.kind} className={cn("flex", ROW_TONE[pair.full.kind])}>
-                      <span className="w-10 shrink-0" />
-                      <DiffText row={pair.full} html={highlighted?.[pair.full.index]} />
-                    </div>
-                  ) : (
-                    <div key={i} className="grid grid-cols-2">
-                      <SplitCell row={pair.left} line={pair.left?.oldLine ?? null} html={pair.left ? highlighted?.[pair.left.index] : undefined} />
-                      <SplitCell row={pair.right} line={pair.right?.newLine ?? null} html={pair.right ? highlighted?.[pair.right.index] : undefined} />
-                    </div>
-                  ),
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+        <ChangesDiffView
+          selection={selection}
+          mode={mode}
+          onModeChange={setMode}
+          patch={patch}
+          diffError={diffError}
+          selectionUntracked={selectionUntracked}
+        />
       </div>
 
-      <div className="shrink-0 border-t border-border p-2">
-        {actionError ? (
-          <div role="alert" data-error-code={actionError.code} className="mb-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
-            {errorText(actionError)}
+      <CommitComposer
+        disabled={busy !== null}
+        actionError={actionError}
+        notice={notice}
+        onCommit={commit}
+        onPush={push}
+      />
+    </div>
+  );
+}
+
+type ChangesDiffViewProps = {
+  selection: Selection | null;
+  mode: DiffViewMode;
+  onModeChange: (mode: DiffViewMode) => void;
+  patch: string | null;
+  diffError: StructuredIpcError | null;
+  selectionUntracked: boolean;
+};
+
+const ChangesDiffView = memo(function ChangesDiffView({
+  selection,
+  mode,
+  onModeChange,
+  patch,
+  diffError,
+  selectionUntracked,
+}: ChangesDiffViewProps) {
+  const rows = useMemo(() => (patch ? parseUnifiedDiff(patch) : []), [patch]);
+  const split = useMemo(() => (mode === "split" ? splitRows(rows) : []), [mode, rows]);
+  const highlighted = useMemo(() => (patch ? highlightLines(patch, "diff") : null), [patch]);
+
+  return (
+    <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-3">
+        <span className="min-w-0 flex-1 truncate font-mono text-xs">
+          {selection ? selection.path : ""}
+          {selection ? (
+            <span className="ml-2 font-sans text-[10px] text-muted-foreground">
+              {selection.group === "staged" ? "Staged" : "Working tree"}
+            </span>
+          ) : null}
+        </span>
+        <SegmentedControl<DiffViewMode>
+          label="Diff layout"
+          value={mode}
+          onChange={onModeChange}
+          className="w-40"
+          options={[
+            { value: "unified", label: <span className="inline-flex items-center gap-1"><Rows2 className="size-3" />Unified</span>, ariaLabel: "Unified" },
+            { value: "split", label: <span className="inline-flex items-center gap-1"><Columns2 className="size-3" />Split</span>, ariaLabel: "Split" },
+          ]}
+        />
+      </div>
+      <div data-testid="changes-diff" data-mode={mode} className="min-h-0 flex-1 overflow-auto font-mono text-xs leading-5 scrollbar-sleek">
+        {diffError ? (
+          <div role="alert" data-error-code={diffError.code} className="px-3 py-2 text-destructive">{errorText(diffError)}</div>
+        ) : !selection ? null : rows.length === 0 && patch !== null ? (
+          <div role="status" className="px-3 py-4 font-sans text-muted-foreground">
+            {selectionUntracked
+              ? "New untracked file with no text preview (empty, binary or too large)."
+              : "No textual diff for this file."}
           </div>
-        ) : notice ? (
-          <div role="status" className="mb-2 px-1 text-xs text-muted-foreground">{notice}</div>
-        ) : null}
-        <div className="flex items-end gap-2">
-          <textarea
-            value={message}
-            onChange={(event) => setMessage(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault();
-                void commit();
-              }
-            }}
-            aria-label="Commit message"
-            placeholder="Commit message"
-            rows={2}
-            className="min-h-[2.5rem] min-w-0 flex-1 resize-y rounded-md border border-input bg-transparent px-2 py-1 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
-          />
-          <div className="flex shrink-0 flex-col gap-1">
-            <button
-              type="button"
-              onClick={() => void commit()}
-              disabled={busy !== null || message.trim().length === 0}
-              className="inline-flex h-7 items-center gap-1 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
-            >
-              <GitCommitHorizontal className="size-3.5" />
-              Commit
-            </button>
-            <button
-              type="button"
-              onClick={() => void push()}
-              disabled={busy !== null}
-              className="inline-flex h-7 items-center gap-1 rounded-md border border-input px-3 text-xs hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
-            >
-              <Upload className="size-3.5" />
-              Push
-            </button>
+        ) : mode === "unified" ? (
+          <div className="min-w-max py-1">
+            {rows.map((row) => (
+              <div key={row.index} data-testid="diff-row" data-kind={row.kind} className={cn("flex", ROW_TONE[row.kind], GUTTER_TONE[row.kind])}>
+                <span aria-hidden className="w-10 shrink-0 select-none pr-1 text-right text-muted-foreground/70 tabular-nums">{row.oldLine ?? ""}</span>
+                <span aria-hidden className="w-10 shrink-0 select-none pr-2 text-right text-muted-foreground/70 tabular-nums">{row.newLine ?? ""}</span>
+                <DiffText row={row} html={highlighted?.[row.index]} />
+              </div>
+            ))}
           </div>
+        ) : (
+          <div className="py-1">
+            {split.map((pair, i) =>
+              pair.full ? (
+                <div key={i} data-testid="diff-row" data-kind={pair.full.kind} className={cn("flex", ROW_TONE[pair.full.kind])}>
+                  <span className="w-10 shrink-0" />
+                  <DiffText row={pair.full} html={highlighted?.[pair.full.index]} />
+                </div>
+              ) : (
+                <div key={i} className="grid grid-cols-2">
+                  <SplitCell row={pair.left} line={pair.left?.oldLine ?? null} html={pair.left ? highlighted?.[pair.left.index] : undefined} />
+                  <SplitCell row={pair.right} line={pair.right?.newLine ?? null} html={pair.right ? highlighted?.[pair.right.index] : undefined} />
+                </div>
+              ),
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+type CommitComposerProps = {
+  disabled: boolean;
+  actionError: StructuredIpcError | null;
+  notice: string | null;
+  onCommit: (message: string, onSuccess: () => void) => Promise<void>;
+  onPush: () => Promise<void>;
+};
+
+const CommitComposer = memo(function CommitComposer({
+  disabled,
+  actionError,
+  notice,
+  onCommit,
+  onPush,
+}: CommitComposerProps) {
+  const [message, setMessage] = useState("");
+  const submitCommit = () => {
+    if (message.trim().length === 0) return;
+    void onCommit(message, () => setMessage(""));
+  };
+
+  return (
+    <div className="shrink-0 border-t border-border p-2">
+      {actionError ? (
+        <div role="alert" data-error-code={actionError.code} className="mb-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
+          {errorText(actionError)}
+        </div>
+      ) : notice ? (
+        <div role="status" className="mb-2 px-1 text-xs text-muted-foreground">{notice}</div>
+      ) : null}
+      <div className="flex items-end gap-2">
+        <textarea
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              submitCommit();
+            }
+          }}
+          aria-label="Commit message"
+          placeholder="Commit message"
+          rows={2}
+          className="min-h-[2.5rem] min-w-0 flex-1 resize-y rounded-md border border-input bg-transparent px-2 py-1 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+        />
+        <div className="flex shrink-0 flex-col gap-1">
+          <button
+            type="button"
+            onClick={submitCommit}
+            disabled={disabled || message.trim().length === 0}
+            className="inline-flex h-7 items-center gap-1 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
+          >
+            <GitCommitHorizontal className="size-3.5" />
+            Commit
+          </button>
+          <button
+            type="button"
+            onClick={() => void onPush()}
+            disabled={disabled}
+            className="inline-flex h-7 items-center gap-1 rounded-md border border-input px-3 text-xs hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+          >
+            <Upload className="size-3.5" />
+            Push
+          </button>
         </div>
       </div>
     </div>
   );
-}
+});
 
 function isUntracked(groups: Record<ChangeGroup, ChangeEntry[]>, path: string): boolean {
   return groups.workingTree.some((entry) => entry.path === path && entry.status === "?");

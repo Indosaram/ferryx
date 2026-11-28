@@ -120,6 +120,32 @@ export type UseLayoutSyncOptions = {
   debounceMs?: number;
 };
 
+function backendIdsMatch(
+  sessions: WorkspaceState["sessions"],
+  prev: ReadonlyMap<string, string | null>,
+): boolean {
+  let count = 0;
+  for (const id in sessions) {
+    if (!Object.prototype.hasOwnProperty.call(sessions, id)) continue;
+    count += 1;
+    if (!prev.has(id) || prev.get(id) !== (sessions[id]?.backendSessionId ?? null)) {
+      return false;
+    }
+  }
+  return count === prev.size;
+}
+
+function recordBackendIds(
+  sessions: WorkspaceState["sessions"],
+  target: Map<string, string | null>,
+): void {
+  target.clear();
+  for (const id in sessions) {
+    if (!Object.prototype.hasOwnProperty.call(sessions, id)) continue;
+    target.set(id, sessions[id]?.backendSessionId ?? null);
+  }
+}
+
 /**
  * Keeps one workspace's layout document in sync: the host publishes its layout after a local
  * change and long-polls for clients; a paired client long-polls and publishes the same way.
@@ -142,6 +168,8 @@ export function useLayoutSync({
   const errorRef = useRef(onError);
   errorRef.current = onError;
   const snapshotRef = useRef<string>("");
+  const prevLayoutRef = useRef<WorkspaceState["layout"] | null>(null);
+  const prevBackendIdsRef = useRef<Map<string, string | null>>(new Map());
   const loopRef = useRef<ReturnType<typeof createLayoutSyncLoop> | null>(null);
 
   const paired = project.target?.kind === "pairedDaemon" ? project : null;
@@ -252,6 +280,8 @@ export function useLayoutSync({
       // replace every tab object on each poll.
       if (unchanged && minted.size === 0) return;
       const next: WorkspaceState = { ...current, layout, sessions, worktreeLayouts };
+      prevLayoutRef.current = layout;
+      recordBackendIds(sessions, prevBackendIdsRef.current);
       dispatchRef.current({ type: "RESTORE_WORKSPACE", state: next });
       if (minted.size > 0) enrichDetached(minted, next);
     };
@@ -268,10 +298,14 @@ export function useLayoutSync({
     });
     loopRef.current = loop;
     snapshotRef.current = JSON.stringify(readShared(stateRef.current.layout, stateRef.current.sessions));
+    prevLayoutRef.current = stateRef.current.layout;
+    recordBackendIds(stateRef.current.sessions, prevBackendIdsRef.current);
     void loop.start();
     return () => {
       cancelled = true;
       loopRef.current = null;
+      prevLayoutRef.current = null;
+      prevBackendIdsRef.current.clear();
       loop.stop();
     };
   }, [adapter, debounceMs, enabled, isPaired, project.repoRoot, remoteWorkspaceId, wireKey, workspaceId, localWorktreePath]);
@@ -279,6 +313,14 @@ export function useLayoutSync({
   useEffect(() => {
     const loop = loopRef.current;
     if (!loop) return;
+    if (
+      state.layout === prevLayoutRef.current &&
+      backendIdsMatch(state.sessions, prevBackendIdsRef.current)
+    ) {
+      return;
+    }
+    prevLayoutRef.current = state.layout;
+    recordBackendIds(state.sessions, prevBackendIdsRef.current);
     const shared: SharedTab[] = toSharedLayout(state.layout, state.sessions, undefined, project.repoRoot);
     const key = JSON.stringify(shared);
     if (key === snapshotRef.current) return;

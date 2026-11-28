@@ -502,6 +502,7 @@ pub async fn post_chat(
             CHAT_UNAVAILABLE,
         ));
     }
+    notify_messages_changed();
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"queued": true, "session_id": session_id})),
@@ -533,6 +534,63 @@ pub async fn session_ws(
     ws.on_upgrade(move |socket| handle_session_socket(socket, state.pool, id))
 }
 
+/// Fallback SQLite poll interval for an idle dashboard session WebSocket.
+const SESSION_WS_IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+/// Responsive poll interval while a turn is active or messages just arrived.
+const SESSION_WS_ACTIVE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Shared wakeup for dashboard session WebSockets when messages are added or queued.
+pub fn messages_changed() -> &'static tokio::sync::Notify {
+    static NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Wakes open dashboard session WebSockets so newly stored messages stream without
+/// waiting for the idle fallback poll.
+pub fn notify_messages_changed() {
+    messages_changed().notify_waiters();
+}
+
+fn session_ws_poll_interval(session_active: bool, saw_messages: bool) -> std::time::Duration {
+    if session_active || saw_messages {
+        SESSION_WS_ACTIVE_POLL
+    } else {
+        SESSION_WS_IDLE_POLL
+    }
+}
+
+async fn flush_session_messages(
+    socket: &mut WebSocket,
+    pool: &SqlitePool,
+    id: &str,
+    last: &mut i64,
+) -> Result<bool, ()> {
+    let rows: Vec<(i64, String, String, String, String)> = sqlx::query_as(
+        "SELECT rowid, id, role, content, created_at FROM messages WHERE session_key = ? AND rowid > ? ORDER BY rowid LIMIT 100",
+    )
+    .bind(id)
+    .bind(*last)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let saw_messages = !rows.is_empty();
+    for (rowid, message_id, role, content, created) in rows {
+        *last = rowid;
+        let event = json!({"type": "event", "event": {
+            "type": "message", "session_id": id, "id": message_id,
+            "role": role, "content": content, "created_at": created,
+        }});
+        if socket
+            .send(Message::Text(event.to_string().into()))
+            .await
+            .is_err()
+        {
+            return Err(());
+        }
+    }
+    Ok(saw_messages)
+}
+
 /// Sends `ready`, then each message stored for the session after the socket opened as an
 /// `event`, and answers `ping`. `message`/`chat` run an omo turn of the session (as omo's
 /// multiplexer route did); `stop` interrupts the session's live omo turn.
@@ -552,32 +610,30 @@ async fn handle_session_socket(mut socket: WebSocket, pool: SqlitePool, id: Stri
             .fetch_one(&pool)
             .await
             .unwrap_or(0);
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut next_poll = tokio::time::Instant::now()
+        + session_ws_poll_interval(crate::chat::turns::is_active(&id), false);
     loop {
+        let notify = messages_changed().notified();
+        tokio::pin!(notify);
+        let _ = notify.as_mut().enable();
         tokio::select! {
-            _ = tick.tick() => {
-                let rows: Vec<(i64, String, String, String, String)> = sqlx::query_as(
-                    "SELECT rowid, id, role, content, created_at FROM messages WHERE session_key = ? AND rowid > ? ORDER BY rowid LIMIT 100",
-                )
-                .bind(&id)
-                .bind(last)
-                .fetch_all(&pool)
-                .await
-                .unwrap_or_default();
-                for (rowid, message_id, role, content, created) in rows {
-                    last = rowid;
-                    let event = json!({"type": "event", "event": {
-                        "type": "message", "session_id": id, "id": message_id,
-                        "role": role, "content": content, "created_at": created,
-                    }});
-                    if socket.send(Message::Text(event.to_string().into())).await.is_err() {
-                        return;
-                    }
-                }
+            _ = notify.as_mut() => {
+                let Ok(saw_messages) = flush_session_messages(&mut socket, &pool, &id, &mut last).await else {
+                    return;
+                };
+                next_poll = tokio::time::Instant::now()
+                    + session_ws_poll_interval(crate::chat::turns::is_active(&id), saw_messages);
+            }
+            _ = tokio::time::sleep_until(next_poll) => {
+                let Ok(saw_messages) = flush_session_messages(&mut socket, &pool, &id, &mut last).await else {
+                    return;
+                };
+                next_poll = tokio::time::Instant::now()
+                    + session_ws_poll_interval(crate::chat::turns::is_active(&id), saw_messages);
             }
             incoming = socket.recv() => {
                 let Some(Ok(message)) = incoming else { break };
+                let mut submitted = false;
                 let reply = match message {
                     Message::Text(text) => {
                         let parsed: Value = serde_json::from_str(text.as_str())
@@ -593,6 +649,8 @@ async fn handle_session_socket(mut socket: WebSocket, pool: SqlitePool, id: Stri
                                     match resolve_session_key(&pool, &id).await {
                                         Ok(key) => {
                                             if submit_chat(&pool, key, content) {
+                                                submitted = true;
+                                                notify_messages_changed();
                                                 json!({"type": "accepted", "session_id": id})
                                             } else {
                                                 json!({"type": "error", "message": CHAT_UNAVAILABLE})
@@ -616,6 +674,9 @@ async fn handle_session_socket(mut socket: WebSocket, pool: SqlitePool, id: Stri
                 };
                 if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
                     break;
+                }
+                if submitted {
+                    next_poll = tokio::time::Instant::now() + SESSION_WS_ACTIVE_POLL;
                 }
             }
         }
@@ -1935,5 +1996,20 @@ mod tests {
             web_root_from(None, None, home),
             std::path::PathBuf::from("/Users/me/.ferryx/hub/web")
         );
+    }
+
+    #[tokio::test]
+    async fn session_ws_poll_widens_when_idle_and_wakes_on_message_notify() {
+        assert_eq!(session_ws_poll_interval(false, false), SESSION_WS_IDLE_POLL);
+        assert_eq!(session_ws_poll_interval(true, false), SESSION_WS_ACTIVE_POLL);
+        assert_eq!(session_ws_poll_interval(false, true), SESSION_WS_ACTIVE_POLL);
+
+        let notified = messages_changed().notified();
+        tokio::pin!(notified);
+        let _ = notified.as_mut().enable();
+        notify_messages_changed();
+        tokio::time::timeout(std::time::Duration::from_secs(1), notified)
+            .await
+            .expect("notify_messages_changed wakes registered session websocket waiter");
     }
 }

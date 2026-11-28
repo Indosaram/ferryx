@@ -153,6 +153,7 @@ pub struct BrowserRemoteService {
     snapshot_source: Arc<parking_lot::RwLock<Arc<dyn BrowserSnapshotSource>>>,
     native_capture_semaphore: Arc<tokio::sync::Semaphore>,
     quarantined_permits: QuarantinedPermits,
+    visibility_notify: Arc<tokio::sync::Notify>,
 }
 
 pub static ACTIVE_REMOTE_SERVICE: parking_lot::RwLock<Option<Arc<BrowserRemoteService>>> =
@@ -192,6 +193,7 @@ impl BrowserRemoteService {
             ))),
             native_capture_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             quarantined_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            visibility_notify: Arc::new(tokio::sync::Notify::new()),
         };
         *ACTIVE_REMOTE_SERVICE.write() = Some(Arc::new(svc.clone()));
         svc
@@ -218,6 +220,7 @@ impl BrowserRemoteService {
             snapshot_source: Arc::new(parking_lot::RwLock::new(snapshot_source)),
             native_capture_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             quarantined_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            visibility_notify: Arc::new(tokio::sync::Notify::new()),
         };
         *ACTIVE_REMOTE_SERVICE.write() = Some(Arc::new(svc.clone()));
         svc
@@ -293,12 +296,21 @@ impl BrowserRemoteService {
         self.snapshot_source.read().clone()
     }
 
+    /// Wakes parked capture producers immediately when a browser becomes visible again.
+    pub fn notify_visibility_changed(&self) {
+        self.visibility_notify.notify_waiters();
+    }
+
     pub fn set_viewer_paused(&self, browser_id: &str, subscription_id: &str, paused: bool) {
         let mut subs = self.subscribers_per_browser.lock();
         if let Some(browser_subs) = subs.get_mut(browser_id) {
             if let Some(viewer) = browser_subs.get_mut(subscription_id) {
                 viewer.paused = paused;
             }
+        }
+        drop(subs);
+        if !paused {
+            self.visibility_notify.notify_waiters();
         }
     }
 
@@ -308,6 +320,10 @@ impl BrowserRemoteService {
             if let Some(viewer) = browser_subs.get_mut(subscription_id) {
                 viewer.stalled = stalled;
             }
+        }
+        drop(subs);
+        if !stalled {
+            self.visibility_notify.notify_waiters();
         }
     }
 
@@ -521,15 +537,19 @@ impl BrowserRemoteService {
         let snapshot_source_holder = Arc::clone(&self.snapshot_source);
         let native_capture_semaphore = Arc::clone(&self.native_capture_semaphore);
         let quarantined_permits = Arc::clone(&self.quarantined_permits);
+        let visibility_notify = Arc::clone(&self.visibility_notify);
         let manager = self.manager.clone();
         let desktop_epoch = Arc::clone(&self.desktop_epoch);
         let service_epoch = self.service_epoch;
         let browser_id_clone = browser_id.clone();
 
         let join_handle = handle.spawn(async move {
+            const INVISIBLE_BACKOFF_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(500);
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(
                 profile.interval_ms.clamp(50, 5000),
             ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut seq: u32 = 0;
             let mut had_receivers = false;
 
@@ -544,6 +564,12 @@ impl BrowserRemoteService {
                     stopper.stop(&browser_id_clone, true);
                     break;
                 }
+
+                // Register wakeup interest before sampling eligibility/visibility so a concurrent
+                // notify_visibility_changed() or viewer unpause cannot be missed.
+                let wake = visibility_notify.notified();
+                tokio::pin!(wake);
+                wake.as_mut().enable();
 
                 // While active subscribers > 0
                 let (has_active_subscribers, has_eligible_subscribers) = {
@@ -563,7 +589,30 @@ impl BrowserRemoteService {
                 }
 
                 if !has_eligible_subscribers {
-                    // Capture only for eligible consumers/credit: skip capture tick when all viewers are paused or stalled
+                    // Capture only for eligible consumers/credit: park while all viewers are paused or stalled
+                    tokio::select! {
+                        _ = wake => interval.reset_immediately(),
+                        _ = tokio::time::sleep(INVISIBLE_BACKOFF_INTERVAL) => interval.reset_immediately(),
+                    }
+                    continue;
+                }
+
+                let visible = match manager.is_visible(&browser_id_clone) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        stopper.stop(&browser_id_clone, false);
+                        stopper.release_quarantine(&browser_id_clone);
+                        break;
+                    }
+                };
+
+                if !visible {
+                    // Back off while invisible instead of polling get_state() at capture cadence;
+                    // wake immediately on notify_visibility_changed() or re-check at slow cadence.
+                    tokio::select! {
+                        _ = wake => interval.reset_immediately(),
+                        _ = tokio::time::sleep(INVISIBLE_BACKOFF_INTERVAL) => interval.reset_immediately(),
+                    }
                     continue;
                 }
 
@@ -1569,6 +1618,51 @@ mod tests {
             !service.quarantined_permits.lock().contains_key(&b1),
             "a non-timeout capture error must not be quarantined"
         );
+        service.unsubscribe(&b1, &sub);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invisible_producer_wakes_immediately_on_visibility_notify() {
+        use crate::browser::snapshot_source::{
+            sample_valid_jpeg_bytes, BrowserSnapshot, FakeBrowserSnapshotSource,
+            FakeSnapshotBehavior,
+        };
+
+        let (service, b1) = create_test_service();
+        let source = Arc::new(FakeBrowserSnapshotSource::new(
+            FakeSnapshotBehavior::Fixed(BrowserSnapshot::new(
+                sample_valid_jpeg_bytes(),
+                SnapshotFormat::Jpeg { quality: 70 },
+                800,
+                600,
+            )),
+        ));
+        service.set_snapshot_source(source);
+
+        let mut frame_rx = service.subscribe_frames(&b1);
+        let sub = service.subscribe(&b1, "dev-vis", "v-vis").unwrap();
+
+        // First frame arrives while visible.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), frame_rx.recv())
+            .await
+            .expect("initial frame")
+            .expect("channel open");
+
+        // Hide the browser and advance virtual time into the invisible backoff park.
+        service.manager.set_visible(&b1, false).unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(120)).await;
+        tokio::task::yield_now().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        // Make visible again and notify: must wake far before the 500ms fallback poll.
+        service.manager.set_visible(&b1, true).unwrap();
+        service.notify_visibility_changed();
+        let resumed = tokio::time::timeout(std::time::Duration::from_millis(50), frame_rx.recv())
+            .await
+            .expect("notify_visibility_changed must wake parked producer immediately")
+            .expect("channel open");
+        assert!(!resumed.is_empty());
+
         service.unsubscribe(&b1, &sub);
     }
 }

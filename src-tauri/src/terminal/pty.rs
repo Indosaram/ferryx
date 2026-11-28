@@ -342,6 +342,24 @@ enum SpawnPathPolicy {
     Inherited,
 }
 
+struct LifecycleWatcherGuard {
+    running: Arc<std::sync::atomic::AtomicBool>,
+    disarmed: bool,
+    #[cfg(test)]
+    exit_notify: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for LifecycleWatcherGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.running
+                .store(false, std::sync::atomic::Ordering::Release);
+            #[cfg(test)]
+            self.exit_notify.notify_waiters();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
@@ -356,6 +374,13 @@ pub struct PtyManager {
     agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
     #[cfg(unix)]
     transfer_owners: Arc<Mutex<HashMap<String, PtySessionSnapshot>>>,
+    /// Single manager-level lifecycle watcher state (spawned lazily on 0->1, exits when empty).
+    lifecycle_watcher_running: Arc<std::sync::atomic::AtomicBool>,
+    lifecycle_wake: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    lifecycle_watcher_spawns: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    lifecycle_watcher_exit_notify: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     removal_notify: Arc<tokio::sync::Notify>,
 }
@@ -380,6 +405,12 @@ impl PtyManager {
             )),
             #[cfg(unix)]
             transfer_owners: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle_watcher_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lifecycle_wake: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            lifecycle_watcher_spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            lifecycle_watcher_exit_notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             removal_notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -914,87 +945,201 @@ impl PtyManager {
             session.set_output_hub(hub);
         }
 
-        self.sessions
-            .write()
-            .insert(session_id.clone(), Arc::clone(&session));
+        let spawn_watcher = {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), Arc::clone(&session));
+            !self
+                .lifecycle_watcher_running
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        };
         session.mark_running();
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         super::qa_liveness::record_owned_pty_creation(&session);
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         super::qa_liveness::record_local_pty_event(&session, "create", "delivery", serde_json::json!({"created": true, "mutationId":create_mutation_id}), created_identity, Ok(()));
-        self.start_lifecycle_watcher(session_id);
+        self.drive_lifecycle_watcher(spawn_watcher);
         Ok(rx)
     }
 
-    fn start_lifecycle_watcher(&self, session_id: String) {
+    fn drive_lifecycle_watcher(&self, spawn_watcher: bool) {
+        if !spawn_watcher {
+            self.lifecycle_wake.notify_one();
+            return;
+        }
+        #[cfg(test)]
+        self.lifecycle_watcher_spawns
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let manager = self.clone();
         tokio::spawn(async move {
+            use futures_util::stream::{FuturesUnordered, StreamExt};
+            use std::collections::HashSet;
+
+            let mut guard = LifecycleWatcherGuard {
+                running: Arc::clone(&manager.lifecycle_watcher_running),
+                disarmed: false,
+                #[cfg(test)]
+                exit_notify: Arc::clone(&manager.lifecycle_watcher_exit_notify),
+            };
+            let mut tracked_readers: HashSet<(String, usize)> = HashSet::new();
+            let mut tearing_down: HashSet<(String, usize)> = HashSet::new();
+            let mut reader_eofs: FuturesUnordered<
+                futures_util::future::BoxFuture<'static, (String, usize)>,
+            > = FuturesUnordered::new();
+
             loop {
-                let Some(session) = manager.get_session(&session_id) else {
-                    break;
+                let snapshot: Vec<(String, Arc<PtySession>)> = {
+                    let sessions = manager.sessions.read();
+                    if sessions.is_empty() {
+                        manager
+                            .lifecycle_watcher_running
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        guard.disarmed = true;
+                        drop(sessions);
+                        #[cfg(test)]
+                        manager.lifecycle_watcher_exit_notify.notify_waiters();
+                        break;
+                    }
+                    sessions
+                        .iter()
+                        .map(|(id, session)| (id.clone(), Arc::clone(session)))
+                        .collect()
                 };
 
-                match session.state() {
-                    PtySessionState::Exited { .. } | PtySessionState::Failed { .. } => {
-                        session.close_output();
-                        manager.remove_from_registry(&session_id);
-                        break;
+                let mut active_keys: HashSet<(String, usize)> =
+                    HashSet::with_capacity(snapshot.len());
+                for (session_id, session) in snapshot {
+                    let key = (session_id.clone(), Arc::as_ptr(&session) as usize);
+                    active_keys.insert(key.clone());
+
+                    if tracked_readers.insert(key.clone()) {
+                        let notify = session.reader_finished_notify();
+                        let weak = Arc::downgrade(&session);
+                        let fut_key = key.clone();
+                        reader_eofs.push(Box::pin(async move {
+                            loop {
+                                let notified = notify.notified();
+                                tokio::pin!(notified);
+                                notified.as_mut().enable();
+                                match weak.upgrade() {
+                                    Some(s) if s.is_reader_finished() => {
+                                        // Chain-wake any concurrent `await_reader_finished` waiter.
+                                        notify.notify_waiters();
+                                        return fut_key;
+                                    }
+                                    None => return fut_key,
+                                    Some(_) => {}
+                                }
+                                notified.await;
+                            }
+                        }));
                     }
-                    PtySessionState::Closing => {
-                        tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
+
+                    if tearing_down.contains(&key) {
                         continue;
                     }
-                    PtySessionState::Starting | PtySessionState::Running => {}
-                }
 
-                match session.poll_exit_code() {
-                    Ok(Some(code)) => {
-                        manager.finalize_natural_exit(&session_id, Some(code)).await;
-                        break;
-                    }
-                    // Gone with no readable status (an adopted child this daemon cannot reap).
-                    Ok(None) if session.is_reaped() => {
-                        manager.finalize_natural_exit(&session_id, None).await;
-                        break;
-                    }
-                    Ok(None)
-                        if session.output_receiver_closed() || session.is_reader_finished() =>
-                    {
-                        // Info, not debug: this branch closes (SIGHUP/SIGTERM) a shell that has not
-                        // exited, so the log must say which side ended first.
-                        tracing::info!(
-                            session_id = %session_id,
-                            receiver_closed = session.output_receiver_closed(),
-                            reader_finished = session.is_reader_finished(),
-                            "closing a live PTY because its output side ended"
-                        );
-                        if let Err(error) = manager.close_session(&session_id).await {
-                            tracing::warn!(
-                                "PTY receiver-drop cleanup failed for {}: {}",
-                                session_id,
-                                error
-                            );
+                    match session.state() {
+                        PtySessionState::Exited { .. } | PtySessionState::Failed { .. } => {
+                            session.close_output();
+                            manager.remove_from_registry(&session_id);
+                            continue;
                         }
-                        break;
+                        PtySessionState::Closing => {
+                            continue;
+                        }
+                        PtySessionState::Starting | PtySessionState::Running => {}
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        session.mark_failed(error.to_string());
-                        // Tearing the session down: give the master up so the console host can
-                        // flush, then end the reader with the cancellation as the bounded fallback.
-                        session.close_io();
-                        let _ = Self::end_reader_after_close(&session).await;
-                        session.close_output();
-                        manager.remove_from_registry(&session_id);
+
+                    match session.poll_exit_code() {
+                        Ok(Some(code)) => {
+                            tearing_down.insert(key);
+                            let m = manager.clone();
+                            tokio::spawn(async move {
+                                m.finalize_natural_exit(&session_id, Some(code)).await;
+                            });
+                        }
+                        // Gone with no readable status (an adopted child this daemon cannot reap).
+                        Ok(None) if session.is_reaped() => {
+                            tearing_down.insert(key);
+                            let m = manager.clone();
+                            tokio::spawn(async move {
+                                m.finalize_natural_exit(&session_id, None).await;
+                            });
+                        }
+                        Ok(None)
+                            if session.output_receiver_closed() || session.is_reader_finished() =>
+                        {
+                            // Info, not debug: this branch closes (SIGHUP/SIGTERM) a shell that has not
+                            // exited, so the log must say which side ended first.
+                            tracing::info!(
+                                session_id = %session_id,
+                                receiver_closed = session.output_receiver_closed(),
+                                reader_finished = session.is_reader_finished(),
+                                "closing a live PTY because its output side ended"
+                            );
+                            tearing_down.insert(key);
+                            let m = manager.clone();
+                            tokio::spawn(async move {
+                                if let Err(error) = m.close_session(&session_id).await {
+                                    tracing::warn!(
+                                        "PTY receiver-drop cleanup failed for {}: {}",
+                                        session_id,
+                                        error
+                                    );
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            session.mark_failed(error.to_string());
+                            // Tearing the session down: give the master up so the console host can
+                            // flush, then end the reader with the cancellation as the bounded fallback.
+                            session.close_io();
+                            tearing_down.insert(key);
+                            let m = manager.clone();
+                            let s = Arc::clone(&session);
+                            tokio::spawn(async move {
+                                let _ = Self::end_reader_after_close(&s).await;
+                                s.close_output();
+                                m.remove_from_registry(&session_id);
+                            });
+                        }
+                    }
+                }
+
+                tearing_down.retain(|key| active_keys.contains(key));
+                tracked_readers.retain(|key| active_keys.contains(key));
+
+                {
+                    let sessions = manager.sessions.read();
+                    if sessions.is_empty() {
+                        manager
+                            .lifecycle_watcher_running
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        guard.disarmed = true;
+                        drop(sessions);
+                        #[cfg(test)]
+                        manager.lifecycle_watcher_exit_notify.notify_waiters();
                         break;
                     }
                 }
 
-                // The reader's end wakes the watcher at once; the poll stays the fallback for
-                // exits only the child reports (adopted and Windows children).
-                let reader_finished = session.reader_finished_notify();
+                // Wait for any session's reader EOF, a manager wake (new session / empty check),
+                // or the single shared fallback tick for exits only the child reports.
+                let wake = manager.lifecycle_wake.notified();
+                tokio::pin!(wake);
+                wake.as_mut().enable();
                 tokio::select! {
-                    _ = reader_finished.notified() => {}
+                    _ = wake => {}
+                    Some(_done_key) = reader_eofs.next(), if !reader_eofs.is_empty() => {
+                        // Drain all resolved EOF futures without removing from `tracked_readers`:
+                        // `is_reader_finished()` stays true until the session is removed from
+                        // `manager.sessions`, so re-tracking it while teardown runs would spin.
+                        while futures_util::FutureExt::now_or_never(reader_eofs.next())
+                            .flatten()
+                            .is_some()
+                        {}
+                    }
                     _ = tokio::time::sleep(LIFECYCLE_POLL_INTERVAL) => {}
                 }
             }
@@ -1126,17 +1271,29 @@ impl PtyManager {
         }
     }
 
-    /// Observe the reader's finished flag, bounded. The reader sets it as its last act, so this
-    /// reports the same event `join_reader_bounded` waits for, without needing the handle.
+    /// Observe the reader's finished flag, bounded. The reader sets it as its last act and
+    /// signals `reader_finished_notify`, so this awaits that signal directly instead of polling.
     async fn await_reader_finished(session: &Arc<PtySession>, timeout: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while !session.is_reader_finished() {
-            if tokio::time::Instant::now() >= deadline {
-                return false;
+        let notify = session.reader_finished_notify();
+        let wait = async {
+            loop {
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if session.is_reader_finished() {
+                    // Re-signal so any concurrent waiter on `reader_finished_notify` (which
+                    // `session.rs` signals with `notify_one`) also wakes up.
+                    notify.notify_waiters();
+                    return;
+                }
+                notified.await;
             }
-            tokio::time::sleep(LIFECYCLE_POLL_INTERVAL.min(READER_WAIT_POLL_INTERVAL)).await;
+        };
+        if tokio::time::timeout(timeout, wait).await.is_ok() {
+            true
+        } else {
+            session.is_reader_finished()
         }
-        true
     }
 
     async fn poll_reap_bounded(
@@ -1430,8 +1587,13 @@ impl PtyManager {
         let mut sessions = self.sessions.write();
         self.cwd_probe_permits.lock().remove(session_id);
         let removed = sessions.remove(session_id);
-        #[cfg(test)]
+        let is_empty = sessions.is_empty();
+        drop(sessions);
         if removed.is_some() {
+            if is_empty {
+                self.lifecycle_wake.notify_one();
+            }
+            #[cfg(test)]
             self.removal_notify.notify_waiters();
         }
         removed
@@ -1598,6 +1760,9 @@ impl PtyManager {
         }
 
         registry.insert(session_id.clone(), Arc::clone(&session));
+        let spawn_watcher = !self
+            .lifecycle_watcher_running
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
         owners.remove(&session_id);
         drop(registry);
         drop(owners);
@@ -1609,7 +1774,7 @@ impl PtyManager {
             _ => {}
         }
 
-        self.start_lifecycle_watcher(session_id);
+        self.drive_lifecycle_watcher(spawn_watcher);
         Ok(rx)
     }
 
@@ -3869,5 +4034,43 @@ mod tests {
             "the refusal must carry the configured pair: {error:?}"
         );
         assert_eq!(manager.session_count(), 0, "a refused spawn registers no session");
+    }
+
+    #[tokio::test]
+    async fn shared_lifecycle_watcher_spawns_lazily_serves_multiple_sessions_and_exits_when_empty() {
+        use std::sync::atomic::Ordering;
+
+        let manager = PtyManager::new();
+        assert!(!manager.lifecycle_watcher_running.load(Ordering::Acquire));
+        assert_eq!(manager.lifecycle_watcher_spawns.load(Ordering::Relaxed), 0);
+
+        let (id1, _rx1) = manager.spawn(interactive_bash(), 80, 24).expect("spawn 1");
+        let (id2, _rx2) = manager.spawn(interactive_bash(), 80, 24).expect("spawn 2");
+        assert!(manager.lifecycle_watcher_running.load(Ordering::Acquire));
+        assert_eq!(
+            manager.lifecycle_watcher_spawns.load(Ordering::Relaxed),
+            1,
+            "two live sessions must share a single manager-level lifecycle watcher"
+        );
+
+        let exited = manager.lifecycle_watcher_exit_notify.notified();
+        tokio::pin!(exited);
+        exited.as_mut().enable();
+        manager.close_session(&id1).await.expect("close 1");
+        manager.close_session(&id2).await.expect("close 2");
+        if manager.lifecycle_watcher_running.load(Ordering::Acquire) {
+            tokio::time::timeout(LOAD_TOLERANT_BOUND, exited)
+                .await
+                .expect("shared watcher must exit once registry becomes empty");
+        }
+        assert!(!manager.lifecycle_watcher_running.load(Ordering::Acquire));
+
+        let (id3, _rx3) = manager.spawn(interactive_bash(), 80, 24).expect("spawn 3");
+        assert_eq!(
+            manager.lifecycle_watcher_spawns.load(Ordering::Relaxed),
+            2,
+            "0->1 transition after empty must lazily respawn the shared watcher"
+        );
+        manager.close_session(&id3).await.expect("close 3");
     }
 }

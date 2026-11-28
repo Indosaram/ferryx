@@ -38,6 +38,24 @@ impl Drop for RowCellsGuard {
     }
 }
 
+/// Cached reusable Ghostty render-pass handles for a single terminal.
+///
+/// Field declaration order enforces safe drop order: `row_cells` and
+/// `row_iterator` hold borrowed slices into `render_state`, so they are freed
+/// before `render_state`. `NativeTerminal::drop` drops `RenderPassHandles`
+/// before calling `ghostty_terminal_free`.
+pub struct RenderPassHandles {
+    pub row_cells: RowCellsGuard,
+    pub row_iterator: RowIteratorGuard,
+    pub render_state: RenderStateGuard,
+}
+
+// SAFETY: Category: Thread Transfer Safety.
+// Invariant: Ghostty render-state, row-iterator, and row-cells handles are
+// heap-allocated via the default allocator with no thread-local C state and are
+// exclusively owned behind `NativeTerminal`'s mutex.
+unsafe impl Send for RenderPassHandles {}
+
 pub struct KeyEncoderGuard(pub NonNull<GhosttyKeyEncoderImpl>);
 impl Drop for KeyEncoderGuard {
     fn drop(&mut self) {

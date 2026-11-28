@@ -5,6 +5,8 @@ import { reportDesktopWindowFocus } from "./tauri";
 const FOCUS_REPORT_INTERVAL_MS = 60_000;
 
 let trackingStarted = false;
+let disposed = false;
+let trackingGeneration = 0;
 let nativeFocused: boolean | null = null;
 let unlistenFocusChanged: (() => void) | null = null;
 let focusReportTimer: ReturnType<typeof setInterval> | null = null;
@@ -25,7 +27,7 @@ function syncFocusReporting(focused: boolean | null): void {
     clearInterval(focusReportTimer);
     focusReportTimer = null;
   }
-  if (focused === null) return;
+  if (disposed || focused === null) return;
   publishWindowFocus(focused);
   void reportFocus(focused);
   if (focused) {
@@ -35,16 +37,35 @@ function syncFocusReporting(focused: boolean | null): void {
   }
 }
 
+export function stopNativeWindowFocusTracking(): void {
+  disposed = true;
+  trackingGeneration += 1;
+  if (focusReportTimer !== null) {
+    clearInterval(focusReportTimer);
+    focusReportTimer = null;
+  }
+  if (unlistenFocusChanged !== null) {
+    const unlisten = unlistenFocusChanged;
+    unlistenFocusChanged = null;
+    unlisten();
+  }
+  trackingStarted = false;
+}
+
 export function startNativeWindowFocusTracking(): void {
   if (trackingStarted || unlistenFocusChanged) return;
+  disposed = false;
   trackingStarted = true;
+  const generation = ++trackingGeneration;
+  const isStale = () => disposed || generation !== trackingGeneration;
   startWindowFocusBroadcast();
 
   void (async () => {
     let receivedFocusEvent = false;
     try {
       const win = getCurrentWindow();
-      unlistenFocusChanged = await win.onFocusChanged((event) => {
+      const unlisten = await win.onFocusChanged((event) => {
+        if (isStale()) return;
         receivedFocusEvent = true;
         nativeFocused = event.payload;
         syncFocusReporting(event.payload);
@@ -52,12 +73,19 @@ export function startNativeWindowFocusTracking(): void {
           window.dispatchEvent(new CustomEvent("ferryx:window-focused"));
         }
       });
+      if (isStale()) {
+        unlisten();
+        return;
+      }
+      unlistenFocusChanged = unlisten;
       const focused = await win.isFocused();
+      if (isStale()) return;
       if (!receivedFocusEvent) {
         nativeFocused = focused;
         syncFocusReporting(focused);
       }
     } catch {
+      if (isStale()) return;
       if (!receivedFocusEvent) {
         nativeFocused = null;
         syncFocusReporting(null);
@@ -68,4 +96,8 @@ export function startNativeWindowFocusTracking(): void {
 
 export function getNativeWindowFocused(): boolean | null {
   return nativeFocused;
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => stopNativeWindowFocusTracking());
 }

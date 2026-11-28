@@ -73,12 +73,48 @@ pub struct MachineSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_stamps: Option<crate::agent_control::events::SessionStamps>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    len: u64,
+    mtime: std::time::SystemTime,
+}
+
+impl FileStamp {
+    fn from_metadata(meta: &std::fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            #[cfg(unix)]
+            dev: meta.dev(),
+            #[cfg(unix)]
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime: meta.modified().ok()?,
+        })
+    }
+}
+
+struct JournalState {
+    store: Result<Store, String>,
+    stamp: Option<FileStamp>,
+}
+
+impl JournalState {
+    fn as_ref(&self) -> Result<&Store, &String> {
+        self.store.as_ref()
+    }
+}
+
 #[cfg(test)]
 type JournalProbe = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct MachineOperationJournal {
     path: PathBuf,
-    state: parking_lot::Mutex<Result<Store, String>>,
+    state: parking_lot::Mutex<JournalState>,
     #[cfg(test)]
     probe: parking_lot::RwLock<Option<JournalProbe>>,
 }
@@ -200,33 +236,51 @@ impl MachineOperationJournal {
         Ok(record)
     }
     pub(crate) fn open(path: PathBuf) -> Self {
-        let state = match std::fs::read(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store {
-                version: 1,
-                records: BTreeMap::new(),
-                sessions: BTreeMap::new(),
-                session_revision: 0,
-                schema: crate::agent_control::pending_input::schema_step(),
-                pending_inputs: BTreeMap::new(),
-                observation_history: ObservationHistory::default(),
-            }),
-            Err(_) => Err("MACHINE_SERVICE_UNAVAILABLE".into()),
-            Ok(bytes) => serde_json::from_slice::<Store>(&bytes)
-                .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".into())
-                .and_then(|mut s| {
-                    if s.version != 1 {
-                        return Err("MACHINE_SERVICE_UNAVAILABLE".into());
-                    }
-                    lift_schema(&mut s);
-                    for r in s.records.values_mut() {
-                        if matches!(r.operation, Operation::Pending { .. }) {
-                            r.operation = Operation::OutcomeUnknown {
-                                request_id: r.request_id.clone(),
-                            };
-                        }
-                    }
-                    Ok(s)
+        use std::io::Read as _;
+        let state = match std::fs::File::open(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => JournalState {
+                store: Ok(Store {
+                    version: 1,
+                    records: BTreeMap::new(),
+                    sessions: BTreeMap::new(),
+                    session_revision: 0,
+                    schema: crate::agent_control::pending_input::schema_step(),
+                    pending_inputs: BTreeMap::new(),
+                    observation_history: ObservationHistory::default(),
                 }),
+                stamp: None,
+            },
+            Err(_) => JournalState {
+                store: Err("MACHINE_SERVICE_UNAVAILABLE".into()),
+                stamp: None,
+            },
+            Ok(mut file) => {
+                let file_stamp = file.metadata().ok().and_then(|m| FileStamp::from_metadata(&m));
+                let mut bytes = Vec::new();
+                let store = file
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".to_string())
+                    .and_then(|_| {
+                        serde_json::from_slice::<Store>(&bytes)
+                            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".into())
+                    })
+                    .and_then(|mut s| {
+                        if s.version != 1 {
+                            return Err("MACHINE_SERVICE_UNAVAILABLE".into());
+                        }
+                        lift_schema(&mut s);
+                        for r in s.records.values_mut() {
+                            if matches!(r.operation, Operation::Pending { .. }) {
+                                r.operation = Operation::OutcomeUnknown {
+                                    request_id: r.request_id.clone(),
+                                };
+                            }
+                        }
+                        Ok(s)
+                    });
+                let stamp = if store.is_ok() { file_stamp } else { None };
+                JournalState { store, stamp }
+            }
         };
         Self {
             path,
@@ -235,8 +289,8 @@ impl MachineOperationJournal {
             probe: parking_lot::RwLock::new(None),
         }
     }
-    fn refresh_locked(&self, state: &mut Result<Store, String>) -> Result<std::fs::File, String> {
-        state.as_ref().map_err(Clone::clone)?;
+    fn refresh_locked(&self, state: &mut JournalState) -> Result<std::fs::File, String> {
+        state.store.as_ref().map_err(Clone::clone)?;
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -248,15 +302,34 @@ impl MachineOperationJournal {
             .open(self.path.with_extension("tx.lock"))
             .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
         lock.lock().map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
-        match std::fs::read(&self.path) {
-            Ok(bytes) => {
+        match std::fs::metadata(&self.path) {
+            Ok(meta) => {
+                let disk_stamp = FileStamp::from_metadata(&meta);
+                if disk_stamp.is_some() && state.stamp == disk_stamp {
+                    return Ok(lock);
+                }
+                #[cfg(test)]
+                self.probe("refresh_read");
+                let mut file = match std::fs::File::open(&self.path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        state.stamp = None;
+                        return Ok(lock);
+                    }
+                    Err(_) => return Err("MACHINE_SERVICE_UNAVAILABLE".into()),
+                };
+                let file_stamp = file.metadata().ok().and_then(|m| FileStamp::from_metadata(&m));
+                let mut bytes = Vec::new();
+                use std::io::Read as _;
+                file.read_to_end(&mut bytes)
+                    .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
                 let mut current: Store =
                     serde_json::from_slice(&bytes).map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
                 if current.version != 1 {
                     return Err("MACHINE_SERVICE_UNAVAILABLE".into());
                 }
                 lift_schema(&mut current);
-                let previous = state.as_ref().map_err(Clone::clone)?;
+                let previous = state.store.as_ref().map_err(Clone::clone)?;
                 for (key, record) in &mut current.records {
                     if matches!(record.operation, Operation::Pending { .. })
                         && previous.records.get(key).is_some_and(|prior| {
@@ -268,15 +341,18 @@ impl MachineOperationJournal {
                         };
                     }
                 }
-                *state = Ok(current);
+                state.store = Ok(current);
+                state.stamp = file_stamp;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                state.stamp = None;
+            }
             Err(_) => return Err("MACHINE_SERVICE_UNAVAILABLE".into()),
         }
         Ok(lock)
     }
 
-    fn persist(&self, state: &mut Result<Store, String>, candidate: Store) -> Result<(), String> {
+    fn persist(&self, state: &mut JournalState, candidate: Store) -> Result<(), String> {
         #[cfg(test)]
         self.probe("persist");
         let result = super::auth::write_private_json(&self.path, &candidate)
@@ -289,11 +365,15 @@ impl MachineOperationJournal {
         });
         match result {
             Ok(()) => {
-                *state = Ok(candidate);
+                state.store = Ok(candidate);
+                state.stamp = std::fs::metadata(&self.path)
+                    .ok()
+                    .and_then(|m| FileStamp::from_metadata(&m));
                 Ok(())
             }
             Err(e) => {
-                *state = Err(e.clone());
+                state.store = Err(e.clone());
+                state.stamp = None;
                 Err(e)
             }
         }
@@ -519,7 +599,17 @@ impl MachineOperationJournal {
         }
         let mut state = self.state.lock();
         let _file_lock = self.refresh_locked(&mut state)?;
-        let mut candidate = state.as_ref().map_err(Clone::clone)?.clone();
+        let current = state.store.as_ref().map_err(Clone::clone)?;
+        let stamps_differ = stamps.iter().any(|(id, stamps)| {
+            current
+                .sessions
+                .get(id)
+                .is_some_and(|session| session.agent_stamps.as_ref() != Some(stamps))
+        });
+        if !stamps_differ && observations.is_empty() {
+            return Ok(());
+        }
+        let mut candidate = current.clone();
         let mut changed = false;
         for (id, stamps) in &stamps {
             let Some(session) = candidate.sessions.get_mut(id) else {
@@ -1225,5 +1315,59 @@ mod agent_stamp_tests {
                 panic!("the replay must fail once the durable rows are deleted, got {events:?}")
             }
         }
+    }
+
+    #[test]
+    fn unchanged_record_journal_skips_disk_read_parse_and_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine-operations.v1.json");
+        let journal = journal_with(&dir, &["s1"]);
+        let initial = BTreeMap::from([("s1".to_string(), stamps("r1", 100, 200))]);
+        journal.record_agent_stamps(&initial).unwrap();
+
+        let phases = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let recorded = std::sync::Arc::clone(&phases);
+        *journal.probe.write() = Some(std::sync::Arc::new(move |phase| {
+            recorded.lock().push(phase.to_string());
+        }));
+
+        // Unchanged owned session stamp + unowned session stamp: skips both disk read/parse and persist.
+        let unchanged = BTreeMap::from([
+            ("s1".to_string(), stamps("r1", 100, 200)),
+            ("desktop-pane".to_string(), stamps("r2", 300, 400)),
+        ]);
+        journal
+            .record_journal(JournalBatch {
+                stamps: unchanged,
+                observations: Vec::new(),
+            })
+            .unwrap();
+        assert!(
+            phases.lock().is_empty(),
+            "unchanged record_journal must not read or write disk, got: {:?}",
+            *phases.lock()
+        );
+
+        // External write via a second journal instance changes the file stamp and forces a reload.
+        let other = MachineOperationJournal::open(path);
+        other.save_session(machine_session("s2")).unwrap();
+
+        let update_s2 = BTreeMap::from([("s2".to_string(), stamps("r3", 500, 600))]);
+        journal
+            .record_journal(JournalBatch {
+                stamps: update_s2,
+                observations: Vec::new(),
+            })
+            .unwrap();
+        let observed = phases.lock().clone();
+        assert!(
+            observed.iter().any(|p| p == "refresh_read"),
+            "external atomic rename must invalidate cached stamp and reload, got: {observed:?}"
+        );
+        assert!(
+            observed.iter().any(|p| p == "persist"),
+            "changed stamp on newly-observed session must persist, got: {observed:?}"
+        );
+        assert_eq!(journal.agent_stamps().unwrap()["s2"], stamps("r3", 500, 600));
     }
 }

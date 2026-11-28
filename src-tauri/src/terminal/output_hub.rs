@@ -1388,17 +1388,22 @@ impl TerminalOutputHub {
         }
     }
 
-    /// The byte ceiling the session's screen mirror enforces for `ceiling`. A budgeted hub always
-    /// applies the session's share, capped at the daemon-wide native ceiling -- including while
-    /// only one session is live, when the share is the whole budget and would otherwise let the
-    /// mirror grow past the ceiling every other session is held to. Only a hub with no aggregate
-    /// budget keeps the unset creation-time default, so it behaves exactly as it did before the
-    /// budget existed.
+    const SCREEN_MIRROR_MAX_SCROLLBACK_BYTES: usize = 8 * 1024 * 1024;
+
+    /// The byte ceiling the session's screen mirror enforces for `ceiling`. The mirror only keeps
+    /// `MIRROR_SCROLLBACK_LINES` (2,000) rows for full-attach seeds and visible-screen snapshots,
+    /// so capping its byte limit at `SCREEN_MIRROR_MAX_SCROLLBACK_BYTES` (8 MiB) bounds wide-line
+    /// or rich-style growth without prematurely pruning normal scrollback. A budgeted hub always
+    /// applies the session's share capped at `NATIVE_SCROLLBACK_CEILING_BYTES` (and the mirror
+    /// cap) -- including while only one session is live; an unbudgeted hub uses the capped
+    /// native ceiling directly.
     fn mirror_limit_bytes(&self, ceiling: usize) -> usize {
+        let cap = super::NATIVE_SCROLLBACK_CEILING_BYTES
+            .min(Self::SCREEN_MIRROR_MAX_SCROLLBACK_BYTES);
         if self.with_ledger(|_| ()).is_some() {
-            ceiling.min(super::NATIVE_SCROLLBACK_CEILING_BYTES)
+            ceiling.min(cap)
         } else {
-            super::NATIVE_SCROLLBACK_CEILING_BYTES
+            cap
         }
     }
 
@@ -1414,9 +1419,10 @@ impl TerminalOutputHub {
     }
 
     /// Records the session's retained history and applies whatever trims the budget requires.
-    /// Called after every published chunk, with no hub lock held.
-    fn account_retained_history(&self, session_id: &str) {
-        let retained = self.retained_bytes(session_id);
+    /// Called after every published chunk, with no hub lock held; `retained` is captured while
+    /// holding the session write lock during publish so we avoid re-acquiring the sessions map
+    /// and session hub lock just to read one counter.
+    fn account_retained_history(&self, session_id: &str, retained: usize) {
         if self
             .with_ledger(|budget| budget.note_retained(session_id, retained))
             .is_none()
@@ -1763,6 +1769,9 @@ impl TerminalOutputHub {
         if hub.raw_sender.receiver_count() > 0 {
             let _ = hub.raw_sender.send(chunk.bytes.to_vec());
         }
+        // Read under the write lock this publish already holds: the budget charge is the same
+        // number `retained_bytes` would return, without a second map lookup and session lock.
+        let retained = hub.buffer.retained.retained_bytes();
         drop(hub);
         let ingest = ingest.unwrap_or_default();
         if let Some(revision) = ingest.transient_applied {
@@ -1781,7 +1790,7 @@ impl TerminalOutputHub {
             Arc::clone(&chunk.bytes),
         );
         // Charged after every lock is released: the budget may trim this or another session.
-        self.account_retained_history(session_id);
+        self.account_retained_history(session_id, retained);
 
         Some((chunk, ingest.replies))
     }
@@ -3740,9 +3749,11 @@ mod tests {
             .expect("mirror")
             .lock()
             .scrollback_limit_bytes();
+        let mirror_cap = crate::terminal::NATIVE_SCROLLBACK_CEILING_BYTES
+            .min(TerminalOutputHub::SCREEN_MIRROR_MAX_SCROLLBACK_BYTES);
         assert_eq!(
             limit,
-            Some(ceiling.min(crate::terminal::NATIVE_SCROLLBACK_CEILING_BYTES)),
+            Some(ceiling.min(mirror_cap)),
             "the mirror follows the share, not the unbudgeted default"
         );
 
@@ -3756,7 +3767,7 @@ mod tests {
             .expect("mirror")
             .lock()
             .scrollback_limit_bytes();
-        assert_eq!(limit, Some(crate::terminal::NATIVE_SCROLLBACK_CEILING_BYTES));
+        assert_eq!(limit, Some(mirror_cap));
     }
 
     /// A recovery hole keeps `history_incomplete` on a full attach even after sequence 1 is

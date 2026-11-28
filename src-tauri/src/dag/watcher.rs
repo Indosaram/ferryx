@@ -1,6 +1,6 @@
 use crate::dag::journal::{parse_run_checkpoint, resolve_dag_runs_dir, DagRunSnapshot};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
@@ -8,7 +8,97 @@ use tokio::sync::mpsc::Sender;
 type TaggedSink = Sender<(String, DagRunSnapshot)>;
 /// Last observed (len, mtime) of a checkpoint that parsed cleanly.
 type FileStamp = (u64, Option<std::time::SystemTime>);
-use tokio::time::{interval, sleep, MissedTickBehavior};
+use tokio::time::sleep;
+
+const POLL_BACKOFF_STEPS: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+];
+
+#[derive(Default)]
+struct ScanState {
+    cache: HashMap<String, DagRunSnapshot>,
+    stamps: HashMap<PathBuf, FileStamp>,
+    path_run_ids: HashMap<PathBuf, String>,
+    resolved_runs_dir: Option<PathBuf>,
+}
+
+fn resolve_target_dir_sync(root: &Path, cached: &mut Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(dir) = cached.as_ref() {
+        if dir.is_dir() {
+            return Some(dir.clone());
+        }
+    }
+    let runs_dir = resolve_dag_runs_dir(root);
+    if runs_dir.is_dir() {
+        *cached = Some(runs_dir.clone());
+        return Some(runs_dir);
+    }
+    if root.is_dir()
+        && (root.join("runs").is_dir()
+            || root.ends_with(".omo/senpi-task/dag")
+            || root.ends_with("dag"))
+    {
+        let dir = root.to_path_buf();
+        *cached = Some(dir.clone());
+        return Some(dir);
+    }
+    *cached = None;
+    None
+}
+
+fn resolve_watch_target_sync(root: &Path) -> PathBuf {
+    // Only journal directories are watched. Falling back to the project root would arm a
+    // recursive watch over an entire source tree for every session root we track.
+    if root.join(".omo/senpi-task/dag").exists() {
+        root.join(".omo/senpi-task/dag")
+    } else if root.join("runs").exists()
+        || root.ends_with(".omo/senpi-task/dag")
+        || root.ends_with("dag")
+    {
+        root.to_path_buf()
+    } else {
+        let runs_dir = resolve_dag_runs_dir(root);
+        runs_dir.parent().map(Path::to_path_buf).unwrap_or(runs_dir)
+    }
+}
+
+fn create_watcher(
+    watch_target: &Path,
+    notify_tx: &tokio::sync::mpsc::Sender<()>,
+) -> Option<RecommendedWatcher> {
+    if !watch_target.exists() {
+        return None;
+    }
+    let tx_clone = notify_tx.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |res: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res {
+                let is_noisy = event.paths.iter().any(|p| {
+                    p.components().any(|c| {
+                        let s = c.as_os_str();
+                        s == "node_modules"
+                            || s == "target"
+                            || s == ".git"
+                            || s == "dist"
+                            || s == ".cache"
+                    })
+                });
+                if !is_noisy {
+                    let _ = tx_clone.try_send(());
+                }
+            }
+        },
+        Config::default(),
+    )
+    .ok()?;
+    watcher
+        .watch(watch_target, RecursiveMode::Recursive)
+        .ok()
+        .map(|()| watcher)
+}
 
 #[derive(Clone, Default)]
 struct WatcherHooks {
@@ -34,112 +124,116 @@ impl WatcherHooks {
     }
 }
 
+/// Returns `(sink_still_open, runs_dir_present)`.
 async fn scan_and_emit(
     project_path: &str,
     root: &Path,
-    cache: &mut HashMap<String, DagRunSnapshot>,
-    stamps: &mut HashMap<PathBuf, FileStamp>,
+    state: &mut ScanState,
     sink: &TaggedSink,
     hooks: &WatcherHooks,
-) -> bool {
-    let runs_dir = resolve_dag_runs_dir(root);
-    let target_dir = if runs_dir.is_dir() {
-        &runs_dir
-    } else if root.is_dir()
-        && (root.join("runs").is_dir()
-            || root.ends_with(".omo/senpi-task/dag")
-            || root.ends_with("dag"))
-    {
-        root
-    } else {
-        // Even the "nothing to scan" determination is filesystem work, so it must be
-        // observed off the async worker like any other scan.
-        let probe_hooks = hooks.clone();
-        let _ = tokio::task::spawn_blocking(move || probe_hooks.scanning()).await;
-        return true;
-    };
-
-    // The directory walk, the file reads and the JSON parses all run on a blocking
-    // thread. Doing them inline occupied a Tokio worker for the whole scan -- a
-    // directory walk plus N synchronous reads and parses -- which stalls other tasks
-    // on that worker and stalls the entire runtime on a current-thread executor.
+) -> (bool, bool) {
+    // Path resolution, directory walk, file reads and JSON parses all run on a blocking
+    // thread. Doing them inline occupied a Tokio worker for the whole scan -- which stalls
+    // other tasks on that worker and stalls the entire runtime on a current-thread executor.
     // Only the sink sends stay on the async side.
-    let scan_dir = target_dir.to_path_buf();
+    let root_owned = root.to_path_buf();
     let scan_hooks = hooks.clone();
-    let prior = std::mem::take(stamps);
-    let (snapshots, next_stamps) = match tokio::task::spawn_blocking(move || {
-        // The scan observation point belongs INSIDE the blocking closure: the whole
-        // point is that the walk, reads and parses happen off the async worker, so a
-        // hook that fired on the async side would report the wrong thread.
-        scan_hooks.scanning();
-        let mut collected: Vec<DagRunSnapshot> = Vec::new();
-        let mut next_stamps: HashMap<PathBuf, FileStamp> = HashMap::new();
-        let entries = match std::fs::read_dir(&scan_dir) {
-            Ok(e) => e,
-            Err(_) => return (collected, next_stamps),
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            let meta = std::fs::metadata(&path).ok();
-            let stamp = meta.as_ref().map(|m| (m.len(), m.modified().ok()));
-            // Unchanged since the last clean parse: its snapshot is already cached.
-            if let Some(stamp) = stamp {
-                if prior.get(&path) == Some(&stamp) {
-                    next_stamps.insert(path, stamp);
+    let prior_stamps = std::mem::take(&mut state.stamps);
+    let prior_run_ids = std::mem::take(&mut state.path_run_ids);
+    let mut cached_dir = state.resolved_runs_dir.clone();
+
+    let (snapshots, next_stamps, next_run_ids, next_dir, dir_present) =
+        match tokio::task::spawn_blocking(move || {
+            // The scan observation point belongs INSIDE the blocking closure: the whole
+            // point is that resolution, walk, reads and parses happen off the async worker.
+            scan_hooks.scanning();
+            let Some(scan_dir) = resolve_target_dir_sync(&root_owned, &mut cached_dir) else {
+                return (Vec::new(), HashMap::new(), HashMap::new(), None, false);
+            };
+            let mut collected: Vec<DagRunSnapshot> = Vec::new();
+            let mut next_stamps: HashMap<PathBuf, FileStamp> = HashMap::new();
+            let mut next_run_ids: HashMap<PathBuf, String> = HashMap::new();
+            let entries = match std::fs::read_dir(&scan_dir) {
+                Ok(e) => e,
+                Err(_) => return (collected, next_stamps, next_run_ids, None, false),
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
                     continue;
                 }
-            }
-            // A checkpoint can be observed mid-write; only a recently modified file
-            // is retried briefly, and it is not stamped so the next scan re-parses it.
-            let recent = stamp
-                .and_then(|(_, mtime)| mtime)
-                .and_then(|mtime| mtime.elapsed().ok())
-                .is_none_or(|age| age < Duration::from_secs(2));
-            let attempts = if recent { 3 } else { 1 };
-            for attempt in 0..attempts {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(snapshot) = parse_run_checkpoint(&content) {
-                        collected.push(snapshot);
-                        if let (Some(stamp), false) = (stamp, recent) {
-                            next_stamps.insert(path.clone(), stamp);
+                let meta = std::fs::metadata(&path).ok();
+                let stamp = meta.as_ref().map(|m| (m.len(), m.modified().ok()));
+                // Unchanged since the last clean parse: its snapshot is already cached.
+                if let Some(stamp) = stamp {
+                    if prior_stamps.get(&path) == Some(&stamp) {
+                        if let Some(run_id) = prior_run_ids.get(&path) {
+                            next_run_ids.insert(path.clone(), run_id.clone());
                         }
-                        break;
+                        next_stamps.insert(path, stamp);
+                        continue;
                     }
                 }
-                if attempt + 1 < attempts {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                // A checkpoint can be observed mid-write; only a recently modified file
+                // is retried briefly, and it is not stamped so the next scan re-parses it.
+                let recent = stamp
+                    .and_then(|(_, mtime)| mtime)
+                    .and_then(|mtime| mtime.elapsed().ok())
+                    .is_none_or(|age| age < Duration::from_secs(2));
+                let attempts = if recent { 3 } else { 1 };
+                for attempt in 0..attempts {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(snapshot) = parse_run_checkpoint(&content) {
+                            next_run_ids.insert(path.clone(), snapshot.run_id.clone());
+                            collected.push(snapshot);
+                            if let (Some(stamp), false) = (stamp, recent) {
+                                next_stamps.insert(path.clone(), stamp);
+                            }
+                            break;
+                        }
+                    }
+                    if attempt + 1 < attempts {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                 }
             }
-        }
-        (collected, next_stamps)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => return true,
-    };
-    *stamps = next_stamps;
+            (collected, next_stamps, next_run_ids, Some(scan_dir), true)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => return (true, state.resolved_runs_dir.is_some()),
+        };
+
+    state.stamps = next_stamps;
+    state.path_run_ids = next_run_ids;
+    state.resolved_runs_dir = next_dir;
+
+    // Prune cache entries whose checkpoint files are no longer present on disk.
+    if !dir_present {
+        state.cache.clear();
+    } else {
+        let live_ids: HashSet<&str> = state.path_run_ids.values().map(String::as_str).collect();
+        state.cache.retain(|run_id, _| live_ids.contains(run_id.as_str()));
+    }
 
     for snapshot in snapshots {
-        let is_updated = match cache.get(&snapshot.run_id) {
+        let is_updated = match state.cache.get(&snapshot.run_id) {
             Some(prev) => prev != &snapshot,
             None => true,
         };
         if is_updated {
-            cache.insert(snapshot.run_id.clone(), snapshot.clone());
+            state.cache.insert(snapshot.run_id.clone(), snapshot.clone());
             if sink
                 .send((project_path.to_string(), snapshot))
                 .await
                 .is_err()
             {
-                return false;
+                return (false, dir_present);
             }
         }
     }
-    true
+    (true, dir_present)
 }
 
 async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink) {
@@ -153,72 +247,47 @@ async fn run_watcher_loop_observed(
     hooks: WatcherHooks,
     mut lose_watch: Option<tokio::sync::oneshot::Receiver<()>>,
 ) {
-    let mut cache = HashMap::new();
-    let mut stamps = HashMap::new();
+    let mut state = ScanState::default();
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(64);
 
-    // Only journal directories are watched. Falling back to the project root would arm a
-    // recursive watch over an entire source tree for every session root we track.
-    let watch_target = if root.join(".omo/senpi-task/dag").exists() {
-        root.join(".omo/senpi-task/dag")
-    } else if root.join("runs").exists()
-        || root.ends_with(".omo/senpi-task/dag")
-        || root.ends_with("dag")
-    {
-        root.clone()
-    } else {
-        let runs_dir = resolve_dag_runs_dir(&root);
-        runs_dir.parent().map(Path::to_path_buf).unwrap_or(runs_dir)
-    };
+    let root_for_target = root.clone();
+    let mut watch_target =
+        tokio::task::spawn_blocking(move || resolve_watch_target_sync(&root_for_target))
+            .await
+            .unwrap_or_else(|_| root.clone());
 
     // Hydrate before arming: starting a filesystem watch can stall for seconds on a loaded
     // host, and the current inventory must not wait on it.
-    if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks).await {
+    let (open, _) = scan_and_emit(&project_path, &root, &mut state, &sink, &hooks).await;
+    if !open {
         return;
     }
 
-    let tx_clone = notify_tx.clone();
-    let watcher_res = RecommendedWatcher::new(
-        move |res: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res {
-                let is_noisy = event.paths.iter().any(|p| {
-                    p.components().any(|c| {
-                        let s = c.as_os_str();
-                        s == "node_modules"
-                            || s == "target"
-                            || s == ".git"
-                            || s == "dist"
-                            || s == ".cache"
-                    })
-                });
-                if !is_noisy {
-                    let _ = tx_clone.try_send(());
-                }
-            }
-        },
-        Config::default(),
-    );
-
-    let (mut polling_mode, mut _watcher_guard) = match watcher_res {
-        Ok(mut watcher) if watch_target.exists() => {
-            match watcher.watch(&watch_target, RecursiveMode::Recursive) {
-                Ok(()) => (false, Some(watcher)),
-                Err(_) => (true, None),
-            }
-        }
-        _ => (true, None),
-    };
+    let mut _watcher_guard = create_watcher(&watch_target, &notify_tx);
+    let mut polling_mode = _watcher_guard.is_none();
+    let mut watch_lost = false;
 
     hooks.event(if polling_mode { "polling" } else { "armed" });
     // Second pass: anything written while the watch was arming produced no event.
-    if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks).await {
+    let (open, dir_present) =
+        scan_and_emit(&project_path, &root, &mut state, &sink, &hooks).await;
+    if !open {
         return;
     }
     hooks.event("scanned");
 
     let mut debounce_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
-    let mut poll_interval = interval(Duration::from_secs(1));
-    poll_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut missing_backoff_step: usize = 0;
+    let mut poll_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = if polling_mode {
+        let delay = if dir_present {
+            POLL_BACKOFF_STEPS[0]
+        } else {
+            POLL_BACKOFF_STEPS[missing_backoff_step]
+        };
+        Some(Box::pin(sleep(delay)))
+    } else {
+        None
+    };
 
     loop {
         tokio::select! {
@@ -232,6 +301,7 @@ async fn run_watcher_loop_observed(
             } => {
                 // Models the Windows backend silently losing its native watch.
                 lose_watch = None;
+                watch_lost = true;
                 drop(_watcher_guard.take());
                 notify_rx.close();
                 while notify_rx.try_recv().is_ok() {}
@@ -242,11 +312,13 @@ async fn run_watcher_loop_observed(
                 // `lose_watch` is now None and `debounce_sleep` is None -- so the task
                 // parks forever and DAG progress silently freezes until the app restarts.
                 polling_mode = true;
-                if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks)
-                    .await
-                {
+                missing_backoff_step = 0;
+                let (open, _) =
+                    scan_and_emit(&project_path, &root, &mut state, &sink, &hooks).await;
+                if !open {
                     break;
                 }
+                poll_sleep = Some(Box::pin(sleep(POLL_BACKOFF_STEPS[0])));
                 hooks.event("lost-scanned");
             }
             recv_res = notify_rx.recv(), if !notify_rx.is_closed() => {
@@ -268,20 +340,60 @@ async fn run_watcher_loop_observed(
                 }
             }, if debounce_sleep.is_some() => {
                 debounce_sleep = None;
-                if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks)
-                    .await
-                {
+                let (open, _) =
+                    scan_and_emit(&project_path, &root, &mut state, &sink, &hooks).await;
+                if !open {
                     break;
                 }
                 hooks.event("scanned");
             }
-            _ = poll_interval.tick(), if polling_mode => {
-                if !scan_and_emit(&project_path, &root, &mut cache, &mut stamps, &sink, &hooks)
-                    .await
-                {
+            _ = async {
+                match poll_sleep.as_mut() {
+                    Some(s) => s.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            }, if polling_mode && poll_sleep.is_some() => {
+                let (open, dir_present) =
+                    scan_and_emit(&project_path, &root, &mut state, &sink, &hooks).await;
+                if !open {
                     break;
                 }
                 hooks.event("scanned");
+
+                // Upgrade to a native watcher once the runs directory appears on disk.
+                if dir_present && !watch_lost {
+                    let root_for_upgrade = root.clone();
+                    watch_target = tokio::task::spawn_blocking(move || {
+                        resolve_watch_target_sync(&root_for_upgrade)
+                    })
+                    .await
+                    .unwrap_or_else(|_| watch_target.clone());
+                    if let Some(watcher) = create_watcher(&watch_target, &notify_tx) {
+                        _watcher_guard = Some(watcher);
+                        polling_mode = false;
+                        poll_sleep = None;
+                        missing_backoff_step = 0;
+                        hooks.event("armed");
+                        // Re-scan once after arming so events during setup are not missed.
+                        let (open, _) =
+                            scan_and_emit(&project_path, &root, &mut state, &sink, &hooks).await;
+                        if !open {
+                            break;
+                        }
+                        hooks.event("scanned");
+                        continue;
+                    }
+                }
+
+                let next_delay = if dir_present {
+                    missing_backoff_step = 0;
+                    POLL_BACKOFF_STEPS[0]
+                } else {
+                    missing_backoff_step =
+                        (missing_backoff_step + 1).min(POLL_BACKOFF_STEPS.len() - 1);
+                    POLL_BACKOFF_STEPS[missing_backoff_step]
+                };
+                poll_sleep = Some(Box::pin(sleep(next_delay)));
             }
         }
     }
@@ -453,13 +565,12 @@ mod tests {
         // When the real scan starts, another task must run before its barrier is released.
         runtime.block_on(async {
             let (tx, _rx) = tokio::sync::mpsc::channel(10);
-            let mut cache = HashMap::new();
-            let mut stamps = HashMap::new();
-            let scan = scan_and_emit("owned", temp.path(), &mut cache, &mut stamps, &tx, &hooks);
+            let mut state = ScanState::default();
+            let scan = scan_and_emit("owned", temp.path(), &mut state, &tx, &hooks);
             let sentinel = async {
                 sentinel_tx.send(()).expect("async sentinel");
             };
-            let (open, ()) = tokio::join!(biased; scan, sentinel);
+            let ((open, _), ()) = tokio::join!(biased; scan, sentinel);
             assert!(open);
         });
         let (worker, sentinel) = controller.join().expect("controller joined");

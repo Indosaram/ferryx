@@ -494,27 +494,59 @@ fn card_blocks(message: &Value, line: &str) -> Value {
     Value::Array(blocks)
 }
 
+const MAX_ANSWERED_LABELS: usize = 2048;
+
+#[derive(Default)]
+struct AnsweredLabels {
+    map: std::collections::HashMap<String, String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl AnsweredLabels {
+    fn insert(&mut self, request_id: String, label: String) {
+        if let Some(existing) = self.map.get_mut(&request_id) {
+            *existing = label;
+            return;
+        }
+        while self.map.len() >= MAX_ANSWERED_LABELS {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.map.remove(&oldest);
+                }
+                None => {
+                    self.map.clear();
+                    break;
+                }
+            }
+        }
+        self.order.push_back(request_id.clone());
+        self.map.insert(request_id, label);
+    }
+
+    fn get(&self, request_id: &str) -> Option<String> {
+        self.map.get(request_id).cloned()
+    }
+}
+
 fn remember_label(request_id: &str, label: &str) {
     if request_id.is_empty() || label.is_empty() {
         return;
     }
     ANSWERED_LABELS
         .lock()
-        .expect("answered labels")
+        .unwrap_or_else(|poison| poison.into_inner())
         .insert(request_id.to_owned(), label.to_owned());
 }
 
 fn remembered_label(request_id: &str) -> Option<String> {
     ANSWERED_LABELS
         .lock()
-        .expect("answered labels")
+        .unwrap_or_else(|poison| poison.into_inner())
         .get(request_id)
-        .cloned()
 }
 
-static ANSWERED_LABELS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, String>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static ANSWERED_LABELS: std::sync::LazyLock<std::sync::Mutex<AnsweredLabels>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(AnsweredLabels::default()));
 
 fn answer_request_id(op: &AgentOp) -> &str {
     match op {
@@ -3248,5 +3280,22 @@ mod tests {
             .await;
         assert_eq!(dm, Some(("D1".to_owned(), "UBOT".to_owned())));
         assert_eq!(hits.load(Ordering::SeqCst), 2, "the holder reaches the same fake Slack");
+    }
+
+    #[test]
+    fn answered_labels_is_bounded_and_evicts_oldest() {
+        let mut labels = AnsweredLabels::default();
+        for i in 0..(MAX_ANSWERED_LABELS + 10) {
+            labels.insert(format!("req-{i}"), format!("opt-{i}"));
+        }
+        assert_eq!(labels.map.len(), MAX_ANSWERED_LABELS);
+        assert_eq!(labels.get("req-0"), None);
+        assert_eq!(labels.get("req-9"), None);
+        assert_eq!(labels.get("req-10").as_deref(), Some("opt-10"));
+        let last = MAX_ANSWERED_LABELS + 9;
+        assert_eq!(
+            labels.get(&format!("req-{last}")).as_deref(),
+            Some(format!("opt-{last}").as_str())
+        );
     }
 }

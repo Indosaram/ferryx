@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub const APPROVAL_DENIAL_TURN_LIMIT: u32 = 5;
 const DENIAL_REASON: &str =
@@ -39,7 +39,16 @@ const GRACEFUL_EXIT_WINDOW: Duration = Duration::from_secs(5);
 /// How long after a turn's final `agent_end` mhc gets to record whether the session settled or
 /// is waiting on background work (it records that about a second after the reply).
 const LIFECYCLE_SETTLE_WINDOW: Duration = Duration::from_secs(10);
-const LIFECYCLE_POLL: Duration = Duration::from_millis(200);
+/// Progressive poll intervals while waiting for the session lifecycle record to settle.
+const LIFECYCLE_POLL_STEPS: [Duration; 3] = [
+    Duration::from_millis(200),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+];
+/// Maximum concurrent held background `mhc` engines kept alive across sessions.
+/// When a new holder exceeds this cap, the oldest holder is evicted and gracefully
+/// closed so idle background subprocesses cannot accumulate unboundedly in RAM.
+const MAX_HELD_ENGINES: usize = 6;
 /// How often a held engine re-reads the session lifecycle while it waits for a wake.
 const BACKGROUND_RECHECK: Duration = Duration::from_secs(60);
 /// The tail of the session file searched for the latest lifecycle record.
@@ -1148,6 +1157,15 @@ pub(crate) async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
         })
 }
 
+fn settle_poll_delay(attempt: usize) -> Duration {
+    LIFECYCLE_POLL_STEPS[attempt.min(LIFECYCLE_POLL_STEPS.len() - 1)]
+}
+
+async fn lifecycle_file_sig(path: &str) -> Option<(u64, Option<std::time::SystemTime>)> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some((meta.len(), meta.modified().ok()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Settle {
     /// Nothing the session waits on: the engine can close.
@@ -1162,7 +1180,11 @@ enum Settle {
 /// session file without lifecycle records (an older mhc) settles at once.
 async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle> {
     let until = tokio::time::Instant::now() + LIFECYCLE_SETTLE_WINDOW;
+    let mut poll_step = 0usize;
+    let mut last_sig: Option<(u64, Option<std::time::SystemTime>)> = None;
     loop {
+        let wait = settle_poll_delay(poll_step)
+            .min(until.saturating_duration_since(tokio::time::Instant::now()));
         // Frames the engine already wrote come before the record: a completion wake that ran to
         // its own end leaves a 'done' record while its reply is still unread in the pipe, and
         // closing on that record would drop the reply the holder exists to deliver. Draining
@@ -1175,8 +1197,22 @@ async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle
                     return Ok(Settle::Started);
                 }
             }
-            _ = tokio::time::sleep(LIFECYCLE_POLL) => {}
+            _ = tokio::time::sleep(wait) => {
+                poll_step = poll_step.saturating_add(1);
+            }
         }
+        // Stat before reading the 256 KiB tail: if `(len, mtime)` is unchanged from the last
+        // check (which already saw `run_active == true`), skip re-reading and re-parsing.
+        let Some(sig) = lifecycle_file_sig(thread).await else {
+            return Ok(Settle::Done);
+        };
+        if last_sig.as_ref() == Some(&sig) {
+            if tokio::time::Instant::now() >= until {
+                return Ok(Settle::Done);
+            }
+            continue;
+        }
+        last_sig = Some(sig);
         match latest_lifecycle(thread).await {
             None => return Ok(Settle::Done),
             Some(lifecycle) if !lifecycle.run_active => {
@@ -1194,21 +1230,105 @@ async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle
 
 /// A turn that wants a held engine: the holder answers between follow-up runs.
 type Handover = oneshot::Sender<Box<Engine>>;
-type HeldEntry = (String, UnboundedSender<Handover>);
-fn held() -> &'static Mutex<HashMap<String, HeldEntry>> {
-    static HELD: OnceLock<Mutex<HashMap<String, HeldEntry>>> = OnceLock::new();
-    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+struct HeldEntry {
+    id: String,
+    order: u64,
+    sender: UnboundedSender<Handover>,
+    evict: watch::Sender<bool>,
+}
+#[derive(Default)]
+struct HeldRegistry {
+    next_order: u64,
+    entries: HashMap<String, HeldEntry>,
+}
+impl HeldRegistry {
+    fn register(&mut self, thread: &str, max_held: usize) -> (HeldSlot, Vec<String>) {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.next_order = self.next_order.saturating_add(1);
+        let order = self.next_order;
+        let (sender, handovers) = mpsc::unbounded_channel::<Handover>();
+        let (evict_tx, evicted) = watch::channel(false);
+        if let Some(replaced) = self.entries.insert(
+            thread.to_owned(),
+            HeldEntry {
+                id: id.clone(),
+                order,
+                sender: sender.clone(),
+                evict: evict_tx.clone(),
+            },
+        ) {
+            let _ = replaced.evict.send_replace(true);
+        }
+        let evicted_threads = self.enforce_cap(max_held, Some(thread));
+        let slot = HeldSlot {
+            guard: HeldGuard {
+                thread: thread.to_owned(),
+                id,
+            },
+            order,
+            sender,
+            handovers,
+            evict_tx,
+            evicted,
+        };
+        (slot, evicted_threads)
+    }
+
+    fn reinsert(&mut self, thread: String, entry: HeldEntry, max_held: usize) -> Vec<String> {
+        let protect = thread.clone();
+        self.entries.insert(thread, entry);
+        self.enforce_cap(max_held, Some(&protect))
+    }
+
+    fn enforce_cap(&mut self, max_held: usize, keep: Option<&str>) -> Vec<String> {
+        let mut evicted = Vec::new();
+        while self.entries.len() > max_held {
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|(k, _)| keep != Some(k.as_str()))
+                .min_by_key(|(_, entry)| entry.order)
+                .or_else(|| self.entries.iter().min_by_key(|(_, entry)| entry.order))
+                .map(|(k, _)| k.clone());
+            let Some(oldest_key) = oldest else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest_key) {
+                let _ = entry.evict.send_replace(true);
+                evicted.push(oldest_key);
+            }
+        }
+        evicted
+    }
+
+    fn unregister(&mut self, thread: &str, id: &str) {
+        if self.entries.get(thread).is_some_and(|entry| entry.id == id) {
+            self.entries.remove(thread);
+        }
+    }
+
+    fn get_sender(&self, thread: &str) -> Option<UnboundedSender<Handover>> {
+        self.entries.get(thread).map(|entry| entry.sender.clone())
+    }
+}
+fn held() -> &'static Mutex<HeldRegistry> {
+    static HELD: OnceLock<Mutex<HeldRegistry>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HeldRegistry::default()))
 }
 /// True while this hub still holds the thread's engine (settling its last run or waiting on
 /// background work): the session has a live owner, whatever its last lifecycle record says.
 pub(crate) fn is_held(thread: &str) -> bool {
-    held().lock().expect("mhc held registry").contains_key(thread)
+    held()
+        .lock()
+        .expect("mhc held registry")
+        .entries
+        .contains_key(thread)
 }
 fn unregister_held(thread: &str, id: &str) {
-    let mut held = held().lock().expect("mhc held registry");
-    if held.get(thread).is_some_and(|(owner, _)| owner == id) {
-        held.remove(thread);
-    }
+    held()
+        .lock()
+        .expect("mhc held registry")
+        .unregister(thread, id);
 }
 struct HeldGuard {
     thread: String,
@@ -1223,8 +1343,7 @@ async fn take_held(thread: Option<&str>) -> Option<Engine> {
     let sender = held()
         .lock()
         .expect("mhc held registry")
-        .get(thread?)
-        .map(|(_, sender)| sender.clone())?;
+        .get_sender(thread?)?;
     let (reply, engine) = oneshot::channel();
     sender.send(reply).ok()?;
     // A holder that ended first drops the request; the turn then starts a fresh engine.
@@ -1235,6 +1354,7 @@ async fn take_held(thread: Option<&str>) -> Option<Engine> {
 enum HoldEnd {
     Settled,
     Expired,
+    Evicted,
     Exited,
     Failed,
 }
@@ -1244,36 +1364,64 @@ pub const BACKGROUND_LOST: &str = "⚠️ 백그라운드 작업을 실행하던
 /// A registered holder: the session's next turn asks it for the engine.
 struct HeldSlot {
     guard: HeldGuard,
+    order: u64,
     sender: UnboundedSender<Handover>,
     handovers: mpsc::UnboundedReceiver<Handover>,
+    evict_tx: watch::Sender<bool>,
+    evicted: watch::Receiver<bool>,
 }
 fn register_held(thread: &str) -> HeldSlot {
-    let id = uuid::Uuid::new_v4().to_string();
-    let (sender, handovers) = mpsc::unbounded_channel::<Handover>();
-    held()
+    let (slot, evicted) = held()
         .lock()
         .expect("mhc held registry")
-        .insert(thread.to_owned(), (id.clone(), sender.clone()));
-    HeldSlot {
-        guard: HeldGuard {
-            thread: thread.to_owned(),
-            id,
-        },
-        sender,
-        handovers,
+        .register(thread, MAX_HELD_ENGINES);
+    for session in evicted {
+        tracing::warn!(
+            session = %session,
+            max_held = MAX_HELD_ENGINES,
+            "evicting oldest held mhc engine to enforce concurrency cap"
+        );
     }
+    slot
 }
 impl HeldSlot {
     /// Gives the engine to a waiting turn; hands it back when that turn is gone.
     fn hand_over(&self, reply: Handover, engine: Box<Engine>) -> std::result::Result<(), Box<Engine>> {
         unregister_held(&self.guard.thread, &self.guard.id);
         reply.send(engine).inspect_err(|_| {
-            held().lock().expect("mhc held registry").insert(
-                self.guard.thread.clone(),
-                (self.guard.id.clone(), self.sender.clone()),
-            );
+            if !*self.evicted.borrow() {
+                let evicted = held().lock().expect("mhc held registry").reinsert(
+                    self.guard.thread.clone(),
+                    HeldEntry {
+                        id: self.guard.id.clone(),
+                        order: self.order,
+                        sender: self.sender.clone(),
+                        evict: self.evict_tx.clone(),
+                    },
+                    MAX_HELD_ENGINES,
+                );
+                for session in evicted {
+                    tracing::warn!(
+                        session = %session,
+                        max_held = MAX_HELD_ENGINES,
+                        "evicting oldest held mhc engine to enforce concurrency cap"
+                    );
+                }
+            }
         })
     }
+}
+
+async fn wait_evicted(rx: &mut watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    while rx.changed().await.is_ok() {
+        if *rx.borrow() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await
 }
 
 /// Keeps a finished turn's engine while its session waits on background work: completion
@@ -1292,10 +1440,13 @@ async fn hold(
     let deadline = tokio::time::Instant::now() + config.background_max;
     let mut announced = false;
     let end = 'hold: loop {
-        let state = match tokio::time::timeout_at(deadline, settle(&mut engine.rpc, &thread, cwd)).await {
-            Err(_) => break HoldEnd::Expired,
-            Ok(Err(_)) => break HoldEnd::Exited,
-            Ok(Ok(state)) => state,
+        let state = tokio::select! {
+            _ = wait_evicted(&mut slot.evicted) => break 'hold HoldEnd::Evicted,
+            res = tokio::time::timeout_at(deadline, settle(&mut engine.rpc, &thread, cwd)) => match res {
+                Err(_) => break HoldEnd::Expired,
+                Ok(Err(_)) => break HoldEnd::Exited,
+                Ok(Ok(state)) => state,
+            }
         };
         match state {
             // A turn that asked meanwhile gets no engine and starts its own once this one is
@@ -1322,6 +1473,7 @@ async fn hold(
         loop {
             let recheck = tokio::time::Instant::now() + BACKGROUND_RECHECK;
             tokio::select! {
+                _ = wait_evicted(&mut slot.evicted) => break 'hold HoldEnd::Evicted,
                 _ = tokio::time::sleep_until(deadline) => break 'hold HoldEnd::Expired,
                 Some(reply) = slot.handovers.recv() => match slot.hand_over(reply, engine) {
                     Ok(()) => {
@@ -1360,6 +1512,12 @@ async fn hold(
             tracing::warn!(session = %thread, limit_secs = config.background_max.as_secs(), "background work outlived its limit; stopping its engine");
             let _ = followups.send(BACKGROUND_EXPIRED.to_owned());
         }
+        HoldEnd::Evicted => {
+            tracing::warn!(session = %thread, max_held = MAX_HELD_ENGINES, "held mhc engine evicted by concurrency cap; closing it");
+            if announced {
+                let _ = followups.send(BACKGROUND_LOST.to_owned());
+            }
+        }
         HoldEnd::Exited => {
             tracing::warn!(session = %thread, "held mhc engine exited before its background work settled");
             let _ = followups.send(BACKGROUND_LOST.to_owned());
@@ -1369,7 +1527,7 @@ async fn hold(
         }
         HoldEnd::Settled | HoldEnd::Failed => {}
     }
-    close(*engine, end == HoldEnd::Settled).await;
+    close(*engine, matches!(end, HoldEnd::Settled | HoldEnd::Evicted)).await;
     // Only now does a turn that asked for this engine hear there is none and start its own,
     // so two engines never run the same session file.
     drop(slot);
@@ -2763,5 +2921,57 @@ mod lifecycle_tests {
             Some(home.join(".ferryx").join("hub").join("workspace"))
         );
         assert_eq!(workspace_root_from(None, None), None);
+    }
+
+    #[test]
+    fn settle_poll_backs_off_from_200ms_to_500ms_to_1s() {
+        assert_eq!(settle_poll_delay(0), Duration::from_millis(200));
+        assert_eq!(settle_poll_delay(1), Duration::from_millis(500));
+        assert_eq!(settle_poll_delay(2), Duration::from_secs(1));
+        assert_eq!(settle_poll_delay(10), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn held_registry_caps_concurrency_by_evicting_oldest_holder() {
+        let mut registry = HeldRegistry::default();
+        let (mut slot1, evicted) = registry.register("s1", 3);
+        assert!(evicted.is_empty());
+        let (slot2, evicted) = registry.register("s2", 3);
+        assert!(evicted.is_empty());
+        let (slot3, evicted) = registry.register("s3", 3);
+        assert!(evicted.is_empty());
+        assert_eq!(registry.entries.len(), 3);
+        assert!(!*slot1.evicted.borrow());
+        assert!(!*slot2.evicted.borrow());
+        assert!(!*slot3.evicted.borrow());
+
+        // Exceeding the cap evicts the oldest holder (s1) and signals its watch channel.
+        let (slot4, evicted) = registry.register("s4", 3);
+        assert_eq!(evicted, vec!["s1".to_owned()]);
+        assert_eq!(registry.entries.len(), 3);
+        assert!(*slot1.evicted.borrow());
+        assert!(registry.get_sender("s1").is_none());
+        assert!(!*slot2.evicted.borrow());
+        assert!(!*slot3.evicted.borrow());
+        assert!(!*slot4.evicted.borrow());
+        tokio::time::timeout(Duration::from_secs(1), wait_evicted(&mut slot1.evicted))
+            .await
+            .expect("evicted holder wakes immediately");
+
+        // Re-registering an existing session replaces its old slot without evicting others.
+        let (slot3_new, evicted) = registry.register("s3", 3);
+        assert!(evicted.is_empty());
+        assert_eq!(registry.entries.len(), 3);
+        assert!(*slot3.evicted.borrow());
+        assert!(!*slot2.evicted.borrow());
+        assert!(!*slot4.evicted.borrow());
+        assert!(!*slot3_new.evicted.borrow());
+
+        // A fifth distinct session now evicts s2 (the oldest remaining holder).
+        let (_slot5, evicted) = registry.register("s5", 3);
+        assert_eq!(evicted, vec!["s2".to_owned()]);
+        assert!(*slot2.evicted.borrow());
+        assert!(registry.get_sender("s2").is_none());
+        assert_eq!(registry.entries.len(), 3);
     }
 }

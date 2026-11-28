@@ -6,7 +6,7 @@ use ferryx_lib::native_terminal::{
 
 pub fn empty_cell() -> CellSnapshot {
     CellSnapshot {
-        text: String::new(),
+        text: Default::default(),
         wide: CellWide::Narrow,
         fg: None,
         bg: None,
@@ -40,7 +40,7 @@ pub fn make_cell(
     style: CellStyle,
 ) -> CellSnapshot {
     CellSnapshot {
-        text: text.to_string(),
+        text: text.into(),
         wide,
         fg,
         bg,

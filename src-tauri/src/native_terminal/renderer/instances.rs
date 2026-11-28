@@ -1,6 +1,5 @@
 //! Terminal grid instance batch generator for background and glyph passes.
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use super::atlas::{GlyphAtlas, GlyphKey, PreparedGlyphs};
@@ -9,6 +8,58 @@ use super::types::{RendererConfig, SelectionSnapshot};
 use crate::native_terminal::cursor::CursorVisualStyle;
 use crate::native_terminal::error::NativeTerminalError;
 use crate::native_terminal::snapshot::{CellSnapshot, CellWide, RenderSnapshot};
+
+const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_PRIME: u64 = 0x0100_0000_01b3;
+
+struct Fnv1aHasher(u64);
+
+impl Fnv1aHasher {
+    #[inline]
+    fn new() -> Self {
+        Self(FNV1A_OFFSET_BASIS)
+    }
+}
+
+impl Hasher for Fnv1aHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = self.0;
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV1A_PRIME);
+        }
+        self.0 = hash;
+    }
+}
+
+#[inline]
+fn has_under_background_image(snapshot: &RenderSnapshot) -> bool {
+    snapshot.images.iter().any(|p| p.z < i32::MIN / 2)
+}
+
+#[inline]
+fn push_bg_rect(
+    bg_instances: &mut Vec<RectInstance>,
+    rect: [f32; 4],
+    color: [f32; 4],
+    merge: bool,
+) {
+    if merge {
+        if let Some(last) = bg_instances.last_mut() {
+            if last.color == color && last.rect[1] == rect[1] && last.rect[3] == rect[3] {
+                last.rect[2] += rect[2];
+                return;
+            }
+        }
+    }
+    bg_instances.push(RectInstance { rect, color });
+}
 
 fn visible_glyph(cell: &CellSnapshot) -> bool {
     cell.wide != CellWide::SpacerTail
@@ -55,12 +106,13 @@ pub fn compute_row_hash(
     selection: Option<&SelectionSnapshot>,
     config: &RendererConfig,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = Fnv1aHasher::new();
     row.hash(&mut hasher);
     config.cell_width_px.hash(&mut hasher);
     config.cell_height_px.hash(&mut hasher);
     config.theme.hash(&mut hasher);
     snapshot.cols.hash(&mut hasher);
+    has_under_background_image(snapshot).hash(&mut hasher);
 
     if let Some(cells) = snapshot.grid.get(row as usize) {
         for cell in cells {
@@ -68,18 +120,16 @@ pub fn compute_row_hash(
             (cell.wide as u8).hash(&mut hasher);
             cell.fg.map(|c| (c.r, c.g, c.b)).hash(&mut hasher);
             cell.bg.map(|c| (c.r, c.g, c.b)).hash(&mut hasher);
-            (
-                cell.bold,
-                cell.italic,
-                cell.underline,
-                cell.inverse,
-                cell.faint,
-                cell.blink,
-                cell.invisible,
-                cell.strikethrough,
-                cell.overline,
-            )
-                .hash(&mut hasher);
+            let attrs: u16 = u16::from(cell.bold)
+                | (u16::from(cell.italic) << 1)
+                | (u16::from(cell.underline) << 2)
+                | (u16::from(cell.inverse) << 3)
+                | (u16::from(cell.faint) << 4)
+                | (u16::from(cell.blink) << 5)
+                | (u16::from(cell.invisible) << 6)
+                | (u16::from(cell.strikethrough) << 7)
+                | (u16::from(cell.overline) << 8);
+            attrs.hash(&mut hasher);
         }
     }
 
@@ -91,6 +141,7 @@ pub fn compute_row_hash(
     }
 
     if let Some(sel) = selection {
+        true.hash(&mut hasher);
         for col in 0..snapshot.cols {
             sel.contains_cell(col, row).hash(&mut hasher);
         }
@@ -110,7 +161,15 @@ pub fn build_row_instances(
     queue: &wgpu::Queue,
     prepared: Option<&PreparedGlyphs>,
 ) -> Result<(Vec<RectInstance>, Vec<GlyphInstance>), NativeTerminalError> {
-    let mut bg_instances = Vec::with_capacity(snapshot.cols as usize);
+    // Kitty images with z < i32::MIN / 2 rely on per-cell bg rects in
+    // `image_background_occluders`; merge contiguous runs on all other frames.
+    let merge_bg = !has_under_background_image(snapshot);
+    let mut bg_instances = Vec::with_capacity(if merge_bg {
+        8.min(snapshot.cols as usize)
+    } else {
+        snapshot.cols as usize
+    });
+    let mut decorations = Vec::new();
     let mut glyph_instances = Vec::new();
     let (cell_w, cell_h) = (config.cell_width_px as f32, config.cell_height_px as f32);
     let row_cells = snapshot.grid.get(row as usize);
@@ -169,14 +228,11 @@ pub fn build_row_instances(
             fg_color = config.theme.cursor_accent;
         }
 
-        bg_instances.push(RectInstance {
-            rect: [px_x, px_y, cell_w, cell_h],
-            color: bg_color,
-        });
+        push_bg_rect(&mut bg_instances, [px_x, px_y, cell_w, cell_h], bg_color, merge_bg);
 
         if is_cursor {
             append_cursor_decorations(
-                &mut bg_instances,
+                &mut decorations,
                 effective_cursor_style,
                 px_x,
                 px_y,
@@ -189,13 +245,13 @@ pub fn build_row_instances(
         if let Some(c) = cell {
             let line_h = 1.0f32.max((cell_h * 0.08).round());
             if c.underline {
-                bg_instances.push(RectInstance {
+                decorations.push(RectInstance {
                     rect: [px_x, px_y + cell_h - line_h - 1.0, cell_w, line_h],
                     color: fg_color,
                 });
             }
             if c.strikethrough {
-                bg_instances.push(RectInstance {
+                decorations.push(RectInstance {
                     rect: [
                         px_x,
                         px_y + (cell_h * 0.5 - line_h * 0.5).round(),
@@ -206,7 +262,7 @@ pub fn build_row_instances(
                 });
             }
             if c.overline {
-                bg_instances.push(RectInstance {
+                decorations.push(RectInstance {
                     rect: [px_x, px_y, cell_w, line_h],
                     color: fg_color,
                 });
@@ -242,6 +298,8 @@ pub fn build_row_instances(
             }
         }
     }
+
+    bg_instances.extend(decorations);
 
     Ok((bg_instances, glyph_instances))
 }
@@ -530,11 +588,46 @@ mod tests {
         };
         let h_base = compute_row_hash(0, &single_cell_scenario(base.clone()), None, &config);
 
+        let mut bold = base.clone();
+        bold.bold = true;
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(bold), None, &config)
+        );
+
+        let mut italic = base.clone();
+        italic.italic = true;
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(italic), None, &config)
+        );
+
+        let mut underline = base.clone();
+        underline.underline = true;
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(underline), None, &config)
+        );
+
+        let mut inverse = base.clone();
+        inverse.inverse = true;
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(inverse), None, &config)
+        );
+
         let mut faint = base.clone();
         faint.faint = true;
         assert_ne!(
             h_base,
             compute_row_hash(0, &single_cell_scenario(faint), None, &config)
+        );
+
+        let mut blink = base.clone();
+        blink.blink = true;
+        assert_ne!(
+            h_base,
+            compute_row_hash(0, &single_cell_scenario(blink), None, &config)
         );
 
         let mut invis = base.clone();
@@ -557,5 +650,119 @@ mod tests {
             h_base,
             compute_row_hash(0, &single_cell_scenario(over), None, &config)
         );
+    }
+
+    #[test]
+    fn test_fnv1a_hasher_matches_reference_vectors() {
+        let mut h_empty = Fnv1aHasher::new();
+        h_empty.write(b"");
+        assert_eq!(h_empty.finish(), 0xcbf2_9ce4_8422_2325);
+
+        let mut h_a = Fnv1aHasher::new();
+        h_a.write(b"a");
+        assert_eq!(h_a.finish(), 0xaf63_dc4c_8601_ec8c);
+
+        let mut h_foobar = Fnv1aHasher::new();
+        h_foobar.write(b"foobar");
+        assert_eq!(h_foobar.finish(), 0x8594_4171_f739_67e8);
+    }
+
+    #[test]
+    fn test_bg_run_length_merging_produces_pixel_identical_geometry() {
+        let c_default = [0.1, 0.1, 0.1, 1.0];
+        let c_red = [1.0, 0.0, 0.0, 1.0];
+        let c_blue = [0.0, 0.0, 1.0, 1.0];
+        let colors = [
+            c_default, c_default, c_default, c_red, c_red, c_blue, c_default, c_default,
+            c_default, c_default,
+        ];
+        let (cell_w, cell_h, row_y) = (10.0f32, 20.0f32, 40.0f32);
+
+        let mut merged = Vec::new();
+        let mut unmerged = Vec::new();
+        for (col, &color) in colors.iter().enumerate() {
+            let rect = [col as f32 * cell_w, row_y, cell_w, cell_h];
+            push_bg_rect(&mut merged, rect, color, true);
+            push_bg_rect(&mut unmerged, rect, color, false);
+        }
+
+        assert_eq!(unmerged.len(), 10);
+        assert_eq!(merged.len(), 4);
+        assert_eq!(merged[0].rect, [0.0, 40.0, 30.0, 20.0]);
+        assert_eq!(merged[0].color, c_default);
+        assert_eq!(merged[1].rect, [30.0, 40.0, 20.0, 20.0]);
+        assert_eq!(merged[1].color, c_red);
+        assert_eq!(merged[2].rect, [50.0, 40.0, 10.0, 20.0]);
+        assert_eq!(merged[2].color, c_blue);
+        assert_eq!(merged[3].rect, [60.0, 40.0, 40.0, 20.0]);
+        assert_eq!(merged[3].color, c_default);
+
+        // Verify every pixel coordinate in the 100x20 row resolves identically.
+        let sample_color = |rects: &[RectInstance], x: f32, y: f32| -> Option<[f32; 4]> {
+            rects.iter().rev().find_map(|r| {
+                let in_x = x >= r.rect[0] && x < r.rect[0] + r.rect[2];
+                let in_y = y >= r.rect[1] && y < r.rect[1] + r.rect[3];
+                (in_x && in_y).then_some(r.color)
+            })
+        };
+        for px in 0..100 {
+            let x = px as f32 + 0.5;
+            for py in [row_y + 0.5, row_y + 10.0, row_y + 19.5] {
+                assert_eq!(
+                    sample_color(&merged, x, py),
+                    sample_color(&unmerged, x, py),
+                    "mismatch at ({x}, {py})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_row_instances_merges_contiguous_bg_and_preserves_decorations() {
+        let gpu = match GpuContext::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
+        };
+        eprintln!("FERRYX_GPU_TEST_READY");
+        let mut atlas = GlyphAtlas::new(&gpu.device);
+        let config = test_config();
+
+        let red = ColorRgb { r: 255, g: 0, b: 0 };
+        let mut row = vec![CellSnapshot::default(); 8];
+        row[2].bg = Some(red);
+        row[3].bg = Some(red);
+        row[3].underline = true;
+        row[4].text = "A".into();
+        let snapshot = RenderSnapshot {
+            cols: 8,
+            rows: 1,
+            cursor: crate::native_terminal::cursor::CursorSnapshot {
+                x: 0,
+                y: 0,
+                visible: true,
+                blinking: false,
+                wide_tail: false,
+                visual_style: CursorVisualStyle::Underline,
+            },
+            grid: vec![row],
+            images: Vec::new(),
+        };
+
+        let (bg, glyphs) =
+            build_row_instances(0, &snapshot, None, &config, &mut atlas, &gpu.queue, None).unwrap();
+        // 3 merged bg spans: [0..2) default, [2..4) red, [4..8) default, followed by
+        // 2 trailing decorations: cursor underline at col 0 + cell underline at col 3.
+        assert_eq!(bg.len(), 3 + 2);
+        assert_eq!(bg[0].rect, [0.0, 0.0, 20.0, 20.0]);
+        assert_eq!(bg[1].rect, [20.0, 0.0, 20.0, 20.0]);
+        assert_eq!(bg[1].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(bg[2].rect, [40.0, 0.0, 40.0, 20.0]);
+        assert_eq!(bg[3].rect, [0.0, 18.0, 10.0, 2.0]);
+        assert_eq!(bg[4].rect[0], 30.0);
+        assert_eq!(bg[4].rect[2], 10.0);
+        assert_eq!(glyphs.len(), 1);
     }
 }

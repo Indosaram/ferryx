@@ -8,7 +8,7 @@
 //! The session key is omo-gateway's, so a Slack thread omo already answered resumes the same
 //! engine thread (`metadata.omo_thread_id` in `sessions`). One turn per session runs at a time.
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -400,13 +400,26 @@ async fn first_delivery_persisted(pool: &SqlitePool, channel: &str, ts: &str) ->
     })
 }
 
+const SESSION_LOCK_PRUNE_THRESHOLD: usize = 128;
+
+fn session_locks() -> &'static Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(Default::default)
+}
+
 pub(crate) fn session_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    let mut locks = LOCKS
-        .get_or_init(Default::default)
+    let mut locks = session_locks()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    locks.entry(key.to_owned()).or_default().clone()
+    if let Some(existing) = locks.get(key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    if locks.len() > SESSION_LOCK_PRUNE_THRESHOLD {
+        locks.retain(|_, weak| weak.strong_count() > 0);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key.to_owned(), Arc::downgrade(&lock));
+    lock
 }
 
 async fn load_state(pool: &SqlitePool, key: &SessionKey) -> Option<SessionState> {
@@ -2928,5 +2941,36 @@ mod tests {
     fn a_dashboard_turn_has_no_stable_owner_turn_id() {
         let web = SessionTurn { status_ts: None, text: "hi".into(), ..ack_turn("1.0") };
         assert_eq!(owner_turn_id(&web), None);
+    }
+
+    #[test]
+    fn session_lock_reuses_live_arc_and_prunes_dead_entries() {
+        let live_key = format!("live-session-{}", uuid::Uuid::new_v4());
+        let first = session_lock(&live_key);
+        let second = session_lock(&live_key);
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let prefix = format!("ephemeral-session-{}", uuid::Uuid::new_v4());
+        for i in 0..=(SESSION_LOCK_PRUNE_THRESHOLD + 16) {
+            let lock = session_lock(&format!("{prefix}-{i}"));
+            drop(lock);
+        }
+        // One more insertion past the threshold triggers pruning of dead weak entries.
+        let trigger = session_lock(&format!("{prefix}-trigger"));
+        let remaining_ephemeral = session_locks()
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .count();
+        assert!(
+            remaining_ephemeral <= SESSION_LOCK_PRUNE_THRESHOLD,
+            "dead weak session locks must be pruned past threshold, found {remaining_ephemeral}"
+        );
+        // Live lock is still preserved and shared.
+        assert!(Arc::ptr_eq(&first, &session_lock(&live_key)));
+        drop(trigger);
+        drop(second);
+        drop(first);
     }
 }

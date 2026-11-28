@@ -5,7 +5,10 @@ use std::ptr;
 use fxsh::types::{
     Cell, ClipboardTarget, Color, Cursor, CursorStyle, Delta, Hyperlink, Modes, MouseEncoding, MouseMode, Palette, RowData, UiEvent, UiEventKind,
 };
-use session_core::replica::{normalize_size, Replica};
+use session_core::replica::{
+    normalize_size, palette_encoded_len, row_encoded_len, Replica, CURSOR_ENCODED_LEN,
+    MODES_ENCODED_LEN,
+};
 
 use crate::sys::{self, *};
 
@@ -620,13 +623,10 @@ pub struct HostTerminal {
     next_event_id: u64,
     row_bytes: VecDeque<usize>,
     scrollback_bytes: usize,
+    screen_row_bytes: Vec<usize>,
+    screen_bytes: usize,
+    links_bytes: usize,
     trimmed: usize,
-}
-
-fn encoded_len<T: fxsh::Codec>(v: &T) -> usize {
-    let mut w = Vec::new();
-    v.enc(&mut w);
-    w.len()
 }
 
 pub struct Advance {
@@ -637,14 +637,13 @@ pub struct Advance {
     pub ui_events: Vec<UiEvent>,
 }
 
-struct Light {
-    screen: Vec<RowData>,
-    cursor: Cursor,
-    modes: Modes,
-    palette: Palette,
-    title: String,
-    links: BTreeMap<u32, String>,
-    had_scrollback: bool,
+struct ScreenDiff {
+    cursor: Option<Cursor>,
+    modes: Option<Modes>,
+    palette: Option<Palette>,
+    title: Option<String>,
+    dirty_rows: Vec<(u16, RowData)>,
+    hyperlinks_added: Vec<Hyperlink>,
 }
 
 impl HostTerminal {
@@ -658,6 +657,9 @@ impl HostTerminal {
             next_event_id: 1,
             row_bytes: VecDeque::new(),
             scrollback_bytes: 0,
+            screen_row_bytes: Vec::new(),
+            screen_bytes: 0,
+            links_bytes: 0,
             trimmed: 0,
         };
         t.rebuild(true);
@@ -674,38 +676,24 @@ impl HostTerminal {
         self.engine.compress_step()
     }
 
-    fn light(&self) -> Light {
-        let r = &self.replica;
-        Light {
-            screen: r.screen.clone(),
-            cursor: r.cursor.clone(),
-            modes: r.modes.clone(),
-            palette: r.palette.clone(),
-            title: r.title.clone(),
-            links: r.hyperlinks.clone(),
-            had_scrollback: !r.scrollback.is_empty(),
-        }
-    }
-
     pub fn feed(&mut self, bytes: &[u8]) -> Advance {
-        let light = self.light();
         let step = self.engine.feed(bytes);
-        self.advance(step, light)
+        self.advance(step)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> Advance {
-        let light = self.light();
         let step = self.engine.resize(cols, rows);
-        self.advance(step, light)
+        self.advance(step)
     }
 
-    fn advance(&mut self, step: Step, light: Light) -> Advance {
+    fn advance(&mut self, step: Step) -> Advance {
+        let had_scrollback = !self.replica.scrollback.is_empty();
         let mut appended_rows: Vec<(u64, RowData)> = Vec::new();
         let mut evicted_any = false;
-        let rewritten = match step {
+        let screen_diff = match step {
             Step::Rewritten => {
                 self.rebuild(true);
-                true
+                None
             }
             Step::Appended { evicted, appended } => {
                 let from_trimmed = evicted.min(self.trimmed);
@@ -723,13 +711,13 @@ impl HostTerminal {
                 }
                 if self.replica.scrollback.len() + self.trimmed != sb {
                     self.rebuild(true);
-                    true
+                    None
                 } else {
-                    self.rebuild(false);
-                    false
+                    Some(self.apply_screen_diff())
                 }
             }
         };
+        let rewritten = screen_diff.is_none();
         let mut vt_replies = Vec::new();
         let mut ui_events = Vec::new();
         for e in self.engine.take_effects() {
@@ -742,13 +730,84 @@ impl HostTerminal {
             }
         }
         evicted_any |= self.enforce_limit(&mut appended_rows);
-        let delta = (!rewritten).then(|| self.build_delta(&light, appended_rows, evicted_any, &ui_events));
+        let delta = screen_diff.map(|diff| {
+            let evicted_before =
+                (evicted_any && had_scrollback).then(|| self.replica.first_line_id().unwrap_or(self.next_line_id));
+            Delta {
+                subscription_id: 0,
+                base_revision: 0,
+                new_revision: 0,
+                size: None,
+                cursor: diff.cursor,
+                modes: diff.modes,
+                palette: diff.palette,
+                title: diff.title,
+                dirty_rows: diff.dirty_rows,
+                hyperlinks_added: diff.hyperlinks_added,
+                scrollback_appended: appended_rows,
+                scrollback_evicted_before: evicted_before,
+                exit_info: None,
+                ui_events: ui_events.clone(),
+            }
+        });
         let changed = rewritten || delta.as_ref().is_some_and(state_changed);
         Advance { rewritten, changed, delta, vt_replies, ui_events }
     }
 
+    fn apply_screen_diff(&mut self) -> ScreenDiff {
+        let s = self.engine.read_screen(&mut self.links);
+        let mut dirty_rows = Vec::new();
+        let same_len = self.replica.screen.len() == s.screen.len()
+            && self.screen_row_bytes.len() == s.screen.len();
+        if same_len {
+            for (i, new_row) in s.screen.iter().enumerate() {
+                if &self.replica.screen[i] != new_row {
+                    let new_len = row_encoded_len(new_row);
+                    self.screen_bytes = self.screen_bytes - self.screen_row_bytes[i] + new_len;
+                    self.screen_row_bytes[i] = new_len;
+                    dirty_rows.push((i as u16, new_row.clone()));
+                }
+            }
+        } else {
+            for (i, new_row) in s.screen.iter().enumerate() {
+                if self.replica.screen.get(i) != Some(new_row) {
+                    dirty_rows.push((i as u16, new_row.clone()));
+                }
+            }
+            self.screen_row_bytes = s.screen.iter().map(row_encoded_len).collect();
+            self.screen_bytes = self.screen_row_bytes.iter().sum();
+        }
+        let cursor = (self.replica.cursor != s.cursor).then(|| s.cursor.clone());
+        let modes = (self.replica.modes != s.modes).then(|| s.modes.clone());
+        let palette = (self.replica.palette != s.palette).then(|| s.palette.clone());
+        let title = (self.replica.title != s.title).then(|| s.title.clone());
+        self.replica.cols = s.cols;
+        self.replica.rows = s.rows;
+        self.replica.screen = s.screen;
+        self.replica.cursor = s.cursor;
+        self.replica.modes = s.modes;
+        self.replica.palette = s.palette;
+        self.replica.title = s.title;
+        if !self.links.uris.is_empty() {
+            let referenced = self.replica.referenced_links();
+            self.links.retain_referenced(&referenced);
+        }
+        let hyperlinks_added: Vec<Hyperlink> = self
+            .links
+            .uris
+            .iter()
+            .filter(|(id, uri)| self.replica.hyperlinks.get(id) != Some(uri))
+            .map(|(id, uri)| Hyperlink { id: *id, uri: uri.clone() })
+            .collect();
+        if !hyperlinks_added.is_empty() || self.replica.hyperlinks.len() != self.links.uris.len() {
+            self.replica.hyperlinks = self.links.uris.clone();
+            self.links_bytes = self.replica.hyperlinks.values().map(|u| 8 + u.len()).sum();
+        }
+        ScreenDiff { cursor, modes, palette, title, dirty_rows, hyperlinks_added }
+    }
+
     fn push_back_row(&mut self, row: RowData) {
-        let n = encoded_len(&row) + 8;
+        let n = row_encoded_len(&row) + 8;
         self.row_bytes.push_back(n);
         self.scrollback_bytes += n;
         self.replica.scrollback.push_back((self.next_line_id, row));
@@ -764,9 +823,13 @@ impl HostTerminal {
 
     fn non_scrollback_len(&self) -> usize {
         let r = &self.replica;
-        let screen: usize = r.screen.iter().map(encoded_len).sum();
-        let links: usize = r.hyperlinks.iter().map(|(_, u)| 8 + u.len()).sum();
-        256 + screen + encoded_len(&r.cursor) + encoded_len(&r.modes) + encoded_len(&r.palette) + 4 + r.title.len() + links
+        256 + self.screen_bytes
+            + CURSOR_ENCODED_LEN
+            + MODES_ENCODED_LEN
+            + palette_encoded_len(&r.palette)
+            + 4
+            + r.title.len()
+            + self.links_bytes
     }
 
     /// Keeps canonical_encode(S) at or below S_MAX (§2.2) by evicting the
@@ -787,27 +850,6 @@ impl HostTerminal {
         evicted
     }
 
-    fn build_delta(&self, light: &Light, appended: Vec<(u64, RowData)>, evicted: bool, ui_events: &[UiEvent]) -> Delta {
-        let r = &self.replica;
-        let evicted_before = (evicted && light.had_scrollback).then(|| r.first_line_id().unwrap_or(self.next_line_id));
-        Delta {
-            subscription_id: 0,
-            base_revision: 0,
-            new_revision: 0,
-            size: None,
-            cursor: (light.cursor != r.cursor).then(|| r.cursor.clone()),
-            modes: (light.modes != r.modes).then(|| r.modes.clone()),
-            palette: (light.palette != r.palette).then(|| r.palette.clone()),
-            title: (light.title != r.title).then(|| r.title.clone()),
-            dirty_rows: r.screen.iter().enumerate().filter(|(i, row)| light.screen.get(*i) != Some(row)).map(|(i, row)| (i as u16, row.clone())).collect(),
-            hyperlinks_added: r.hyperlinks.iter().filter(|(id, uri)| light.links.get(id) != Some(uri)).map(|(id, uri)| Hyperlink { id: *id, uri: uri.clone() }).collect(),
-            scrollback_appended: appended,
-            scrollback_evicted_before: evicted_before,
-            exit_info: None,
-            ui_events: ui_events.to_vec(),
-        }
-    }
-
     fn rebuild(&mut self, scrollback: bool) {
         let s = self.engine.read_screen(&mut self.links);
         if scrollback {
@@ -820,6 +862,8 @@ impl HostTerminal {
                 self.push_back_row(row);
             }
         }
+        self.screen_row_bytes = s.screen.iter().map(row_encoded_len).collect();
+        self.screen_bytes = self.screen_row_bytes.iter().sum();
         let r = &mut self.replica;
         r.cols = s.cols;
         r.rows = s.rows;
@@ -828,9 +872,12 @@ impl HostTerminal {
         r.modes = s.modes;
         r.palette = s.palette;
         r.title = s.title;
-        let referenced = r.referenced_links();
-        self.links.retain_referenced(&referenced);
+        if !self.links.uris.is_empty() {
+            let referenced = r.referenced_links();
+            self.links.retain_referenced(&referenced);
+        }
         r.hyperlinks = self.links.uris.clone();
+        self.links_bytes = r.hyperlinks.values().map(|u| 8 + u.len()).sum();
     }
 
     pub fn set_exit(&mut self, exit: fxsh::types::ExitInfo) {
@@ -849,4 +896,53 @@ pub fn state_changed(d: &Delta) -> bool {
         || !d.scrollback_appended.is_empty()
         || d.scrollback_evicted_before.is_some()
         || d.exit_info.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fxsh::Codec;
+
+    fn codec_len<T: Codec>(v: &T) -> usize {
+        let mut w = Vec::new();
+        v.enc(&mut w);
+        w.len()
+    }
+
+    fn reference_non_scrollback_len(r: &Replica) -> usize {
+        let screen: usize = r.screen.iter().map(codec_len).sum();
+        let links: usize = r.hyperlinks.iter().map(|(_, u)| 8 + u.len()).sum();
+        256 + screen + codec_len(&r.cursor) + codec_len(&r.modes) + codec_len(&r.palette) + 4 + r.title.len() + links
+    }
+
+    #[test]
+    fn incremental_non_scrollback_len_and_in_place_diff_match_reference() {
+        let mut t = HostTerminal::new(40, 6, 100);
+        assert_eq!(t.non_scrollback_len(), reference_non_scrollback_len(&t.replica));
+
+        let adv = t.feed(b"hello \x1b[1;31mworld\x1b[0m\x1b]0;title-1\x07\x1b]4;1;rgb:11/22/33\x1b\\");
+        assert!(!adv.rewritten);
+        assert!(adv.changed);
+        let d = adv.delta.as_ref().expect("delta");
+        assert_eq!(d.dirty_rows.len(), 1);
+        assert_eq!(d.dirty_rows[0].0, 0);
+        assert_eq!(d.title.as_deref(), Some("title-1"));
+        assert!(d.palette.is_some());
+        assert_eq!(t.non_scrollback_len(), reference_non_scrollback_len(&t.replica));
+
+        // Unchanged feed produces no dirty rows and preserves exact cached lengths.
+        let noop = t.feed(b"");
+        assert!(!noop.rewritten);
+        assert!(!noop.changed);
+        assert!(noop.delta.as_ref().unwrap().dirty_rows.is_empty());
+        assert_eq!(t.non_scrollback_len(), reference_non_scrollback_len(&t.replica));
+
+        // Hyperlinks add and then clear on rewrite.
+        t.feed(b"\r\n\x1b]8;;https://ex.com/test\x1b\\click\x1b]8;;\x1b\\");
+        assert_eq!(t.non_scrollback_len(), reference_non_scrollback_len(&t.replica));
+
+        let resized = t.resize(50, 8);
+        assert!(resized.rewritten);
+        assert_eq!(t.non_scrollback_len(), reference_non_scrollback_len(&t.replica));
+    }
 }

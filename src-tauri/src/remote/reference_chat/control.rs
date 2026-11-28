@@ -56,6 +56,10 @@ pub const CONTROL_EFFORT_ID: &str = "effort";
 /// recorded unverified apply, which a replay must not type again.
 const CONTROL_LEDGER_LIMIT: usize = 4096;
 
+/// Bounds on the process-local discovery cache and per-key probe serialization gates.
+const DISCOVERY_CACHE_MAX_ENTRIES: usize = 256;
+const PROBE_GATES_PRUNE_THRESHOLD: usize = 128;
+
 /// POST `/api/v1/reference-chat/{sessionId}/control` body.
 ///
 /// Flat on purpose: the UI sends `{ requestId, target, registryId, controlId, valueId }`, not
@@ -676,13 +680,26 @@ impl ComposerHost {
             CacheState::Ready(composer) => Some(composer.clone()),
             CacheState::Absent => None,
         };
-        self.cache.lock().insert(
-            key,
-            CacheEntry {
-                state,
-                expires_at: now.saturating_add(DISCOVERY_CACHE_TTL.as_millis() as u64),
-            },
-        );
+        {
+            let mut cache = self.cache.lock();
+            cache.retain(|_, entry| now < entry.expires_at);
+            if !cache.contains_key(&key) && cache.len() >= DISCOVERY_CACHE_MAX_ENTRIES {
+                if let Some(evict_key) = cache
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.expires_at)
+                    .map(|(k, _)| k.clone())
+                {
+                    cache.remove(&evict_key);
+                }
+            }
+            cache.insert(
+                key,
+                CacheEntry {
+                    state,
+                    expires_at: now.saturating_add(DISCOVERY_CACHE_TTL.as_millis() as u64),
+                },
+            );
+        }
         composer
     }
 
@@ -714,6 +731,9 @@ impl ComposerHost {
 
     fn probe_gate(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut gates = self.probe_gates.lock();
+        if gates.len() > PROBE_GATES_PRUNE_THRESHOLD {
+            gates.retain(|existing, gate| existing == key || Arc::strong_count(gate) > 1);
+        }
         gates
             .entry(key.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -2376,5 +2396,82 @@ mod tests {
         assert!(maho_caps.options.iter().any(|o| o.id == CONTROL_EFFORT_ID && o.values.len() == 7));
         let cline_caps = composer_from_models("cline", &empty);
         assert!(cline_caps.options.iter().any(|o| o.id == "mode" && o.values == vec!["act", "plan"]));
+    }
+
+    #[tokio::test]
+    async fn composer_host_purges_expired_cache_caps_entries_and_prunes_idle_probe_gates() {
+        let host = scripted_host();
+        let probe = ScriptProbe {
+            raw: Mutex::new(ProbeRaw::Stdout(claude_stdout())),
+            calls: AtomicUsize::new(0),
+        };
+        let clock = ManualClock(AtomicUsize::new(10_000));
+
+        // Seed 1 expired entry and 256 live entries (with "earliest" having the smallest expires_at).
+        {
+            let mut cache = host.cache.lock();
+            cache.insert(
+                "expired".into(),
+                CacheEntry {
+                    state: CacheState::Absent,
+                    expires_at: 9_999,
+                },
+            );
+            cache.insert(
+                "earliest".into(),
+                CacheEntry {
+                    state: CacheState::Absent,
+                    expires_at: 10_001,
+                },
+            );
+            for i in 1..DISCOVERY_CACHE_MAX_ENTRIES {
+                cache.insert(
+                    format!("live-{i}"),
+                    CacheEntry {
+                        state: CacheState::Absent,
+                        expires_at: 20_000 + i as u64,
+                    },
+                );
+            }
+        }
+
+        let caps = host
+            .composer_for("claude", Some("/work/cap"), Some("/home"), None, &probe, &clock)
+            .await;
+        assert!(caps.is_some());
+        {
+            let cache = host.cache.lock();
+            assert_eq!(cache.len(), DISCOVERY_CACHE_MAX_ENTRIES);
+            assert!(!cache.contains_key("expired"), "expired entry must be purged");
+            assert!(
+                !cache.contains_key("earliest"),
+                "earliest-expiring entry must be evicted when at capacity"
+            );
+        }
+
+        // Seed >128 idle probe gates plus one actively held gate; calling probe_gate prunes idle ones.
+        let held_gate = host.probe_gate("held-gate");
+        {
+            let mut gates = host.probe_gates.lock();
+            for i in 0..=PROBE_GATES_PRUNE_THRESHOLD {
+                gates.insert(
+                    format!("idle-gate-{i}"),
+                    Arc::new(tokio::sync::Mutex::new(())),
+                );
+            }
+        }
+        assert!(host.probe_gates.lock().len() > PROBE_GATES_PRUNE_THRESHOLD);
+        let _new_gate = host.probe_gate("fresh-gate");
+        {
+            let gates = host.probe_gates.lock();
+            assert!(gates.contains_key("held-gate"), "actively held gate must be preserved");
+            assert!(gates.contains_key("fresh-gate"), "newly requested gate must be present");
+            assert!(
+                gates.len() <= 3,
+                "idle probe gates with strong_count == 1 must be pruned, got {}",
+                gates.len()
+            );
+        }
+        drop(held_gate);
     }
 }

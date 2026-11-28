@@ -192,6 +192,22 @@ impl EngineLauncher for ProcessLauncher {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(target_os = "linux")]
+        {
+            let parent_pid = unsafe { libc::getpid() };
+            // SAFETY: runs after fork() and calls only async-signal-safe syscalls.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                    if libc::getppid() != parent_pid {
+                        libc::raise(libc::SIGKILL);
+                    }
+                    Ok(())
+                });
+            }
+        }
         match profile.open_log() {
             Some(log) => command.stderr(log),
             None => command.stderr(Stdio::null()),
@@ -225,8 +241,16 @@ impl EngineLauncher for ProcessLauncher {
             };
             let status = match waited {
                 Some(status) => status,
-                // Asked to stop, or every handle on the engine is gone: kill, then reap.
+                // Asked to stop, or every handle on the engine is gone: kill the whole
+                // process group (created by `process_group(0)`) so grandchild tool processes
+                // do not survive as orphans, then kill and reap the direct child.
                 None => {
+                    #[cfg(unix)]
+                    if let Some(pgid) = pid.and_then(|p| i32::try_from(p).ok()).filter(|&p| p > 0) {
+                        unsafe {
+                            libc::kill(-pgid, libc::SIGKILL);
+                        }
+                    }
                     let _ = child.kill().await;
                     child.wait().await
                 }
@@ -1359,6 +1383,16 @@ impl Inner {
             return Err(SupervisorFault::not_running(
                 "the supervisor engine stopped with the hub",
             ));
+        }
+        // Under the profile lock, reap any orphaned `mhc` left behind by a dead previous hub
+        // before launching the replacement.
+        if self
+            .profile
+            .read_pid_record()
+            .is_some_and(|record| record.owner_pid != std::process::id())
+        {
+            let profile = self.profile.clone();
+            let _ = tokio::task::spawn_blocking(move || profile.reap_stale_pid()).await;
         }
         // Another supervisor process may have written the store while it owned the profile.
         self.store().reload();
@@ -2498,6 +2532,20 @@ impl MhcSupervisor {
     /// [`SupervisorFault::Cancelled`] and its engine turn is aborted. Never waits on a slot.
     pub fn cancel_decisions(&self) {
         self.inner.cancel.send_modify(|epoch| *epoch += 1);
+    }
+
+    /// Marks the supervisor stopped and cancels in-flight decisions without waiting on the
+    /// engine lock. Call before aborting a [`Self::supervise`] task when the caller will
+    /// explicitly await [`Self::stop_engine`], avoiding a redundant detached `StopOnDrop`.
+    pub fn begin_stop(&self) {
+        self.inner.run_state.store(STOPPED, Ordering::SeqCst);
+        self.cancel_decisions();
+    }
+
+    /// Stops the retained engine explicitly so callers (such as hub generation teardown) can
+    /// await shutdown with a bounded timeout instead of relying on detached `StopOnDrop`.
+    pub async fn stop_engine(&self) {
+        self.shutdown().await;
     }
 
     /// Stops the engine with the hub: decisions are cancelled, stdin is closed, the process

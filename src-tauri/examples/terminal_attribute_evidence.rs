@@ -53,7 +53,7 @@ fn build_attribute_snapshot() -> RenderSnapshot {
         // Render plain label starting at column 0
         for ch in label.chars() {
             let cell = CellSnapshot {
-                text: ch.to_string(),
+                text: ch.into(),
                 ..Default::default()
             };
             grid[row_idx][col_idx] = cell;
@@ -63,7 +63,7 @@ fn build_attribute_snapshot() -> RenderSnapshot {
         // Render styled sample text
         for ch in sample_text.chars() {
             let mut cell = CellSnapshot {
-                text: ch.to_string(),
+                text: ch.into(),
                 ..Default::default()
             };
             apply_attr(&mut cell);

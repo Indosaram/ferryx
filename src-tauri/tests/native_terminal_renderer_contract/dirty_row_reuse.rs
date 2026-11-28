@@ -23,7 +23,7 @@ fn test_single_row_mutation_yields_one_rebuilt_dirty_row_and_reused_rows() {
     // Modify a single cell and cursor position confined within row 0
     snapshot.cursor.x = 11;
     snapshot.cursor.y = 0;
-    snapshot.grid[0][0].text = "Z".to_string();
+    snapshot.grid[0][0].text = "Z".into();
 
     let incremental_frame = renderer
         .render_snapshot(&snapshot, None)

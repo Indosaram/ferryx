@@ -23,6 +23,14 @@ pub mod agent_state;
 
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const RING_BYTES: usize = 512 * 1024;
+const MAX_COMPLETED_SPAWNS: usize = 1024;
+const EXITED_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_EXITED_SESSIONS: usize = 32;
+
+#[inline]
+fn base64_encoded_len(raw_len: usize) -> usize {
+    raw_len.div_ceil(3).saturating_mul(4)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -72,6 +80,7 @@ pub(crate) struct Output {
     bytes: usize,
     chunks: VecDeque<(u64, Vec<u8>)>,
     exited: bool,
+    exited_at: Option<std::time::Instant>,
     pub(crate) agent_revision: u64,
     pub(crate) agent_state: Option<agent_state::AgentStateSnapshot>,
 }
@@ -100,9 +109,51 @@ enum SpawnState {
     Completed(SpawnRecord),
 }
 
+#[derive(Default)]
+struct SpawnRegistry {
+    entries: HashMap<String, SpawnState>,
+    completed_order: VecDeque<String>,
+}
+
+impl SpawnRegistry {
+    fn get(&self, req_id: &str) -> Option<&SpawnState> {
+        self.entries.get(req_id)
+    }
+
+    fn insert_in_progress(&mut self, req_id: String, params: Value) {
+        self.entries
+            .insert(req_id, SpawnState::InProgress { params });
+    }
+
+    fn complete(&mut self, req_id: String, record: SpawnRecord) {
+        self.entries
+            .insert(req_id.clone(), SpawnState::Completed(record));
+        self.completed_order.push_back(req_id);
+        while self.completed_order.len() > MAX_COMPLETED_SPAWNS {
+            if let Some(oldest) = self.completed_order.pop_front() {
+                if matches!(self.entries.get(&oldest), Some(SpawnState::Completed(_))) {
+                    self.entries.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    fn cancel_in_progress(&mut self, req_id: &str) -> bool {
+        if matches!(
+            self.entries.get(req_id),
+            Some(SpawnState::InProgress { .. })
+        ) {
+            self.entries.remove(req_id);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 struct SpawnReservationGuard<'a> {
     req_id: String,
-    spawns: &'a Mutex<HashMap<String, SpawnState>>,
+    spawns: &'a Mutex<SpawnRegistry>,
     cv: &'a Condvar,
     completed: bool,
 }
@@ -111,11 +162,7 @@ impl<'a> Drop for SpawnReservationGuard<'a> {
     fn drop(&mut self) {
         if !self.completed {
             if let Ok(mut spawns) = self.spawns.lock() {
-                if matches!(
-                    spawns.get(&self.req_id),
-                    Some(SpawnState::InProgress { .. })
-                ) {
-                    spawns.remove(&self.req_id);
+                if spawns.cancel_in_progress(&self.req_id) {
                     self.cv.notify_all();
                 }
             }
@@ -134,7 +181,7 @@ pub struct Runtime {
     token: String,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     projects: Mutex<HashMap<String, PathBuf>>,
-    spawns: Mutex<HashMap<String, SpawnState>>,
+    spawns: Mutex<SpawnRegistry>,
     spawns_cv: Condvar,
     dag_streams: dag_stream::DagStreams,
     pub(crate) agent_state: Option<Arc<agent_state::AgentStateServer>>,
@@ -169,7 +216,7 @@ impl Runtime {
             token,
             sessions: Mutex::new(HashMap::new()),
             projects: Mutex::new(HashMap::new()),
-            spawns: Mutex::new(HashMap::new()),
+            spawns: Mutex::new(SpawnRegistry::default()),
             spawns_cv: Condvar::new(),
             dag_streams: dag_stream::DagStreams::new(),
             agent_state,
@@ -198,6 +245,57 @@ impl Runtime {
     /// PTY sessions are untouched: they outlive their connection by design.
     pub fn release_connection(&self, connection: u64) {
         self.dag_streams.close_connection(connection);
+    }
+
+    /// Sweeps naturally exited sessions past [`EXITED_SESSION_TTL`] or [`MAX_EXITED_SESSIONS`]
+    /// so their 512 KiB ring buffers and PTY descriptors cannot accumulate over helper lifetime.
+    fn prune_exited_sessions(&self) {
+        let now = std::time::Instant::now();
+        let evicted: Vec<Arc<Session>> = {
+            let Ok(mut sessions) = self.sessions.lock() else {
+                return;
+            };
+            let mut exited_entries: Vec<(String, std::time::Instant)> = Vec::new();
+            for (id, session) in sessions.iter() {
+                let (lock, _) = &*session.output;
+                if let Ok(state) = lock.lock() {
+                    if state.exited {
+                        exited_entries.push((id.clone(), state.exited_at.unwrap_or(now)));
+                    }
+                }
+            }
+            if exited_entries.is_empty() {
+                return;
+            }
+            let mut to_remove = Vec::new();
+            let mut surviving = Vec::new();
+            for (id, at) in exited_entries {
+                if now.saturating_duration_since(at) >= EXITED_SESSION_TTL {
+                    to_remove.push(id);
+                } else {
+                    surviving.push((id, at));
+                }
+            }
+            if surviving.len() > MAX_EXITED_SESSIONS {
+                surviving.sort_by_key(|(_, at)| *at);
+                let excess = surviving.len() - MAX_EXITED_SESSIONS;
+                for (id, _) in surviving.into_iter().take(excess) {
+                    to_remove.push(id);
+                }
+            }
+            to_remove
+                .into_iter()
+                .filter_map(|id| sessions.remove(&id))
+                .collect()
+        };
+        for session in evicted {
+            let (lock, _) = &*session.output;
+            if let Ok(mut state) = lock.lock() {
+                state.chunks.clear();
+                state.chunks.shrink_to_fit();
+                state.bytes = 0;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -431,6 +529,7 @@ impl Runtime {
                 }))
             }
             "pty.spawn" => {
+                self.prune_exited_sessions();
                 let client_req_id = p.get("clientRequestId").and_then(Value::as_str);
                 let mut reservation_guard = if let Some(req_id) = client_req_id {
                     let mut spawns = self.spawns.lock().map_err(|e| e.to_string())?;
@@ -457,10 +556,7 @@ impl Runtime {
                                     .0;
                             }
                             None => {
-                                spawns.insert(
-                                    req_id.to_string(),
-                                    SpawnState::InProgress { params: p.clone() },
-                                );
+                                spawns.insert_in_progress(req_id.to_string(), p.clone());
                                 break;
                             }
                         }
@@ -518,6 +614,7 @@ impl Runtime {
                         bytes: 0,
                         chunks: VecDeque::new(),
                         exited: false,
+                        exited_at: None,
                         agent_revision: 0,
                         agent_state: None,
                     }),
@@ -611,6 +708,9 @@ impl Runtime {
                             }
                             _ => {
                                 state.exited = true;
+                                if state.exited_at.is_none() {
+                                    state.exited_at = Some(std::time::Instant::now());
+                                }
                                 signal.notify_all();
                                 break;
                             }
@@ -645,13 +745,13 @@ impl Runtime {
 
                 if let Some(guard) = reservation_guard.as_mut() {
                     let mut spawns = self.spawns.lock().map_err(|e| e.to_string())?;
-                    spawns.insert(
+                    spawns.complete(
                         guard.req_id.clone(),
-                        SpawnState::Completed(SpawnRecord {
+                        SpawnRecord {
                             target: target.clone(),
                             pid,
                             params: p.clone(),
-                        }),
+                        },
                     );
                     guard.completed = true;
                     self.spawns_cv.notify_all();
@@ -660,6 +760,7 @@ impl Runtime {
                 Ok(json!({ "target": target, "pid": pid }))
             }
             "pty.list" => {
+                self.prune_exited_sessions();
                 let sessions: Vec<Arc<Session>> = {
                     let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
                     sessions.values().cloned().collect()
@@ -766,17 +867,35 @@ impl Runtime {
                         Ok(json!({ "cols": cols, "rows": rows }))
                     }
                     "pty.stop" => {
-                        let mut child = session.child.lock().map_err(|e| e.to_string())?;
-                        if child
-                            .try_wait()
-                            .map_err(|e| e.to_string())?
-                            .is_none()
                         {
-                            child.kill().map_err(|e| e.to_string())?;
-                            child.wait().map_err(|e| e.to_string())?;
+                            let mut child = session.child.lock().map_err(|e| e.to_string())?;
+                            if child
+                                .try_wait()
+                                .map_err(|e| e.to_string())?
+                                .is_none()
+                            {
+                                child.kill().map_err(|e| e.to_string())?;
+                                child.wait().map_err(|e| e.to_string())?;
+                            }
+                        }
+                        {
+                            let (lock, signal) = &*session.output;
+                            if let Ok(mut state) = lock.lock() {
+                                state.chunks.clear();
+                                state.chunks.shrink_to_fit();
+                                state.bytes = 0;
+                                state.exited = true;
+                                if state.exited_at.is_none() {
+                                    state.exited_at = Some(std::time::Instant::now());
+                                }
+                                signal.notify_all();
+                            }
                         }
                         if let Some(server) = &self.agent_state {
                             server.revoke(&target.backend_session_id);
+                        }
+                        if let Ok(mut sessions) = self.sessions.lock() {
+                            sessions.remove(&target.backend_session_id);
                         }
                         Ok(json!({ "stopped": true }))
                     }
@@ -793,116 +912,127 @@ impl Runtime {
                             .unwrap_or(0)
                             .min(10000);
 
-                        let (lock, signal) = &*output;
-                        let state = lock.lock().map_err(|e| e.to_string())?;
+                        let (first, next, exited, agent_state_snapshot, raw_chunks) = {
+                            let (lock, signal) = &*output;
+                            let state = lock.lock().map_err(|e| e.to_string())?;
 
-                        if let Some(requested) = agent_after_revision {
-                            if requested > state.agent_revision {
-                                return Err(
-                                    "INVALID_REQUEST: agentAfterRevision exceeds current revision"
-                                        .into(),
-                                );
+                            if let Some(requested) = agent_after_revision {
+                                if requested > state.agent_revision {
+                                    return Err(
+                                        "INVALID_REQUEST: agentAfterRevision exceeds current revision"
+                                            .into(),
+                                    );
+                                }
                             }
+
+                            let (state, _) = signal
+                                .wait_timeout_while(
+                                    state,
+                                    std::time::Duration::from_millis(wait),
+                                    |s| {
+                                        let no_output = s.next <= after.saturating_add(1);
+                                        let revision_unchanged = match agent_after_revision {
+                                            None => true,
+                                            Some(req) => s.agent_revision == req,
+                                        };
+                                        no_output && !s.exited && revision_unchanged
+                                    },
+                                )
+                                .map_err(|e| e.to_string())?;
+
+                            let first = state
+                                .chunks
+                                .front()
+                                .map(|(seq, _)| *seq)
+                                .unwrap_or(state.next);
+                            let next = state.next;
+                            let exited = state.exited;
+                            let agent_state_snapshot = match agent_after_revision {
+                                Some(requested) if state.agent_revision > requested => {
+                                    state.agent_state.clone()
+                                }
+                                _ => None,
+                            };
+
+                            // Copy only bounded raw chunks under the lock using exact Base64
+                            // size math; Base64 encoding and JSON assembly run after unlock.
+                            let max_response_len: usize = 900 * 1024;
+                            let mut raw_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
+                            let mut current_size_estimate: usize = 256;
+
+                            for (seq, chunk_bytes) in
+                                state.chunks.iter().filter(|(seq, _)| *seq > after)
+                            {
+                                let chunk_est = base64_encoded_len(chunk_bytes.len()) + 80;
+                                if !raw_chunks.is_empty()
+                                    && current_size_estimate + chunk_est > max_response_len
+                                {
+                                    break;
+                                }
+                                current_size_estimate += chunk_est;
+                                raw_chunks.push((*seq, chunk_bytes.clone()));
+                            }
+
+                            (first, next, exited, agent_state_snapshot, raw_chunks)
+                        };
+
+                        let gap = after.saturating_add(1) < first;
+                        let agent_state_json = agent_state_snapshot.map(|s| s.to_response_json());
+                        let initial_cursor = after.max(next.saturating_sub(1));
+
+                        let mut response = json!({
+                            "target": target,
+                            "pid": pid,
+                            "cwd": cwd,
+                            "cursor": initial_cursor.to_string(),
+                            "afterSequence": initial_cursor,
+                            "gap": gap,
+                            "exited": exited,
+                            "chunks": [],
+                        });
+                        if let Some(agent_state) = agent_state_json {
+                            response["agentState"] = agent_state;
                         }
 
-                        let (state, _) = signal
-                            .wait_timeout_while(
-                                state,
-                                std::time::Duration::from_millis(wait),
-                                |s| {
-                                    let no_output = s.next <= after.saturating_add(1);
-                                    let revision_unchanged = match agent_after_revision {
-                                        None => true,
-                                        Some(req) => s.agent_revision == req,
-                                    };
-                                    no_output && !s.exited && revision_unchanged
-                                },
-                            )
-                            .map_err(|e| e.to_string())?;
+                        // Measure empty-chunks envelope once outside the lock (+40B slack for
+                        // u64 decimal cursor/afterSequence width) and bound chunks in O(N).
+                        let envelope_len =
+                            serde_json::to_vec(&response).map(|v| v.len()).unwrap_or(0) + 40;
+                        let chunk_budget = MAX_FRAME.saturating_sub(1).saturating_sub(envelope_len);
 
-                        let first = state
-                            .chunks
-                            .front()
-                            .map(|(seq, _)| *seq)
-                            .unwrap_or(state.next);
-                        let gap = after.saturating_add(1) < first;
-
-                        let max_response_len: usize = 900 * 1024;
-                        let mut response_chunks = Vec::new();
-                        let mut current_size_estimate = 256;
+                        let mut response_chunks = Vec::with_capacity(raw_chunks.len());
+                        let mut used_chunk_bytes: usize = 0;
                         let mut last_seq = after;
 
-                        for (seq, chunk_bytes) in
-                            state.chunks.iter().filter(|(seq, _)| *seq > after)
-                        {
-                            let b64 = BASE64_STANDARD.encode(chunk_bytes);
-                            let chunk_est = b64.len() + 80;
-                            if !response_chunks.is_empty()
-                                && current_size_estimate + chunk_est > max_response_len
-                            {
+                        for (seq, chunk_bytes) in raw_chunks {
+                            let seq_str = seq.to_string();
+                            let b64 = BASE64_STANDARD.encode(&chunk_bytes);
+                            // Exact JSON bytes for {"cursor":"<s1>","sequence":<s1>,"data":"<b64>"}
+                            // plus 1 byte for the comma separator after the first element.
+                            let item_len = 35
+                                + seq_str.len() * 2
+                                + b64.len()
+                                + usize::from(!response_chunks.is_empty());
+                            if used_chunk_bytes + item_len > chunk_budget {
                                 break;
                             }
-                            current_size_estimate += chunk_est;
-                            last_seq = *seq;
+                            used_chunk_bytes += item_len;
+                            last_seq = seq;
                             response_chunks.push(json!({
-                                "cursor": seq.to_string(),
+                                "cursor": seq_str,
                                 "sequence": seq,
                                 "data": b64,
                             }));
                         }
 
                         let cursor_num = if response_chunks.is_empty() {
-                            after.max(state.next.saturating_sub(1))
+                            initial_cursor
                         } else {
                             last_seq
                         };
-                        let cursor_str = cursor_num.to_string();
-
-                        let agent_state_json = match agent_after_revision {
-                            Some(requested) if state.agent_revision > requested => {
-                                state.agent_state.as_ref().map(|s| s.to_response_json())
-                            }
-                            _ => None,
-                        };
-
-                        let mut response = json!({
-                            "target": target,
-                            "pid": pid,
-                            "cwd": cwd,
-                            "cursor": cursor_str,
-                            "afterSequence": cursor_num,
-                            "gap": gap,
-                            "exited": state.exited,
-                            "chunks": response_chunks,
-                        });
-
-                        if let Some(agent_state) = agent_state_json {
-                            response["agentState"] = agent_state;
-                        }
-
-                        while serde_json::to_vec(&response).map(|v| v.len()).unwrap_or(0)
-                            >= MAX_FRAME
-                            && !response["chunks"].as_array().unwrap().is_empty()
-                        {
-                            if let Some(arr) =
-                                response.get_mut("chunks").and_then(Value::as_array_mut)
-                            {
-                                arr.pop();
-                                let new_cur = arr
-                                    .last()
-                                    .and_then(|c| c.get("cursor"))
-                                    .and_then(Value::as_str)
-                                    .unwrap_or(&after.to_string())
-                                    .to_string();
-                                let new_seq = arr
-                                    .last()
-                                    .and_then(|c| c.get("sequence"))
-                                    .and_then(Value::as_u64)
-                                    .unwrap_or(after);
-                                response["cursor"] = json!(new_cur);
-                                response["afterSequence"] = json!(new_seq);
-                            }
-                        }
+                        response["cursor"] = json!(cursor_num.to_string());
+                        response["afterSequence"] = json!(cursor_num);
+                        response["chunks"] = Value::Array(response_chunks);
 
                         Ok(response)
                     }
@@ -1377,6 +1507,114 @@ mod ferryx_scope {
                         err.contains("FORBIDDEN: cwd outside project"),
                         "expected FORBIDDEN error, got: {err}"
                     );
+                }
+
+                #[test]
+                fn base64_encoded_len_matches_standard_encoder() {
+                    for n in 0..=64 {
+                        let sample = vec![0xABu8; n];
+                        assert_eq!(
+                            base64_encoded_len(n),
+                            BASE64_STANDARD.encode(&sample).len(),
+                            "mismatch at raw length {n}"
+                        );
+                    }
+                }
+
+                #[test]
+                fn spawn_registry_bounds_completed_entries_fifo() {
+                    let mut reg = SpawnRegistry::default();
+                    reg.insert_in_progress("in-flight".to_string(), json!({"k": 1}));
+                    for i in 0..(MAX_COMPLETED_SPAWNS + 5) {
+                        reg.complete(
+                            format!("req-{i}"),
+                            SpawnRecord {
+                                target: TargetRef {
+                                    host_id: "h".to_string(),
+                                    owner_id: "o".to_string(),
+                                    epoch: Epoch(1),
+                                    backend_session_id: format!("s-{i}"),
+                                },
+                                pid: i as u32 + 1,
+                                params: json!({}),
+                            },
+                        );
+                    }
+                    assert_eq!(reg.completed_order.len(), MAX_COMPLETED_SPAWNS);
+                    assert!(matches!(
+                        reg.get("in-flight"),
+                        Some(SpawnState::InProgress { .. })
+                    ));
+                    assert!(reg.get("req-0").is_none());
+                    assert!(reg.get("req-4").is_none());
+                    assert!(matches!(
+                        reg.get("req-5"),
+                        Some(SpawnState::Completed(_))
+                    ));
+                    assert!(matches!(
+                        reg.get(&format!("req-{}", MAX_COMPLETED_SPAWNS + 4)),
+                        Some(SpawnState::Completed(_))
+                    ));
+                }
+
+                #[test]
+                fn pty_stop_clears_ring_and_evicts_session() {
+                    let runtime_dir = tempfile::tempdir().unwrap();
+                    let project_dir = tempfile::tempdir().unwrap();
+                    let runtime = Runtime::new(
+                        runtime_dir.path().to_path_buf(),
+                        "test-host".to_string(),
+                        "tok-stop".to_string(),
+                    )
+                    .unwrap();
+                    runtime
+                        .handle(Request {
+                            protocol: 1,
+                            token: "tok-stop".to_string(),
+                            op: "project.register".to_string(),
+                            params: json!({
+                                "id": "proj-stop",
+                                "path": project_dir.path().to_string_lossy(),
+                            }),
+                        })
+                        .unwrap();
+                    let spawn = runtime
+                        .handle(Request {
+                            protocol: 1,
+                            token: "tok-stop".to_string(),
+                            op: "pty.spawn".to_string(),
+                            params: json!({ "projectId": "proj-stop" }),
+                        })
+                        .unwrap();
+                    let target = spawn["target"].clone();
+                    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+                    let output = {
+                        let sessions = runtime.sessions.lock().unwrap();
+                        let session = sessions.get(&session_id).expect("session present");
+                        let (lock, _) = &*session.output;
+                        let mut st = lock.lock().unwrap();
+                        st.chunks.push_back((999, vec![b'x'; 4096]));
+                        st.bytes += 4096;
+                        session.output.clone()
+                    };
+
+                    runtime
+                        .handle(Request {
+                            protocol: 1,
+                            token: "tok-stop".to_string(),
+                            op: "pty.stop".to_string(),
+                            params: json!({ "target": target }),
+                        })
+                        .unwrap();
+
+                    assert!(
+                        !runtime.sessions.lock().unwrap().contains_key(&session_id),
+                        "stopped session must be removed from Runtime.sessions"
+                    );
+                    let state = output.0.lock().unwrap();
+                    assert!(state.chunks.is_empty());
+                    assert_eq!(state.bytes, 0);
+                    assert!(state.exited);
                 }
             }
         }

@@ -15,6 +15,18 @@ export type PanelAttentionSource = {
 
 const EMPTY: AttentionBySessionId = {};
 
+export function sameAttentionMap(prev: AttentionBySessionId, next: AttentionBySessionId): boolean {
+  if (prev === next) return true;
+  const prevKeys = Object.keys(prev);
+  const nextKeys = Object.keys(next);
+  if (prevKeys.length !== nextKeys.length) return false;
+  for (const key of prevKeys) {
+    if (!Object.prototype.hasOwnProperty.call(next, key)) return false;
+    if (prev[key]?.group !== next[key]?.group) return false;
+  }
+  return true;
+}
+
 // Resolved lazily: test doubles of "../tauri" without the panel commands keep working (the map
 // stays empty and every pane uses the old-peer mapping in groupOf).
 function panelFn<K extends "getSupervisorPanel" | "onSupervisorPanelEvent">(name: K): (typeof tauri)[K] | undefined {
@@ -38,7 +50,8 @@ export function usePanelAttention(source: PanelAttentionSource = {}): AttentionB
     let unlisten: (() => void) | undefined;
     const show = (next: PanelSnapshot) => {
       current = next;
-      setAttention(attentionBySessionIdOf(next.sessions ?? []));
+      const nextAttention = attentionBySessionIdOf(next.sessions ?? []);
+      setAttention((prev) => (sameAttentionMap(prev, nextAttention) ? prev : nextAttention));
     };
     // Subscribe before the first load so a frame racing it is replayed, not lost.
     subscribe?.((event) => {

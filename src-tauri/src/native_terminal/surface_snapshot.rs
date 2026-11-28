@@ -1,13 +1,13 @@
 use super::composition::SurfaceCompositionLayout;
 use super::renderer::canonical_scenario;
-use super::snapshot::{CellSnapshot, CellWide, RenderSnapshot};
+use super::snapshot::{CellSnapshot, CellText, CellWide, RenderSnapshot};
 
 pub fn snapshot_for_layout(
     layout: SurfaceCompositionLayout,
 ) -> (RenderSnapshot, super::renderer::SelectionSnapshot) {
     let (mut snapshot, selection) = canonical_scenario();
     let empty_cell = CellSnapshot {
-        text: String::new(),
+        text: CellText::default(),
         wide: CellWide::Narrow,
         fg: None,
         bg: None,

@@ -5,7 +5,7 @@
 //! Lanes without a contract, or with mode `off`, are never touched. A proposal is persisted
 //! before it is dispatched, and an uncertain delivery is never resent.
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Weak};
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -90,14 +90,24 @@ impl LoopOutcome {
     }
 }
 
-static LANE_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+const LANE_LOCK_PRUNE_THRESHOLD: usize = 128;
+
+static LANE_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(Default::default);
 
 fn lane_lock(lane_key: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut locks = LANE_LOCKS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    Arc::clone(locks.entry(lane_key.to_owned()).or_default())
+    if let Some(existing) = locks.get(lane_key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    if locks.len() > LANE_LOCK_PRUNE_THRESHOLD {
+        locks.retain(|_, weak| weak.strong_count() > 0);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(lane_key.to_owned(), Arc::downgrade(&lock));
+    lock
 }
 
 fn hub_error(error: impl std::fmt::Display) -> GoalError {
@@ -1705,5 +1715,34 @@ mod tests {
             Some(LaneStatus::VerifiedDone)
         );
         assert_eq!(model.calls(), 2);
+    }
+
+    #[test]
+    fn lane_lock_reuses_live_arc_and_prunes_dead_entries() {
+        let live_key = format!("live-lane-{}", uuid::Uuid::new_v4());
+        let first = lane_lock(&live_key);
+        let second = lane_lock(&live_key);
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let prefix = format!("ephemeral-lane-{}", uuid::Uuid::new_v4());
+        for i in 0..=(LANE_LOCK_PRUNE_THRESHOLD + 16) {
+            let lock = lane_lock(&format!("{prefix}-{i}"));
+            drop(lock);
+        }
+        let trigger = lane_lock(&format!("{prefix}-trigger"));
+        let remaining_ephemeral = LANE_LOCKS
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .count();
+        assert!(
+            remaining_ephemeral <= LANE_LOCK_PRUNE_THRESHOLD,
+            "dead weak lane locks must be pruned past threshold, found {remaining_ephemeral}"
+        );
+        assert!(Arc::ptr_eq(&first, &lane_lock(&live_key)));
+        drop(trigger);
+        drop(second);
+        drop(first);
     }
 }

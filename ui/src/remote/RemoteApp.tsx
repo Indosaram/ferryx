@@ -4407,33 +4407,77 @@ export const RemoteHostConnection: React.FC<{
     if (!token) return;
     const scope = chatGatewayScope(token, transportBaseUrl);
     const controller = new AbortController();
-    let retry: ReturnType<typeof setInterval> | null = null;
+    let retryTimer: ReturnType<typeof setInterval> | null = null;
+    let inFlight = false;
+    let resolved = false;
+    // Exponential backoff measured in 3s ticks: 1 -> 2 -> 4 -> 8 -> 10 (3s -> 30s), while
+    // keeping a single setInterval so fake-interval tests advance the first 3s retry cleanly.
+    let retryStepTicks = 1;
+    let ticksRemaining = 0;
     let warned = false;
+    const clearRetry = () => {
+      if (retryTimer !== null) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
+    };
+    const ensureRetry = () => {
+      if (controller.signal.aborted || resolved) return;
+      ticksRemaining = retryStepTicks;
+      retryStepTicks = Math.min(10, retryStepTicks * 2);
+      if (retryTimer !== null) return;
+      if (typeof document !== "undefined" && document.hidden) return;
+      retryTimer = setInterval(() => {
+        if (controller.signal.aborted || resolved || inFlight) return;
+        if (typeof document !== "undefined" && document.hidden) return;
+        ticksRemaining = Math.max(0, ticksRemaining - 1);
+        if (ticksRemaining === 0) void readIdentity();
+      }, 3000);
+    };
     // A transient capabilities failure answers null: it keeps the identity this lane already had,
-    // says so, and asks again on the history poll's cadence until the host answers.
+    // says so, and backs off (3s -> 30s) until the host answers or the document becomes visible.
     const readIdentity = async () => {
-      const identity = await readChatGatewayIdentity({ baseUrl: transportBaseUrl, token, signal: controller.signal });
-      if (controller.signal.aborted) return;
-      if (identity !== null) {
-        setChatGatewayAnswer({ scope, identity });
-        if (retry !== null) clearInterval(retry);
-        retry = null;
-        if (warned) setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_UNAVAILABLE_WARNING));
-        warned = false;
+      if (controller.signal.aborted || inFlight || resolved) return;
+      if (typeof document !== "undefined" && document.hidden) return;
+      inFlight = true;
+      try {
+        const identity = await readChatGatewayIdentity({ baseUrl: transportBaseUrl, token, signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (identity !== null) {
+          resolved = true;
+          setChatGatewayAnswer({ scope, identity });
+          clearRetry();
+          retryStepTicks = 1;
+          ticksRemaining = 0;
+          if (warned) setChatWarnings((prev) => prev.filter((warning) => warning !== CHAT_UNAVAILABLE_WARNING));
+          warned = false;
+          return;
+        }
+        warned = true;
+        setChatWarnings((prev) => withChatWarning(prev, CHAT_UNAVAILABLE_WARNING));
+        ensureRetry();
+      } finally {
+        inFlight = false;
+      }
+    };
+    const onVisibilityChange = () => {
+      if (controller.signal.aborted || resolved) return;
+      if (typeof document !== "undefined" && document.hidden) {
+        clearRetry();
         return;
       }
-      warned = true;
-      setChatWarnings((prev) => withChatWarning(prev, CHAT_UNAVAILABLE_WARNING));
-      if (retry === null) {
-        retry = setInterval(() => {
-          void readIdentity();
-        }, 3000);
+      if (!inFlight && retryTimer === null) {
+        retryStepTicks = 1;
+        ticksRemaining = 0;
+        void readIdentity();
       }
     };
     void readIdentity();
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       controller.abort();
-      if (retry !== null) clearInterval(retry);
+      clearRetry();
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [token, transportBaseUrl]);
 
@@ -4937,9 +4981,11 @@ export const RemoteHostConnection: React.FC<{
     let fetching = false;
     // A push that lands while a read is in flight: that read's answer may predate it.
     let pushedDuringRead = false;
+    // Track the last prompt/screen revision acknowledged so unchanged 3s polls skip redundant POSTs.
+    let lastAckKey: string | null = null;
     const controller = new AbortController();
 
-    const readPrompt = async () => {
+    const readPrompt = async (source: "init" | "poll" | "push") => {
       if (cancelled || fetching) return;
       if (typeof document !== "undefined" && document.hidden) return;
       fetching = true;
@@ -4964,7 +5010,8 @@ export const RemoteHostConnection: React.FC<{
         if (cancelled || pushedDuringRead) return;
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
-        const revision = prompt === null ? null : parseChatScreenRevision(body);
+        const rawRevision = parseChatScreenRevision(body);
+        const revision = prompt === null ? null : rawRevision;
         // The same occurrence on the same screen is the card already drawn; it is not replaced.
         const promptUnchanged =
           promptId === chatPromptIdRef.current &&
@@ -4985,20 +5032,24 @@ export const RemoteHostConnection: React.FC<{
           const next = prev.filter((warning) => warning !== CHAT_HELD_WARNING);
           return next.length === prev.length ? prev : next;
         });
-        // This existing read is the visible chat's observation of the live pane. A new
-        // outcome may arrive without a prompt-change push or a view transition.
-        await acknowledgeChatOutcome(target, controller.signal);
+        // Acknowledge only when a new prompt/screen revision is observed or a push notified us of a
+        // fresh screen event; unchanged 3s fallback polls must not POST acknowledge-outcome repeatedly.
+        const ackKey = `${promptId ?? ""}|${rawRevision ?? ""}`;
+        if (source === "push" || lastAckKey === null || ackKey !== lastAckKey) {
+          await acknowledgeChatOutcome(target, controller.signal);
+          if (!controller.signal.aborted) lastAckKey = ackKey;
+        }
       } catch {
         /* a transient prompt read keeps the card the user is looking at */
       } finally {
         fetching = false;
-        if (pushedDuringRead && !cancelled) void readPrompt();
+        if (pushedDuringRead && !cancelled) void readPrompt("push");
       }
     };
 
-    void readPrompt();
+    void readPrompt("init");
     const timer = setInterval(() => {
-      void readPrompt();
+      void readPrompt("poll");
     }, 3000);
     // A card answered on another device closes here at once: the push drops a card the frame
     // says is gone, then the read confirms the screen. The 3s poll stays as the fallback.
@@ -5014,7 +5065,7 @@ export const RemoteHostConnection: React.FC<{
         setChatScreenRevision(null);
       }
       if (fetching) pushedDuringRead = true;
-      else void readPrompt();
+      else void readPrompt("push");
     };
     return () => {
       cancelled = true;
@@ -5751,6 +5802,8 @@ export const RemoteHostConnection: React.FC<{
   const [chatStructuredSessionId, setChatStructuredSessionId] = useState<string | null>(null);
   const [chatStructuredError, setChatStructuredError] = useState<string | null>(null);
   const [chatStructuredOpening, setChatStructuredOpening] = useState(false);
+
+  const structuredChatTransport = useMemo(() => remoteStructuredChatTransport(), []);
 
   useEffect(() => {
     bindStructuredChatRemote(token ? { baseUrl: transportBaseUrl, token } : null);
@@ -7220,7 +7273,7 @@ export const RemoteHostConnection: React.FC<{
               {chatStructuredMode && chatStructuredSessionId ? (
                 <div className="flex-1 min-h-0 flex flex-col" data-testid="remote-structured-chat-pane">
                   <StructuredChatPane
-                    transport={remoteStructuredChatTransport()}
+                    transport={structuredChatTransport}
                     sessionId={chatStructuredSessionId}
                     workspaceLabel={model.context.workspaceId ?? undefined}
                     showHeader={desktopSidebar}
@@ -7230,6 +7283,7 @@ export const RemoteHostConnection: React.FC<{
                     toolCallVisibility={paneChatPreferences.toolCallVisibility}
                     announceLevel={paneChatPreferences.announceLevel}
                     active={viewMode === "chat"}
+                    visible={viewMode === "chat"}
                   />
                 </div>
               ) : (

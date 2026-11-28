@@ -299,13 +299,17 @@ type DragFocusSnapshot = {
   focusedGroupId: string | null;
 };
 
+const NOOP = () => undefined;
+const POINTER_SENSOR_OPTIONS = { activationConstraint: { distance: 12 } };
+const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates };
+
 export function TerminalSplitView({
   layout,
   sessions,
   fileTabWorktreePath = null,
   targetHostPlatform = null,
-  onActivateTab = () => undefined,
-  onCloseTab = () => undefined,
+  onActivateTab = NOOP,
+  onCloseTab = NOOP,
   onCloseOtherTabs,
   onCloseTabsToRight,
   onCloseTabsToLeft,
@@ -315,11 +319,11 @@ export function TerminalSplitView({
   onDetachPaneToTab,
   onRenameTab,
   onToggleTabPin,
-  onAddTab = () => undefined,
+  onAddTab = NOOP,
   onMoveTabToWindow,
   listOtherWindows,
-  onAddBrowserTab = () => undefined,
-  onDuplicateBrowserTab = () => undefined,
+  onAddBrowserTab = NOOP,
+  onDuplicateBrowserTab = NOOP,
   onAddMarkdown,
   onAddMobileEmulator,
   onOpenSettings,
@@ -331,19 +335,19 @@ export function TerminalSplitView({
   onSetPaneView,
   renderChatPane,
   defaultAgentId,
-  onNavigateBrowserTab = () => undefined,
-  onReloadBrowserTab = () => undefined,
-  onSplitPane = () => undefined,
-  onClosePane = () => undefined,
+  onNavigateBrowserTab = NOOP,
+  onReloadBrowserTab = NOOP,
+  onSplitPane = NOOP,
+  onClosePane = NOOP,
   onDetachBrowserPane,
   onOpenBrowserFullscreen,
   onCloseBrowserSession,
-  onSetRatio = () => undefined,
-  onSetGroupRatio = () => undefined,
-  onEqualizeGroupRun = () => undefined,
-  onEqualizePaneRun = () => undefined,
-  onSwapPanes = () => undefined,
-  onFocusPane = () => undefined,
+  onSetRatio = NOOP,
+  onSetGroupRatio = NOOP,
+  onEqualizeGroupRun = NOOP,
+  onEqualizePaneRun = NOOP,
+  onSwapPanes = NOOP,
+  onFocusPane = NOOP,
   unreadTabIds,
   activityByTabId,
   activityBySessionId,
@@ -360,7 +364,7 @@ export function TerminalSplitView({
   onResetAgentState,
   onBackendSessionUnavailable,
 }: TerminalSplitViewProps) {
-  const normalizedLayout = normalizeLayout(layout);
+  const normalizedLayout = useMemo(() => normalizeLayout(layout), [layout]);
   // A split's focused leaf lives in layoutsByTabId, so a pane/session change must recompute the
   // tab labels even when the tabs array itself is unchanged.
   const tabDisplayById = useMemo(
@@ -389,8 +393,8 @@ export function TerminalSplitView({
   }, []);
 
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 12 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(PointerSensor, POINTER_SENSOR_OPTIONS),
+    useSensor(KeyboardSensor, KEYBOARD_SENSOR_OPTIONS),
   );
 
   const isRedundantSplit: RedundantSplitCheck = ({ tabId, sourceLeafId, targetLeafId, direction, position }) => {
@@ -1175,6 +1179,154 @@ type PaneRendererProps = {
   onCloseBrowserSession?: (browserId: string) => void;
 } & PaneChatProps;
 
+function shallowEqualProps<T extends object>(prev: T, next: T): boolean {
+  const prevKeys = Object.keys(prev) as Array<keyof T>;
+  const nextKeys = Object.keys(next) as Array<keyof T>;
+  if (prevKeys.length !== nextKeys.length) return false;
+  for (const key of prevKeys) {
+    if (!Object.is(prev[key], next[key])) return false;
+  }
+  return true;
+}
+
+function leafSessionsAndActivityEqual(
+  node: PaneNode,
+  tab: WorkspaceTab,
+  tabLayout: TabPaneLayout,
+  prevSessions: Readonly<Record<string, TerminalSession>>,
+  nextSessions: Readonly<Record<string, TerminalSession>>,
+  prevActivityBySessionId: Readonly<Record<string, TerminalActivity>> | undefined,
+  nextActivityBySessionId: Readonly<Record<string, TerminalActivity>> | undefined,
+): boolean {
+  if (node.type === "leaf") {
+    const defaultSessionId = isTerminalTab(tab) ? tab.sessionId : "";
+    const sessionId = tabLayout.sessionIdsByLeafId[node.leafId] ?? defaultSessionId;
+    if ((prevSessions[sessionId] ?? FALLBACK_SESSION) !== (nextSessions[sessionId] ?? FALLBACK_SESSION)) {
+      return false;
+    }
+    if (prevActivityBySessionId?.[sessionId] !== nextActivityBySessionId?.[sessionId]) {
+      return false;
+    }
+    return true;
+  }
+  return (
+    leafSessionsAndActivityEqual(
+      node.first,
+      tab,
+      tabLayout,
+      prevSessions,
+      nextSessions,
+      prevActivityBySessionId,
+      nextActivityBySessionId,
+    ) &&
+    leafSessionsAndActivityEqual(
+      node.second,
+      tab,
+      tabLayout,
+      prevSessions,
+      nextSessions,
+      prevActivityBySessionId,
+      nextActivityBySessionId,
+    )
+  );
+}
+
+function paneContentEqual(a: PaneContent, b: PaneContent): boolean {
+  if (a === b) return true;
+  if (a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case "terminal":
+      return b.kind === "terminal" && a.sessionId === b.sessionId;
+    case "remoteDesktop":
+      return b.kind === "remoteDesktop" && a.hostId === b.hostId;
+    case "dag":
+      return b.kind === "dag" && a.runId === b.runId && a.dag?.runId === b.dag?.runId;
+    case "changes":
+      return (
+        b.kind === "changes" &&
+        a.workspaceId === b.workspaceId &&
+        a.worktreePath === b.worktreePath &&
+        a.worktree?.wsId === b.worktree?.wsId &&
+        a.worktree?.slug === b.worktree?.slug
+      );
+    case "file":
+      return (
+        b.kind === "file" &&
+        a.previewId === b.previewId &&
+        a.path === b.path &&
+        a.backendSessionId === b.backendSessionId &&
+        a.line === b.line &&
+        a.col === b.col &&
+        a.workspaceId === b.workspaceId &&
+        a.customLabel === b.customLabel &&
+        a.remote === b.remote
+      );
+    case "browser": {
+      if (b.kind !== "browser") return false;
+      const ab = a.browser;
+      const bb = b.browser;
+      return (
+        (ab?.browserId ?? a.browserId) === (bb?.browserId ?? b.browserId) &&
+        (ab?.url ?? a.url) === (bb?.url ?? b.url) &&
+        (ab?.title ?? a.title) === (bb?.title ?? b.title) &&
+        (ab?.loading ?? a.loading) === (bb?.loading ?? b.loading) &&
+        (ab?.canGoBack ?? a.canGoBack) === (bb?.canGoBack ?? b.canGoBack) &&
+        (ab?.canGoForward ?? a.canGoForward) === (bb?.canGoForward ?? b.canGoForward) &&
+        (ab?.zoomFactor ?? a.zoomFactor) === (bb?.zoomFactor ?? b.zoomFactor) &&
+        (ab?.loadError ?? a.loadError) === (bb?.loadError ?? b.loadError) &&
+        (ab?.profileId ?? a.profileId) === (bb?.profileId ?? b.profileId) &&
+        (ab?.worktreePath ?? a.worktreePath) === (bb?.worktreePath ?? b.worktreePath) &&
+        (ab?.worktreeLabel ?? a.worktreeLabel) === (bb?.worktreeLabel ?? b.worktreeLabel)
+      );
+    }
+  }
+}
+
+function arePaneRendererPropsEqual(prev: PaneRendererProps, next: PaneRendererProps): boolean {
+  if (prev.tabVisible || next.tabVisible) {
+    return shallowEqualProps(prev, next);
+  }
+  if (
+    prev.node !== next.node ||
+    prev.tab !== next.tab ||
+    prev.tabLayout !== next.tabLayout ||
+    prev.groupFocused !== next.groupFocused ||
+    prev.browserPanesVisible !== next.browserPanesVisible ||
+    prev.dropFeedbackLeafId !== next.dropFeedbackLeafId ||
+    prev.path !== next.path ||
+    prev.searchLeafId !== next.searchLeafId ||
+    prev.chatViewAvailable !== next.chatViewAvailable ||
+    Boolean(prev.onCloseSearch) !== Boolean(next.onCloseSearch) ||
+    Boolean(prev.renderChatPane) !== Boolean(next.renderChatPane) ||
+    Boolean(prev.onSetPaneView) !== Boolean(next.onSetPaneView) ||
+    Boolean(prev.onReconnectAgentSession) !== Boolean(next.onReconnectAgentSession) ||
+    Boolean(prev.onReconnectSshSession) !== Boolean(next.onReconnectSshSession) ||
+    Boolean(prev.onReconnectPairedSession) !== Boolean(next.onReconnectPairedSession) ||
+    Boolean(prev.onReconnectLocalSession) !== Boolean(next.onReconnectLocalSession) ||
+    Boolean(prev.onRefreshSessionIdentity) !== Boolean(next.onRefreshSessionIdentity) ||
+    Boolean(prev.onOpenNewShell) !== Boolean(next.onOpenNewShell) ||
+    Boolean(prev.onRestartPane) !== Boolean(next.onRestartPane) ||
+    Boolean(prev.onBackendSessionUnavailable) !== Boolean(next.onBackendSessionUnavailable) ||
+    Boolean(prev.onDetachBrowserPane) !== Boolean(next.onDetachBrowserPane) ||
+    Boolean(prev.onOpenBrowserFullscreen) !== Boolean(next.onOpenBrowserFullscreen) ||
+    Boolean(prev.onCloseBrowserSession) !== Boolean(next.onCloseBrowserSession)
+  ) {
+    return false;
+  }
+  if (prev.sessions === next.sessions && prev.activityBySessionId === next.activityBySessionId) {
+    return true;
+  }
+  return leafSessionsAndActivityEqual(
+    next.node,
+    next.tab,
+    next.tabLayout,
+    prev.sessions,
+    next.sessions,
+    prev.activityBySessionId,
+    next.activityBySessionId,
+  );
+}
+
 const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) {
   const { node, tab, tabLayout, sessions, path, browserPanesVisible, dropFeedbackLeafId, onNavigateBrowserTab, onReloadBrowserTab } = props;
   if (node.type === "leaf") {
@@ -1252,7 +1404,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
       </div>
     </div>
   );
-});
+}, arePaneRendererPropsEqual);
 
 type PaneLeafViewProps = {
   leafId: string;
@@ -1300,6 +1452,40 @@ type PaneLeafViewProps = {
 const PANE_TOOLBAR_PX = 20;
 
 type BrowserPaneMenuState = { browserId: string; x: number; y: number } | null;
+
+function arePaneLeafPropsEqual(prev: PaneLeafViewProps, next: PaneLeafViewProps): boolean {
+  if (prev.tabVisible || next.tabVisible) {
+    return shallowEqualProps(prev, next);
+  }
+  return (
+    prev.leafId === next.leafId &&
+    prev.view === next.view &&
+    prev.tab === next.tab &&
+    paneContentEqual(prev.content, next.content) &&
+    prev.session === next.session &&
+    prev.activity === next.activity &&
+    prev.isOnlyLeaf === next.isOnlyLeaf &&
+    prev.isActive === next.isActive &&
+    prev.browserPanesVisible === next.browserPanesVisible &&
+    prev.dropFeedbackLeafId === next.dropFeedbackLeafId &&
+    prev.searchOpen === next.searchOpen &&
+    prev.chatViewAvailable === next.chatViewAvailable &&
+    Boolean(prev.onCloseSearch) === Boolean(next.onCloseSearch) &&
+    Boolean(prev.renderChatPane) === Boolean(next.renderChatPane) &&
+    Boolean(prev.onSetPaneView) === Boolean(next.onSetPaneView) &&
+    Boolean(prev.onReconnectAgentSession) === Boolean(next.onReconnectAgentSession) &&
+    Boolean(prev.onReconnectSshSession) === Boolean(next.onReconnectSshSession) &&
+    Boolean(prev.onReconnectPairedSession) === Boolean(next.onReconnectPairedSession) &&
+    Boolean(prev.onReconnectLocalSession) === Boolean(next.onReconnectLocalSession) &&
+    Boolean(prev.onRefreshSessionIdentity) === Boolean(next.onRefreshSessionIdentity) &&
+    Boolean(prev.onOpenNewShell) === Boolean(next.onOpenNewShell) &&
+    Boolean(prev.onRestartPane) === Boolean(next.onRestartPane) &&
+    Boolean(prev.onBackendSessionUnavailable) === Boolean(next.onBackendSessionUnavailable) &&
+    Boolean(prev.onDetachBrowserPane) === Boolean(next.onDetachBrowserPane) &&
+    Boolean(prev.onOpenBrowserFullscreen) === Boolean(next.onOpenBrowserFullscreen) &&
+    Boolean(prev.onCloseBrowserSession) === Boolean(next.onCloseBrowserSession)
+  );
+}
 
 const PaneLeafView = React.memo(function PaneLeafView({
   leafId,
@@ -1956,7 +2142,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
     </div>
     </NativeTerminalVisibilityProvider>
   );
-});
+}, arePaneLeafPropsEqual);
 
 type PaneResizeDividerProps = {
   direction: PaneDirection;

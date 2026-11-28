@@ -2134,20 +2134,25 @@ where
     Fut: std::future::Future<Output = Result<(), IpcError>>,
 {
     let start_instant = std::time::Instant::now();
-    let started_at_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs_f64() * 1000.0);
+    // Per-keystroke: a release build without the opt-in must not even build the JSON tree the
+    // sink would drop. The scoped-sink tests run in debug builds, where this is always true.
+    let switch_debug = crate::ipc::debug::high_frequency_switch_debug_enabled();
     let op_id = request_id.clone();
-    crate::ipc::debug::log_native_switch_debug(serde_json::json!({
-        "event": "terminal.surface.input.stage.backend_write_start",
-        "details": {
-            "operationId": op_id,
-            "sessionId": session_id,
-            "generation": generation,
-            "startedAt": started_at_unix_ms,
-        }
-    }));
+    if switch_debug {
+        let started_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs_f64() * 1000.0);
+        crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+            "event": "terminal.surface.input.stage.backend_write_start",
+            "details": {
+                "operationId": op_id,
+                "sessionId": session_id,
+                "generation": generation,
+                "startedAt": started_at_unix_ms,
+            }
+        }));
+    }
     // Task 3 (local-split-qa): private QA barrier hook on the REAL write
     // stage. The channel exists only when the pane-liveness runner installed
     // a task-owned barrier dir through the inherited env; default builds and
@@ -2174,34 +2179,36 @@ where
     )
     .await;
     let duration_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
-    match &write_result {
-        Ok(()) => {
-            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
-                "event": "terminal.surface.input.stage.backend_write",
-                "details": {
-                    "operationId": op_id,
-                    "sessionId": session_id,
-                    "durationMs": duration_ms,
-                    "success": true,
-                    "errorCode": None::<String>,
-                }
-            }));
-        }
-        Err(err) => {
-            let code_str = serde_json::to_value(&err.code)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_else(|| format!("{:?}", err.code));
-            crate::ipc::debug::log_native_switch_debug(serde_json::json!({
-                "event": "terminal.surface.input.stage.backend_write",
-                "details": {
-                    "operationId": op_id,
-                    "sessionId": session_id,
-                    "durationMs": duration_ms,
-                    "success": false,
-                    "errorCode": Some(crate::ipc::debug::normalize_error_code(&code_str)),
-                }
-            }));
+    if switch_debug {
+        match &write_result {
+            Ok(()) => {
+                crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                    "event": "terminal.surface.input.stage.backend_write",
+                    "details": {
+                        "operationId": op_id,
+                        "sessionId": session_id,
+                        "durationMs": duration_ms,
+                        "success": true,
+                        "errorCode": None::<String>,
+                    }
+                }));
+            }
+            Err(err) => {
+                let code_str = serde_json::to_value(&err.code)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_else(|| format!("{:?}", err.code));
+                crate::ipc::debug::log_native_switch_debug(serde_json::json!({
+                    "event": "terminal.surface.input.stage.backend_write",
+                    "details": {
+                        "operationId": op_id,
+                        "sessionId": session_id,
+                        "durationMs": duration_ms,
+                        "success": false,
+                        "errorCode": Some(crate::ipc::debug::normalize_error_code(&code_str)),
+                    }
+                }));
+            }
         }
     }
     // Task 3 (local-split-qa): settle with a FRESH real collector snapshot

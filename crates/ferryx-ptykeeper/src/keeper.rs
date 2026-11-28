@@ -35,9 +35,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 // Both are needed: `Write` is named bare by `Session::writer`, and `Read` supplies `.read()` to the
 // pump's `Box<dyn std::io::Read + Send>`. Spelled `_`-less on purpose, so neither reads as unused.
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -199,6 +201,205 @@ struct ReplayPage {
     gap: Option<ReplayGap>,
 }
 
+/// Lightweight cross-platform wakeup handle for a live output tap.
+///
+/// On Unix this owns a non-blocking, close-on-exec `pipe(2)` whose read end can be polled
+/// alongside the client socket in `poll(2)`, eliminating periodic idle wakeups while allowing
+/// immediate streaming wakeup whenever the PTY pump pushes bytes. On non-Unix targets it uses a
+/// `Condvar`.
+pub struct OutputWaker {
+    #[cfg(unix)]
+    read_fd: RawFd,
+    #[cfg(unix)]
+    write_fd: RawFd,
+    #[cfg(not(unix))]
+    wait_mu: Mutex<bool>,
+    #[cfg(not(unix))]
+    wait_cv: Condvar,
+    pending: AtomicBool,
+}
+
+#[cfg(unix)]
+unsafe fn set_nonblock_cloexec(fd: RawFd) -> std::io::Result<()> {
+    let fd_flags = libc::fcntl(fd, libc::F_GETFD);
+    if fd_flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if libc::fcntl(fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC) < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let status = libc::fcntl(fd, libc::F_GETFL);
+    if status < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if libc::fcntl(fd, libc::F_SETFL, status | libc::O_NONBLOCK) < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+impl OutputWaker {
+    pub fn new() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let mut fds: [RawFd; 2] = [-1, -1];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if let Err(error) = unsafe {
+                set_nonblock_cloexec(fds[0]).and_then(|()| set_nonblock_cloexec(fds[1]))
+            } {
+                unsafe {
+                    let _ = libc::close(fds[0]);
+                    let _ = libc::close(fds[1]);
+                }
+                return Err(error);
+            }
+            Ok(Self { read_fd: fds[0], write_fd: fds[1], pending: AtomicBool::new(false) })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                wait_mu: Mutex::new(false),
+                wait_cv: Condvar::new(),
+                pending: AtomicBool::new(false),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn read_fd(&self) -> RawFd {
+        self.read_fd
+    }
+
+    /// Signals a waiting output tap without blocking. Coalesces repeated wakes until [`Self::clear`].
+    pub fn wake(&self) {
+        if !self.pending.swap(true, Ordering::SeqCst) {
+            #[cfg(unix)]
+            unsafe {
+                let byte: u8 = 1;
+                let _ = libc::write(self.write_fd, (&byte as *const u8).cast(), 1);
+            }
+            #[cfg(not(unix))]
+            {
+                *lock(&self.wait_mu) = true;
+                self.wait_cv.notify_all();
+            }
+        }
+    }
+
+    /// Drains any queued wake bytes and re-arms notifications. Must be called by the owning tap
+    /// thread *before* reading from the replay log so concurrent pushes never lose a wakeup.
+    pub fn clear(&self) {
+        #[cfg(unix)]
+        {
+            let mut buf = [0u8; 64];
+            loop {
+                let n = unsafe { libc::read(self.read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n > 0 {
+                    continue;
+                }
+                if n < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            *lock(&self.wait_mu) = false;
+        }
+        self.pending.store(false, Ordering::SeqCst);
+    }
+
+    #[cfg(not(unix))]
+    pub fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
+        let guard = lock(&self.wait_mu);
+        if *guard {
+            return true;
+        }
+        let (guard, _) = self
+            .wait_cv
+            .wait_timeout(guard, timeout)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OutputWaker {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::close(self.read_fd);
+            let _ = libc::close(self.write_fd);
+        }
+    }
+}
+
+#[derive(Default)]
+struct OutputWakers {
+    count: AtomicUsize,
+    list: Mutex<Vec<Weak<OutputWaker>>>,
+}
+
+impl OutputWakers {
+    fn register(&self, waker: &Arc<OutputWaker>) {
+        let mut list = lock(&self.list);
+        list.retain(|existing| {
+            existing
+                .upgrade()
+                .is_some_and(|arc| !Arc::ptr_eq(&arc, waker))
+        });
+        list.push(Arc::downgrade(waker));
+        self.count.store(list.len(), Ordering::SeqCst);
+    }
+
+    fn unregister(&self, waker: &Arc<OutputWaker>) {
+        let mut list = lock(&self.list);
+        list.retain(|existing| {
+            existing
+                .upgrade()
+                .is_some_and(|arc| !Arc::ptr_eq(&arc, waker))
+        });
+        self.count.store(list.len(), Ordering::SeqCst);
+    }
+
+    fn notify(&self) {
+        if self.count.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let mut list = lock(&self.list);
+        let mut live = Vec::with_capacity(list.len());
+        list.retain(|weak| match weak.upgrade() {
+            Some(arc) => {
+                live.push(arc);
+                true
+            }
+            None => false,
+        });
+        self.count.store(list.len(), Ordering::SeqCst);
+        drop(list);
+        for waker in live {
+            waker.wake();
+        }
+    }
+}
+
+/// RAII registration of an [`OutputWaker`] on a live session. Dropping it unregisters the waker.
+pub struct OutputTapRegistration {
+    wakers: Arc<OutputWakers>,
+    waker: Arc<OutputWaker>,
+}
+
+impl Drop for OutputTapRegistration {
+    fn drop(&mut self) {
+        self.wakers.unregister(&self.waker);
+    }
+}
+
 /// One live session. Everything that must block lives behind its own lock so the registry guard is
 /// never held across I/O.
 pub struct Session {
@@ -239,6 +440,9 @@ pub struct Session {
     /// The replay log is shared with this session's pump thread, which appends every byte the
     /// master produces: one `Arc`, two holders, so the pump never reaches into the session.
     replay: Arc<Mutex<ReplayLog>>,
+    /// Registered live-output tap wakers notified whenever the pump pushes bytes or session state
+    /// changes (epoch advance, retirement, pump EOF).
+    output_wakers: Arc<OutputWakers>,
     pump: Mutex<Option<JoinHandle<()>>>,
     /// The handle that ends a blocking read, behind a mutex so a teardown can take a clone of it
     /// without holding the slot it lives in.
@@ -1256,6 +1460,7 @@ impl Keeper {
             request.session_id.clone(),
             crate::replay::REPLAY_SESSION_BYTES,
         )));
+        let output_wakers = Arc::new(OutputWakers::default());
         // The wake pipe is created before the pump and shared with it, so the teardown that sets the
         // stop flag can also end the pump's wait instead of leaving it to a poll tick.
         #[cfg(unix)]
@@ -1284,6 +1489,7 @@ impl Keeper {
             request.session_id.clone(),
             reader,
             Arc::clone(&replay),
+            Arc::clone(&output_wakers),
             Arc::clone(&reaper),
             pump_master_fd,
             Arc::clone(&wake),
@@ -1317,6 +1523,7 @@ impl Keeper {
             master_fd,
             wake,
             replay,
+            output_wakers,
             pump: Mutex::new(Some(pump)),
             interrupt: Mutex::new(interrupt),
             budget: Arc::clone(&self.budget),
@@ -1403,6 +1610,9 @@ impl Keeper {
             (epoch, checkpoint, page)
         };
         session.touch();
+        // Wake any previously attached live-output tap whose epoch was just superseded so it
+        // observes `EPOCH_MISMATCH` immediately instead of sleeping indefinitely.
+        session.output_wakers.notify();
         Ok(AttachOutcome {
             session_id: session_id.to_owned(),
             epoch,
@@ -1427,6 +1637,21 @@ impl Keeper {
         let _ownership = lock(&session.ownership);
         lock(&self.epochs).verify(session_id, epoch)?;
         Ok(())
+    }
+
+    /// Registers a live-output tap waker on `session_id` so the tap is woken immediately when the
+    /// session's PTY pump pushes bytes or its ownership/lifetime changes.
+    pub fn register_output_waker(
+        &self,
+        session_id: &str,
+        waker: &Arc<OutputWaker>,
+    ) -> KeeperResult<OutputTapRegistration> {
+        let session = self.session(session_id)?;
+        session.output_wakers.register(waker);
+        Ok(OutputTapRegistration {
+            wakers: Arc::clone(&session.output_wakers),
+            waker: Arc::clone(waker),
+        })
     }
 
     /// How many bytes a replay from `after` would copy right now, without copying them. `None` when
@@ -1600,6 +1825,7 @@ impl Keeper {
                 epochs.forget(session_id);
             }
         }
+        session.output_wakers.notify();
         // Ends the child (escalating on Unix) and collects it, then stops the pump: the stop flag is
         // what makes the pump's bounded `poll` leave its loop, so the join cannot hang behind a child
         // that ignored `SIGHUP` or a descendant that still holds the slave.
@@ -1860,6 +2086,7 @@ impl Keeper {
                     drop(retired);
                     lock(&self.checkpoints).forget_session(&session_id);
                 }
+                session.output_wakers.notify();
                 session.terminate_and_reap();
                 session.interrupt_reader();
                 session.join_pump();
@@ -2095,6 +2322,7 @@ fn spawn_pump(
     session_id: String,
     mut reader: Box<dyn std::io::Read + Send>,
     replay: Arc<Mutex<ReplayLog>>,
+    output_wakers: Arc<OutputWakers>,
     reaper: Arc<ChildReaper>,
     master_fd: Option<i32>,
     wake: Arc<PumpWake>,
@@ -2133,6 +2361,7 @@ fn spawn_pump(
                             // the same end state as EOF.
                             reaper.mark_exited();
                             reaper.reap_if_exited();
+                            output_wakers.notify();
                             return;
                         }
                     }
@@ -2145,11 +2374,15 @@ fn spawn_pump(
                         // status is not yet collectable is waited for with a bound, then killed.
                         reaper.mark_exited();
                         reaper.reap_within(Duration::from_millis(EOF_GRACE_MILLIS));
+                        output_wakers.notify();
                         return;
                     }
                     Ok(count) => {
-                        let mut replay = lock(&replay);
-                        replay.push(&buffer[..count]);
+                        {
+                            let mut replay = lock(&replay);
+                            replay.push(&buffer[..count]);
+                        }
+                        output_wakers.notify();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     // A non-blocking descriptor with no data ready is not an error: the next poll
@@ -2158,6 +2391,7 @@ fn spawn_pump(
                     Err(_) => {
                         reaper.mark_exited();
                         reaper.reap_if_exited();
+                        output_wakers.notify();
                         return;
                     }
                 }

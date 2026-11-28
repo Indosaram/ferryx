@@ -66,7 +66,7 @@ pub struct ScreenSeed {
 }
 
 fn encode_bytes<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(&STANDARD.encode(bytes))
+    serializer.collect_str(&base64::display::Base64Display::new(bytes, &STANDARD))
 }
 
 fn decode_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {

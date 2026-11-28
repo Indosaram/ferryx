@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   Activity,
   AlertCircle,
@@ -309,20 +309,28 @@ function MachineRailItem({
   );
 }
 
-function MachineSection({
-  entry,
+const MachineSection = memo(function MachineSection({
+  machineKey,
+  title,
+  origin,
+  status,
+  snapshot,
+  history,
+  notice,
+  onKill,
   sort,
   collapsed,
   onToggle,
-}: {
-  entry: MachineEntry;
+}: MachineEntry & {
   sort: ResourceSort;
   collapsed: ReadonlySet<string>;
   onToggle: (key: string) => void;
 }) {
-  const { machineKey, title, origin, status, snapshot, history, notice, onKill } = entry;
   const isCollapsed = collapsed.has(machineKey);
-  const groups = snapshot ? groupSessionsByWorktree(snapshot.sessions, sort) : [];
+  const groups = useMemo(
+    () => (snapshot ? groupSessionsByWorktree(snapshot.sessions, sort) : []),
+    [snapshot, sort],
+  );
   const note = snapshot ? unavailableLabel(snapshot.unavailable) : null;
   const HardwareIcon = origin === "local" ? Laptop : Server;
   const memRatio = snapshot ? usageRatio(snapshot.memoryUsedBytes, snapshot.memoryTotalBytes) : null;
@@ -592,7 +600,7 @@ function MachineSection({
       )}
     </section>
   );
-}
+});
 
 export function SystemResourcesDialog({
   onClose,
@@ -648,22 +656,48 @@ export function SystemResourcesDialog({
   useEffect(() => {
     alive.current = true;
     let cancelled = false;
+    let inFlight = false;
     let timer: number | undefined;
+    const isHidden = () => typeof document !== "undefined" && document.hidden;
+    const clear = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
     // The daemon samples only when asked, so this panel owns the cadence: it re-asks while it is
-    // open and stops on unmount, which leaves an idle daemon with no collector to run. The next
-    // ask is scheduled only after the previous one settles, so slow samples never pile up.
+    // open and visible, stops on unmount or when the document is hidden, and schedules the next
+    // ask only after the previous one settles so slow samples never pile up.
     const sample = async () => {
-      await refresh();
-      if (cancelled) return;
+      if (cancelled || inFlight || isHidden()) return;
+      inFlight = true;
+      try {
+        await refresh();
+      } finally {
+        inFlight = false;
+      }
+      if (cancelled || isHidden()) return;
+      clear();
       timer = window.setTimeout(() => {
+        timer = undefined;
         void sample();
       }, RESOURCE_SAMPLE_INTERVAL_MS);
     };
-    void sample();
+    const onVisibilityChange = () => {
+      if (cancelled) return;
+      if (isHidden()) {
+        clear();
+        return;
+      }
+      if (timer === undefined && !inFlight) void sample();
+    };
+    if (!isHidden()) void sample();
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       cancelled = true;
       alive.current = false;
-      window.clearTimeout(timer);
+      clear();
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [refresh]);
 
@@ -671,23 +705,56 @@ export function SystemResourcesDialog({
     if (hostKey === "") return;
     let cancelled = false;
     const timers = new Map<string, number>();
+    const inFlight = new Set<string>();
+    const isHidden = () => typeof document !== "undefined" && document.hidden;
     const targets = hostKey.split("\n").map((entry) => {
       const [hostId, generation] = entry.split("\u0000");
       return { hostId: hostId!, generation: generation! };
     });
-    const sample = async (target: { hostId: string; generation: string }) => {
-      const result = await fetchPairedResources(target);
-      if (cancelled) return;
-      setPaired((prev) => ({ ...prev, [target.hostId]: result }));
-      if (result.status === "sampled") {
-        setHistory((prev) => ({ ...prev, [target.hostId]: appendHistory(prev[target.hostId], result.snapshot) }));
-      }
-      timers.set(target.hostId, window.setTimeout(() => void sample(target), RESOURCE_SAMPLE_INTERVAL_MS));
+    const clearAll = () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
     };
-    targets.forEach((target) => void sample(target));
+    const sample = async (target: { hostId: string; generation: string }) => {
+      if (cancelled || inFlight.has(target.hostId) || isHidden()) return;
+      inFlight.add(target.hostId);
+      try {
+        const result = await fetchPairedResources(target);
+        if (cancelled) return;
+        setPaired((prev) => ({ ...prev, [target.hostId]: result }));
+        if (result.status === "sampled") {
+          setHistory((prev) => ({ ...prev, [target.hostId]: appendHistory(prev[target.hostId], result.snapshot) }));
+        }
+      } finally {
+        inFlight.delete(target.hostId);
+      }
+      if (cancelled || isHidden()) return;
+      const existing = timers.get(target.hostId);
+      if (existing !== undefined) window.clearTimeout(existing);
+      timers.set(
+        target.hostId,
+        window.setTimeout(() => {
+          timers.delete(target.hostId);
+          void sample(target);
+        }, RESOURCE_SAMPLE_INTERVAL_MS),
+      );
+    };
+    const onVisibilityChange = () => {
+      if (cancelled) return;
+      if (isHidden()) {
+        clearAll();
+        return;
+      }
+      targets.forEach((target) => {
+        if (!timers.has(target.hostId) && !inFlight.has(target.hostId)) void sample(target);
+      });
+    };
+    if (!isHidden()) targets.forEach((target) => void sample(target));
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       cancelled = true;
-      timers.forEach((timer) => window.clearTimeout(timer));
+      clearAll();
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibilityChange);
       setPaired({});
       setHistory((prev) => {
         const local = prev[LOCAL_KEY];
@@ -714,19 +781,52 @@ export function SystemResourcesDialog({
     if (sshTargets.length === 0) return;
     let cancelled = false;
     const timers = new Map<string, number>();
-    const sample = async (host: SshHost) => {
-      const result = await fetchSshResources(host);
-      if (cancelled) return;
-      setSshResults((prev) => ({ ...prev, [host.id]: result }));
-      if (result.status === "sampled") {
-        setHistory((prev) => ({ ...prev, [`${SSH_KEY_PREFIX}${host.id}`]: appendHistory(prev[`${SSH_KEY_PREFIX}${host.id}`], result.snapshot) }));
-      }
-      timers.set(host.id, window.setTimeout(() => void sample(host), SSH_RESOURCE_SAMPLE_INTERVAL_MS));
+    const inFlight = new Set<string>();
+    const isHidden = () => typeof document !== "undefined" && document.hidden;
+    const clearAll = () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
     };
-    sshTargets.forEach((host) => void sample(host));
+    const sample = async (host: SshHost) => {
+      if (cancelled || inFlight.has(host.id) || isHidden()) return;
+      inFlight.add(host.id);
+      try {
+        const result = await fetchSshResources(host);
+        if (cancelled) return;
+        setSshResults((prev) => ({ ...prev, [host.id]: result }));
+        if (result.status === "sampled") {
+          setHistory((prev) => ({ ...prev, [`${SSH_KEY_PREFIX}${host.id}`]: appendHistory(prev[`${SSH_KEY_PREFIX}${host.id}`], result.snapshot) }));
+        }
+      } finally {
+        inFlight.delete(host.id);
+      }
+      if (cancelled || isHidden()) return;
+      const existing = timers.get(host.id);
+      if (existing !== undefined) window.clearTimeout(existing);
+      timers.set(
+        host.id,
+        window.setTimeout(() => {
+          timers.delete(host.id);
+          void sample(host);
+        }, SSH_RESOURCE_SAMPLE_INTERVAL_MS),
+      );
+    };
+    const onVisibilityChange = () => {
+      if (cancelled) return;
+      if (isHidden()) {
+        clearAll();
+        return;
+      }
+      sshTargets.forEach((host) => {
+        if (!timers.has(host.id) && !inFlight.has(host.id)) void sample(host);
+      });
+    };
+    if (!isHidden()) sshTargets.forEach((host) => void sample(host));
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       cancelled = true;
-      timers.forEach((timer) => window.clearTimeout(timer));
+      clearAll();
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibilityChange);
       setSshResults({});
     };
   }, [sshTargets]);
@@ -752,6 +852,11 @@ export function SystemResourcesDialog({
       else next.add(key);
       return next;
     });
+  }, []);
+
+  const handleRequestKill = useCallback((session: SessionResourceUsage) => {
+    setKillError(null);
+    setKillTarget(session);
   }, []);
 
   const confirmKill = useCallback(async () => {
@@ -798,10 +903,7 @@ export function SystemResourcesDialog({
       snapshot,
       history: history[LOCAL_KEY],
       notice: loading && !snapshot ? "Reading host resources from the background service…" : null,
-      onKill: (session) => {
-        setKillError(null);
-        setKillTarget(session);
-      },
+      onKill: handleRequestKill,
     },
     ...hosts.map((host): MachineEntry => {
       const result = paired[host.hostId];
@@ -1069,7 +1171,7 @@ export function SystemResourcesDialog({
               {visibleMachines.map((entry) => (
                 <MachineSection
                   key={entry.machineKey}
-                  entry={entry}
+                  {...entry}
                   sort={sort}
                   collapsed={collapsed}
                   onToggle={toggle}

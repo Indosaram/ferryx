@@ -94,6 +94,13 @@ struct SessionInner {
     settings: SessionSettings,
     state: SessionState,
     parts: Vec<StructuredPart>,
+    /// Highest `seq` already published to external readers (`history` / `wait_for_events`).
+    /// Parts appended by `spawn_event_pump` stay invisible until their journal flush lands so
+    /// readers never observe un-journaled parts before durability completes.
+    published_seq: u64,
+    /// False for ended sessions discovered at startup whose `.jsonl` parts are loaded lazily
+    /// on first history/resume access instead of held in RAM forever.
+    parts_loaded: bool,
     /// The next `seq` to hand out. Monotonic for the session's whole life: a rollback drops parts
     /// but never lowers this, so `seq` stays strictly increasing across a rollback.
     next_seq: u64,
@@ -133,7 +140,7 @@ impl SessionInner {
         }
     }
 
-    fn append_part(&mut self, draft: PartDraft) -> u64 {
+    fn append_part_quiet(&mut self, draft: PartDraft) -> u64 {
         let seq = self.next_seq.max(1);
         self.next_seq = seq + 1;
         self.parts.push(StructuredPart {
@@ -142,16 +149,36 @@ impl SessionInner {
             ts_ms: now_ms(),
             payload: draft.payload,
         });
+        seq
+    }
+
+    fn append_part(&mut self, draft: PartDraft) -> u64 {
+        let seq = self.append_part_quiet(draft);
+        self.published_seq = self.published_seq.max(seq);
         let _ = self.events_tx.send_replace(seq);
         seq
     }
 
+    fn visible_parts(&self) -> &[StructuredPart] {
+        let end = self.parts.partition_point(|part| part.seq <= self.published_seq);
+        &self.parts[..end]
+    }
+
+    fn has_parts_after(&self, after: u64) -> bool {
+        self.visible_parts()
+            .last()
+            .is_some_and(|part| part.seq > after)
+    }
+
     fn parts_after(&self, after: u64) -> Vec<StructuredPart> {
-        self.parts
-            .iter()
-            .filter(|part| part.seq > after)
-            .cloned()
-            .collect()
+        let visible = self.visible_parts();
+        let idx = visible.partition_point(|part| part.seq <= after);
+        visible[idx..].to_vec()
+    }
+
+    fn all_parts_after(&self, after: u64) -> Vec<StructuredPart> {
+        let idx = self.parts.partition_point(|part| part.seq <= after);
+        self.parts[idx..].to_vec()
     }
 
     fn meta_record(&self, handle: &SessionHandle) -> JournalRecord {
@@ -166,12 +193,144 @@ impl SessionInner {
     }
 }
 
+/// Persistent serialized journal writer held outside `SessionInner` so streaming
+/// delta appends never hold the session state mutex across disk I/O or reopen
+/// the file descriptor on every delta.
+struct SessionJournal {
+    path: PathBuf,
+    writer: Option<tokio::io::BufWriter<tokio::fs::File>>,
+    flushed_seq: u64,
+}
+
+impl SessionJournal {
+    fn new(path: PathBuf) -> Self {
+        Self::with_flushed_seq(path, 0)
+    }
+
+    fn with_flushed_seq(path: PathBuf, flushed_seq: u64) -> Self {
+        Self {
+            path,
+            writer: None,
+            flushed_seq,
+        }
+    }
+
+    async fn append_parts(&mut self, parts: &[StructuredPart]) -> Result<(), StructuredChatError> {
+        use tokio::io::AsyncWriteExt;
+        if parts.is_empty() {
+            return Ok(());
+        }
+        let mut encoded = Vec::with_capacity(parts.len());
+        for part in parts {
+            let line = serde_json::to_string(&JournalRecord::Part {
+                part: part.clone(),
+            })
+            .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
+            encoded.push((part.seq, line));
+        }
+        if self.writer.is_none() {
+            let file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .await
+                .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
+            self.writer = Some(tokio::io::BufWriter::new(file));
+        }
+        let writer = self.writer.as_mut().expect("writer initialized");
+        let write_result: std::io::Result<()> = async {
+            for (_, line) in &encoded {
+                writer.write_all(line.as_bytes()).await?;
+                writer.write_all(b"\n").await?;
+            }
+            writer.flush().await
+        }
+        .await;
+        if let Err(error) = write_result {
+            self.writer = None;
+            return Err(StructuredChatError::Provider(error.to_string()));
+        }
+        if let Some((last_seq, _)) = encoded.last() {
+            self.flushed_seq = self.flushed_seq.max(*last_seq);
+        }
+        Ok(())
+    }
+
+    async fn rewrite(
+        &mut self,
+        meta: &JournalRecord,
+        parts: &[StructuredPart],
+        last_seq: u64,
+    ) -> Result<(), StructuredChatError> {
+        // Drop any open append handle before atomic rename so Windows allows
+        // replacing the target file and Unix does not keep appending to an
+        // unlinked inode.
+        self.writer = None;
+        rewrite_journal_file(&self.path, meta, parts).await?;
+        self.flushed_seq = last_seq;
+        Ok(())
+    }
+}
+
 /// One structured-chat session: a live provider (or a resumable ended one) plus its journal.
+///
+/// Lock order invariant: whenever both locks are needed, ALWAYS acquire `journal` before `inner`,
+/// take only a fast in-memory snapshot under `inner`, and drop `inner` before any disk I/O.
 pub struct SessionHandle {
     session_id: String,
     provider_id: String,
     cwd: PathBuf,
     inner: tokio::sync::Mutex<SessionInner>,
+    journal: tokio::sync::Mutex<SessionJournal>,
+}
+
+impl SessionHandle {
+    async fn flush_pending_parts(&self) -> Result<(), StructuredChatError> {
+        let mut journal = self.journal.lock().await;
+        let pending = {
+            let inner = self.inner.lock().await;
+            inner.all_parts_after(journal.flushed_seq)
+        };
+        journal.append_parts(&pending).await?;
+        let flushed = journal.flushed_seq;
+        let mut inner = self.inner.lock().await;
+        if flushed > inner.published_seq {
+            inner.published_seq = flushed;
+            let _ = inner.events_tx.send_replace(flushed);
+        }
+        Ok(())
+    }
+
+    async fn rewrite_journal_snapshot(&self) -> Result<(), StructuredChatError> {
+        self.rewrite_journal_snapshot_with_end(false).await
+    }
+
+    async fn rewrite_journal_snapshot_with_end(
+        &self,
+        mark_ended: bool,
+    ) -> Result<(), StructuredChatError> {
+        let mut journal = self.journal.lock().await;
+        let (meta, parts, last_seq) = {
+            let inner = self.inner.lock().await;
+            let last_seq = inner.parts.last().map_or(0, |part| part.seq);
+            let mut meta = inner.meta_record(self);
+            if mark_ended {
+                if let JournalRecord::Meta { ref mut state, .. } = meta {
+                    *state = SessionState::Ended;
+                }
+            }
+            (meta, inner.parts.clone(), last_seq)
+        };
+        journal.rewrite(&meta, &parts, last_seq).await?;
+        let mut inner = self.inner.lock().await;
+        if mark_ended {
+            inner.state = SessionState::Ended;
+            inner.provider = None;
+        }
+        inner.published_seq = inner.published_seq.max(last_seq);
+        let _ = inner.events_tx.send_replace(inner.published_seq);
+        Ok(())
+    }
 }
 
 /// The process-local structured-chat store.
@@ -286,76 +445,26 @@ impl StructuredChatStore {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
+        let scan_dir = dir.clone();
+        let reloaded = crate::ipc::run_blocking(move || Ok(scan_ended_sessions(&scan_dir)))
+            .await
+            .unwrap_or_default();
+        let mut initial_sessions = HashMap::with_capacity(reloaded.len());
+        for (session_id, handle) in reloaded {
+            initial_sessions.insert(session_id, handle);
+        }
         let store = Arc::new(Self {
-            sessions: RwLock::new(HashMap::new()),
+            sessions: RwLock::new(initial_sessions),
             journal_dir: dir,
         });
-        store.reload_ended_sessions();
         Ok(store)
     }
 
+    #[cfg(test)]
     fn reload_ended_sessions(&self) {
-        // Replayed sessions have no live process: state `ended`, provider none.
-        let entries = match std::fs::read_dir(&self.journal_dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let mut meta: Option<(String, String, String, Option<String>, SessionSettings)> = None;
-            let mut parts = Vec::new();
-            let mut latest_seq = 0u64;
-            for line in content.lines() {
-                let Ok(record) = serde_json::from_str::<JournalRecord>(line) else {
-                    continue;
-                };
-                match record {
-                    JournalRecord::Meta {
-                        session_id,
-                        provider,
-                        cwd,
-                        thread_id,
-                        settings,
-                        ..
-                    } => meta = Some((session_id, provider, cwd, thread_id, settings)),
-                    JournalRecord::Part { part } => {
-                        latest_seq = latest_seq.max(part.seq);
-                        parts.push(part);
-                    }
-                }
-            }
-            let Some((session_id, provider, cwd, thread_id, settings)) = meta else {
-                continue;
-            };
-            let (events_tx, _events_rx) = watch::channel(latest_seq);
-            let handle = Arc::new(SessionHandle {
-                session_id: session_id.clone(),
-                provider_id: provider,
-                cwd: PathBuf::from(&cwd),
-                inner: tokio::sync::Mutex::new(SessionInner {
-                    provider: None,
-                    thread_id,
-                    settings,
-                    state: SessionState::Ended,
-                    parts,
-                    next_seq: latest_seq + 1,
-                    turn_ids: Vec::new(),
-                    turn_snapshots: HashMap::new(),
-                    thread_first_turn: 0,
-                    turn_starting: false,
-                    active_turn: None,
-                    last_completed_turn: None,
-                    events_tx,
-                    journal_path: path,
-                }),
-            });
-            if let Ok(mut sessions) = self.sessions.try_write() {
+        let reloaded = scan_ended_sessions(&self.journal_dir);
+        if let Ok(mut sessions) = self.sessions.try_write() {
+            for (session_id, handle) in reloaded {
                 sessions.insert(session_id, handle);
             }
         }
@@ -399,6 +508,8 @@ impl StructuredChatStore {
                 settings: settings.clone(),
                 state: SessionState::Running,
                 parts: Vec::new(),
+                published_seq: 0,
+                parts_loaded: true,
                 next_seq: 1,
                 turn_ids: Vec::new(),
                 turn_snapshots: HashMap::new(),
@@ -409,10 +520,14 @@ impl StructuredChatStore {
                 events_tx: watch::channel(0).0,
                 journal_path: journal_path.clone(),
             }),
+            journal: tokio::sync::Mutex::new(SessionJournal::new(journal_path)),
         });
         spawn_event_pump(Arc::clone(&handle), events_rx);
-        write_meta_record(&handle, &*handle.inner.lock().await).await?;
-        let summary = handle.inner.lock().await.summary(&session_id, provider_id, &cwd);
+        let summary = {
+            let inner = handle.inner.lock().await;
+            inner.summary(&session_id, provider_id, &cwd)
+        };
+        handle.rewrite_journal_snapshot().await?;
         self.sessions
             .write()
             .await
@@ -460,46 +575,47 @@ impl StructuredChatStore {
                 return Err(error);
             }
         };
-        let mut inner = handle.inner.lock().await;
-        inner.turn_starting = false;
-        if let Some(snapshot) = pre_turn_snapshot {
-            inner.turn_snapshots.insert(turn.turn_id.clone(), snapshot);
-        }
-        // `turn/started` may already have recorded the turn (the notification races the
-        // response), so the id is only added when it is not there yet.
-        if !inner.turn_ids.contains(&turn.turn_id) {
-            inner.turn_ids.push(turn.turn_id.clone());
-        }
-        // The provider may have died while this turn was being started: the pump saw `Ended`
-        // before `active_turn` existed, so it could not fail the turn. Record the failure here so
-        // a turn never starts into a dead provider and then vanishes.
-        let provider_gone = inner.provider.is_none() || inner.state == SessionState::Ended;
-        // The user message part is stamped with the turn id the provider assigned.
-        let seq = inner.append_part(PartDraft {
-            turn_id: Some(turn.turn_id.clone()),
-            payload: PartKind::UserMessage {
-                text: body.text.clone(),
-            },
-        });
-        append_part_record(&inner.journal_path, inner.parts.last().expect("part appended")).await?;
-        if provider_gone {
-            inner.append_part(PartDraft {
-                turn_id: Some(turn.turn_id),
-                payload: PartKind::Error {
-                    message: "the provider exited before the turn completed".into(),
+        let seq = {
+            let mut inner = handle.inner.lock().await;
+            inner.turn_starting = false;
+            if let Some(snapshot) = pre_turn_snapshot {
+                inner.turn_snapshots.insert(turn.turn_id.clone(), snapshot);
+            }
+            // `turn/started` may already have recorded the turn (the notification races the
+            // response), so the id is only added when it is not there yet.
+            if !inner.turn_ids.contains(&turn.turn_id) {
+                inner.turn_ids.push(turn.turn_id.clone());
+            }
+            // The provider may have died while this turn was being started: the pump saw `Ended`
+            // before `active_turn` existed, so it could not fail the turn. Record the failure here so
+            // a turn never starts into a dead provider and then vanishes.
+            let provider_gone = inner.provider.is_none() || inner.state == SessionState::Ended;
+            // The user message part is stamped with the turn id the provider assigned.
+            let seq = inner.append_part(PartDraft {
+                turn_id: Some(turn.turn_id.clone()),
+                payload: PartKind::UserMessage {
+                    text: body.text.clone(),
                 },
             });
-            append_part_record(&inner.journal_path, inner.parts.last().expect("part appended"))
-                .await?;
-            return Ok(seq);
-        }
-        inner.active_turn = Some(turn.turn_id.clone());
-        // The turn may have completed while the provider round trip was in flight (the pump saw
-        // `TurnCompleted` before `active_turn` existed and could not clear it). Read that back, so
-        // a finished turn never looks in flight and blocks the next one.
-        if inner.last_completed_turn.as_deref() == Some(turn.turn_id.as_str()) {
-            inner.active_turn = None;
-        }
+            if provider_gone {
+                inner.append_part(PartDraft {
+                    turn_id: Some(turn.turn_id),
+                    payload: PartKind::Error {
+                        message: "the provider exited before the turn completed".into(),
+                    },
+                });
+            } else {
+                inner.active_turn = Some(turn.turn_id.clone());
+                // The turn may have completed while the provider round trip was in flight (the pump saw
+                // `TurnCompleted` before `active_turn` existed and could not clear it). Read that back, so
+                // a finished turn never looks in flight and blocks the next one.
+                if inner.last_completed_turn.as_deref() == Some(turn.turn_id.as_str()) {
+                    inner.active_turn = None;
+                }
+            }
+            seq
+        };
+        handle.flush_pending_parts().await?;
         Ok(seq)
     }
 
@@ -529,14 +645,16 @@ impl StructuredChatStore {
             (provider, expected_turn)
         };
         provider.steer(&expected_turn, body.text.clone()).await?;
-        let mut inner = handle.inner.lock().await;
-        let seq = inner.append_part(PartDraft {
-            turn_id: Some(expected_turn),
-            payload: PartKind::UserMessage {
-                text: body.text.clone(),
-            },
-        });
-        append_part_record(&inner.journal_path, inner.parts.last().expect("part appended")).await?;
+        let seq = {
+            let mut inner = handle.inner.lock().await;
+            inner.append_part(PartDraft {
+                turn_id: Some(expected_turn),
+                payload: PartKind::UserMessage {
+                    text: body.text.clone(),
+                },
+            })
+        };
+        handle.flush_pending_parts().await?;
         Ok(seq)
     }
 
@@ -642,26 +760,28 @@ impl StructuredChatStore {
             revert_files::restore_snapshot(&handle.cwd, snapshot).await?;
         }
         let reopened = provider.rollback(&before_turn_id).await?;
-        let mut inner = handle.inner.lock().await;
-        inner.thread_id = Some(reopened);
-        inner.turn_ids.truncate(keep);
-        inner.turn_snapshots.retain(|turn_id, _| keep_ids.contains(turn_id));
-        inner.active_turn = None;
-        // A part with no turn id (a divider, or an error the provider never stamped) belongs to
-        // the current thread: only the parts stamped with a rolled-back turn go.
-        inner.parts.retain(|part| match part.turn_id.as_ref() {
-            Some(id) => keep_ids.contains(id),
-            None => true,
-        });
-        // The marker is appended, not a rewrite of the numbering: `seq` keeps climbing, so a client
-        // that holds a cursor across a rollback sees the marker and never a re-used number.
-        inner.append_part(PartDraft {
-            turn_id: None,
-            payload: PartKind::Rollback { turns },
-        });
+        {
+            let mut inner = handle.inner.lock().await;
+            inner.thread_id = Some(reopened);
+            inner.turn_ids.truncate(keep);
+            inner.turn_snapshots.retain(|turn_id, _| keep_ids.contains(turn_id));
+            inner.active_turn = None;
+            // A part with no turn id (a divider, or an error the provider never stamped) belongs to
+            // the current thread: only the parts stamped with a rolled-back turn go.
+            inner.parts.retain(|part| match part.turn_id.as_ref() {
+                Some(id) => keep_ids.contains(id),
+                None => true,
+            });
+            // The marker is appended, not a rewrite of the numbering: `seq` keeps climbing, so a client
+            // that holds a cursor across a rollback sees the marker and never a re-used number.
+            inner.append_part(PartDraft {
+                turn_id: None,
+                payload: PartKind::Rollback { turns },
+            });
+        }
         // One atomic rewrite drops the rolled-back rows from the journal and keeps the marker, so a
         // reload cannot resurrect what the rollback took back.
-        rewrite_journal(&handle, &inner).await?;
+        handle.rewrite_journal_snapshot().await?;
         Ok(())
     }
 
@@ -683,20 +803,22 @@ impl StructuredChatStore {
                 .clone()
         };
         provider.answer_approval(request_id, decision).await?;
-        let mut inner = handle.inner.lock().await;
-        for part in &mut inner.parts {
-            if let PartKind::ApprovalRequest {
-                request_id: named,
-                answered,
-                ..
-            } = &mut part.payload
-            {
-                if named == request_id {
-                    *answered = true;
+        {
+            let mut inner = handle.inner.lock().await;
+            for part in &mut inner.parts {
+                if let PartKind::ApprovalRequest {
+                    request_id: named,
+                    answered,
+                    ..
+                } = &mut part.payload
+                {
+                    if named == request_id {
+                        *answered = true;
+                    }
                 }
             }
         }
-        rewrite_journal(&handle, &inner).await?;
+        handle.rewrite_journal_snapshot().await?;
         Ok(())
     }
 
@@ -707,45 +829,49 @@ impl StructuredChatStore {
         settings: &SessionSettings,
     ) -> Result<SessionSettings, StructuredChatError> {
         let handle = self.handle(session_id).await?;
-        let mut inner = handle.inner.lock().await;
-        if settings.model.is_some() {
-            inner.settings.model = settings.model.clone();
-        }
-        if settings.effort.is_some() {
-            inner.settings.effort = settings.effort.clone();
-        }
-        if settings.permission_mode.is_some() {
-            inner.settings.permission_mode = settings.permission_mode;
-        }
-        if settings.execution_mode.is_some() {
-            inner.settings.execution_mode = settings.execution_mode.clone();
-        }
-        if settings.agent_name.is_some() {
-            inner.settings.agent_name = settings.agent_name.clone();
-        }
-        if settings.fast_mode.is_some() {
-            inner.settings.fast_mode = settings.fast_mode;
-        }
-        if !settings.additional_dirs.is_empty() {
-            inner.settings.additional_dirs = settings.additional_dirs.clone();
-        }
-        if settings.steering_mode.is_some() {
-            inner.settings.steering_mode = settings.steering_mode;
-        }
-        if settings.follow_up_mode.is_some() {
-            inner.settings.follow_up_mode = settings.follow_up_mode;
-        }
-        if settings.auto_compaction.is_some() {
-            inner.settings.auto_compaction = settings.auto_compaction;
-        }
-        if settings.auto_retry.is_some() {
-            inner.settings.auto_retry = settings.auto_retry;
-        }
-        if settings.compaction_mode.is_some() {
-            inner.settings.compaction_mode = settings.compaction_mode.clone();
-        }
-        write_meta_record(&handle, &inner).await?;
-        Ok(inner.settings.clone())
+        ensure_parts_loaded(&handle).await?;
+        let updated = {
+            let mut inner = handle.inner.lock().await;
+            if settings.model.is_some() {
+                inner.settings.model = settings.model.clone();
+            }
+            if settings.effort.is_some() {
+                inner.settings.effort = settings.effort.clone();
+            }
+            if settings.permission_mode.is_some() {
+                inner.settings.permission_mode = settings.permission_mode;
+            }
+            if settings.execution_mode.is_some() {
+                inner.settings.execution_mode = settings.execution_mode.clone();
+            }
+            if settings.agent_name.is_some() {
+                inner.settings.agent_name = settings.agent_name.clone();
+            }
+            if settings.fast_mode.is_some() {
+                inner.settings.fast_mode = settings.fast_mode;
+            }
+            if !settings.additional_dirs.is_empty() {
+                inner.settings.additional_dirs = settings.additional_dirs.clone();
+            }
+            if settings.steering_mode.is_some() {
+                inner.settings.steering_mode = settings.steering_mode;
+            }
+            if settings.follow_up_mode.is_some() {
+                inner.settings.follow_up_mode = settings.follow_up_mode;
+            }
+            if settings.auto_compaction.is_some() {
+                inner.settings.auto_compaction = settings.auto_compaction;
+            }
+            if settings.auto_retry.is_some() {
+                inner.settings.auto_retry = settings.auto_retry;
+            }
+            if settings.compaction_mode.is_some() {
+                inner.settings.compaction_mode = settings.compaction_mode.clone();
+            }
+            inner.settings.clone()
+        };
+        handle.rewrite_journal_snapshot().await?;
+        Ok(updated)
     }
 
     pub async fn capabilities(
@@ -787,18 +913,19 @@ impl StructuredChatStore {
                 .clone()
         };
         let thread_id = provider.clear().await?;
-        let mut inner = handle.inner.lock().await;
-        inner.thread_id = Some(thread_id);
-        // Everything already known belongs to threads before this one; the next turn opens this
-        // thread's range.
-        inner.thread_first_turn = inner.turn_ids.len();
-        inner.active_turn = None;
-        let seq = inner.append_part(PartDraft {
-            turn_id: None,
-            payload: PartKind::NewSession,
-        });
-        write_meta_record(&handle, &inner).await?;
-        append_part_record(&inner.journal_path, inner.parts.last().expect("part appended")).await?;
+        let seq = {
+            let mut inner = handle.inner.lock().await;
+            inner.thread_id = Some(thread_id);
+            // Everything already known belongs to threads before this one; the next turn opens this
+            // thread's range.
+            inner.thread_first_turn = inner.turn_ids.len();
+            inner.active_turn = None;
+            inner.append_part(PartDraft {
+                turn_id: None,
+                payload: PartKind::NewSession,
+            })
+        };
+        handle.rewrite_journal_snapshot().await?;
         Ok(seq)
     }
 
@@ -865,20 +992,22 @@ impl StructuredChatStore {
             ));
         };
         provider.answer_extension_ui(request_id, response).await?;
-        let mut inner = handle.inner.lock().await;
-        for part in &mut inner.parts {
-            if let PartKind::ExtensionUiRequest {
-                request_id: id,
-                answered,
-                ..
-            } = &mut part.payload
-            {
-                if id == request_id {
-                    *answered = true;
+        {
+            let mut inner = handle.inner.lock().await;
+            for part in &mut inner.parts {
+                if let PartKind::ExtensionUiRequest {
+                    request_id: id,
+                    answered,
+                    ..
+                } = &mut part.payload
+                {
+                    if id == request_id {
+                        *answered = true;
+                    }
                 }
             }
         }
-        rewrite_journal(&handle, &inner).await?;
+        handle.rewrite_journal_snapshot().await?;
         Ok(())
     }
 
@@ -956,6 +1085,7 @@ impl StructuredChatStore {
                 return Ok(stats);
             }
         }
+        ensure_parts_loaded(&handle).await?;
         let inner = handle.inner.lock().await;
         let mut stats = SessionStats {
             turns: inner.turn_ids.len() as u64,
@@ -1047,30 +1177,37 @@ impl StructuredChatStore {
         query: &HistoryQuery,
     ) -> Result<HistoryPage, StructuredChatError> {
         let handle = self.handle(session_id).await?;
+        ensure_parts_loaded(&handle).await?;
         let inner = handle.inner.lock().await;
+        let visible = inner.visible_parts();
         let limit = query.limit.unwrap_or(HISTORY_PAGE_DEFAULT).clamp(1, HISTORY_PAGE_MAX);
-        let candidates: Vec<&StructuredPart> = inner
-            .parts
-            .iter()
-            .filter(|part| part.seq > query.after.unwrap_or(0))
-            .filter(|part| query.before.is_none_or(|before| part.seq < before))
-            .collect();
+        let start_idx = visible.partition_point(|part| part.seq <= query.after.unwrap_or(0));
+        let end_idx = match query.before {
+            Some(before) => visible.partition_point(|part| part.seq < before),
+            None => visible.len(),
+        };
+        let candidates = if start_idx <= end_idx {
+            &visible[start_idx..end_idx]
+        } else {
+            &[]
+        };
         let truncated = candidates.len() > limit;
         // A read with no `after` cursor is the transcript opening: serve the newest window, so the
         // first page is what the reader is looking at and `before` walks back from there. A read
         // with `after` is an incremental tail, so serve the window adjacent to that cursor.
-        let window: Vec<&StructuredPart> = if query.after.is_some() {
-            candidates.into_iter().take(limit).collect()
+        let window = if query.after.is_some() {
+            &candidates[..candidates.len().min(limit)]
         } else {
             let start = candidates.len().saturating_sub(limit);
-            candidates.into_iter().skip(start).collect()
+            &candidates[start..]
         };
         let oldest = window.first().map(|part| part.seq);
-        let parts: Vec<StructuredPart> = window.into_iter().cloned().collect();
+        let parts = window.to_vec();
         Ok(HistoryPage {
             parts,
             // Older rows exist below the page only when the session holds parts under it.
-            has_older: oldest.is_some_and(|seq| inner.parts.iter().any(|part| part.seq < seq)),
+            has_older: oldest
+                .is_some_and(|seq| visible.first().is_some_and(|first| first.seq < seq)),
             next_before: oldest,
             truncated,
         })
@@ -1084,9 +1221,10 @@ impl StructuredChatStore {
         after: u64,
     ) -> Result<Vec<StructuredPart>, StructuredChatError> {
         let handle = self.handle(session_id).await?;
+        ensure_parts_loaded(&handle).await?;
         let has_pending = {
             let inner = handle.inner.lock().await;
-            let pending = !inner.parts_after(after).is_empty();
+            let pending = inner.has_parts_after(after);
             if pending {
                 None
             } else {
@@ -1120,6 +1258,7 @@ impl StructuredChatStore {
     /// Closes the session and kills its provider process.
     pub async fn close_session(&self, session_id: &str) -> Result<(), StructuredChatError> {
         let handle = self.handle(session_id).await?;
+        ensure_parts_loaded(&handle).await?;
         let provider = {
             let mut inner = handle.inner.lock().await;
             inner.state = SessionState::Ended;
@@ -1129,9 +1268,7 @@ impl StructuredChatStore {
         if let Some(provider) = provider {
             provider.close().await;
         }
-        let inner = handle.inner.lock().await;
-        write_meta_record(&handle, &inner).await?;
-        drop(inner);
+        handle.rewrite_journal_snapshot().await?;
         self.sessions.write().await.remove(session_id);
         Ok(())
     }
@@ -1204,26 +1341,177 @@ async fn discover_models_with_commands(
     }
 }
 
+/// Lightweight peek for startup reload so ended sessions do not parse or retain
+/// historical part payloads in memory until a caller reads or resumes them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "kind")]
+enum JournalHeaderPeek {
+    Meta {
+        session_id: String,
+        provider: String,
+        cwd: String,
+        thread_id: Option<String>,
+        settings: SessionSettings,
+    },
+    Part {
+        part: JournalPartSeq,
+    },
+}
+
+#[derive(Deserialize)]
+struct JournalPartSeq {
+    seq: u64,
+}
+
+fn scan_ended_sessions(journal_dir: &Path) -> Vec<(String, Arc<SessionHandle>)> {
+    use std::io::BufRead;
+    let Ok(entries) = std::fs::read_dir(journal_dir) else {
+        return Vec::new();
+    };
+    let mut loaded = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        let mut meta: Option<(String, String, String, Option<String>, SessionSettings)> = None;
+        let mut latest_seq = 0u64;
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            let Ok(record) = serde_json::from_str::<JournalHeaderPeek>(line.trim()) else {
+                continue;
+            };
+            match record {
+                JournalHeaderPeek::Meta {
+                    session_id,
+                    provider,
+                    cwd,
+                    thread_id,
+                    settings,
+                } => meta = Some((session_id, provider, cwd, thread_id, settings)),
+                JournalHeaderPeek::Part { part } => {
+                    latest_seq = latest_seq.max(part.seq);
+                }
+            }
+        }
+        let Some((session_id, provider, cwd, thread_id, settings)) = meta else {
+            continue;
+        };
+        let (events_tx, _events_rx) = watch::channel(latest_seq);
+        let handle = Arc::new(SessionHandle {
+            session_id: session_id.clone(),
+            provider_id: provider,
+            cwd: PathBuf::from(&cwd),
+            inner: tokio::sync::Mutex::new(SessionInner {
+                provider: None,
+                thread_id,
+                settings,
+                state: SessionState::Ended,
+                parts: Vec::new(),
+                published_seq: latest_seq,
+                parts_loaded: false,
+                next_seq: latest_seq + 1,
+                turn_ids: Vec::new(),
+                turn_snapshots: HashMap::new(),
+                thread_first_turn: 0,
+                turn_starting: false,
+                active_turn: None,
+                last_completed_turn: None,
+                events_tx,
+                journal_path: path.clone(),
+            }),
+            journal: tokio::sync::Mutex::new(SessionJournal::with_flushed_seq(path, latest_seq)),
+        });
+        loaded.push((session_id, handle));
+    }
+    loaded
+}
+
+fn load_journal_parts_sync(path: &Path) -> (Vec<StructuredPart>, u64) {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return (Vec::new(), 0);
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut parts = Vec::new();
+    let mut latest_seq = 0u64;
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        if let Ok(JournalRecord::Part { part }) = serde_json::from_str::<JournalRecord>(line.trim())
+        {
+            latest_seq = latest_seq.max(part.seq);
+            parts.push(part);
+        }
+    }
+    if !parts.windows(2).all(|w| w[0].seq <= w[1].seq) {
+        parts.sort_by_key(|p| p.seq);
+    }
+    (parts, latest_seq)
+}
+
+async fn ensure_parts_loaded(handle: &Arc<SessionHandle>) -> Result<(), StructuredChatError> {
+    let journal_path = {
+        let inner = handle.inner.lock().await;
+        if inner.parts_loaded {
+            return Ok(());
+        }
+        inner.journal_path.clone()
+    };
+    let (loaded_parts, latest_seq) =
+        crate::ipc::run_blocking(move || Ok(load_journal_parts_sync(&journal_path)))
+            .await
+            .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
+    let mut journal = handle.journal.lock().await;
+    let mut inner = handle.inner.lock().await;
+    if !inner.parts_loaded {
+        inner.parts = loaded_parts;
+        inner.next_seq = inner.next_seq.max(latest_seq + 1);
+        inner.published_seq = inner.published_seq.max(latest_seq);
+        inner.parts_loaded = true;
+        journal.flushed_seq = journal.flushed_seq.max(latest_seq);
+    }
+    Ok(())
+}
+
 /// A session ended by a gateway restart has no provider; the next mutation resumes the thread.
 async fn ensure_running(handle: &Arc<SessionHandle>) -> Result<(), StructuredChatError> {
-    let mut inner = handle.inner.lock().await;
-    if inner.provider.is_some() {
-        return Ok(());
-    }
-    let Some(thread_id) = inner.thread_id.clone() else {
-        return Err(StructuredChatError::Conflict(
-            "SESSION_ENDED: the thread id was lost; start a new session".into(),
-        ));
+    ensure_parts_loaded(handle).await?;
+    let events_rx = {
+        let mut inner = handle.inner.lock().await;
+        if inner.provider.is_some() {
+            return Ok(());
+        }
+        let Some(thread_id) = inner.thread_id.clone() else {
+            return Err(StructuredChatError::Conflict(
+                "SESSION_ENDED: the thread id was lost; start a new session".into(),
+            ));
+        };
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let provider: Arc<dyn StructuredProvider> =
+            spawn_provider(&handle.provider_id, handle.cwd.clone(), events_tx, &inner.settings)?;
+        let resumed = provider.start(Some(thread_id)).await?;
+        inner.thread_id = Some(resumed);
+        inner.state = SessionState::Running;
+        inner.provider = Some(provider);
+        events_rx
     };
-    let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let provider: Arc<dyn StructuredProvider> =
-        spawn_provider(&handle.provider_id, handle.cwd.clone(), events_tx, &inner.settings)?;
-    let resumed = provider.start(Some(thread_id)).await?;
-    inner.thread_id = Some(resumed);
-    inner.state = SessionState::Running;
-    inner.provider = Some(provider);
-    write_meta_record(handle, &inner).await?;
-    drop(inner);
+    handle.rewrite_journal_snapshot().await?;
     spawn_event_pump(Arc::clone(handle), events_rx);
     Ok(())
 }
@@ -1232,114 +1520,97 @@ async fn ensure_running(handle: &Arc<SessionHandle>) -> Result<(), StructuredCha
 /// and marks the session `ended` when the provider process is gone.
 fn spawn_event_pump(handle: Arc<SessionHandle>, mut events: mpsc::UnboundedReceiver<ProviderEvent>) {
     tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            let mut inner = handle.inner.lock().await;
-            match event {
-                ProviderEvent::Part(draft) => {
-                    inner.append_part(draft);
-                    if let Err(error) = append_part_record(
-                        &inner.journal_path,
-                        inner.parts.last().expect("part appended"),
-                    )
-                    .await
-                    {
+        while let Some(first_event) = events.recv().await {
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            enum PendingJournal {
+                None,
+                Flush,
+                Rewrite,
+            }
+            let (pending, notify_seq) = {
+                let mut inner = handle.inner.lock().await;
+                let mut pending = PendingJournal::None;
+                let mut notify_seq: Option<u64> = None;
+                let mut next = Some(first_event);
+                while let Some(event) = next {
+                    match event {
+                        ProviderEvent::Part(draft) => {
+                            notify_seq = Some(inner.append_part_quiet(draft));
+                            if pending == PendingJournal::None {
+                                pending = PendingJournal::Flush;
+                            }
+                        }
+                        ProviderEvent::TurnStarted { turn_id } => {
+                            // A resumed turn arrives only this way (`thread/queue/start` reports it as a
+                            // notification), so record it here as well: steer, interrupt and rollback all
+                            // address turns out of `turn_ids`.
+                            if !inner.turn_ids.contains(&turn_id) {
+                                inner.turn_ids.push(turn_id.clone());
+                            }
+                            inner.active_turn = Some(turn_id);
+                        }
+                        ProviderEvent::TurnCompleted { turn_id, error } => {
+                            if inner.active_turn.as_deref() == Some(turn_id.as_str()) {
+                                inner.active_turn = None;
+                            }
+                            inner.last_completed_turn = Some(turn_id.clone());
+                            if let Some(message) = error {
+                                notify_seq = Some(inner.append_part_quiet(PartDraft {
+                                    turn_id: Some(turn_id),
+                                    payload: PartKind::Error { message },
+                                }));
+                                if pending == PendingJournal::None {
+                                    pending = PendingJournal::Flush;
+                                }
+                            }
+                        }
+                        ProviderEvent::Ended { reason } => {
+                            // A turn still in flight when the process dies is a failed turn: record why,
+                            // so history does not end with a user message and silence.
+                            if let Some(turn_id) = inner.active_turn.take() {
+                                notify_seq = Some(inner.append_part_quiet(PartDraft {
+                                    turn_id: Some(turn_id),
+                                    payload: PartKind::Error {
+                                        message: format!(
+                                            "the provider exited before the turn completed: {reason}"
+                                        ),
+                                    },
+                                }));
+                            }
+                            eprintln!("structured-chat session ended: {reason}");
+                            pending = PendingJournal::Rewrite;
+                        }
+                    }
+                    next = events.try_recv().ok();
+                }
+                (pending, notify_seq)
+            };
+            match pending {
+                PendingJournal::None => {}
+                PendingJournal::Flush => {
+                    if let Err(error) = handle.flush_pending_parts().await {
                         eprintln!("structured-chat journal append failed: {error}");
+                        if let Some(seq) = notify_seq {
+                            let mut inner = handle.inner.lock().await;
+                            inner.published_seq = inner.published_seq.max(seq);
+                            let _ = inner.events_tx.send_replace(seq);
+                        }
                     }
                 }
-                ProviderEvent::TurnStarted { turn_id } => {
-                    // A resumed turn arrives only this way (`thread/queue/start` reports it as a
-                    // notification), so record it here as well: steer, interrupt and rollback all
-                    // address turns out of `turn_ids`.
-                    if !inner.turn_ids.contains(&turn_id) {
-                        inner.turn_ids.push(turn_id.clone());
+                PendingJournal::Rewrite => {
+                    if handle.rewrite_journal_snapshot_with_end(true).await.is_err() {
+                        let mut inner = handle.inner.lock().await;
+                        inner.state = SessionState::Ended;
+                        inner.provider = None;
+                        if let Some(seq) = notify_seq {
+                            inner.published_seq = inner.published_seq.max(seq);
+                            let _ = inner.events_tx.send_replace(seq);
+                        }
                     }
-                    inner.active_turn = Some(turn_id);
-                }
-                ProviderEvent::TurnCompleted { turn_id, error } => {
-                    if inner.active_turn.as_deref() == Some(turn_id.as_str()) {
-                        inner.active_turn = None;
-                    }
-                    inner.last_completed_turn = Some(turn_id.clone());
-                    if let Some(message) = error {
-                        inner.append_part(PartDraft {
-                            turn_id: Some(turn_id),
-                            payload: PartKind::Error { message },
-                        });
-                        let _ = append_part_record(
-                            &inner.journal_path,
-                            inner.parts.last().expect("part appended"),
-                        )
-                        .await;
-                    }
-                }
-                ProviderEvent::Ended { reason } => {
-                    // A turn still in flight when the process dies is a failed turn: record why,
-                    // so history does not end with a user message and silence.
-                    if let Some(turn_id) = inner.active_turn.take() {
-                        inner.append_part(PartDraft {
-                            turn_id: Some(turn_id),
-                            payload: PartKind::Error {
-                                message: format!("the provider exited before the turn completed: {reason}"),
-                            },
-                        });
-                        let _ = append_part_record(
-                            &inner.journal_path,
-                            inner.parts.last().expect("part appended"),
-                        )
-                        .await;
-                    }
-                    inner.state = SessionState::Ended;
-                    inner.provider = None;
-                    eprintln!("structured-chat session ended: {reason}");
-                    let _ = write_meta_record(&handle, &inner).await;
                 }
             }
         }
     });
-}
-
-async fn write_meta_record(
-    handle: &SessionHandle,
-    inner: &SessionInner,
-) -> Result<(), StructuredChatError> {
-    rewrite_journal_file(
-        &inner.journal_path,
-        &inner.meta_record(handle),
-        &inner.parts,
-    )
-    .await
-}
-
-async fn append_part_record(path: &Path, part: &StructuredPart) -> Result<(), StructuredChatError> {
-    use tokio::io::AsyncWriteExt;
-    let line = serde_json::to_string(&JournalRecord::Part {
-        part: part.clone(),
-    })
-    .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-        .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
-    file.write_all(line.as_bytes())
-        .await
-        .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
-    file.write_all(b"\n")
-        .await
-        .map_err(|error| StructuredChatError::Provider(error.to_string()))?;
-    file.flush()
-        .await
-        .map_err(|error| StructuredChatError::Provider(error.to_string()))
-}
-
-/// Rewrites the whole journal from memory, keeping the meta record and the surviving parts in
-/// sync. Journals are per-session and small, so a rewrite is cheaper than surgical edits.
-async fn rewrite_journal(
-    handle: &SessionHandle,
-    inner: &SessionInner,
-) -> Result<(), StructuredChatError> {
-    rewrite_journal_file(&inner.journal_path, &inner.meta_record(handle), &inner.parts).await
 }
 
 async fn rewrite_journal_file(
@@ -1565,6 +1836,7 @@ mod tests {
         temp: &Path,
     ) -> Arc<SessionHandle> {
         let session_id = "s-test".to_owned();
+        let journal_path = temp.join(format!("{session_id}.jsonl"));
         let handle = Arc::new(SessionHandle {
             session_id: session_id.clone(),
             provider_id: "fake".to_owned(),
@@ -1580,6 +1852,8 @@ mod tests {
                 },
                 state: SessionState::Running,
                 parts: Vec::new(),
+                published_seq: 0,
+                parts_loaded: true,
                 next_seq: 1,
                 turn_ids: Vec::new(),
                 turn_snapshots: HashMap::new(),
@@ -1588,8 +1862,9 @@ mod tests {
                 active_turn: None,
                 last_completed_turn: None,
                 events_tx: watch::channel(0).0,
-                journal_path: temp.join(format!("{session_id}.jsonl")),
+                journal_path: journal_path.clone(),
             }),
+            journal: tokio::sync::Mutex::new(SessionJournal::new(journal_path)),
         });
         store
             .sessions
@@ -1598,7 +1873,8 @@ mod tests {
             .insert(session_id, Arc::clone(&handle));
         // A real session always has its meta line: the journal replay and rollback rewrites
         // both assume it, so the fixture must not be lazy about it.
-        write_meta_record(&handle, &*handle.inner.lock().await)
+        handle
+            .rewrite_journal_snapshot()
             .await
             .expect("meta record");
         handle
@@ -1802,10 +2078,8 @@ mod tests {
                     answered: false,
                 },
             });
-            append_part_record(&inner.journal_path, inner.parts.last().unwrap())
-                .await
-                .unwrap();
         }
+        handle.flush_pending_parts().await.unwrap();
         store
             .answer_approval("s-test", "900", ApprovalDecision::Decline)
             .await
@@ -2051,6 +2325,7 @@ mod tests {
 
         // A provider without a continuation is a typed conflict, not a silent success: this is what
         // the route maps to 409 and the UI reads to fall back to sending a message.
+        let refuse_journal = temp.join("s-refuse.jsonl");
         let refusing = std::sync::Arc::new(SessionHandle {
             session_id: "s-refuse".into(),
             provider_id: "fake".into(),
@@ -2066,6 +2341,8 @@ mod tests {
                 },
                 state: SessionState::Running,
                 parts: Vec::new(),
+                published_seq: 0,
+                parts_loaded: true,
                 next_seq: 1,
                 turn_ids: Vec::new(),
                 turn_snapshots: HashMap::new(),
@@ -2074,8 +2351,9 @@ mod tests {
                 active_turn: None,
                 last_completed_turn: None,
                 events_tx: watch::channel(0).0,
-                journal_path: temp.join("s-refuse.jsonl"),
+                journal_path: refuse_journal.clone(),
             }),
+            journal: tokio::sync::Mutex::new(SessionJournal::new(refuse_journal)),
         });
         store
             .sessions
@@ -2097,5 +2375,194 @@ mod tests {
         assert!(capabilities.resume, "codex has a native continuation");
         assert!(!capabilities.revert_files, "thread/revert does not revert files");
         assert!(capabilities.history_paging, "history serves bounded pages");
+    }
+
+    #[tokio::test]
+    async fn journal_interleaved_rewrite_and_append_preserves_all_parts_and_monotonic_seq() {
+        let temp = std::env::temp_dir().join(format!("ferryx-sc-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp).await.unwrap();
+        let store = store_in(&temp);
+        let handle = insert_fake_session(&store, &temp).await;
+        let journal_path = temp.join("s-test.jsonl");
+
+        // Seed parts 1 and 2 and flush them to disk.
+        {
+            let mut inner = handle.inner.lock().await;
+            inner.append_part(PartDraft {
+                turn_id: Some("t1".into()),
+                payload: PartKind::UserMessage { text: "one".into() },
+            });
+            inner.append_part(PartDraft {
+                turn_id: Some("t1".into()),
+                payload: PartKind::AssistantMessage { text: "two".into() },
+            });
+        }
+        handle.flush_pending_parts().await.unwrap();
+        assert_eq!(handle.journal.lock().await.flushed_seq, 2);
+
+        // Phase 1: Deterministic interleaving — hold `journal` while mutating `inner`
+        // (both a settings change and new parts #3 and #4), then release `journal` and
+        // race a snapshot rewrite against concurrent flushes.
+        {
+            let _journal_guard = handle.journal.lock().await;
+            let mut inner = handle.inner.lock().await;
+            inner.settings.model = Some("gpt-5.2".into());
+            inner.append_part(PartDraft {
+                turn_id: Some("t2".into()),
+                payload: PartKind::UserMessage {
+                    text: "three".into(),
+                },
+            });
+            inner.append_part(PartDraft {
+                turn_id: Some("t2".into()),
+                payload: PartKind::AssistantMessage {
+                    text: "four".into(),
+                },
+            });
+        }
+        let (r_rewrite, r_flush_a, r_flush_b) = tokio::join!(
+            handle.rewrite_journal_snapshot(),
+            handle.flush_pending_parts(),
+            handle.flush_pending_parts(),
+        );
+        r_rewrite.unwrap();
+        r_flush_a.unwrap();
+        r_flush_b.unwrap();
+        assert_eq!(handle.journal.lock().await.flushed_seq, 4);
+
+        // Phase 2: Concurrent writers interleaving appends and rewrites.
+        let mut tasks = Vec::new();
+        for i in 0..16usize {
+            let h = Arc::clone(&handle);
+            tasks.push(tokio::spawn(async move {
+                if i % 3 == 0 {
+                    {
+                        let mut inner = h.inner.lock().await;
+                        inner.settings.effort = Some(format!("effort-{i}"));
+                    }
+                    h.rewrite_journal_snapshot().await.unwrap();
+                } else {
+                    {
+                        let mut inner = h.inner.lock().await;
+                        inner.append_part(PartDraft {
+                            turn_id: Some(format!("t-par-{i}")),
+                            payload: PartKind::UserMessage {
+                                text: format!("msg-{i}"),
+                            },
+                        });
+                    }
+                    h.flush_pending_parts().await.unwrap();
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let expected_count = handle.inner.lock().await.parts.len();
+        assert_eq!(expected_count, 4 + 10);
+        assert_eq!(
+            handle.journal.lock().await.flushed_seq,
+            expected_count as u64
+        );
+
+        // Verify the raw `.jsonl` lines on disk (without defensive sorting) are
+        // strictly monotonic, complete, and duplicate-free, and preserve the latest meta.
+        let raw = tokio::fs::read_to_string(&journal_path).await.unwrap();
+        assert!(raw.contains("\"model\":\"gpt-5.2\""));
+        let mut raw_seqs = Vec::new();
+        for line in raw.lines() {
+            if let Ok(JournalRecord::Part { part }) = serde_json::from_str::<JournalRecord>(line) {
+                raw_seqs.push(part.seq);
+            }
+        }
+        assert_eq!(
+            raw_seqs,
+            (1..=expected_count as u64).collect::<Vec<_>>(),
+            "on-disk journal parts must be complete, deduplicated, and strictly monotonic"
+        );
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn load_journal_parts_sync_sorts_out_of_order_jsonl_for_partition_point() {
+        let temp = std::env::temp_dir().join(format!("ferryx-sc-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp).await.unwrap();
+        let journal_path = temp.join("s-unordered.jsonl");
+
+        let meta = JournalRecord::Meta {
+            session_id: "s-unordered".into(),
+            provider: "fake".into(),
+            cwd: temp.to_string_lossy().to_string(),
+            thread_id: Some("th-unordered".into()),
+            settings: SessionSettings::default(),
+            state: SessionState::Ended,
+        };
+        let mut body = serde_json::to_string(&meta).unwrap();
+        body.push('\n');
+        for seq in [1u64, 4, 2, 6, 5, 3] {
+            let rec = JournalRecord::Part {
+                part: StructuredPart {
+                    seq,
+                    turn_id: Some("t1".into()),
+                    ts_ms: seq,
+                    payload: PartKind::UserMessage {
+                        text: format!("part-{seq}"),
+                    },
+                },
+            };
+            body.push_str(&serde_json::to_string(&rec).unwrap());
+            body.push('\n');
+        }
+        tokio::fs::write(&journal_path, body).await.unwrap();
+
+        let (parts, latest_seq) = load_journal_parts_sync(&journal_path);
+        assert_eq!(latest_seq, 6);
+        assert_eq!(
+            parts.iter().map(|p| p.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+
+        // Reload through the store and verify `partition_point` queries (`history`) and
+        // `has_parts_after` work on the defensively sorted parts, and `flushed_seq` tracks `6`.
+        let reloaded = store_in(&temp);
+        reloaded.reload_ended_sessions();
+        let after_3 = reloaded
+            .history(
+                "s-unordered",
+                &HistoryQuery {
+                    after: Some(3),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after_3.parts.iter().map(|p| p.seq).collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+        let window = reloaded
+            .history(
+                "s-unordered",
+                &HistoryQuery {
+                    after: Some(2),
+                    before: Some(5),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            window.parts.iter().map(|p| p.seq).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        let handle = reloaded.handle("s-unordered").await.unwrap();
+        {
+            let inner = handle.inner.lock().await;
+            assert!(inner.has_parts_after(5));
+            assert!(!inner.has_parts_after(6));
+        }
+        assert_eq!(handle.journal.lock().await.flushed_seq, 6);
+        let _ = tokio::fs::remove_dir_all(&temp).await;
     }
 }

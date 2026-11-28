@@ -3,6 +3,7 @@
 use parking_lot::{Mutex, ReentrantMutex};
 use std::sync::{Arc, OnceLock};
 
+use super::pipeline::RenderPipelines;
 use crate::native_terminal::error::NativeTerminalError;
 
 // Serialize wgpu instance create/destroy and adapter/device acquisition.
@@ -157,6 +158,7 @@ fn preferred_terminal_surface_format(
 pub struct GpuContext {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
+    pipelines: Arc<OnceLock<Arc<RenderPipelines>>>,
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub adapter_info: wgpu::AdapterInfo,
@@ -306,12 +308,21 @@ impl GpuContext {
         Ok(Self {
             instance,
             adapter,
+            pipelines: Arc::new(OnceLock::new()),
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter_info,
             uncaptured_error,
             _owned_instance: owned_instance,
         })
+    }
+
+    /// Returns the cached terminal render pipelines for this GPU device, compiling them once.
+    pub(crate) fn render_pipelines(&self) -> Arc<RenderPipelines> {
+        Arc::clone(
+            self.pipelines
+                .get_or_init(|| Arc::new(RenderPipelines::new(&self.device))),
+        )
     }
 
     /// Creates a native window render surface using the same WGPU instance.

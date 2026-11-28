@@ -2,6 +2,22 @@ use std::io;
 #[path = "drain.rs"]
 mod drain;
 
+#[cfg(target_os = "macos")]
+const PROC_PGRP_ONLY: u32 = 2;
+#[cfg(target_os = "macos")]
+const PID_SLACK: usize = 32;
+#[cfg(target_os = "macos")]
+const MAX_PGRP_PIDS: usize = 65536;
+
+#[cfg(target_os = "macos")]
+fn pid_buffer_len(needed_bytes: usize) -> io::Result<usize> {
+    let needed_pids = needed_bytes.div_ceil(std::mem::size_of::<i32>());
+    if needed_pids >= MAX_PGRP_PIDS {
+        return Err(io::Error::other("Git group inventory exceeded limit"));
+    }
+    Ok(needed_pids.saturating_add(PID_SLACK).min(MAX_PGRP_PIDS))
+}
+
 pub(super) struct Owner(libc::pid_t);
 pub(super) struct Exit(libc::pid_t);
 
@@ -82,24 +98,44 @@ impl Owner {
     fn only_zombies(&self) -> io::Result<bool> {
         // Darwin killpg reports EPERM for a group containing only zombies.
         // Do not blanket-ignore EPERM: inspect this exact anchored group.
-        let mut pids = vec![0i32; 65536];
-        let bytes = unsafe {
-            libc::proc_listpids(
-                2,
-                self.0 as u32,
-                pids.as_mut_ptr().cast(),
-                (pids.len() * 4) as i32,
-            )
+        const PID_SIZE: usize = std::mem::size_of::<i32>();
+        let needed = unsafe {
+            libc::proc_listpids(PROC_PGRP_ONLY, self.0 as u32, std::ptr::null_mut(), 0)
         };
-        if bytes <= 0 {
+        if needed < 0 {
             return Err(io::Error::last_os_error());
         }
-        if bytes as usize >= pids.len() * 4 {
-            return Err(io::Error::other("Git group inventory exceeded limit"));
+        if needed == 0 {
+            return Ok(true);
         }
+        let mut capacity = pid_buffer_len(needed as usize)?;
+        let (pids, bytes) = loop {
+            let mut pids = vec![0i32; capacity];
+            let bytes = unsafe {
+                libc::proc_listpids(
+                    PROC_PGRP_ONLY,
+                    self.0 as u32,
+                    pids.as_mut_ptr().cast(),
+                    (pids.len() * PID_SIZE) as i32,
+                )
+            };
+            if bytes < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if bytes == 0 {
+                return Ok(true);
+            }
+            if (bytes as usize) < pids.len() * PID_SIZE {
+                break (pids, bytes as usize);
+            }
+            if capacity >= MAX_PGRP_PIDS {
+                return Err(io::Error::other("Git group inventory exceeded limit"));
+            }
+            capacity = capacity.saturating_mul(2).min(MAX_PGRP_PIDS);
+        };
         for pid in pids
             .into_iter()
-            .take(bytes as usize / 4)
+            .take(bytes / PID_SIZE)
             .filter(|pid| *pid > 0)
         {
             let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -143,5 +179,21 @@ impl Exit {
             drain::wait(watch, deadline)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_buffer_len_allocates_needed_plus_slack_and_enforces_limit() {
+        assert_eq!(pid_buffer_len(4).unwrap(), 1 + PID_SLACK);
+        assert_eq!(pid_buffer_len(12).unwrap(), 3 + PID_SLACK);
+        assert_eq!(
+            pid_buffer_len((MAX_PGRP_PIDS - 1) * std::mem::size_of::<i32>()).unwrap(),
+            MAX_PGRP_PIDS
+        );
+        assert!(pid_buffer_len(MAX_PGRP_PIDS * std::mem::size_of::<i32>()).is_err());
     }
 }

@@ -223,7 +223,7 @@ mod tests {
         use crate::native_terminal::cursor::{CursorSnapshot, CursorVisualStyle};
         use crate::native_terminal::snapshot::RenderSnapshot;
         SessionRenderInput {
-            snapshot: RenderSnapshot {
+            snapshot: Arc::new(RenderSnapshot {
                 cols: 80,
                 rows: 24,
                 cursor: CursorSnapshot {
@@ -236,12 +236,19 @@ mod tests {
                 },
                 grid: Vec::new(),
                 images: Vec::new(),
-            },
+            }),
             selection: None,
             scrollbar_overlay: None,
             attention_frame: false,
             synchronized_output: false,
         }
+    }
+
+    #[test]
+    fn cloning_session_render_input_shares_snapshot_arc() {
+        let input = mock_input();
+        let cloned = input.clone();
+        assert!(Arc::ptr_eq(&input.snapshot, &cloned.snapshot));
     }
 
     #[test]

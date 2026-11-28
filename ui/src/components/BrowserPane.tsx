@@ -511,22 +511,50 @@ export function BrowserPane({
       });
     };
 
-    const updateBounds = () => {
+    if (!maskAwareVisible || liveTab.loadError) {
+      const hideCurrent = () => {
+        const handle = viewportRef.current;
+        if (handle) void handle.hide(reportFailure);
+      };
+      updateBoundsRef.current = hideCurrent;
+      hideCurrent();
+      return () => {
+        disposed = true;
+        updateBoundsRef.current = () => undefined;
+      };
+    }
+
+    let lastSentBounds: { x: number; y: number; width: number; height: number } | null = null;
+    let pendingRaf: number | null = null;
+
+    const updateBounds = (force = false) => {
       // Read the handle at call time: a re-claim (browser or priority change) replaces it while
       // this effect stays mounted, and geometry must always drive the pane's current claim.
       const handle = viewportRef.current;
       if (!handle) return;
-      if (!maskAwareVisible || liveTab.loadError) {
-        void handle.hide(reportFailure);
-        return;
-      }
-
       const rect = el.getBoundingClientRect();
       const toolbarRect = toolbarRef.current?.getBoundingClientRect();
       const minTop = toolbarRect ? toolbarRect.bottom : rect.y;
       const clampedY = Math.max(rect.y, minTop);
       const heightReduction = clampedY - rect.y;
       const clampedHeight = Math.max(0, rect.height - heightReduction);
+      const nextBounds = {
+        x: rect.x,
+        y: clampedY,
+        width: rect.width,
+        height: clampedHeight,
+      };
+      if (
+        !force &&
+        lastSentBounds !== null &&
+        lastSentBounds.x === nextBounds.x &&
+        lastSentBounds.y === nextBounds.y &&
+        lastSentBounds.width === nextBounds.width &&
+        lastSentBounds.height === nextBounds.height
+      ) {
+        return;
+      }
+      lastSentBounds = nextBounds;
 
       // On macOS the child webview is a sibling NSView stacked above the app WKWebView, and
       // the native terminal surface sits below that webview. An opaque child shown before its
@@ -534,33 +562,41 @@ export function BrowserPane({
       // occupies the stale rect, which no DOM z-index can undo. The coordinator reveals it only
       // after the backend acknowledged this frame, and only if this pane still owns the surface.
       void handle
-        .syncBoundsAndShow(
-          {
-            x: rect.x,
-            y: clampedY,
-            width: rect.width,
-            height: clampedHeight,
-          },
-          reportFailure,
-        )
+        .syncBoundsAndShow(nextBounds, reportFailure)
         .then((shown) => {
-          if (disposed || !shown) return;
+          if (disposed) return;
+          if (!shown) {
+            if (lastSentBounds === nextBounds) lastSentBounds = null;
+            return;
+          }
           setDisplayError(null);
         });
     };
 
-    updateBoundsRef.current = updateBounds;
-    updateBounds();
+    const scheduleUpdateBounds = () => {
+      if (disposed || pendingRaf !== null) return;
+      pendingRaf = requestAnimationFrame(() => {
+        pendingRaf = null;
+        if (!disposed) updateBounds(false);
+      });
+    };
 
-    const resizeObserver = new ResizeObserver(updateBounds);
+    updateBoundsRef.current = () => updateBounds(true);
+    updateBounds(true);
+
+    const resizeObserver = new ResizeObserver(scheduleUpdateBounds);
     resizeObserver.observe(el);
-    window.addEventListener("resize", updateBounds);
+    window.addEventListener("resize", scheduleUpdateBounds);
 
     return () => {
       disposed = true;
+      if (pendingRaf !== null) {
+        cancelAnimationFrame(pendingRaf);
+        pendingRaf = null;
+      }
       updateBoundsRef.current = () => undefined;
       resizeObserver.disconnect();
-      window.removeEventListener("resize", updateBounds);
+      window.removeEventListener("resize", scheduleUpdateBounds);
       // Hiding is the owner's release, not this effect's cleanup: an effect re-run must never
       // hide a surface another pane already claimed.
     };

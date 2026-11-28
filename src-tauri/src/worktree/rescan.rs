@@ -80,11 +80,19 @@ impl WorktreeRescanCache {
     /// outlive it for the life of the process, and a later re-registration
     /// under the same ID would inherit a stale baseline that suppresses the
     /// events its new checkout deserves.
-    #[cfg(any(feature = "desktop", test))]
     fn retain_workspaces(&self, active: &HashSet<String>) {
         self.entries.lock().retain(|id, _| active.contains(id));
         self.wedged.lock().retain(|id| active.contains(id));
     }
+}
+
+/// Deterministic stagger offset for a git workspace's initial `last_scan` so
+/// multiple workspaces do not all hit `RECONCILE_INTERVAL` on the same tick.
+/// Index 0 gets zero offset so a single workspace reconciles at the exact bound.
+fn reconcile_stagger_offset(git_workspace_index: usize) -> Duration {
+    let slots = (RECONCILE_INTERVAL.as_secs() / WORKTREE_RESCAN_INTERVAL.as_secs()).max(1) as usize;
+    let slot = (git_workspace_index % slots) as u64;
+    Duration::from_secs(slot * WORKTREE_RESCAN_INTERVAL.as_secs())
 }
 
 #[derive(Debug)]
@@ -234,24 +242,95 @@ pub fn read_worktree_admin_fingerprint(repo_root: &Path) -> Option<String> {
     Some(parts.join(&FINGERPRINT_SEP.to_string()))
 }
 
-/// Runs the fingerprint probe on a dedicated thread with a hard deadline so a
-/// wedged mount cannot stall the sweep (or leak unbounded threads).
+struct ProbeRequest {
+    repo_root: PathBuf,
+    reply: std::sync::mpsc::Sender<Option<String>>,
+}
+
+struct ProbeWorker {
+    tx: Option<std::sync::mpsc::Sender<ProbeRequest>>,
+}
+
+impl ProbeWorker {
+    fn spawn_sender() -> Option<std::sync::mpsc::Sender<ProbeRequest>> {
+        let (tx, rx) = std::sync::mpsc::channel::<ProbeRequest>();
+        std::thread::Builder::new()
+            .name("worktree-fingerprint".to_string())
+            .spawn(move || {
+                while let Ok(request) = rx.recv() {
+                    let _ = request
+                        .reply
+                        .send(read_worktree_admin_fingerprint(&request.repo_root));
+                }
+            })
+            .ok()?;
+        Some(tx)
+    }
+
+    fn probe(&mut self, repo_root: &Path) -> ProbeOutcome {
+        if self.tx.is_none() {
+            self.tx = Self::spawn_sender();
+        }
+        let Some(tx) = self.tx.as_ref() else {
+            return ProbeOutcome::Done(None);
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if tx
+            .send(ProbeRequest {
+                repo_root: repo_root.to_path_buf(),
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            // Worker exited unexpectedly; respawn once.
+            self.tx = Self::spawn_sender();
+            let Some(tx) = self.tx.as_ref() else {
+                return ProbeOutcome::Done(None);
+            };
+            let (retry_tx, retry_rx) = std::sync::mpsc::channel();
+            if tx
+                .send(ProbeRequest {
+                    repo_root: repo_root.to_path_buf(),
+                    reply: retry_tx,
+                })
+                .is_err()
+            {
+                self.tx = None;
+                return ProbeOutcome::Done(None);
+            }
+            return self.await_reply(retry_rx);
+        }
+        self.await_reply(reply_rx)
+    }
+
+    fn await_reply(
+        &mut self,
+        reply_rx: std::sync::mpsc::Receiver<Option<String>>,
+    ) -> ProbeOutcome {
+        match reply_rx.recv_timeout(FINGERPRINT_PROBE_TIMEOUT) {
+            Ok(result) => ProbeOutcome::Done(result),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Detach the wedged worker so healthy workspaces get a fresh
+                // worker on the next probe; the caller marks this workspace
+                // wedged so it will not wedge another thread.
+                self.tx = None;
+                ProbeOutcome::TimedOut
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.tx = None;
+                ProbeOutcome::Done(None)
+            }
+        }
+    }
+}
+
+/// Runs the fingerprint probe on a single persistent worker thread with a hard
+/// deadline so steady-state sweeps spawn zero OS threads and a wedged mount
+/// cannot stall healthy workspaces.
 fn probe_fingerprint(repo_root: &Path) -> ProbeOutcome {
-    let (sender, receiver) = std::sync::mpsc::channel::<Option<String>>();
-    let root = repo_root.to_path_buf();
-    let worker = std::thread::Builder::new()
-        .name("worktree-fingerprint".to_string())
-        .spawn(move || {
-            let _ = sender.send(read_worktree_admin_fingerprint(&root));
-        });
-    if worker.is_err() {
-        return ProbeOutcome::Done(None);
-    }
-    match receiver.recv_timeout(FINGERPRINT_PROBE_TIMEOUT) {
-        Ok(result) => ProbeOutcome::Done(result),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => ProbeOutcome::TimedOut,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => ProbeOutcome::Done(None),
-    }
+    static WORKER: std::sync::LazyLock<Mutex<ProbeWorker>> =
+        std::sync::LazyLock::new(|| Mutex::new(ProbeWorker { tx: None }));
+    WORKER.lock().probe(repo_root)
 }
 
 fn read_file(path: &Path) -> std::io::Result<String> {
@@ -450,13 +529,27 @@ fn sweep_with_probe<F>(
 where
     F: Fn(&Path) -> ProbeOutcome,
 {
+    let mut workspaces = registry.list();
+    workspaces.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let active_ids: HashSet<String> = workspaces.iter().map(|(id, _)| id.clone()).collect();
+    cache.retain_workspaces(&active_ids);
+
     let mut changes = Vec::new();
-    for (workspace_id, manager) in registry.list() {
+    let mut git_index = 0usize;
+    for (workspace_id, manager) in workspaces {
+        let stagger = if manager.is_git_backed() {
+            let offset = reconcile_stagger_offset(git_index);
+            git_index += 1;
+            offset
+        } else {
+            Duration::ZERO
+        };
         changes.extend(sweep_workspace_with_probe(
             cache,
             &workspace_id,
             &manager,
             now,
+            stagger,
             &probe,
         ));
     }
@@ -470,6 +563,7 @@ fn sweep_workspace_with_probe<F>(
     workspace_id: &str,
     manager: &WorktreeManager,
     now: Instant,
+    stagger: Duration,
     probe: &F,
 ) -> Vec<DetectedWorktreeChange>
 where
@@ -493,20 +587,15 @@ where
             .unwrap_or_default();
     }
     let repo_root = manager.repo_root().to_path_buf();
-    let prior_worktrees = {
-        let entries = cache.entries.lock();
-        entries
-            .get(workspace_id)
-            .map(|entry| entry.worktrees.clone())
-    };
 
-    // Read the cached gate state without holding the lock across IO.
+    // Read only the cached gate state (never cloning `entry.worktrees`) without
+    // holding the lock across IO.
     let (stored_fingerprint, reconcile_due) = {
         let entries = cache.entries.lock();
         match entries.get(workspace_id) {
             Some(entry) => (
                 entry.fingerprint.clone(),
-                now.duration_since(entry.last_scan) >= RECONCILE_INTERVAL,
+                now.saturating_duration_since(entry.last_scan) >= RECONCILE_INTERVAL,
             ),
             None => (None, false),
         }
@@ -550,17 +639,14 @@ where
         }
     };
 
-    let mut changes = Vec::new();
-    if let Some(prior_worktrees) = prior_worktrees {
-        changes.extend(diff_worktrees(&prior_worktrees, &scanned, workspace_id));
-    }
-
     let mut entries = cache.entries.lock();
     match entries.get_mut(workspace_id) {
         Some(entry) => {
+            let changes = diff_worktrees(&entry.worktrees, &scanned, workspace_id);
             entry.fingerprint = captured;
             entry.worktrees = scanned;
             entry.last_scan = now;
+            changes
         }
         None => {
             entries.insert(
@@ -568,12 +654,12 @@ where
                 RescanEntry {
                     fingerprint: captured,
                     worktrees: scanned,
-                    last_scan: now,
+                    last_scan: now.checked_sub(stagger).unwrap_or(now),
                 },
             );
+            Vec::new()
         }
     }
-    changes
 }
 
 /// Per-workspace scan budget. A wedged filesystem can make `list_worktrees`
@@ -596,6 +682,7 @@ fn sweep_workspace_with_budget<F>(
     workspace_id: &str,
     manager: &WorktreeManager,
     now: Instant,
+    stagger: Duration,
     probe: &F,
     budget: GitBudget,
 ) -> Vec<DetectedWorktreeChange>
@@ -603,7 +690,7 @@ where
     F: Fn(&Path) -> ProbeOutcome,
 {
     with_git_budget(budget, || {
-        sweep_workspace_with_probe(cache, workspace_id, manager, now, probe)
+        sweep_workspace_with_probe(cache, workspace_id, manager, now, stagger, probe)
     })
 }
 
@@ -625,15 +712,23 @@ pub fn spawn_worktree_rescan_task<R: tauri::Runtime>(
         loop {
             ticker.tick().await;
             let now = Instant::now();
-            let workspaces = registry.list();
+            let mut workspaces = registry.list();
+            workspaces.sort_by(|(a, _), (b, _)| a.cmp(b));
             // Prune cache state for workspaces removed since the previous
             // tick so their baselines and wedge markers cannot outlive them.
-            let active_ids: HashSet<String> = workspaces
-                .iter()
-                .map(|(workspace_id, _)| workspace_id.clone())
-                .collect();
+            let active_ids: HashSet<String> =
+                workspaces.iter().map(|(id, _)| id.clone()).collect();
             cache.retain_workspaces(&active_ids);
+
+            let mut git_index = 0usize;
             for (workspace_id, manager) in workspaces {
+                let stagger = if manager.is_git_backed() {
+                    let offset = reconcile_stagger_offset(git_index);
+                    git_index += 1;
+                    offset
+                } else {
+                    Duration::ZERO
+                };
                 let workspace_cache = Arc::clone(&cache);
                 // Owned copy for the blocking closure; the original stays for
                 // logging in the match arms below.
@@ -661,6 +756,7 @@ pub fn spawn_worktree_rescan_task<R: tauri::Runtime>(
                             &closure_workspace_id,
                             &manager,
                             now,
+                            stagger,
                             &probe_fingerprint,
                             budget,
                         ))
@@ -1347,6 +1443,7 @@ mod tests {
             "ws-a",
             &manager,
             now + Duration::from_secs(30),
+            Duration::ZERO,
             &changed,
             budget,
         );
@@ -1388,5 +1485,76 @@ mod tests {
             serde_json::to_value(WorktreeChangeKind::DirtyChanged).unwrap(),
             serde_json::json!("dirtyChanged")
         );
+    }
+
+    #[test]
+    fn sweep_prunes_unregistered_workspaces_from_cache_and_wedged() {
+        let (_temp_a, manager_a) = setup_test_repo();
+        let (_temp_b, manager_b) = setup_test_repo();
+        let registry = WorkspaceRegistry::new();
+        registry.register("ws-a", manager_a.repo_root()).unwrap();
+        registry.register("ws-b", manager_b.repo_root()).unwrap();
+
+        let cache = WorktreeRescanCache::default();
+        let now = Instant::now();
+        let _ = sweep_with_probe(&cache, &registry, now, |_root| ProbeOutcome::TimedOut);
+        assert!(cache.entries.lock().contains_key("ws-a"));
+        assert!(cache.entries.lock().contains_key("ws-b"));
+        assert!(cache.wedged.lock().contains("ws-a"));
+        assert!(cache.wedged.lock().contains("ws-b"));
+
+        assert!(registry.unregister("ws-b"));
+        let _ = sweep_with_probe(&cache, &registry, now + Duration::from_secs(30), |_root| {
+            ProbeOutcome::Done(Some("fp".into()))
+        });
+        assert!(cache.entries.lock().contains_key("ws-a"));
+        assert!(!cache.entries.lock().contains_key("ws-b"));
+        assert!(cache.wedged.lock().contains("ws-a"));
+        assert!(!cache.wedged.lock().contains("ws-b"));
+    }
+
+    #[test]
+    fn sweep_staggers_reconcile_across_multiple_workspaces() {
+        let (_temp_a, manager_a) = setup_test_repo();
+        let (_temp_b, manager_b) = setup_test_repo();
+        let (_temp_c, manager_c) = setup_test_repo();
+        let registry = WorkspaceRegistry::new();
+        registry.register("ws-a", manager_a.repo_root()).unwrap();
+        registry.register("ws-b", manager_b.repo_root()).unwrap();
+        registry.register("ws-c", manager_c.repo_root()).unwrap();
+
+        let cache = WorktreeRescanCache::default();
+        // Anchor well past RECONCILE_INTERVAL so checked_sub cannot underflow on freshly booted hosts.
+        let now = Instant::now() + RECONCILE_INTERVAL;
+        let probe = |_root: &Path| ProbeOutcome::Done(Some("static".into()));
+        assert!(sweep_with_probe(&cache, &registry, now, probe).is_empty());
+
+        let entries = cache.entries.lock();
+        let last_a = entries["ws-a"].last_scan;
+        let last_b = entries["ws-b"].last_scan;
+        let last_c = entries["ws-c"].last_scan;
+        assert_eq!(last_a, now);
+        assert_eq!(
+            last_a.saturating_duration_since(last_b),
+            WORKTREE_RESCAN_INTERVAL
+        );
+        assert_eq!(
+            last_a.saturating_duration_since(last_c),
+            WORKTREE_RESCAN_INTERVAL * 2
+        );
+    }
+
+    #[test]
+    fn probe_fingerprint_reuses_persistent_worker_across_calls() {
+        let (_temp, manager) = setup_test_repo();
+        let first = match probe_fingerprint(manager.repo_root()) {
+            ProbeOutcome::Done(fp) => fp.expect("git repo fingerprint"),
+            ProbeOutcome::TimedOut => panic!("probe timed out on local tempdir"),
+        };
+        let second = match probe_fingerprint(manager.repo_root()) {
+            ProbeOutcome::Done(fp) => fp.expect("git repo fingerprint"),
+            ProbeOutcome::TimedOut => panic!("probe timed out on local tempdir"),
+        };
+        assert_eq!(first, second);
     }
 }

@@ -494,13 +494,27 @@ pub(crate) struct StreamState {
     /// `ClaudeAdapterV2.ts:5405-5410`, ids `${message.id}:text:${index}`) and a tool call by its
     /// own `tool_use` id.
     seen_blocks: HashSet<String>,
+    /// FIFO insertion order for `seen_blocks` so long turns stay bounded.
+    seen_blocks_order: std::collections::VecDeque<String>,
     /// File changes by `tool_use` id, so the matching `tool_result` can close the same part.
     file_changes: HashMap<String, Vec<FileChangeEntry>>,
     /// Tool names by `tool_use` id, so a later `tool_result` can name the call it finishes.
     tool_names: HashMap<String, String>,
 }
 
+const MAX_SEEN_BLOCKS: usize = 4096;
+
 impl StreamState {
+    fn clear_turn(&mut self) {
+        self.text.clear();
+        self.thinking.clear();
+        self.current_message = None;
+        self.seen_blocks.clear();
+        self.seen_blocks_order.clear();
+        self.file_changes.clear();
+        self.tool_names.clear();
+    }
+
     /// Whether this content block is one no earlier snapshot of its message emitted, marking it
     /// emitted. Identity is the message id plus the block's ordinal among blocks of the same kind
     /// in that message — t3code's `snapshotBlockIndex` counts text and thinking separately and
@@ -521,7 +535,18 @@ impl StreamState {
             // snapshot set has no key to hold.
             (None, None) => return true,
         };
-        self.seen_blocks.insert(identity)
+        if !self.seen_blocks.insert(identity.clone()) {
+            return false;
+        }
+        self.seen_blocks_order.push_back(identity);
+        while self.seen_blocks.len() > MAX_SEEN_BLOCKS {
+            if let Some(oldest) = self.seen_blocks_order.pop_front() {
+                self.seen_blocks.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        true
     }
 }
 
@@ -1224,6 +1249,7 @@ async fn run_reader<T: ClaudeTransport + 'static>(
                     }
                 }
                 let finished = turns.lock().await.finish();
+                state.clear_turn();
                 let Some(finished) = finished else {
                     // A result with no turn in flight (a replay after a relaunch) completes
                     // nothing; reporting it would end a turn the store never saw begin.

@@ -95,13 +95,12 @@ fn decode_cell(cell: &CellSnapshot) -> Option<DecodedCell> {
     }
     let image_id_low = cell.fg_ident?;
     let placement_id = cell.underline_ident.filter(|identifier| *identifier != 0);
-    let diacritics: Vec<char> = characters.collect();
     // An invalid diacritic is treated as absent, like the reference decoder.
-    let row = diacritics.first().and_then(|c| diacritic_index(*c));
-    let column = diacritics.get(1).and_then(|c| diacritic_index(*c));
-    let image_id_high = diacritics
-        .get(2)
-        .and_then(|c| diacritic_index(*c))
+    let row = characters.next().and_then(diacritic_index);
+    let column = characters.next().and_then(diacritic_index);
+    let image_id_high = characters
+        .next()
+        .and_then(diacritic_index)
         .and_then(|value| u8::try_from(value).ok());
     Some(DecodedCell {
         image_id_low,
@@ -372,4 +371,54 @@ fn tile_geometry(
             dest_height.round().max(1.0) as u32,
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_cell, DIACRITICS, PLACEHOLDER};
+    use crate::native_terminal::snapshot::{CellSnapshot, CellText};
+
+    fn diacritic_char(index: usize) -> char {
+        char::from_u32(DIACRITICS[index]).expect("valid diacritic scalar")
+    }
+
+    #[test]
+    fn decode_cell_reads_up_to_three_diacritics_in_order() {
+        let mut text = String::new();
+        text.push(PLACEHOLDER);
+        text.push(diacritic_char(3));
+        text.push(diacritic_char(7));
+        text.push(diacritic_char(2));
+        text.push(diacritic_char(9)); // trailing diacritic ignored
+
+        let cell = CellSnapshot {
+            text: CellText::from(text),
+            fg_ident: Some(42),
+            underline_ident: Some(5),
+            ..Default::default()
+        };
+        let decoded = decode_cell(&cell).expect("placeholder cell");
+        assert_eq!(decoded.image_id_low, 42);
+        assert_eq!(decoded.placement_id, Some(5));
+        assert_eq!(decoded.row, Some(3));
+        assert_eq!(decoded.column, Some(7));
+        assert_eq!(decoded.image_id_high, Some(2));
+
+        // Invalid first diacritic leaves row = None while still decoding column.
+        let mut invalid_first = String::new();
+        invalid_first.push(PLACEHOLDER);
+        invalid_first.push('X');
+        invalid_first.push(diacritic_char(4));
+        let cell_invalid = CellSnapshot {
+            text: CellText::from(invalid_first),
+            fg_ident: Some(11),
+            underline_ident: Some(0),
+            ..Default::default()
+        };
+        let decoded_invalid = decode_cell(&cell_invalid).expect("placeholder with invalid row");
+        assert_eq!(decoded_invalid.placement_id, None);
+        assert_eq!(decoded_invalid.row, None);
+        assert_eq!(decoded_invalid.column, Some(4));
+        assert_eq!(decoded_invalid.image_id_high, None);
+    }
 }
