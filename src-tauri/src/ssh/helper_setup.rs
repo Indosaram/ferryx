@@ -971,6 +971,6 @@ pub async fn provision(
     Ok(location)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "helper_setup_tests.rs"]
 mod tests;

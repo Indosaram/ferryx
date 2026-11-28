@@ -120,6 +120,16 @@ export type GitHubIssuePreview = {
   suggestedSlug: string;
 };
 
+/**
+ * Whether the signed-in GitHub CLI account has starred Ferryx.
+ * `starred: null` means the question could not be answered (no CLI, no login, network); the star
+ * prompt treats that as "not verified" rather than guessing either way.
+ */
+export type GitHubStarStatus = {
+  starred: boolean | null;
+  reason?: string;
+};
+
 export type TerminalThemeColors = {
   background: string;
   foreground: string;
@@ -338,6 +348,17 @@ export async function previewGitHubIssue(request: {
   return invokeCommand<GitHubIssuePreview>("cmd_github_issue_preview", {
     request: { workspaceId: request.workspaceId, issueRef: request.issueRef },
   });
+}
+
+/// Asks the authenticated GitHub CLI whether this account already starred Ferryx.
+/// A `starred: null` answer means "could not tell", never "not starred".
+export async function getGitHubStarStatus(): Promise<GitHubStarStatus> {
+  return invokeCommand<GitHubStarStatus>("cmd_github_star_status");
+}
+
+/// Stars Ferryx on the signed-in GitHub CLI account. Only ever called from an explicit click.
+export async function starFerryxRepository(): Promise<void> {
+  await invokeCommand<void>("cmd_github_star_repository");
 }
 
 export async function getTerminalPreferences(remote?: RemotePreferenceTarget): Promise<TerminalPreferences> {

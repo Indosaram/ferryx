@@ -2569,6 +2569,9 @@ mod tests {
     use crate::daemon::client::DaemonClient;
     use crate::remote::auth::DevicePermission;
     use std::ffi::OsString;
+    // The crate-level import is desktop-gated, but these daemon tests need the type on a
+    // headless build too.
+    use std::sync::Arc;
     use tokio::sync::Mutex;
 
     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::const_new(());
@@ -3653,7 +3656,7 @@ pub fn run() {
 /// managed as the app's daemon client, exactly as `create_app` manages the real one; it records
 /// every request it receives on any connection. After the handler runs, a control Ping through
 /// the same client proves the fake daemon is reachable, so an empty pre-ping log is meaningful.
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 mod quit_path_tests {
     use super::*;
     use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};

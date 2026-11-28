@@ -98,7 +98,7 @@ import { planOrphanAdoption } from "./state/orphanAdoption";
 import { movedEverySession, planTabMove } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
-import { isMacShortcutPlatform, resolvedShortcuts, routeBrowserModeShortcut, useShortcuts } from "./lib/shortcuts";
+import { isMacShortcutPlatform, resolvedShortcuts, routeBrowserModeShortcut, shortcutLabel, useShortcuts } from "./lib/shortcuts";
 import { useShortcutOverrides, useShortcutPreset } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
@@ -123,6 +123,14 @@ import {
 } from "./lib/whatsNew";
 import { showNotificationPermissionHint } from "./lib/notificationPermissionHint";
 import { getCurrentVersion } from "./lib/updater";
+import { installCliLauncher } from "./lib/tauri";
+import { AgentValueMomentObserver } from "./components/star-nag/AgentValueMomentObserver";
+import { FeatureTipDialog } from "./components/feature-tips/FeatureTipDialog";
+import { StarNagCard } from "./components/star-nag/StarNagCard";
+import { showStarNagToast } from "./components/star-nag/StarNagToast";
+import { type CompletedFeatureTipState, type FeatureTipAction } from "./lib/featureTips";
+
+import { useTipAndStarNag } from "./state/useTipAndStarNag";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
 import { buildSetupProgress } from "./lib/setupProgress";
@@ -1123,6 +1131,10 @@ function WorkspaceApp({
   } | null>(null);
   const lastRestoredSessionsRef = useRef<Record<string, TerminalSession>>({});
   const { settings: generalSettings } = useGeneralSettings();
+  const [cliInstalled, setCliInstalled] = useState<boolean | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [starNagJustCompletedOnboarding, setStarNagJustCompletedOnboarding] = useState(false);
+  const closeFeatureTipRef = useRef<() => void>(() => {});
   const activeProject = useMemo(
     () => projects.find((project) => project.workspaceId === activeProjectId) ?? projects[0] ?? DEFAULT_PROJECT,
     [activeProjectId, projects],
@@ -4591,6 +4603,7 @@ function WorkspaceApp({
     let cancelled = false;
     void getCurrentVersion().then((version) => {
       if (cancelled || !version) return;
+      setAppVersion(version);
       const entry = resolveWhatsNew(version);
       if (!cancelled && entry) {
         setWhatsNew(entry);
@@ -4600,6 +4613,25 @@ function WorkspaceApp({
       cancelled = true;
     };
   }, [isNativeRuntime, isPrimary]);
+
+  // The feature-tip scheduler needs a definite answer on the CLI launcher before it may open.
+  useEffect(() => {
+    if (!isNativeRuntime) {
+      setCliInstalled(false);
+      return;
+    }
+    let cancelled = false;
+    void getCliLauncherStatus()
+      .then((status) => {
+        if (!cancelled) setCliInstalled(status.isInstalled);
+      })
+      .catch(() => {
+        if (!cancelled) setCliInstalled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNativeRuntime]);
 
   const handleToggleSettings = useCallback(() => {
     preloadSettingsDialog();
@@ -5626,6 +5658,105 @@ function WorkspaceApp({
     onRevealBrowser: handleOpenBrowserFullscreen,
   });
   const isMacPlatform = isMacShortcutPlatform();
+  // ---- Feature tips & star prompt (Orca parity) -------------------------------------------
+  // Ferryx has no per-feature "already used this" flags yet, so only the CLI launcher is known.
+  const completedFeatureTipState = useMemo<CompletedFeatureTipState>(
+    () => ({
+      cliInstalled: cliInstalled === true,
+      voiceDictationEnabled: false,
+      sessionSearchTipCompleted: false,
+      chatUiLaunchTipCompleted: false,
+      supervisorTipCompleted: false,
+    }),
+    [cliInstalled],
+  );
+  const activeModalIsNone = !isAddProjectOpen && !isCommandPaletteOpen && !isSettingsOpen
+    && !isResourcesOpen && !isCreateOpen && !historyProject && !deleteTarget && !diskManageProject
+    && !pendingProjectRemove && !restartPaneRequest && !whatsNew
+    && (!onboardingSteps || onboardingSteps.length === 0);
+  const tipShortcut = useMemo(() => shortcutLabel("commandPalette.open"), []);
+  const handleFeatureTipAction = useCallback((action: FeatureTipAction) => {
+    closeFeatureTipRef.current();
+    if (action === "use-chat-ui") {
+      const tab = state.layout.tabs.find((candidate) => candidate.id === state.layout.activeTabId)
+        ?? state.layout.tabs[0];
+      const layout = tab ? state.layout.layoutsByTabId?.[tab.id] : undefined;
+      const leafId = layout?.activeLeafId ?? (layout ? collectLeafIds(layout.root)[0] : null);
+      if (tab && leafId && chatViewAvailable) {
+        handleSetPaneView(tab.id, leafId, "chat");
+        return;
+      }
+      toast.info("Chat view is unavailable for this pane. Open a project first.");
+      return;
+    }
+    if (action === "enable-session-search") {
+      const project = activeProject;
+      setHistoryProject(project);
+      return;
+    }
+    if (action === "setup-cli") {
+      void installCliLauncher()
+        .then((status) => {
+          setCliInstalled(status.isInstalled);
+          toast.success("The ferryx command is ready in your terminal.");
+        })
+        .catch(() => toast.error("Could not install the ferryx command."));
+      return;
+    }
+    if (action === "learn-cmd-j-palette") {
+      setIsCommandPaletteOpen(true);
+      return;
+    }
+    if (action === "create-supervisor") {
+      toast.info("Open the Supervisor panel from the sidebar to add a teammate agent.");
+      return;
+    }
+    toast.info("Voice dictation is available in the remote chat composer.");
+  }, [
+    activeProject,
+    chatViewAvailable,
+    handleSetPaneView,
+    state.layout,
+  ]);
+  const tipStarNag = useTipAndStarNag({
+    enabled: isNativeRuntime && isPrimary,
+    featureTipsEnabled: generalSettings.featureTipsEnabled,
+    starNagEnabled: generalSettings.starNagEnabled,
+    onboardingPending: Boolean(onboardingSteps && onboardingSteps.length > 0),
+    persistedUIReady: workspaceRestoreStatus === "restored",
+    activeModalIsNone,
+    cliInstalled,
+    completedTips: completedFeatureTipState,
+    appVersion,
+    onboardingJustCompleted: starNagJustCompletedOnboarding,
+    onTipAction: handleFeatureTipAction,
+  });
+  closeFeatureTipRef.current = tipStarNag.closeTip;
+
+  // The onboarding-completed star prompt is a toast (Orca's `surface: 'toast'`), not the card.
+  const starToastPending = tipStarNag.starToastPending;
+  const starToastStar = tipStarNag.starToastStar;
+  const starToastOpenWeb = tipStarNag.starToastOpenWeb;
+  const starToastDefer = tipStarNag.starToastDefer;
+  useEffect(() => {
+    if (!starToastPending || activeRemoteHost) return;
+    const clear = showStarNagToast({
+      mode: tipStarNag.starToastMode,
+      onStar: starToastStar,
+      onOpenWeb: starToastOpenWeb,
+      onDismissed: (resolved) => {
+        if (!resolved) starToastDefer();
+      },
+    });
+    return clear;
+  }, [
+    activeRemoteHost,
+    starToastDefer,
+    starToastOpenWeb,
+    starToastPending,
+    starToastStar,
+    tipStarNag.starToastMode,
+  ]);
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
@@ -5976,6 +6107,7 @@ function WorkspaceApp({
               setOnboardingRecordedSteps(markOnboardingStepsCompleted([step]).completedSteps);
             }}
             onFinish={() => {
+              setStarNagJustCompletedOnboarding(true);
               setOnboardingAddedProject(null);
               setOnboardingSteps(null);
             }}
@@ -6030,6 +6162,32 @@ function WorkspaceApp({
           />
         </Suspense>
       ) : null}
+      {tipStarNag.tip && !activeRemoteHost ? (
+        <FeatureTipDialog
+          tip={tipStarNag.tip}
+          shortcut={tipShortcut}
+          onClose={tipStarNag.closeTip}
+          onAction={tipStarNag.runTipAction}
+        />
+      ) : null}
+      {tipStarNag.starCardVisible && !activeRemoteHost ? (
+        <div className="pointer-events-none fixed bottom-6 right-6 z-40 flex justify-end">
+          <div className="pointer-events-auto">
+            <StarNagCard
+              initialMode={tipStarNag.starCardMode}
+              busy={tipStarNag.starCardBusy}
+              onStar={tipStarNag.starCardStar}
+              onLater={tipStarNag.starCardLater}
+              onDismiss={tipStarNag.starCardDismiss}
+            />
+          </div>
+        </div>
+      ) : null}
+      <AgentValueMomentObserver
+        activityBySession={paneActivityBySessionId ?? {}}
+        enabled={tipStarNag.valueMomentEnabled}
+        onValueMoment={tipStarNag.onValueMoment}
+      />
       {externalWorktreePrompt.prompt && !activeRemoteHost ? (
         <ExternalWorktreeImportDialog
           key={externalWorktreePrompt.prompt.workspaceId}

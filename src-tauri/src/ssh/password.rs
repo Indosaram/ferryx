@@ -28,7 +28,7 @@ struct Credential {
     token: String,
 }
 static STORE: OnceLock<Mutex<HashMap<String, Credential>>> = OnceLock::new();
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "password_tests.rs"]
 mod tests;
 fn store() -> &'static Mutex<HashMap<String, Credential>> {

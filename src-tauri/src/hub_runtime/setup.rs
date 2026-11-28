@@ -808,7 +808,7 @@ pub(super) fn hub_setup_cli(args: &[String]) -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
 

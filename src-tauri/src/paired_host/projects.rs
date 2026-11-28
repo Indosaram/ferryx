@@ -98,6 +98,6 @@ pub fn resolve_stored_project(data_dir: &std::path::Path, workspace_id: &str) ->
     let map = read_stored_projects(data_dir);
     map.get(workspace_id).cloned()
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "projects_tests.rs"]
 mod tests;

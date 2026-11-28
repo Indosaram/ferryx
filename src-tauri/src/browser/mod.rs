@@ -40,7 +40,7 @@ mod snapshot_source_tests;
 pub mod state_cookies;
 // Downloads, print, find, zoom, file chooser and page notifications (both engines).
 pub mod system;
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 pub mod tests;
 pub mod vault;
 #[cfg(feature = "desktop")]
@@ -58,9 +58,11 @@ pub use guest::{
 };
 pub use manager::BrowserManager;
 pub use media::{
-    browser_media_control_script, handle_media_envelope, is_media_envelope, BrowserMediaControlResult,
+    browser_media_control_script, is_media_envelope, BrowserMediaControlResult,
     BrowserMediaState, MediaControlAction, BROWSER_MEDIA_STATE_EVENT,
 };
+#[cfg(feature = "desktop")]
+pub use media::handle_media_envelope;
 pub use model::*;
 pub use remote_bridge_protocol::*;
 pub use remote_driver::*;

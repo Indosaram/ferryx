@@ -9541,6 +9541,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn browser_cookie_header_from_session_cookies() {
         // Row 12 security fix (audit D-6). RED mutation: make

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "desktop")]
 use tauri::Manager;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 #[path = "agents_reset_event_tests.rs"]
 mod reset_event_tests;
 

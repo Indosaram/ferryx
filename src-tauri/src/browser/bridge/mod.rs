@@ -479,5 +479,5 @@ pub fn picker_arm_script(token: &str) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests;

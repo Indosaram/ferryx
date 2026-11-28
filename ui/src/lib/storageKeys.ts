@@ -169,5 +169,24 @@ export const EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY = "ferryx.worktrees.exte
 /** Supervisor setup next-action kinds whose banner the user dismissed ("Not now"). */
 export const SUPERVISOR_SETUP_BANNER_DISMISSED_STORAGE_KEY = "ferryx.supervisor.setupBannerDismissed";
 
+/** Feature tips the user has already been shown (ids from `FEATURE_TIPS`). */
+export const FEATURE_TIPS_SEEN_IDS_STORAGE_KEY = "ferryx.tips.seenIds";
+/** Master off switch for feature tips. */
+export const FEATURE_TIPS_DISABLED_STORAGE_KEY = "ferryx.tips.disabled";
+/** Total agent spawns ever observed; the star-nag threshold is measured against this. */
+export const AGENTS_SPAWNED_TOTAL_STORAGE_KEY = "ferryx.agentsSpawnedTotal";
+/** Set once the user starred, opened the repo, or disabled the star prompt. */
+export const STAR_NAG_COMPLETED_STORAGE_KEY = "ferryx.starNag.completed";
+/** Spawns required after `starNagBaselineAgents` before the next prompt; doubles on each defer. */
+export const STAR_NAG_NEXT_THRESHOLD_STORAGE_KEY = "ferryx.starNag.nextThreshold";
+/** Spawn total captured when the threshold prompt was last deferred. */
+export const STAR_NAG_BASELINE_AGENTS_STORAGE_KEY = "ferryx.starNag.baselineAgents";
+/** Epoch ms before which the threshold prompt stays silent. */
+export const STAR_NAG_DEFERRED_UNTIL_STORAGE_KEY = "ferryx.starNag.deferredUntil";
+/** App version whose agent-value-moment was already used. */
+export const STAR_NAG_VALUE_MOMENT_APP_VERSION_STORAGE_KEY = "ferryx.starNag.valueMomentAppVersion";
+/** Master off switch for the star prompt. */
+export const STAR_NAG_DISABLED_STORAGE_KEY = "ferryx.starNag.disabled";
+
 
 

@@ -11284,7 +11284,7 @@ mod ssh_survival_tests;
 #[path = "handover_accounting_tests.rs"]
 mod handover_accounting_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
 

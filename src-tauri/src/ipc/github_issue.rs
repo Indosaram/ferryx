@@ -9,6 +9,10 @@
 //! Issue text reaches the UI as inert preview data. Ferryx never executes it,
 //! never submits it as a prompt, and never stores credentials of its own: `gh`
 //! keeps owning the authentication it already has.
+//!
+//! The same authenticated executable answers one unrelated question at the bottom
+//! of this module: whether the signed-in account has starred Ferryx. It reuses the
+//! bounded `run_gh` runner rather than spawning `gh` a second way.
 
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use crate::ipc::run_blocking;
@@ -38,6 +42,12 @@ const SLUG_TITLE_WORDS: usize = 6;
 const SLUG_WORD_MAX_CHARS: usize = 8;
 const GH_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const GH_DRAIN_GRACE: Duration = Duration::from_secs(5);
+/// How many times a transient spawn failure is retried before it becomes an error.
+const GH_SPAWN_RETRIES: u32 = 5;
+/// Base backoff between spawn retries; multiplied by the attempt number.
+const GH_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
+/// Star checks are a background nicety, so they get a shorter deadline than issue reads.
+const GH_STAR_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -269,6 +279,27 @@ impl Capture {
     }
 }
 
+/// Spawns `gh`, retrying the two transient failures a busy machine produces.
+///
+/// `ETXTBSY` happens when another thread holds the executable open for writing at the instant
+/// this one forks: the child inherits that descriptor and `exec` is refused. `EAGAIN` is a
+/// momentarily exhausted process table. Both clear on their own, so retrying briefly is correct
+/// where surfacing an error would make an ordinary parallel test run fail at random.
+fn spawn_gh(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    const TRANSIENT: [i32; 2] = [libc::ETXTBSY, libc::EAGAIN];
+    let mut attempt = 0u32;
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if attempt < GH_SPAWN_RETRIES && TRANSIENT.contains(&error.raw_os_error().unwrap_or(0)) => {
+                attempt += 1;
+                std::thread::sleep(GH_SPAWN_RETRY_DELAY * attempt);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Runs `gh` with a fixed argument array, a wall-clock deadline, and bounded
 /// pipes. The deadline is enforced by polling the child (portable across the
 /// three desktop targets) and killing it once it passes, so a hung executable
@@ -289,7 +320,7 @@ fn run_gh(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| match error.kind() {
+    let mut child = spawn_gh(&mut command).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => IpcError::new(
             IpcErrorCode::CliExecutableNotFound,
             "The GitHub CLI (gh) was not found. Install it and run `gh auth login`.",
@@ -315,6 +346,11 @@ fn run_gh(
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {}
+            // A signal delivered to this thread interrupts the wait syscall; the child is still
+            // ours and the poll simply has to be repeated. Treating that as fatal made the issue
+            // read fail at random under load (two full-suite runs disagreed on which fixture test
+            // broke), so only a genuinely broken wait ends the read.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => {
                 let _ = child.kill();
                 return Err(IpcError::new(
@@ -662,6 +698,121 @@ fn sanitize_text(value: &str) -> String {
         }
     }
     out
+}
+
+/// The repository whose star state the prompt asks about.
+const STAR_REPOSITORY: &str = "Indosaram/ferryx";
+
+/// Answer to "has this account starred Ferryx?".
+///
+/// `starred` is deliberately tri-state: `null` means the question could not be answered (no
+/// `gh`, no authentication, a network failure), and the prompt treats that as "not verified"
+/// rather than assuming either answer. `reason` carries why, so a silent no can be explained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubStarStatus {
+    pub starred: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl GitHubStarStatus {
+    fn known(starred: bool) -> Self {
+        Self {
+            starred: Some(starred),
+            reason: None,
+        }
+    }
+
+    fn unknown(reason: impl Into<String>) -> Self {
+        Self {
+            starred: None,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+fn star_status_args() -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "--include".to_string(),
+        format!("user/starred/{STAR_REPOSITORY}"),
+    ]
+}
+
+fn star_repository_args() -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "PUT".to_string(),
+        format!("user/starred/{STAR_REPOSITORY}"),
+    ]
+}
+
+/// The status line `gh api --include` prints before the body, e.g. `HTTP/2.0 204`.
+fn http_status_from_gh_response(raw: &str) -> Option<u16> {
+    raw.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("HTTP/")?;
+        let mut parts = rest.split_whitespace();
+        parts.next()?;
+        parts.next()?.parse().ok()
+    })
+}
+
+/// Maps `gh api user/starred/...` output onto the tri-state answer.
+fn star_status_from_response(raw: &str) -> Option<bool> {
+    match http_status_from_gh_response(raw) {
+        Some(200 | 204) => Some(true),
+        Some(404) => Some(false),
+        _ => None,
+    }
+}
+
+/// Orca's `checkOrcaStarred` equivalent: one authenticated `gh api` call, bounded, and never
+/// fatal. A missing CLI or an expired login yields `starred: null` instead of an error dialog.
+fn probe_star_status() -> GitHubStarStatus {
+    let program = match resolve_gh_program() {
+        Ok(program) => program,
+        Err(error) => return GitHubStarStatus::unknown(error.message),
+    };
+    match run_gh(
+        &program,
+        &star_status_args(),
+        GH_STAR_TIMEOUT,
+        GH_MAX_STDOUT_BYTES,
+    ) {
+        Ok(stdout) => match star_status_from_response(&stdout) {
+            Some(starred) => GitHubStarStatus::known(starred),
+            None => GitHubStarStatus::unknown("The GitHub CLI returned an unexpected response."),
+        },
+        // An unstarred repository answers 404; that is an answer, not a failure.
+        Err(error) if error.code == IpcErrorCode::NotFound => GitHubStarStatus::known(false),
+        Err(error) => GitHubStarStatus::unknown(error.message),
+    }
+}
+
+/// Whether the signed-in `gh` account has starred Ferryx.
+#[tauri::command]
+pub async fn cmd_github_star_status() -> GitHubStarStatus {
+    match run_blocking(|| Ok(probe_star_status())).await {
+        Ok(status) => status,
+        Err(error) => GitHubStarStatus::unknown(error.message),
+    }
+}
+
+/// Stars Ferryx for the signed-in `gh` account, on an explicit click only.
+#[tauri::command]
+pub async fn cmd_github_star_repository() -> Result<(), IpcError> {
+    run_blocking(|| {
+        let program = resolve_gh_program()?;
+        run_gh(
+            &program,
+            &star_repository_args(),
+            GH_STAR_TIMEOUT,
+            GH_MAX_STDOUT_BYTES,
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 fn bound_bytes(value: &str, max: usize) -> (String, bool) {
@@ -1189,5 +1340,53 @@ mod tests {
             assert!(!args.contains("touch"));
             assert!(!args.contains("$("));
         }
+    }
+}
+
+#[cfg(test)]
+mod star_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_status_line_gh_prints_before_the_body() {
+        assert_eq!(
+            http_status_from_gh_response("HTTP/2.0 204 No Content\n\n"),
+            Some(204)
+        );
+        assert_eq!(
+            http_status_from_gh_response("HTTP/1.1 404 Not Found\r\ncontent-type: application/json"),
+            Some(404)
+        );
+        assert_eq!(http_status_from_gh_response("{\"ok\":true}"), None);
+    }
+
+    #[test]
+    fn maps_star_responses_onto_a_tri_state_answer() {
+        assert_eq!(star_status_from_response("HTTP/2.0 204 No Content\n"), Some(true));
+        assert_eq!(star_status_from_response("HTTP/2.0 200 OK\n{}"), Some(true));
+        assert_eq!(star_status_from_response("HTTP/2.0 404 Not Found\n"), Some(false));
+        assert_eq!(star_status_from_response("HTTP/2.0 500 Server Error\n"), None);
+        assert_eq!(star_status_from_response(""), None);
+    }
+
+    #[test]
+    fn star_invocations_name_the_repository_exactly() {
+        assert_eq!(
+            star_status_args(),
+            vec![
+                "api".to_string(),
+                "--include".to_string(),
+                "user/starred/Indosaram/ferryx".to_string(),
+            ]
+        );
+        assert_eq!(
+            star_repository_args(),
+            vec![
+                "api".to_string(),
+                "-X".to_string(),
+                "PUT".to_string(),
+                "user/starred/Indosaram/ferryx".to_string(),
+            ]
+        );
     }
 }
