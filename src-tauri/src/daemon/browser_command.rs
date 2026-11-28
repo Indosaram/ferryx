@@ -1,8 +1,8 @@
-//! `DaemonRequest::Browser` over the local daemon socket.
+//! `DaemonRequest::Browser` and `DaemonRequest::HostCapabilities` over the local daemon socket.
 //!
 //! This is the client half of the seam `agents --host` already uses: the CLI opens the daemon
-//! socket, hands the request over, and the daemon decides whether the command runs here or is
-//! forwarded to a paired host. No relay client lives in the CLI.
+//! socket, hands the request over, and the daemon decides whether it runs here or is forwarded
+//! to a paired host. No relay client lives in the CLI.
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -17,20 +17,7 @@ pub async fn request_browser_daemon(
     params: Option<serde_json::Value>,
     host_id: Option<String>,
 ) -> Result<String, String> {
-    let stream = connect_daemon().await.map_err(|(value, _)| value.to_string())?;
-    let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
-
-    exchange(
-        &mut reader,
-        &mut write_half,
-        &DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-            token: crate::daemon::client::read_transport_token(),
-        },
-    )
-    .await?;
-
+    let (mut reader, mut write_half) = open_session().await?;
     let response = exchange(
         &mut reader,
         &mut write_half,
@@ -59,6 +46,30 @@ pub async fn request_browser_daemon(
             }
             Ok(value.to_string())
         }
+        other => Err(error_json(other)),
+    }
+}
+
+/// Reads a paired host's advertised capabilities so a caller can see what it can actually do.
+pub async fn request_capabilities_daemon(host_id: &str) -> Result<String, String> {
+    let (mut reader, mut write_half) = open_session().await?;
+    let response = exchange(
+        &mut reader,
+        &mut write_half,
+        &DaemonRequest::HostCapabilities {
+            host_id: host_id.to_string(),
+        },
+    )
+    .await?;
+
+    match response {
+        DaemonResponse::HostCapabilitiesOk { capabilities } => Ok(capabilities.to_string()),
+        other => Err(error_json(other)),
+    }
+}
+
+fn error_json(response: DaemonResponse) -> String {
+    match response {
         DaemonResponse::Error {
             message,
             code,
@@ -67,28 +78,56 @@ pub async fn request_browser_daemon(
             let code = code
                 .filter(|code| !code.is_empty())
                 .unwrap_or_else(|| "INTERNAL".into());
-            Err(serde_json::json!({
+            serde_json::json!({
                 "ok": false,
                 "code": code,
                 "message": message,
                 "details": details,
             })
-            .to_string())
+            .to_string()
         }
         DaemonResponse::ProtocolMismatch { .. } => {
-            Err(r#"{"ok":false,"code":"UNSUPPORTED","message":"the daemon speaks another protocol version"}"#.to_string())
+            r#"{"ok":false,"code":"UNSUPPORTED","message":"the daemon speaks another protocol version"}"#
+                .to_string()
         }
-        other => Err(serde_json::json!({
+        other => serde_json::json!({
             "ok": false,
             "code": "INTERNAL",
             "message": format!("unexpected daemon response: {other:?}"),
         })
-        .to_string()),
+        .to_string(),
     }
 }
 
+type Session = (
+    BufReader<tokio::io::ReadHalf<DaemonStream>>,
+    tokio::io::WriteHalf<DaemonStream>,
+);
+
+async fn open_session() -> Result<Session, String> {
+    let stream = connect_daemon().await.map_err(|(value, _)| value.to_string())?;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    exchange(
+        &mut reader,
+        &mut write_half,
+        &DaemonRequest::Handshake {
+            version: DAEMON_PROTOCOL_VERSION,
+            token: crate::daemon::client::read_transport_token(),
+        },
+    )
+    .await?;
+    Ok((reader, write_half))
+}
+
 #[cfg(unix)]
-async fn connect_daemon() -> Result<tokio::net::UnixStream, (serde_json::Value, i32)> {
+type DaemonStream = tokio::net::UnixStream;
+
+#[cfg(not(unix))]
+type DaemonStream = tokio::net::TcpStream;
+
+#[cfg(unix)]
+async fn connect_daemon() -> Result<DaemonStream, (serde_json::Value, i32)> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let path = crate::daemon::server::get_socket_path();
     let not_running = || {
@@ -120,7 +159,7 @@ async fn connect_daemon() -> Result<tokio::net::UnixStream, (serde_json::Value, 
 }
 
 #[cfg(not(unix))]
-async fn connect_daemon() -> Result<tokio::net::TcpStream, (serde_json::Value, i32)> {
+async fn connect_daemon() -> Result<DaemonStream, (serde_json::Value, i32)> {
     let path = crate::daemon::server::get_socket_path();
     let not_running = || {
         (

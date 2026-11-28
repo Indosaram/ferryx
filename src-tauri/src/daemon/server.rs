@@ -10039,6 +10039,13 @@ impl DaemonServer {
                         }
                     }
                 }
+                Ok(DaemonRequest::HostCapabilities { host_id }) => {
+                    crate::remote::browser_command_service::forward_capabilities(
+                        &self.paired_hosts,
+                        host_id,
+                    )
+                    .await
+                }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),
             };
 

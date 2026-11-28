@@ -22,7 +22,7 @@ pub enum HostSpelling {
 
 pub fn spelling(group: &str) -> HostSpelling {
     match group {
-        "agents" | "supervisor" | "browser" => HostSpelling::Flag,
+        "agents" | "supervisor" | "browser" | "capabilities" => HostSpelling::Flag,
         _ => HostSpelling::Unsupported,
     }
 }

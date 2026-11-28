@@ -1858,6 +1858,12 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connection_id: Option<String>,
     },
+    /// Reads a paired host's advertised capabilities (`GET /api/v1/capabilities`).
+    ///
+    /// This is how a caller learns what a host can actually do before asking it, so an
+    /// unsupported resource is refused with `TARGET_UNSUPPORTED` instead of failing remotely.
+    #[serde(rename_all = "camelCase")]
+    HostCapabilities { host_id: String },
     /// Save the agent-control switch and excluded devices to `agent-control.json`.
     #[serde(rename_all = "camelCase")]
     AgentControlSettingsSet {
@@ -2420,6 +2426,10 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     BrowserOk {
         result: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    HostCapabilitiesOk {
+        capabilities: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
     AgentControlSettingsOk {

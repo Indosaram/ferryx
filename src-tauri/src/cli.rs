@@ -4667,6 +4667,24 @@ fn daemon_refusal(answer: String) -> HostRefusal {
     HostRefusal { code, message }
 }
 
+/// Prints what a paired host advertises, so a caller can see what it can actually do.
+///
+/// The answer is passed through unchanged: it is the host's own capability document, and
+/// reshaping it here would let the CLI disagree with the host about what it supports.
+pub fn run_capabilities_cli(host: &str) -> Result<(), HostRefusal> {
+    let runtime = browser_cli_runtime().map_err(|message| HostRefusal {
+        code: "CAPABILITIES_UNAVAILABLE",
+        message,
+    })?;
+    let response = runtime
+        .block_on(crate::daemon::browser_command::request_capabilities_daemon(
+            host,
+        ))
+        .map_err(daemon_refusal)?;
+    println!("{response}");
+    Ok(())
+}
+
 /// File paths in a browser CLI request are resolved by the GUI process, whose cwd is
 /// unrelated to the caller's, so relative paths are anchored to the CLI's cwd here.
 fn absolutize_browser_cli_paths(

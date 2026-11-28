@@ -118,3 +118,75 @@ pub(crate) async fn forward_browser(
 
 /// The capability a peer must advertise before a browser command is written to it.
 pub(crate) const REQUIRED_CAPABILITY: &str = BROWSER_REMOTE_CAPABILITY;
+
+/// Reads one paired host's advertised capabilities.
+///
+/// A read is safe to repeat, so an ambiguous answer is reported as unknown rather than being
+/// treated as a failure of the host.
+pub(crate) async fn forward_capabilities(
+    hosts: &crate::paired_host::service::PairedHostService,
+    host_id: String,
+) -> DaemonResponse {
+    let known = match hosts.list().await {
+        Ok(known) => known,
+        Err(error) => {
+            return DaemonResponse::Error {
+                code: Some("INVENTORY_INCOMPLETE".into()),
+                message: format!(
+                    "the paired-host inventory could not be read: {} ({})",
+                    error.code, error.message
+                ),
+                details: None,
+            }
+        }
+    };
+    let Some(host) = known.into_iter().find(|host| host.host_id == host_id) else {
+        return DaemonResponse::Error {
+            code: Some("NOT_FOUND".into()),
+            message: format!("no paired host is named {host_id}"),
+            details: None,
+        };
+    };
+    let request = crate::paired_host::client::OperationRequest {
+        host_id: host.host_id,
+        generation: host.generation,
+        operation: crate::paired_host::client::Operation::Capabilities,
+    };
+    match crate::paired_host::client::MachineClient::new()
+        .execute(hosts, request)
+        .await
+    {
+        Ok(response) => match response.result {
+            crate::paired_host::client::OperationResult::Capabilities(capabilities) => {
+                match serde_json::to_value(capabilities) {
+                    Ok(capabilities) => DaemonResponse::HostCapabilitiesOk { capabilities },
+                    Err(error) => DaemonResponse::Error {
+                        code: Some("INTERNAL".into()),
+                        message: format!("the host capabilities could not be encoded: {error}"),
+                        details: None,
+                    },
+                }
+            }
+            other => DaemonResponse::Error {
+                code: Some("INTERNAL".into()),
+                message: format!("unexpected answer for a capabilities read: {other:?}"),
+                details: None,
+            },
+        },
+        Err(error) => DaemonResponse::Error {
+            code: Some(crate::remote::agent_control_service::forward_code(
+                error
+                    .machine_error
+                    .as_ref()
+                    .map(|machine| machine.code.as_str())
+                    .unwrap_or(error.code.as_str()),
+            )),
+            message: error
+                .machine_error
+                .as_ref()
+                .map(|machine| machine.message.clone())
+                .unwrap_or(error.message),
+            details: None,
+        },
+    }
+}

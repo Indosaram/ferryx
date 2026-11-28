@@ -109,6 +109,24 @@ fn main() {
             }
         }
     }
+    if group == Some("capabilities") {
+        // `ferryx <host> capabilities` arrives with `--host <id>` right after the group.
+        let mut caps_args = args.clone();
+        let Some(host) = ferryx_lib::cli::host_ref::take_host_flag(&mut caps_args) else {
+            ferryx_lib::cli::print_browser_cli_error(
+                "CAPABILITIES_NEEDS_HOST",
+                "name the host whose capabilities you want: `ferryx <host> capabilities`",
+            );
+            std::process::exit(ferryx_lib::cli::host_ref::EXIT_REFUSED);
+        };
+        match ferryx_lib::cli::run_capabilities_cli(&host) {
+            Ok(()) => return,
+            Err(refusal) => {
+                ferryx_lib::cli::print_browser_cli_error(refusal.code, refusal.message);
+                std::process::exit(ferryx_lib::cli::host_ref::EXIT_REFUSED);
+            }
+        }
+    }
     if group == Some("browser") {
         // `ferryx <host> browser ...` arrives here with `--host <id>` right after `browser`.
         // A browser command on a host goes through the daemon, not the local browser socket.

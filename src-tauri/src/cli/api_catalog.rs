@@ -28,6 +28,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "remote",
     "file",
     "theme",
+    "capabilities",
     "api",
 ];
 
@@ -530,6 +531,17 @@ pub const CATALOG: &[Command] = &[
             sub!("guide", &[], &[]),
         ],
         exit_codes: &[("0", "ok"), ("1", "theme error"), ("2", "usage error")],
+    },
+    Command {
+        name: "capabilities",
+        summary: "Read what a paired host advertises it can do",
+        output: "json",
+        subcommands: &[sub!("", &[], &[value!("--host")])],
+        exit_codes: &[
+            ("0", "ok"),
+            ("3", "the daemon or host was not found"),
+            ("4", "the host refused or the target is unsupported"),
+        ],
     },
     Command {
         name: "api",
