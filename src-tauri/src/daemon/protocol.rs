@@ -2970,7 +2970,9 @@ mod tests {
             connection_id: None,
         };
         let line = serde_json::to_string(&local).unwrap();
-        assert!(line.contains("\"hostId\":null"), "{line}");
+        // A local command omits the host field entirely rather than sending null, so an older
+        // daemon that does not know the field still parses this request.
+        assert!(!line.contains("hostId"), "{line}");
         assert!(line.contains("\"browserId\":\"b1\""), "{line}");
         assert!(line.contains("\"command\":\"navigate\""), "{line}");
         let back: DaemonRequest = serde_json::from_str(&line).unwrap();

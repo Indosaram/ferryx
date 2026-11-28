@@ -647,7 +647,8 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 "agentControlReceiptsV1",
                 "agentControlAckV1",
                 "supervisorFenceV1",
-                "agentControlSpawnV1"
+                "agentControlSpawnV1",
+                "browserRemoteV1"
             ])
         );
         // Subscribe before triggering work; revocation must win while enumeration is blocked.
