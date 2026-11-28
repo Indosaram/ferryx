@@ -2132,15 +2132,15 @@ async fn enqueue_problem(
     detail: &str,
 ) -> Result<()> {
     let lead = crate::lanes::lead::default_lead_or("meta");
-    crate::lanes::dispatch::enqueue(
-        pool,
-        job_id,
-        &lead,
-        "cron_problem",
-        &serde_json::json!({"problem_id": id, "job_id": job_id, "kind": kind, "run_id": run_id, "detail": detail})
-            .to_string(),
-    )
-    .await?;
+    let body = serde_json::json!({"problem_id": id, "job_id": job_id, "kind": kind, "run_id": run_id, "detail": detail}).to_string();
+    let event_id = crate::lanes::dispatch::enqueue(pool, job_id, &lead, "cron_problem", &body).await?;
+    let cause = crate::schedule::problem_signature(kind, detail);
+    sqlx::query("UPDATE lane_events SET subject_id = ?, state_id = ?, wake_policy = 'wake' WHERE id = ?")
+        .bind(format!("cron_problem:{job_id}:{cause}"))
+        .bind(id.to_string())
+        .bind(event_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

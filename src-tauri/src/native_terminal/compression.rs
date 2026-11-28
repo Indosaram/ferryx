@@ -16,7 +16,7 @@ pub const COMPRESSION_IDLE_DELAY: Duration = Duration::from_secs(2);
 
 /// Pause between incremental steps of one pass. A step compresses at most one page; the pause
 /// lets output, rendering and input take the terminal between steps.
-pub const COMPRESSION_STEP_INTERVAL: Duration = Duration::from_millis(1);
+pub const COMPRESSION_STEP_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Scheduling result of one incremental compression step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

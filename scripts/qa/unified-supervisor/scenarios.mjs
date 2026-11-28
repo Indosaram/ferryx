@@ -17,7 +17,9 @@ import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { awaitGone, HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
 import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
-import { runSlackLeg } from './slack.mjs';
+import { runSlackLeg, runStuckThreadLeg } from './slack.mjs';
+import { runHold } from './hold.mjs';
+import { LANE_OVERSIGHT_REQUIRED_ASSERTIONS, runLaneOversight } from './lane-oversight.mjs';
 import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
 import { LEGACY_REQUIRED_ASSERTIONS } from './legacy.mjs';
 import { CORRECTION_REQUIRED_ASSERTIONS } from './correction.mjs';
@@ -37,7 +39,7 @@ const planned = (task, summary) => Object.freeze({ implemented: false, task, sum
 // `ferryx-cli supervisor setup`, the daemon protocol (RegisterWorkspace, the request the GUI
 // issues) and MCP `supervisor.request`; the isolated hub database is only read, read-only.
 
-const ADMISSION_WORKSPACE_ID = 'qa-admission';
+export const ADMISSION_WORKSPACE_ID = 'qa-admission';
 const ADMISSION_PROJECT = 'qa-supervisor';
 const ADMISSION_REPO_IDENTITY = 'qa:qa-supervisor';
 const ADMISSION_HOST = 'local';
@@ -121,7 +123,7 @@ export function daemonExchange(socketPath, frames, deadlineMs) {
   });
 }
 
-async function registerWorkspace(ctx, socketPath, workspaceId, repoRoot) {
+export async function registerWorkspace(ctx, socketPath, workspaceId, repoRoot) {
   const request = { type: 'registerWorkspace', workspaceId, repoRoot };
   let version = DAEMON_PROTOCOL_VERSION;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -237,6 +239,91 @@ export function readWorkerLogs(logDir) {
   });
 }
 
+async function runStuckThread(ctx) {
+  const data = realpathSync(ctx.paths.data);
+  const root = join(data, 'stuck-thread-leg');
+  const dbPath = join(root, 'hub', 'hub.sqlite');
+  await runStuckThreadLeg(ctx, { root, dbPath });
+}
+
+async function runOwnerChannel(ctx) {
+  const root = join(realpathSync(ctx.paths.data), 'slack-leg');
+  const workspace = join(root, 'ws');
+  const repo = join(workspace, 'qa-slack');
+  const dbPath = join(root, 'hub', 'hub.sqlite');
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is required for the owner-channel fixture');
+  const init = await ctx.run('owner-channel-git-init', git, ['init', '-q', repo], { deadlineMs: 30_000 });
+  if (init.code !== 0) throw new HarnessError('FIXTURE_FAILED', init.stderr);
+  await runSlackLeg(ctx, {
+    root, dbPath, hub: await openHubReader(dbPath), waitForChange, ownerChannel: true,
+    setupCli: (owner, env) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', 'qa-slack',
+      '--repo-identity', 'qa:qa-slack', '--host', 'local', '--git-common-dir', realpathSync(join(repo, '.git')), '--json'],
+    { label: 'owner-channel-setup', env }),
+    registerWorkspace: (env) => registerWorkspace(ctx, join(env.FERRYX_RUNTIME_DIR, 'daemon.sock'), 'qa-owner-channel', workspace),
+  });
+}
+
+async function runReportBack(ctx) {
+  const root = join(realpathSync(ctx.paths.data), 'slack-leg');
+  const workspace = join(root, 'ws');
+  const repo = join(workspace, 'qa-slack');
+  const dbPath = join(root, 'hub', 'hub.sqlite');
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is required for the report-back fixture');
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [
+    ['report-back-git-init', [...gitArgs, 'init', '-q', repo]],
+    ['report-back-git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  // A fixture worker pane (as the admission scenario): it starts, reports working, then idles,
+  // which settles the run and lets the completion driver hold the goal for the owner.
+  const workerLogs = join(root, 'workers');
+  mkdirSync(workerLogs, { recursive: true });
+  const shell = join(root, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  const workerScript = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn\n`;
+  writeFileSync(shell, workerScript, { mode: 0o755 });
+  writeFileSync(join(root, 'bin', 'claude'), workerScript, { mode: 0o755 });
+  await runSlackLeg(ctx, {
+    root, dbPath, hub: await openHubReader(dbPath), waitForChange, reportBack: true,
+    extraEnv: {
+      SHELL: shell, OMON_LANE_AUTO_WORKTREE: '1', FERRYX_HUB_WORKSPACE: 'qa-report-back', FERRYX_HUB_LANE_AGENT: 'claude',
+      PATH: `${join(root, 'bin')}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+    },
+    setupCli: (owner, env) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', 'qa-slack',
+      '--repo-identity', 'qa:qa-slack', '--host', 'local', '--git-common-dir', realpathSync(join(repo, '.git')), '--json'],
+    { label: 'report-back-setup', env }),
+    registerWorkspace: (env) => registerWorkspace(ctx, join(env.FERRYX_RUNTIME_DIR, 'daemon.sock'), 'qa-report-back', workspace),
+  });
+}
+
+async function runSlowTurn(ctx) {
+  const root = join(realpathSync(ctx.paths.data), 'slack-leg');
+  const workspace = join(root, 'ws');
+  const repo = join(workspace, 'qa-slack');
+  const dbPath = join(root, 'hub', 'hub.sqlite');
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is required for the slow-turn fixture');
+  const init = await ctx.run('slow-turn-git-init', git, ['init', '-q', repo], { deadlineMs: 30_000 });
+  if (init.code !== 0) throw new HarnessError('FIXTURE_FAILED', init.stderr);
+  await runSlackLeg(ctx, {
+    root, dbPath, hub: await openHubReader(dbPath), waitForChange, slowTurn: true,
+    setupCli: (owner, env) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', 'qa-slack',
+      '--repo-identity', 'qa:qa-slack', '--host', 'local', '--git-common-dir', realpathSync(join(repo, '.git')), '--json'],
+    { label: 'slow-turn-setup', env }),
+    registerWorkspace: (env) => registerWorkspace(ctx, join(env.FERRYX_RUNTIME_DIR, 'daemon.sock'), 'qa-slow-turn', workspace),
+  });
+}
 async function runAdmission(ctx) {
   if (!POSIX) {
     throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'admission fixture worker needs a POSIX pane shell (the Windows pane shell is pwsh/powershell and ignores SHELL); this scenario runs on Linux or macOS');
@@ -517,7 +604,9 @@ async function runAutonomy(ctx) {
   mkdirSync(workerLogs, { recursive: true });
   const shell = join(data, 'bin', 'qa-worker-shell');
   mkdirSync(dirname(shell), { recursive: true });
-  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn\n`, { mode: 0o755 });
+  const workerScript = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn\n`;
+  writeFileSync(shell, workerScript, { mode: 0o755 });
+  writeFileSync(join(root, 'bin', 'claude'), workerScript, { mode: 0o755 });
 
   // The decision engine: the hub's retained mhc on a loopback provider stub.
   const stub = await startProviderStub(ctx, { answer: (json) => (promptTextOf(json).includes(CONVERGENCE_MARKER) ? AUTONOMY_CONVERGED : null) });
@@ -2606,8 +2695,90 @@ const channelsDeps = Object.freeze({
 const loadChannels = async () => import('./channels.mjs');
 
 export const SCENARIOS = Object.freeze({
+  'owner-channel': Object.freeze({
+    implemented: true,
+    task: '1',
+    summary: 'Unmentioned owner message in a non-free Slack channel reaches the supervisor; foreign traffic creates no supervisor turn or binding',
+    deadlineMs: 8 * 60_000,
+    requiredAssertions: ['slack-owner-identity-provisioned', 'slack-adapter-connected-through-loopback-socket-mode',
+      'foreign-channel-message-creates-no-supervisor-turn-or-binding', 'unmentioned-owner-channel-turn-offers-submit-work',
+      'owner-channel-binding-is-channel-scoped', 'foreign-channel-text-never-reaches-supervisor'],
+    run: runOwnerChannel,
+  }),
+  'report-back': Object.freeze({
+    implemented: true,
+    task: '13',
+    summary: 'A goal admitted from an owner channel thread settles needs_owner: one five-part report in that thread; after a hub restart no second report',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: ['slack-owner-identity-provisioned', 'slack-adapter-connected-through-loopback-socket-mode',
+      'goal-admitted-from-the-thread-settled-needs-owner', 'report-back-posts-one-five-part-report-in-the-origin-thread',
+      'restart-after-settle-posts-no-second-report'],
+    run: runReportBack,
+  }),
+  'slow-turn': Object.freeze({
+    implemented: true,
+    task: '2',
+    summary: 'Stub model delays reply 90s: holding line posted in thread at ~60s then real answer; provider error posts failure line in same thread and nothing in home channel',
+    deadlineMs: 8 * 60_000,
+    requiredAssertions: [
+      'slack-owner-identity-provisioned',
+      'slack-adapter-connected-through-loopback-socket-mode',
+      'holding-line-posted-in-thread-at-60s',
+      'delayed-final-answer-posted-in-thread',
+      'provider-error-failure-line-posted-in-same-thread',
+      'no-message-in-home-channel-on-failure',
+    ],
+    run: runSlowTurn,
+  }),
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
+  'project-name': Object.freeze({
+    implemented: true,
+    task: '4',
+    summary: 'Owner Slack DM names ferryx; stub delegates README correction without hints; admission resolves the ferryx project.',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: ['owner-dm-project-name-admitted-ferryx', 'owner-dm-ambiguous-project-asks-numbered-question-without-goal', 'owner-numbered-reply-admits-goal-on-option-1'],
+    run: async (ctx) => {
+      if (!POSIX) throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'Slack owner DM scenario requires POSIX fixture shell');
+      const { config } = ctx;
+      const data = join(ctx.paths.data, 'project-name');
+      const root = join(data, 'slack-leg');
+      const repo = join(root, 'ws', 'ferryx');
+      const other = join(root, 'ws', 'other');
+      const db = join(root, 'hub', 'hub.sqlite');
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(other, { recursive: true });
+      mkdirSync(dirname(db), { recursive: true });
+      const git = onPath('git');
+      if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is required');
+      for (const dir of [repo, other]) {
+        for (const args of [['init', '-q', dir], ['-c', 'user.name=QA', '-c', 'user.email=qa@example.com', '-C', dir, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']]) {
+          const result = await ctx.run('project-name-git', git, args, { deadlineMs: 30_000 });
+          if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', result.stderr);
+        }
+      }
+      await runSlackLeg(ctx, {
+        root,
+        // Two projects, so a message naming none is ambiguous; "ferryx" sorts first (option 1).
+        setupCli: async (owner, env) => {
+          const setup = (name, dir) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', name, '--repo-identity', `qa:${name}`, '--host', 'local', '--git-common-dir', realpathSync(join(dir, '.git')), '--json'], { env });
+          const second = await setup('other', other);
+          return second.code === 0 ? setup('ferryx', repo) : second;
+        },
+        hub: await openHubReader(db), dbPath: db, waitForChange,
+        registerWorkspace: (env) => registerWorkspace(ctx, join(env.FERRYX_RUNTIME_DIR, 'daemon.sock'), 'qa-project-name', realpathSync(dirname(repo))),
+        scenario: 'project-name',
+      });
+    },
+  }),
+  'stuck-thread': Object.freeze({
+    implemented: true,
+    task: '3',
+    summary: 'An owner reply through isolated loopback Slack starts a fresh engine session for interrupted_run, while a settled session resumes its original engine file',
+    deadlineMs: 3 * 60_000,
+    requiredAssertions: ['interrupted-session-replaced-after-owner-reply', 'settled-session-retained-after-owner-reply'],
+    run: runStuckThread,
+  }),
   admission: Object.freeze({
     implemented: true,
     task: '7',
@@ -2726,6 +2897,22 @@ export const SCENARIOS = Object.freeze({
       { clause: 'ended-goal-report', reason: 'a worker of an ended goal is gone with its pane, so a report for it cannot be sent through the product', coveredBy: 'crates/ferryx-hub/src/lanes/dispatch.rs a_worker_report_becomes_one_wake_on_its_own_goal' },
     ],
     run: runBurst,
+  }),
+  hold: Object.freeze({
+    implemented: true,
+    task: '8',
+    summary: 'Owner hold in a Slack lane thread is read back, survives a recovery tick, and only explicit continue releases it; failed readback says not held',
+    deadlineMs: 8 * 60_000,
+    requiredAssertions: ['owner-hold-names-lane', 'lane-loop-paused', 'recovery-keeps-lane-held', 'explicit-continue-releases-lane', 'readback-failure-says-not-held'],
+    run: runHold,
+  }),
+  'lane-oversight': Object.freeze({
+    implemented: true,
+    task: '7',
+    summary: 'An isolated hub lane whose fixture worker reports through ferryx-cli mcp lane_report twice with the same file bytes, then a changed file: progress time moves only on the change, and another session is refused',
+    deadlineMs: 4 * 60_000,
+    requiredAssertions: LANE_OVERSIGHT_REQUIRED_ASSERTIONS,
+    run: runLaneOversight,
   }),
   'remote-delivery': Object.freeze({
     implemented: true,

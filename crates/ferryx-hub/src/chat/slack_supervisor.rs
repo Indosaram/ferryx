@@ -163,6 +163,7 @@ struct TurnActor {
     actor: ActorContext,
     generation: u64,
     record: TurnRecord,
+    reply_reference: Option<String>,
 }
 
 type Registry = (u64, HashMap<String, TurnActor>);
@@ -184,7 +185,11 @@ struct TurnGuard {
 }
 
 impl TurnGuard {
-    fn register(scope: &ConversationScope, actor: ActorContext) -> Self {
+    fn register(
+        scope: &ConversationScope,
+        actor: ActorContext,
+        reply_reference: Option<String>,
+    ) -> Self {
         let key = scope.key();
         let mut registry = turns_lock();
         registry.0 += 1;
@@ -195,6 +200,7 @@ impl TurnGuard {
                 actor,
                 generation,
                 record: TurnRecord::default(),
+                reply_reference,
             },
         );
         Self { key, generation }
@@ -233,6 +239,14 @@ fn actor_for(scope: &ConversationScope, turn: Option<u64>) -> Option<ActorContex
         .map(|turn| turn.actor.clone())
 }
 
+fn reply_reference_for(scope: &ConversationScope, turn: Option<u64>) -> Option<String> {
+    turns_lock()
+        .1
+        .get(&scope.key())
+        .filter(|live| Some(live.generation) == turn)
+        .and_then(|live| live.reply_reference.clone())
+}
+
 fn update_record(
     scope: &ConversationScope,
     turn: Option<u64>,
@@ -247,6 +261,41 @@ fn update_record(
     }
 }
 
+async fn referenced_question(
+    pool: &SqlitePool,
+    actor: &ActorContext,
+    scope: &ConversationScope,
+    reference: &str,
+) -> Result<Option<(String, String)>, WorkToolRejection> {
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT question_id, channel_id, conversation_id, thread_id, status FROM supervisor_questions
+         WHERE owner_principal = ? AND adapter = 'slack'
+           AND question_message_ts = ? ORDER BY created_at",
+    )
+    .bind(&actor.principal)
+    .bind(reference)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| WorkToolRejection::new("SUPERVISOR_STORE", &error.to_string()))?;
+    if rows.len() > 1 {
+        return Ok(None);
+    }
+    let Some((question_id, channel, _conversation, _thread, status)) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let scope_channel = scope.channel_key.split(':').nth(3).unwrap_or_default();
+    if !channel.is_empty() && !scope_channel.is_empty() && channel != scope_channel {
+        return Ok(None);
+    }
+    if status != "open" {
+        return Err(WorkToolRejection::new(
+            "SUPERVISOR_QUESTION_INVALID",
+            "That clarification is stale or the answer is invalid.",
+        ));
+    }
+    Ok(Some((question_id, actor.source_body.trim().to_owned())))
+}
+
 /// The supervisor's typed work tools for Slack conversations. A request from a scope with no
 /// Slack turn in flight is rejected: there is no authenticated actor to act for.
 pub struct SlackWorkTools {
@@ -255,6 +304,43 @@ pub struct SlackWorkTools {
 }
 
 impl SlackWorkTools {
+    async fn answer_question(
+        &self,
+        actor: &ActorContext,
+        question_id: &str,
+        answer: &str,
+    ) -> Result<SubmitOutcome, WorkToolRejection> {
+        let Some((mut draft, selected)) = crate::supervisor::questions::answer_question(
+            &self.pool,
+            &actor.principal,
+            question_id,
+            answer,
+        )
+        .await
+        .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?
+        else {
+            return Err(WorkToolRejection::new(
+                "SUPERVISOR_QUESTION_INVALID",
+                "That clarification is stale or the answer is invalid.",
+            ));
+        };
+        match draft.missing.as_str() {
+            "project" => {
+                draft.work.project_id = Some(selected.clone());
+                if draft.work.host_id.is_none() {
+                    if let Ok(Some(host_id)) = crate::supervisor::app_work::single_host(&self.pool, &selected).await {
+                        draft.work.host_id = Some(host_id);
+                    }
+                }
+            }
+            "host" => draft.work.host_id = Some(selected),
+            _ => return Err(WorkToolRejection::new("SUPERVISOR_QUESTION_INVALID", "Unsupported clarification.")),
+        }
+        admission::handle_message(&self.pool, actor, Some(&draft.work))
+            .await
+            .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))
+    }
+
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool,
@@ -279,15 +365,129 @@ impl WorkToolHandler for SlackWorkTools {
                 "no authenticated owner message is in flight for this conversation turn",
             ));
         };
+        if let Some(reference) = reply_reference_for(&request.scope, turn) {
+            match referenced_question(&self.pool, &actor, &request.scope, &reference).await {
+                Ok(Some((question_id, answer))) => {
+                    match self.answer_question(&actor, &question_id, &answer).await {
+                        Ok(outcome) => {
+                            update_record(&request.scope, turn, |record| {
+                                record.outcomes.push(outcome.clone());
+                            });
+                            return serde_json::to_value(&outcome).map_err(|error| {
+                                WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
+                            });
+                        }
+                        Err(rejection) => {
+                            let code = rejection.code.clone();
+                            update_record(&request.scope, turn, |record| {
+                                record.rejected.push(code);
+                            });
+                            return Err(rejection);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(rejection) => {
+                    let code = rejection.code.clone();
+                    update_record(&request.scope, turn, |record| {
+                        record.rejected.push(code);
+                    });
+                    return Err(rejection);
+                }
+            }
+        }
         match request.call {
             WorkToolCall::Submit {
                 title,
                 requirements,
                 worker,
+                project,
+                cwd,
             } => {
-                let work = submit_from_call(&title, &requirements, worker, &actor.source_body);
+                let mut work = submit_from_call(&title, &requirements, worker, &actor.source_body);
+                if let Some(identity) = crate::supervisor::identity_of(&self.pool, &actor.principal)
+                    .await
+                    .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?
+                {
+                    if let Some(hinted) = crate::supervisor::app_work::project_of_hints(
+                        &self.pool,
+                        &identity.supervisor_id,
+                        project.as_deref(),
+                        cwd.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?
+                    {
+                        work.project_id = Some(hinted);
+                        work.cwd = cwd;
+                    }
+                    if let Some(project_id) = &actor.choices.project_id {
+                        if let Some(hint) = work.project_id.as_ref().filter(|hint| *hint != project_id) {
+                            tracing::info!(%hint, %project_id, "ignored model project hint conflicting with authenticated owner binding");
+                        }
+                        work.project_id = Some(project_id.clone());
+                        if actor.choices.host_id.is_some() {
+                            work.host_id = actor.choices.host_id.clone();
+                        } else if let Ok(Some(host_id)) = crate::supervisor::app_work::single_host(&self.pool, project_id).await {
+                            work.host_id = Some(host_id);
+                        }
+                    } else if let Some(project_id) = work.project_id.clone() {
+                        if let Ok(Some(host_id)) = crate::supervisor::app_work::single_host(&self.pool, &project_id).await {
+                            work.host_id = Some(host_id);
+                        }
+                    } else if let Some(resolved) = crate::supervisor::app_work::resolve_project(
+                        &self.pool,
+                        &identity.supervisor_id,
+                        &actor.source_body,
+                        &format!("{title} {}", requirements.join(" ")),
+                        &[],
+                        self.sessions.as_deref(),
+                        false,
+                    )
+                    .await
+                    .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?
+                    {
+                        work.project_id = Some(resolved.project_id);
+                        if actor.choices.host_id.is_none() {
+                            work.host_id = resolved.host_id;
+                        }
+                    }
+                }
+                if let (Some(project_id), Some(cwd)) = (work.project_id.as_deref(), work.cwd.take()) {
+                    work.cwd = crate::supervisor::app_work::validate_cwd_hint(&self.pool, project_id, &cwd).await;
+                }
                 let outcome = match admission::handle_message(&self.pool, &actor, Some(&work)).await
                 {
+                    Ok(SubmitOutcome::NeedsChoice { missing, detail })
+                        if missing == "project" || missing == "host" =>
+                    {
+                        let identity = crate::supervisor::identity_of(&self.pool, &actor.principal)
+                            .await
+                            .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?
+                            .ok_or_else(|| WorkToolRejection::new("SUPERVISOR_IDENTITY_MISSING", "no supervisor identity for this owner"))?;
+                        let options = if missing == "project" {
+                            sqlx::query_as::<_, (String, String)>("SELECT project_id, name FROM supervisor_projects WHERE supervisor_id = ? ORDER BY name")
+                                .bind(&identity.supervisor_id).fetch_all(&self.pool).await
+                        } else {
+                            sqlx::query_as::<_, (String, String)>("SELECT host_id, host_id FROM supervisor_project_hosts WHERE project_id = ? ORDER BY host_id")
+                                .bind(work.project_id.as_deref().unwrap_or_default()).fetch_all(&self.pool).await
+                        }.map_err(|error| WorkToolRejection::new("SUPERVISOR_STORE", &error.to_string()))?;
+                        let options: Vec<crate::supervisor::questions::QuestionOption> = options.into_iter()
+                            .map(|(id, name)| crate::supervisor::questions::QuestionOption { id, name }).collect();
+                        let channel_id = request.scope.channel_key.split(':').nth(3).unwrap_or_default();
+                        let thread_id = request.scope.channel_key.split(':').nth(4).unwrap_or_default();
+                        let (question_id, question) = crate::supervisor::questions::ask(
+                            &self.pool,
+                            &crate::supervisor::questions::QuestionDraft {
+                                work: work.clone(), supervisor_id: identity.supervisor_id,
+                                owner_principal: actor.principal.clone(), adapter: ChannelProvider::Slack,
+                                conversation_id: request.scope.key(), channel_id: channel_id.to_owned(),
+                                thread_id: thread_id.to_owned(), missing: missing.clone(),
+                            },
+                            &options,
+                        ).await.map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?;
+                        SubmitOutcome::NeedsChoice { missing, detail: format!("{detail}\n{question}\nReply in this thread with the question id and an option number or name: {question_id}") }
+                    }
                     Ok(outcome) => outcome,
                     Err(error) => {
                         // A refused or failed submit is part of the turn: the reply must say
@@ -522,7 +722,7 @@ fn team_of(admitted: &Admitted) -> Option<String> {
 
 /// The supervisor owner principal of a Slack sender: `slack:<team>:<user>` when the team is
 /// known, otherwise the one Slack owner principal ending in `:<user>`.
-async fn owner_principal(pool: &SqlitePool, team: Option<&str>, user: &str) -> Option<String> {
+pub(super) async fn owner_principal(pool: &SqlitePool, team: Option<&str>, user: &str) -> Option<String> {
     let rows: Vec<String> = match team {
         Some(team) => sqlx::query_scalar(
             "SELECT owner_principal FROM supervisor_identity WHERE owner_principal = ?",
@@ -611,9 +811,8 @@ async fn bind_owner_thread(
     }
 }
 
-/// Whether this admitted Slack message is the owner's and belongs to the supervisor: the
-/// owner's DM, a channel/thread the owner bound, or an owner-led thread (bound here). `None`
-/// keeps the legacy path.
+/// Routes every authenticated owner message after cutover, binding a new channel or thread
+/// on first contact. Non-owner traffic and closed unified intake keep the legacy path.
 pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
     if admitted.event.is_null() || admitted.message_ts.is_empty() {
         return None;
@@ -630,12 +829,9 @@ pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
             return None;
         }
     }
-    let led = owner_led_thread(admitted);
-    let thread = admitted
-        .key
-        .thread_id
-        .clone()
-        .or_else(|| led.clone())
+    let thread = super::slack_turn::reply_thread_ts(&admitted.event)
+        .map(str::to_owned)
+        .or_else(|| owner_led_thread(admitted))
         .unwrap_or_default();
     let binding: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT binding_id, project_id FROM supervisor_channel_bindings
@@ -651,13 +847,13 @@ pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
     .ok()
     .flatten();
     let owner_dm = admitted.dm && admitted.key.user_id == admitted.user;
-    let binding = match (binding, led) {
-        (None, Some(led)) if !owner_dm => {
-            bind_owner_thread(pool, admitted, team.as_deref(), &principal, &led)
+    let binding = match binding {
+        None if !owner_dm => {
+            bind_owner_thread(pool, admitted, team.as_deref(), &principal, &thread)
                 .await
                 .map(|id| (id, None))
         }
-        (binding, _) => binding,
+        binding => binding,
     };
     if !owner_dm && binding.is_none() {
         return None;
@@ -739,6 +935,85 @@ async fn persist_session(pool: &SqlitePool, key: &crate::chat::session::SessionK
     }
 }
 
+/// Posts a Slack obligation's holding line into its own channel/thread.
+pub struct SlackObligationNotifier;
+
+/// What settling one owner answer left the obligation in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerDelivery {
+    /// The reply answered the owner (delivered, or an explicit silence): the obligation closed.
+    Answered(crate::chat::slack_turn::PostOutcome),
+    /// Nothing reached the owner after the one retry: the obligation stays open and uncertain.
+    Unanswered,
+}
+
+/// One owner answer the supervisor is posting: where it goes and what it says.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OwnerAnswer<'a> {
+    pub channel: &'a str,
+    pub thread: Option<&'a str>,
+    pub text: &'a str,
+}
+
+/// Posts one owner answer and settles its obligation: a delivered reply and an explicit
+/// silence both close it (the owner was answered either way), while a missing token or a Slack
+/// rejection is retried once and then recorded as an uncertain delivery, so the obligation
+/// stays open and health says the owner may not have been told.
+pub(crate) async fn settle_owner_delivery(
+    pool: &SqlitePool,
+    source_message_id: &str,
+    answer: OwnerAnswer<'_>,
+) -> OwnerDelivery {
+    use crate::chat::slack_turn::post_checked;
+    use crate::supervisor::obligations::{mark_answered, mark_delivery_uncertain};
+    let mut last_error = String::new();
+    for _ in 0..2 {
+        match post_checked(answer.channel, answer.thread, answer.text).await {
+            Ok(outcome) => {
+                if outcome.answered_owner() {
+                    if let Err(error) = mark_answered(pool, "slack", source_message_id).await {
+                        tracing::error!(%error, "delivered owner answer was not marked answered");
+                    }
+                    return OwnerDelivery::Answered(outcome);
+                }
+                last_error = "Slack has no bot token, so nothing was sent".to_owned();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "owner answer delivery failed; retrying once");
+                last_error = error.to_string();
+            }
+        }
+    }
+    if let Err(error) = mark_delivery_uncertain(pool, "slack", source_message_id, &last_error).await {
+        tracing::error!(%error, "uncertain owner answer was not recorded");
+    }
+    tracing::error!(error = %last_error, "owner answer delivery failed after retry");
+    OwnerDelivery::Unanswered
+}
+
+#[async_trait]
+impl crate::supervisor::obligations::ObligationNotifier for SlackObligationNotifier {
+    async fn send_holding(
+        &self,
+        obligation: &crate::supervisor::obligations::Obligation,
+        text: &str,
+    ) -> crate::error::Result<bool> {
+        let Some(channel) = obligation.channel_id.as_deref() else { return Ok(false) };
+        let outcome =
+            super::slack_turn::post_checked(channel, obligation.thread_id.as_deref(), text).await?;
+        Ok(outcome.answered_owner())
+    }
+}
+
+fn thread_hold_command(text: &str) -> Option<bool> {
+    let normalized = text.trim().trim_end_matches(['.', '!']).trim().to_lowercase();
+    match normalized.as_str() {
+        "/hold" | "/pause" | "hold" | "pause" | "멈춰" | "기다려" => Some(true),
+        "/continue" | "continue" | "계속해" => Some(false),
+        _ => None,
+    }
+}
+
 /// Runs one owner Slack message through the supervisor. Returns the posted reply, or `None`
 /// when the message is not the supervisor's (the caller then keeps the legacy path). The
 /// caller has already deduplicated live and backfilled deliveries.
@@ -751,14 +1026,85 @@ pub async fn try_handle(
 ) -> Option<String> {
     let routed = route(pool, admitted).await?;
     let owner_text = owner_authored_text(&admitted.event, &admitted.bot_user);
+    if let (Some(command), Some(thread_ts)) = (
+        thread_hold_command(&owner_text),
+        admitted.reply_thread.as_deref(),
+    ) {
+        if crate::supervisor::hold::thread_has_active_lane(pool, &admitted.channel, thread_ts)
+            .await
+            .unwrap_or(false)
+        {
+            let reply = if command {
+                match crate::supervisor::hold::slack_thread_command(
+                    pool, &admitted.channel, thread_ts, &routed.principal,
+                ).await {
+                    Ok(held) => {
+                        let names = held.iter().map(|entry| entry.split_once(':').map_or(entry.as_str(), |(lane, _)| lane)).collect::<Vec<_>>();
+                        if names.is_empty() { "No working lanes in this thread needed a hold.".to_owned() }
+                        else { format!("Held lanes: {}.", names.join(", ")) }
+                    }
+                    Err(error) => {
+                        if error.message.starts_with("not held") {
+                            error.message
+                        } else {
+                            format!("not held: {}", error.message)
+                        }
+                    }
+                }
+            } else {
+                match crate::supervisor::hold::resume_slack_thread(pool, &admitted.channel, thread_ts).await {
+                    Ok(held) => {
+                        let names = held.iter().map(|entry| entry.split_once(':').map_or(entry.as_str(), |(lane, _)| lane)).collect::<Vec<_>>();
+                        if names.is_empty() { "No held lanes in this thread to continue.".to_owned() }
+                        else { format!("Continued lanes: {}.", names.join(", ")) }
+                    }
+                    Err(error) => format!("continue failed: {error}"),
+                }
+            };
+            super::slack_turn::post(&admitted.channel, admitted.reply_thread.as_deref(), &reply).await;
+            return Some(reply);
+        }
+    }
     let storage_key = admitted.key.storage_key();
+    let obligation = crate::supervisor::obligations::open_obligation(
+        pool,
+        "slack",
+        &admitted.channel,
+        &routed.source_message_id,
+        Some(&admitted.channel),
+        admitted.reply_thread.as_deref(),
+    )
+    .await;
+    super::slack_turn::react(&admitted.channel, &admitted.message_ts, "eyes", true).await;
+    match &obligation {
+        Ok(id) => {
+            let id = *id;
+            let notifier = std::sync::Arc::new(SlackObligationNotifier);
+            let timer_pool = pool.clone();
+            tokio::spawn(async move {
+                if let Err(error) = crate::supervisor::obligations::run_obligation_timer(timer_pool, id, notifier).await {
+                    tracing::error!(obligation_id = id, %error, "owner answer obligation timer failed");
+                }
+            });
+        }
+        Err(error) => tracing::error!(%error, "owner answer obligation was not recorded"),
+    }
     let lock = super::slack_turn::session_lock(&storage_key);
     let _turn = lock.lock().await;
+    if let Err(error) = crate::supervisor::obligations::update_status(
+        pool,
+        "slack",
+        &routed.source_message_id,
+        "running",
+    )
+    .await
+    {
+        tracing::error!(%error, "owner answer obligation status was not updated");
+    }
     persist_session(pool, &admitted.key).await;
     if let Err(error) = super::transcript::record(pool, &storage_key, "user", prepared).await {
         tracing::warn!(%error, "supervisor slack message was not stored");
     }
-    super::slack_turn::react(&admitted.channel, &admitted.message_ts, "eyes", true).await;
     let actor = ActorContext {
         principal: routed.principal.clone(),
         source_adapter: ChannelProvider::Slack,
@@ -770,7 +1116,11 @@ pub async fn try_handle(
             ..OwnerChoices::default()
         },
     };
-    let guard = TurnGuard::register(&routed.scope, actor);
+    let reply_reference = super::slack_turn::reply_thread_ts(&admitted.event)
+        .map(str::to_owned)
+        .or_else(|| admitted.event.pointer("/message/ts").and_then(Value::as_str).map(str::to_owned))
+        .or_else(|| admitted.event.get("quoted_message_ts").and_then(Value::as_str).map(str::to_owned));
+    let guard = TurnGuard::register(&routed.scope, actor, reply_reference);
     let turn = guard.generation;
     // Cron deliveries mirrored into this session ride on the turn, consumed only on success.
     let briefings = crate::mirror::peek_pending_cron_briefings(pool, &storage_key)
@@ -860,7 +1210,47 @@ pub async fn try_handle(
     let (model, claims) = super::report_claims::strip_reply(&model);
     record.cites_owned_goal = cites_owned_goal(pool, &routed.principal, &model).await;
     let text = render_reply(&model, &record);
-    super::slack_turn::post(&admitted.channel, admitted.reply_thread.as_deref(), &text).await;
+    let answer = OwnerAnswer {
+        channel: &admitted.channel,
+        thread: admitted.reply_thread.as_deref(),
+        text: &text,
+    };
+    let open_question = sqlx::query_as::<_, (String, String)>(
+        "SELECT question_id, missing FROM supervisor_questions
+         WHERE owner_principal = ? AND adapter = 'slack' AND conversation_id = ?
+           AND status = 'open' AND question_message_ts IS NULL ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&routed.principal)
+    .bind(routed.scope.key())
+    .fetch_optional(pool)
+    .await;
+    let mut question_posted = false;
+    if let Ok(Some((question_id, _))) = open_question {
+        let outgoing = super::slack_turn::outgoing_text(&text);
+        if let Ok(Some(ts)) =
+            super::slack_web::post_returning_ts(answer.channel, answer.thread, &outgoing).await
+        {
+            question_posted = true;
+            if let Err(error) = sqlx::query(
+                "UPDATE supervisor_questions SET question_message_ts = ? WHERE question_id = ? AND status = 'open'",
+            )
+            .bind(ts)
+            .bind(question_id)
+            .execute(pool)
+            .await
+            {
+                tracing::warn!(%error, "supervisor question message reference was not stored");
+            }
+            if let Err(error) =
+                crate::supervisor::obligations::mark_answered(pool, "slack", &routed.source_message_id).await
+            {
+                tracing::error!(%error, "delivered owner answer was not marked answered");
+            }
+        }
+    }
+    if !question_posted {
+        settle_owner_delivery(pool, &routed.source_message_id, answer).await;
+    }
     if let Err(error) = super::transcript::record(pool, &storage_key, "assistant", &text).await {
         tracing::warn!(%error, "supervisor slack reply was not stored");
     }
@@ -1069,6 +1459,81 @@ mod tests {
     }
 
     #[test]
+    fn thread_hold_commands_are_owner_text_triggers() {
+        assert_eq!(thread_hold_command("멈춰"), Some(true));
+        assert_eq!(thread_hold_command("기다려!"), Some(true));
+        assert_eq!(thread_hold_command("/hold"), Some(true));
+        assert_eq!(thread_hold_command("계속해"), Some(false));
+        assert_eq!(thread_hold_command("/continue"), Some(false));
+        assert_eq!(thread_hold_command("빌드가 왜 멈춰 있어?"), None);
+        assert_eq!(thread_hold_command("잠깐 기다려 봐도 될까?"), None);
+        assert_eq!(thread_hold_command("이대로 계속해도 돼?"), None);
+        assert_eq!(thread_hold_command("멈춰?"), None);
+        assert_eq!(thread_hold_command("other"), None);
+    }
+
+    #[tokio::test]
+    async fn natural_hold_prose_and_unbound_threads_still_reach_the_supervisor() {
+        let (pool, _, _) = owner_pool().await;
+        let config = slack_config(false);
+        let fake = FakeConversation::new(&pool, false, "supervisor answered");
+        let conversation: Arc<dyn SupervisorConversation> = fake.clone();
+        let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+
+        // 1. Top-level DM with standalone "멈춰" must stay supervised (never drop to legacy None).
+        let top_dm = admit(&config, &dm("UOWNER", "DOWNER", "8100.000001", "멈춰"), "UBOT", false)
+            .expect("owner DM admitted");
+        let reply = with_test_api(base.clone(), "xoxb-test".into(), async {
+            TEST_CONVERSATION
+                .scope(conversation.clone(), async {
+                    try_handle(&config, &pool, &top_dm, "멈춰", fake.as_ref()).await
+                })
+                .await
+        })
+        .await;
+        assert_eq!(reply.as_deref(), Some("supervisor answered"));
+
+        // 2. Unbound thread with standalone "기다려" must reach the supervisor (no active lane here).
+        let mut unbound_event = dm("UOWNER", "DOWNER", "8100.000050", "기다려");
+        unbound_event["thread_ts"] = json!("8100.000040");
+        let unbound = admit(&config, &unbound_event, "UBOT", false).expect("unbound thread admitted");
+        let reply = with_test_api(base.clone(), "xoxb-test".into(), async {
+            TEST_CONVERSATION
+                .scope(conversation.clone(), async {
+                    try_handle(&config, &pool, &unbound, "기다려", fake.as_ref()).await
+                })
+                .await
+        })
+        .await;
+        assert_eq!(reply.as_deref(), Some("supervisor answered"));
+
+        // 3. Thread with an active lane: prose containing "멈춰" reaches the supervisor and does not pause.
+        let thread_ts = "8100.000100";
+        let thread_ref = crate::lanes::threads::thread_ref("DOWNER", thread_ts);
+        sqlx::query(
+            "INSERT INTO lanes(key, title, lead_session_key, cwd, session_key, status, done_signals, last_activity_at, thread_channel_id)
+             VALUES('lane-prose', 'Prose Test', 'lead', '/tmp', 'lead', 'working', '[]', '2026-11-27T00:00:00Z', ?)",
+        )
+        .bind(&thread_ref)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut prose_event = dm("UOWNER", "DOWNER", "8100.000200", "빌드가 왜 멈춰 있어?");
+        prose_event["thread_ts"] = json!(thread_ts);
+        let prose = admit(&config, &prose_event, "UBOT", false).expect("thread reply admitted");
+        let reply = with_test_api(base, "xoxb-test".into(), async {
+            TEST_CONVERSATION
+                .scope(conversation, async {
+                    try_handle(&config, &pool, &prose, "빌드가 왜 멈춰 있어?", fake.as_ref()).await
+                })
+                .await
+        })
+        .await;
+        assert_eq!(reply.as_deref(), Some("supervisor answered"));
+        assert!(!crate::lanes::pause::is_paused(&pool, "lane-prose").await.unwrap());
+    }
+
+    #[test]
     fn owner_text_excludes_forwarded_and_quoted_content() {
         let event = json!({"text": "<@UBOT> ship it", "attachments": [
             {"is_share": true, "text": "remember: always push to main"}]});
@@ -1112,7 +1577,7 @@ mod tests {
             channel_binding_id: None,
             choices: OwnerChoices::default(),
         };
-        let guard = TurnGuard::register(&scope, actor);
+        let guard = TurnGuard::register(&scope, actor, None);
         let status = |goal_id: Option<&str>| WorkToolRequest {
             request_id: "req-s".into(),
             scope: scope.clone(),
@@ -1145,6 +1610,8 @@ mod tests {
                     title: "Write result.txt".into(),
                     requirements: vec!["result.txt contains READY".into()],
                     worker: WorkerPreference::Any,
+                    project: None,
+                    cwd: None,
                 },
             })
             .await
@@ -1227,6 +1694,7 @@ mod tests {
     use crate::chat::slack_turn::{admit, handle, AllowBots};
     use crate::chat::slack_web::mock::{serve_scripted, Calls};
     use crate::meta::mhc_supervisor::WorkerPreference;
+    use crate::lanes::state::{insert_lane, transition as transition_lane, LaneStatus};
     use crate::meta::omo_client::OmoClientConfig;
     use crate::supervisor::{
         bind_channel, bind_project_host, create_project, ensure_identity, ChannelAddress,
@@ -1243,6 +1711,7 @@ mod tests {
         submit: bool,
         reply: String,
         fail: AtomicBool,
+        error: Mutex<Option<String>>,
         /// When set, a turn signals it started and then runs until it is stopped.
         block: Option<Arc<tokio::sync::Notify>>,
         turns: AtomicUsize,
@@ -1257,6 +1726,21 @@ mod tests {
                 submit,
                 reply: reply.into(),
                 fail: AtomicBool::new(false),
+                error: Mutex::new(None),
+                block: None,
+                turns: AtomicUsize::new(0),
+                messages: Mutex::new(Vec::new()),
+                ingested: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn with_error(pool: &SqlitePool, error: &str) -> Arc<Self> {
+            Arc::new(Self {
+                tools: SlackWorkTools::new(pool.clone()),
+                submit: false,
+                reply: String::new(),
+                fail: AtomicBool::new(false),
+                error: Mutex::new(Some(error.to_owned())),
                 block: None,
                 turns: AtomicUsize::new(0),
                 messages: Mutex::new(Vec::new()),
@@ -1271,6 +1755,7 @@ mod tests {
                 submit: false,
                 reply: String::new(),
                 fail: AtomicBool::new(false),
+                error: Mutex::new(None),
                 block: Some(started),
                 turns: AtomicUsize::new(0),
                 messages: Mutex::new(Vec::new()),
@@ -1301,6 +1786,9 @@ mod tests {
         ) -> Result<String, String> {
             self.turns.fetch_add(1, Ordering::SeqCst);
             self.messages.lock().unwrap().push(message.to_owned());
+            if let Some(err) = self.error.lock().unwrap().clone() {
+                return Err(err);
+            }
             if self.fail.load(Ordering::SeqCst) {
                 return Err("provider: unavailable".into());
             }
@@ -1318,6 +1806,8 @@ mod tests {
                             title: "Write result.txt".into(),
                             requirements: vec!["result.txt contains READY".into()],
                             worker: WorkerPreference::Any,
+                            project: None,
+                            cwd: None,
                         },
                     })
                     .await
@@ -1528,6 +2018,8 @@ mod tests {
                     title: "x".into(),
                     requirements: vec!["y".into()],
                     worker: WorkerPreference::Any,
+                    project: None,
+                    cwd: None,
                 },
             })
             .await
@@ -1563,7 +2055,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_channels_the_owner_bound_reach_the_supervisor() {
+    async fn owner_thread_hold_and_continue_names_and_releases_every_working_lane() {
+        let (pool, supervisor_id, project_id) = owner_pool().await;
+        bind_channel(&pool, &supervisor_id, &ChannelAddress {
+            provider: ChannelProvider::Slack, workspace_id: "T1".into(), account_id: "UBOT".into(),
+            channel_id: "CHOLD".into(), thread_id: "9001.000001".into(), owner_principal: OWNER.into(),
+        }, Some(&project_id), None).await.unwrap();
+        for (key, lead) in [("lane-one", "lead-one"), ("lane-two", "lead-two")] {
+            insert_lane(&pool, key, key, lead, "/tmp", "done").await.unwrap();
+            transition_lane(&pool, key, LaneStatus::Working, Some("started")).await.unwrap();
+            crate::lanes::threads::remember_thread_ref(&pool, key, &crate::lanes::threads::thread_ref("CHOLD", "9001.000001")).await.unwrap();
+        }
+        let config = slack_config(false);
+        let conversation = FakeConversation::new(&pool, false, "unused");
+        let hold = admit(&config, &thread_message("UOWNER", "CHOLD", "9001.000002", "9001.000001", "멈춰"), "UBOT", true).unwrap();
+        let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+        let (hold_reply, continue_reply) = with_test_api(base, "xoxb-test".into(), async {
+            let hold_reply = try_handle(&config, &pool, &hold, "멈춰", conversation.as_ref()).await.unwrap();
+            let cont = admit(&config, &thread_message("UOWNER", "CHOLD", "9001.000003", "9001.000001", "계속해"), "UBOT", true).unwrap();
+            let continue_reply = try_handle(&config, &pool, &cont, "계속해", conversation.as_ref()).await.unwrap();
+            (hold_reply, continue_reply)
+        }).await;
+        assert!(hold_reply.contains("lane-one") && hold_reply.contains("lane-two"), "{hold_reply}");
+        assert_eq!(continue_reply, "Continued lanes: lane-one, lane-two.");
+        for key in ["lane-one", "lane-two"] {
+            assert!(!crate::lanes::pause::is_paused(&pool, key).await.unwrap());
+        }
+        let replies = posted(&calls);
+        assert!(replies[0]["text"].as_str().unwrap().contains("lane-one"));
+        assert!(replies[0]["text"].as_str().unwrap().contains("lane-two"));
+    }
+
+    #[tokio::test]
+    async fn owner_thread_hold_readback_failure_reports_not_held() {
+        let (pool, supervisor_id, project_id) = owner_pool().await;
+        bind_channel(&pool, &supervisor_id, &ChannelAddress {
+            provider: ChannelProvider::Slack, workspace_id: "T1".into(), account_id: "UBOT".into(),
+            channel_id: "CHOLD_FAIL".into(), thread_id: "9002.000001".into(), owner_principal: OWNER.into(),
+        }, Some(&project_id), None).await.unwrap();
+        insert_lane(&pool, "lane-fail", "lane-fail", "lead-fail", "/tmp", "done").await.unwrap();
+        transition_lane(&pool, "lane-fail", LaneStatus::Working, Some("started")).await.unwrap();
+        crate::lanes::threads::remember_thread_ref(&pool, "lane-fail", &crate::lanes::threads::thread_ref("CHOLD_FAIL", "9002.000001")).await.unwrap();
+
+        sqlx::query("CREATE TRIGGER test_fail_readback AFTER INSERT ON lane_pauses BEGIN DELETE FROM lane_pauses WHERE lane_key = NEW.lane_key; END;")
+            .execute(&pool).await.unwrap();
+
+        let config = slack_config(false);
+        let conversation = FakeConversation::new(&pool, false, "unused");
+        let hold = admit(&config, &thread_message("UOWNER", "CHOLD_FAIL", "9002.000002", "9002.000001", "멈춰"), "UBOT", true).unwrap();
+        let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+        let reply = with_test_api(base, "xoxb-test".into(), async {
+            try_handle(&config, &pool, &hold, "멈춰", conversation.as_ref()).await.unwrap()
+        }).await;
+        assert!(reply.starts_with("not held"), "{reply}");
+        let replies = posted(&calls);
+        assert!(replies[0]["text"].as_str().unwrap().starts_with("not held"));
+        assert!(!crate::lanes::pause::is_paused(&pool, "lane-fail").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn every_owner_message_reaches_the_supervisor_and_others_keep_the_legacy_turn() {
         let (pool, supervisor_id, project_id) = owner_pool().await;
         bind_channel(
             &pool,
@@ -1600,23 +2151,40 @@ mod tests {
             None,
             "a binding does not admit others"
         );
-        // Without a mention, a message in an unbound channel (admitted as a known thread) is
-        // not the supervisor's.
-        let owner_unbound = admit(
+        // Given an unbound non-free channel, no mention and no known thread.
+        let owner_unbound = crate::chat::slack_turn::admit_for_hub(
+            &pool,
             &config,
             &json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
                 "type": "message", "team": "T1", "user": "UOWNER", "channel": "CFREE",
                 "ts": "7401.000003", "text": WORK}}),
-            "UBOT",
-            true,
         )
+        .await
         .unwrap();
-        assert_eq!(
-            route(&pool, &owner_unbound).await,
-            None,
-            "an unbound channel is not widened"
-        );
-        assert_eq!(bindings(&pool).await.len(), 1, "nothing was bound");
+        // When the owner speaks top-level, replies in an unknown thread, or sends a DM.
+        let top = route(&pool, &owner_unbound).await.expect("owner channel");
+        let reply = crate::chat::slack_turn::admit_for_hub(
+            &pool, &config,
+            &thread_message("UOWNER", "CUNKNOWN", "7401.000005", "7401.000004", WORK),
+        ).await.unwrap();
+        let threaded = route(&pool, &reply).await.expect("owner unknown thread");
+        let dm = admit(&config, &dm("UOWNER", "DROUTE", "7401.000006", WORK), "UBOT", false).unwrap();
+        let direct = route(&pool, &dm).await.expect("owner DM");
+
+        // Then each is supervised and newly seen channel addresses are persisted.
+        assert_eq!(top.principal, OWNER);
+        assert_eq!(threaded.principal, OWNER);
+        assert_eq!(direct.principal, OWNER);
+        assert_eq!(bindings(&pool).await, vec![
+            ("CBOUND".to_owned(), String::new()),
+            ("CFREE".to_owned(), String::new()),
+            ("CUNKNOWN".to_owned(), "7401.000004".to_owned()),
+        ]);
+        let foreign_plain = crate::chat::slack_turn::admit_for_hub(&pool, &config,
+            &json!({"team_id":"T1", "authorizations":[{"user_id":"UBOT"}], "event": {
+                "type":"message", "user":"UOTHER", "channel":"CFREE", "ts":"7401.000007", "text":WORK}}),
+        ).await;
+        assert!(foreign_plain.is_none(), "a foreign unmentioned message is still dropped");
 
         // The owner's bound-channel message is answered in its own thread and admits one goal.
         let fake = FakeConversation::new(&pool, true, "On it.");
@@ -1748,7 +2316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_owner_led_thread_admits_no_one_else_and_no_other_thread() {
+    async fn owner_threads_admit_no_one_else_and_new_threads_get_their_own_binding() {
         let (pool, _, _) = owner_pool().await;
         let config = slack_config(true);
         let admitted =
@@ -1771,13 +2339,13 @@ mod tests {
             true,
         );
         assert_eq!(route(&pool, &foreign_plain).await, None);
-        // Another thread of the same channel is not routed without its own owner-led root.
+        // A different thread gets its own binding without requiring an owner-led root.
         let other_thread = admitted(
             &thread_message("UOWNER", "CLED2", "7911.000006", "7911.000005", "more"),
             true,
         );
-        assert_eq!(route(&pool, &other_thread).await, None);
-        // A mention in a thread whose root author the event does not name binds nothing.
+        assert!(route(&pool, &other_thread).await.is_some());
+        // Even a thread whose root author is unknown is owned by the authenticated sender.
         let mut unknown_root = thread_message(
             "UOWNER",
             "CLED2",
@@ -1790,11 +2358,12 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("parent_user_id");
-        assert_eq!(route(&pool, &admitted(&unknown_root, false)).await, None);
-        assert_eq!(
-            bindings(&pool).await,
-            vec![("CLED2".to_owned(), "7911.000002".to_owned())]
-        );
+        assert!(route(&pool, &admitted(&unknown_root, false)).await.is_some());
+        assert_eq!(bindings(&pool).await, vec![
+            ("CLED2".to_owned(), "7911.000002".to_owned()),
+            ("CLED2".to_owned(), "7911.000005".to_owned()),
+            ("CLED2".to_owned(), "7911.000007".to_owned()),
+        ]);
     }
 
     #[tokio::test]
@@ -1914,6 +2483,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pending, None, "marked injected after the successful turn");
+    }
+
+    /// A turn whose conversation failed still answers the owner in its own thread, and that
+    /// failure reply closes the obligation: a failed turn is an answered message, not a silent
+    /// one.
+    #[tokio::test]
+    async fn a_failed_turn_posts_its_failure_in_the_same_thread() {
+        let (pool, _, _) = owner_pool().await;
+        let config = slack_config(false);
+        let fake = FakeConversation::new(&pool, false, "never posted");
+        fake.fail.store(true, Ordering::SeqCst);
+        let conversation: Arc<dyn SupervisorConversation> = fake.clone();
+        let admitted = admit(
+            &config,
+            &mention("UOWNER", "CFAIL", "7951.000001", WORK),
+            "UBOT",
+            false,
+        )
+        .expect("the owner DM is admitted");
+        let source_message_id = format!("{}/{}", admitted.channel, admitted.message_ts);
+        let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+        with_test_api(base, "xoxb-test".into(), async {
+            TEST_CONVERSATION
+                .scope(conversation, async {
+                    try_handle(&config, &pool, &admitted, WORK, fake.as_ref()).await
+                })
+                .await
+        })
+        .await
+        .expect("supervised");
+        let replies = posted(&calls);
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["channel"], "CFAIL");
+        assert_eq!(
+            replies[0]["thread_ts"], "7951.000001",
+            "the failure lands in the owner's own thread"
+        );
+        assert!(
+            replies[0]["text"].as_str().unwrap_or("").contains("\u{26a0}\u{fe0f}"),
+            "{replies:?}"
+        );
+        let (answered_at, delivery_state): (Option<String>, String) = sqlx::query_as(
+            "SELECT answered_at, delivery_state FROM owner_answer_obligations
+             WHERE adapter = 'slack' AND source_message_id = ?",
+        )
+        .bind(&source_message_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(answered_at.is_some(), "the failure reply closed the obligation");
+        assert_eq!(delivery_state, "delivered");
+    }
+
+    /// A supervised failure is the supervisor's own answer, so it never queues the legacy
+    /// `owner_reply_failed` resume event: that would answer the same message twice.
+    #[tokio::test]
+    async fn no_owner_reply_failed_event_for_a_supervised_message() {
+        let (pool, _, _) = owner_pool().await;
+        let config = slack_config(false);
+        let fake = FakeConversation::new(&pool, false, "never posted");
+        fake.fail.store(true, Ordering::SeqCst);
+        let conversation: Arc<dyn SupervisorConversation> = fake.clone();
+        let admitted = admit(
+            &config,
+            &dm("UOWNER", "DFAIL2", "7961.000001", WORK),
+            "UBOT",
+            false,
+        )
+        .expect("the owner DM is admitted");
+        let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+        with_test_api(base, "xoxb-test".into(), async {
+            TEST_CONVERSATION
+                .scope(conversation, async {
+                    try_handle(&config, &pool, &admitted, WORK, fake.as_ref()).await
+                })
+                .await
+        })
+        .await
+        .expect("supervised");
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind='owner_reply_failed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0, "the supervised turn answers the failure itself");
     }
 
     #[tokio::test]
@@ -2094,5 +2748,310 @@ mod tests {
         assert_eq!(posts.len(), 1, "{posts:?}");
         assert_eq!(posts[0]["text"], ENGINE_UNAVAILABLE_NOTICE);
         assert_eq!(goals(&pool).await, 0);
+    }
+
+    async fn multi_project_pool() -> (SqlitePool, String, String, String) {
+        let (pool, supervisor_id, ferryx) = owner_pool().await;
+        let other = create_project(
+            &pool,
+            &supervisor_id,
+            "other",
+            "github.com/example/other",
+        )
+        .await
+        .unwrap();
+        bind_project_host(
+            &pool,
+            &other.project_id,
+            "host-a",
+            "/home/owner/code/other/.git",
+        )
+        .await
+        .unwrap();
+        (pool, supervisor_id, ferryx, other.project_id)
+    }
+
+    /// Numbered question is recorded and rendered on Slack when project is ambiguous.
+    #[tokio::test]
+    async fn slack_numbered_question_recorded_and_rendered() {
+        let (pool, _, _ferryx, _other) = multi_project_pool().await;
+        let config = slack_config(false);
+        let admitted = admit(
+            &config,
+            &dm("UOWNER", "D4", "7601.000001", "오타 고쳐줘"),
+            "UBOT",
+            false,
+        )
+        .unwrap();
+        let fake = FakeConversation::new(&pool, true, "Which project?");
+        let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+        let reply = with_test_api(base, "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted, "오타 고쳐줘", fake.as_ref()).await
+        })
+        .await
+        .expect("supervised");
+
+        assert_eq!(goals(&pool).await, 0);
+        assert!(reply.contains("ferryx"), "{reply}");
+        assert!(reply.contains("other"), "{reply}");
+        assert!(reply.contains("1."), "{reply}");
+        assert!(reply.contains("2."), "{reply}");
+
+        let q: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT question_id, missing, question_message_ts FROM supervisor_questions WHERE owner_principal = ? AND status = 'open'",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(q.1, "project");
+        assert!(q.2.is_some(), "question_message_ts must be stored");
+    }
+
+    /// Reply referencing the question message re-submits the stored draft and admits the goal.
+    #[tokio::test]
+    async fn slack_reply_reference_re_submits_the_draft() {
+        let (pool, _, _ferryx, _other) = multi_project_pool().await;
+        let config = slack_config(false);
+
+        // Turn 1: Ask question
+        let admitted = admit(
+            &config,
+            &dm("UOWNER", "D5", "7701.000001", "오타 고쳐줘"),
+            "UBOT",
+            false,
+        )
+        .unwrap();
+        let fake1 = FakeConversation::new(&pool, true, "Pick one");
+        let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+        with_test_api(base.clone(), "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted, "오타 고쳐줘", fake1.as_ref()).await
+        })
+        .await;
+
+        let q_ts: String = sqlx::query_scalar(
+            "SELECT question_message_ts FROM supervisor_questions WHERE owner_principal = ? AND status = 'open'",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Turn 2: Reply referencing q_ts with option "1"
+        let reply_event = thread_message("UOWNER", "D5", "7701.000002", &q_ts, "1");
+        let admitted_reply = admit(&config, &reply_event, "UBOT", true).unwrap();
+        let fake2 = FakeConversation::new(&pool, true, "Got it, starting.");
+        with_test_api(base, "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted_reply, "1", fake2.as_ref()).await
+        })
+        .await
+        .expect("supervised");
+
+        assert_eq!(goals(&pool).await, 1);
+        let q_status: String = sqlx::query_scalar(
+            "SELECT status FROM supervisor_questions WHERE owner_principal = ?",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(q_status, "answered");
+    }
+
+    /// Reply without reference to the question is ignored and does not answer it.
+    #[tokio::test]
+    async fn slack_reply_without_reference_ignored() {
+        let (pool, _, _, _) = multi_project_pool().await;
+        let config = slack_config(false);
+
+        // Ask question
+        let admitted = admit(
+            &config,
+            &dm("UOWNER", "D6", "7801.000001", "오타 고쳐줘"),
+            "UBOT",
+            false,
+        )
+        .unwrap();
+        let fake1 = FakeConversation::new(&pool, true, "Pick one");
+        let (base, _) = serve_scripted("UBOT", Vec::new()).await;
+        with_test_api(base.clone(), "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted, "오타 고쳐줘", fake1.as_ref()).await
+        })
+        .await;
+
+        // Reply without reference (top-level DM, no thread_ts or quoted_message_ts)
+        let unref_event = dm("UOWNER", "D6", "7801.000002", "1");
+        let admitted_unref = admit(&config, &unref_event, "UBOT", false).unwrap();
+        let fake2 = FakeConversation::new(&pool, false, "Just a message");
+        with_test_api(base, "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted_unref, "1", fake2.as_ref()).await
+        })
+        .await;
+
+        let q_status: String = sqlx::query_scalar(
+            "SELECT status FROM supervisor_questions WHERE owner_principal = ?",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(q_status, "open", "reply without reference must not answer question");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// Stale or invalid answer receives one-line refusal.
+    #[tokio::test]
+    async fn slack_stale_or_invalid_answer_refusal() {
+        let (pool, _, _, _) = multi_project_pool().await;
+        let config = slack_config(false);
+
+        let admitted = admit(
+            &config,
+            &dm("UOWNER", "D7", "7901.000001", "오타 고쳐줘"),
+            "UBOT",
+            false,
+        )
+        .unwrap();
+        let fake1 = FakeConversation::new(&pool, true, "Pick one");
+        let (base, _) = serve_scripted("UBOT", Vec::new()).await;
+        with_test_api(base.clone(), "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted, "오타 고쳐줘", fake1.as_ref()).await
+        })
+        .await;
+
+        let q_ts: String = sqlx::query_scalar(
+            "SELECT question_message_ts FROM supervisor_questions WHERE owner_principal = ? AND status = 'open'",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // 1. Invalid answer option "99"
+        let invalid_reply = thread_message("UOWNER", "D7", "7901.000002", &q_ts, "99");
+        let admitted_invalid = admit(&config, &invalid_reply, "UBOT", true).unwrap();
+        let fake2 = FakeConversation::new(&pool, true, "Answered");
+        let reply = with_test_api(base.clone(), "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted_invalid, "99", fake2.as_ref()).await
+        })
+        .await
+        .unwrap();
+        assert!(reply.contains("SUPERVISOR_QUESTION_INVALID"), "{reply}");
+        assert_eq!(goals(&pool).await, 0);
+
+        // 2. Valid answer "1" answers it
+        let valid_reply = thread_message("UOWNER", "D7", "7901.000003", &q_ts, "1");
+        let admitted_valid = admit(&config, &valid_reply, "UBOT", true).unwrap();
+        let fake3 = FakeConversation::new(&pool, true, "OK");
+        with_test_api(base.clone(), "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted_valid, "1", fake3.as_ref()).await
+        })
+        .await;
+        assert_eq!(goals(&pool).await, 1);
+
+        // 3. Stale reply to now-answered question
+        let stale_reply = thread_message("UOWNER", "D7", "7901.000004", &q_ts, "1");
+        let admitted_stale = admit(&config, &stale_reply, "UBOT", true).unwrap();
+        let fake4 = FakeConversation::new(&pool, true, "Again");
+        let reply_stale = with_test_api(base, "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted_stale, "1", fake4.as_ref()).await
+        })
+        .await
+        .unwrap();
+        assert!(reply_stale.contains("SUPERVISOR_QUESTION_INVALID"), "{reply_stale}");
+        assert_eq!(goals(&pool).await, 1, "stale reply adds no second goal");
+    }
+
+    /// Two open questions matching the same reference select nothing.
+    #[tokio::test]
+    async fn slack_two_open_questions_select_nothing() {
+        let (pool, supervisor_id, _, _) = multi_project_pool().await;
+        let scope = ConversationScope { project_id: None, channel_key: "slack:T1:UBOT:D8:".into() };
+        let draft = crate::supervisor::questions::QuestionDraft {
+            work: crate::supervisor::app_work::submit_from_call("t", &[], WorkerPreference::Any, "b"),
+            supervisor_id,
+            owner_principal: OWNER.into(),
+            adapter: ChannelProvider::Slack,
+            conversation_id: scope.key(),
+            channel_id: "D8".into(),
+            thread_id: "".into(),
+            missing: "project".into(),
+        };
+        let (q1, _) = crate::supervisor::questions::ask(&pool, &draft, &[]).await.unwrap();
+        let (q2, _) = crate::supervisor::questions::ask(&pool, &draft, &[]).await.unwrap();
+        sqlx::query("UPDATE supervisor_questions SET question_message_ts = 'match.ts' WHERE question_id IN (?, ?)")
+            .bind(&q1).bind(&q2).execute(&pool).await.unwrap();
+
+        let actor = ActorContext {
+            principal: OWNER.into(),
+            source_adapter: ChannelProvider::Slack,
+            source_message_id: "slack:D8/7".into(),
+            source_body: "1".into(),
+            channel_binding_id: None,
+            choices: OwnerChoices::default(),
+        };
+        let matched = referenced_question(&pool, &actor, &scope, "match.ts").await.unwrap();
+        assert_eq!(matched, None, "when two open questions could match, nothing is selected");
+    }
+
+    #[tokio::test]
+    async fn written_turn_engine_exit_fault_posts_interruption_notice_to_slack_thread() {
+        let (pool, supervisor_id, project_id) = owner_pool().await;
+        bind_channel(
+            &pool,
+            &supervisor_id,
+            &ChannelAddress {
+                provider: ChannelProvider::Slack,
+                workspace_id: "T1".into(),
+                account_id: "UBOT".into(),
+                channel_id: "C_WORK".into(),
+                thread_id: String::new(),
+                owner_principal: OWNER.into(),
+            },
+            Some(&project_id),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let config = slack_config(false);
+        let fault = crate::meta::mhc_fault::SupervisorFault::engine_exited(
+            "엔진이 재시작되어 작업이 중단됐습니다: process terminated by SIGKILL",
+        );
+        let fake = FakeConversation::with_error(&pool, &format!("{}: {fault}", fault.code()));
+
+        let msg = json!({
+            "team_id": "T1",
+            "authorizations": [{"user_id": "UBOT"}],
+            "event": {
+                "type": "message",
+                "team": "T1",
+                "user": "UOWNER",
+                "channel": "C_WORK",
+                "ts": "1700.000002",
+                "thread_ts": "1700.000001",
+                "text": "restart service",
+            }
+        });
+        let admitted = admit(&config, &msg, "UBOT", true).unwrap();
+        assert_eq!(admitted.channel, "C_WORK");
+        assert_eq!(admitted.reply_thread.as_deref(), Some("1700.000001"));
+
+        let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+        with_test_api(base, "xoxb-test".into(), async {
+            let handled = try_handle(&config, &pool, &admitted, "restart service", fake.as_ref()).await;
+            assert!(handled.is_some());
+        })
+        .await;
+
+        let posts = posted(&calls);
+        assert_eq!(posts.len(), 1, "posted one reply to slack");
+        assert_eq!(posts[0]["channel"], "C_WORK");
+        assert_eq!(posts[0]["thread_ts"], "1700.000001", "posted into the message thread");
+        let text = posts[0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("엔진이 재시작되어 작업이 중단됐습니다: process terminated by SIGKILL"),
+            "posted reply must contain the interruption notice and restart reason, got: {text}"
+        );
     }
 }

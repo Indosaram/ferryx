@@ -33,6 +33,7 @@ use tokio::sync::watch;
 
 use super::panel_contract::{EvidenceRef, RuleKind, RuleScope, RuleStore, SessionRef, StandingRule};
 use super::request::{RequestContext, RequestFailure};
+use super::ChannelProvider;
 use crate::meta::mhc_fault::SupervisorFault;
 use crate::meta::mhc_profile::ConversationScope;
 use crate::meta::mhc_supervisor::MhcSupervisor;
@@ -104,6 +105,8 @@ pub struct ConverseInput {
     #[serde(default)]
     pub mentions: Vec<String>,
     pub request_id: String,
+    #[serde(default)]
+    pub question_id: Option<String>,
 }
 
 /// One turn of the supervisor's conversation for the app channel.
@@ -536,6 +539,10 @@ pub fn addressed_sessions(message: &str) -> Vec<SessionRef> {
 pub struct Converse<'a> {
     pub pool: &'a SqlitePool,
     pub engine: &'a dyn AppConversation,
+    /// The surface this request came from, as the authenticated caller established it: the
+    /// desktop app, the CLI, MCP, or a paired phone. It names the obligation's adapter, so a
+    /// phone turn's obligation is not recorded (and re-armed) as the app's.
+    pub adapter: ChannelProvider,
     /// The standing rules; `None` when this daemon has none, which refuses rule changes.
     pub rules: Option<&'a dyn RuleStore>,
     pub flights: &'a Flights,
@@ -586,6 +593,28 @@ pub async fn converse(ctx: &Converse<'_>, input: &ConverseInput) -> Outcome {
         Entry::Follow(flight) => return follow(flight).await,
         Entry::Lead(lead) => lead,
     };
+    let adapter = ctx.adapter.as_str();
+    match crate::supervisor::obligations::open_obligation(
+        ctx.pool,
+        adapter,
+        APP_CHANNEL,
+        request_id,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(id) => {
+            let pool = ctx.pool.clone();
+            tokio::spawn(async move {
+                let notifier = std::sync::Arc::new(super::obligations::AppTranscriptNotifier(pool.clone()));
+                if let Err(error) = super::obligations::run_obligation_timer(pool, id, notifier).await {
+                    tracing::error!(obligation_id = id, %error, "app answer obligation timer failed");
+                }
+            });
+        }
+        Err(error) => tracing::error!(%error, request_id, "app owner answer obligation was not recorded"),
+    }
     let outcome = run(ctx, request_id, text, &mentions, change.as_ref()).await;
     lead.finish(&outcome);
     outcome
@@ -634,6 +663,10 @@ async fn run(
     let (reply, _) =
         append(pool, Role::Supervisor, &answer, &evidence, &reply_id, (ctx.now)()).await?;
     (ctx.changed)();
+    let adapter = ctx.adapter.as_str();
+    if let Err(error) = crate::supervisor::obligations::mark_answered(pool, adapter, request_id).await {
+        tracing::error!(%error, request_id, adapter, "owner answer obligation was not marked answered");
+    }
     let mut done = json!({"owner": owner, "reply": reply, "replayed": false});
     if let (Some(learning), Some(fields)) = (learning, done.as_object_mut()) {
         fields.insert("learning".into(), learning);

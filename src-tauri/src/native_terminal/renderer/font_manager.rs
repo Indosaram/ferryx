@@ -201,16 +201,9 @@ impl FontManager {
         scale_factor: f32,
     ) -> RasterizedGlyph {
         let total_pixels = (width * height) as usize;
-        let buffer = vec![0u8; total_pixels];
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let mut buffer = buffer;
-        #[cfg(target_os = "macos")]
-        let mut subpixel_buffer = vec![0u8; total_pixels * 4];
-        #[cfg(not(target_os = "macos"))]
-        let subpixel_buffer = vec![0u8; total_pixels * 4];
 
         if text.is_empty() || text.chars().all(|c| c.is_whitespace()) || width == 0 || height == 0 {
-            return RasterizedGlyph::Alpha(buffer);
+            return RasterizedGlyph::Alpha(vec![0u8; total_pixels]);
         }
 
         let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
@@ -253,9 +246,10 @@ impl FontManager {
             let mut chars = text.chars().peekable();
             let first_ch = match chars.next() {
                 Some(c) => c,
-                None => return RasterizedGlyph::Alpha(buffer),
+                None => return RasterizedGlyph::Alpha(vec![0u8; total_pixels]),
             };
 
+            let mut subpixel_buffer = vec![0u8; total_pixels * 4];
             let mut system = self.system.lock();
             let first_font_opt = system.resolve_font_for_char(first_ch, bold, italic, scale);
             let mut rendered_base = false;
@@ -283,9 +277,11 @@ impl FontManager {
                         false,
                     );
                 } else {
+                    let mut first_buf = [0u8; 4];
+                    let first_str = first_ch.encode_utf8(&mut first_buf);
                     rendered_base = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_subpixel_buffer(
                         font,
-                        &first_ch.to_string(),
+                        first_str,
                         &mut subpixel_buffer,
                         width,
                         height,
@@ -300,9 +296,11 @@ impl FontManager {
                             let comb_font_opt =
                                 system.resolve_font_for_char(comb_ch, bold, italic, scale);
                             if let Some(ref comb_font) = comb_font_opt {
+                                let mut comb_buf = [0u8; 4];
+                                let comb_str = comb_ch.encode_utf8(&mut comb_buf);
                                 let _ = crate::native_terminal::renderer::coretext_raster::macos::rasterize_to_subpixel_buffer(
                                     comb_font,
-                                    &comb_ch.to_string(),
+                                    comb_str,
                                     &mut subpixel_buffer,
                                     width,
                                     height,
@@ -331,10 +329,17 @@ impl FontManager {
                     return RasterizedGlyph::Color(color_bytes);
                 }
             }
+
+            if subpixel_buffer.iter().any(|&b| b != 0) {
+                RasterizedGlyph::Subpixel(subpixel_buffer)
+            } else {
+                RasterizedGlyph::Alpha(vec![0u8; total_pixels])
+            }
         }
 
         #[cfg(target_os = "windows")]
         {
+            let mut buffer = vec![0u8; total_pixels];
             let family = self.font_family.clone();
             crate::native_terminal::renderer::directwrite_raster::rasterize_to_alpha_buffer(
                 &crate::native_terminal::renderer::directwrite_raster::AlphaGlyphRequest {
@@ -348,10 +353,12 @@ impl FontManager {
                 text,
                 &mut buffer,
             );
+            RasterizedGlyph::Alpha(buffer)
         }
 
         #[cfg(target_os = "linux")]
         {
+            let mut buffer = vec![0u8; total_pixels];
             let family = self.font_family.clone();
             crate::native_terminal::renderer::freetype_raster::rasterize_to_alpha_buffer(
                 &family,
@@ -362,12 +369,12 @@ impl FontManager {
                 bold,
                 italic,
             );
+            RasterizedGlyph::Alpha(buffer)
         }
 
-        if subpixel_buffer.iter().any(|&b| b != 0) {
-            RasterizedGlyph::Subpixel(subpixel_buffer)
-        } else {
-            RasterizedGlyph::Alpha(buffer)
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            RasterizedGlyph::Alpha(vec![0u8; total_pixels])
         }
     }
 

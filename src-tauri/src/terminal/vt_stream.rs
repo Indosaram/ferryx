@@ -205,6 +205,30 @@ impl VtUnitSplitter {
         Pending { bytes, sequence, parts }
     }
 
+    /// Length of [`Self::pending`]'s bytes without building them. The same sum, byte for byte,
+    /// so a caller that only needs the size never materializes a copy of the in-flight prefix.
+    pub fn pending_len(&self) -> usize {
+        let mut len = 0;
+        if self.transmission == Transmission::Open && !self.group.is_empty() {
+            len += self.group.len();
+        }
+        match self.scan {
+            Scan::String | Scan::StringEscape => {
+                len += self.string.len();
+                if self.poisoned && self.scan == Scan::StringEscape {
+                    len += 1;
+                }
+            }
+            Scan::CsiDiscard => {
+                len += self.text.len();
+                // The resync introducer `pending` appends.
+                len += 2;
+            }
+            _ => len += self.text.len(),
+        }
+        len
+    }
+
     pub fn has_pending(&self) -> bool {
         !self.group.is_empty()
             || !self.string.is_empty()
@@ -910,6 +934,35 @@ mod tests {
                 "partition at split_pos={split_pos} must have no pending tail"
             );
         }
+    }
+
+    #[test]
+    fn pending_len_matches_the_bytes_pending_would_build() {
+        // Every pending shape: idle ground, partial text, an open transmission, an
+        // unterminated string, a split terminator escape, and a discarded CSI.
+        let mut harness = Harness::new(128);
+        assert_eq!(harness.splitter.pending_len(), 0);
+        harness.feed(b"partial text");
+        assert_eq!(harness.splitter.pending_len(), harness.pending().bytes.len());
+        harness.feed(b"\x1b_Ga=T,f=24,m=1;AAAA\x1b\\");
+        assert_eq!(harness.splitter.pending_len(), harness.pending().bytes.len());
+        harness.feed(b"\x1b_Gm=1;BBB");
+        assert_eq!(harness.splitter.pending_len(), harness.pending().bytes.len());
+        harness.feed(b"\x1b]1337;File=name=a:");
+        assert_eq!(harness.splitter.pending_len(), harness.pending().bytes.len());
+        harness.feed(&[b'Q'; 512]);
+        assert_eq!(harness.splitter.pending_len(), harness.pending().bytes.len());
+        harness.feed(b"\x1b");
+        assert_eq!(harness.splitter.pending_len(), harness.pending().bytes.len());
+        harness.feed(b"\\");
+        assert_eq!(harness.splitter.pending_len(), harness.pending().bytes.len());
+
+        let mut csi = Harness::new(64);
+        let mut oversized = b"\x1b[".to_vec();
+        oversized.extend(std::iter::repeat_n(b'1', 100));
+        csi.feed(&oversized);
+        assert_eq!(csi.splitter.pending_len(), csi.pending().bytes.len());
+        assert!(csi.splitter.pending_len() >= 2, "resync introducer counted");
     }
 
     #[test]

@@ -188,6 +188,8 @@ pub enum SupervisorError {
     EngineUnavailable { code: &'static str, detail: String },
     #[error(transparent)]
     Goal(#[from] GoalError),
+    #[error("supervisor storage failed: {0}")]
+    Storage(String),
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
 }
@@ -224,7 +226,7 @@ impl SupervisorError {
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
             | SupervisorError::Goal(_) => "INVALID_REQUEST",
-            SupervisorError::Sql(_) => "STORAGE",
+            SupervisorError::Sql(_) | SupervisorError::Storage(_) => "STORAGE",
         }
     }
 }
@@ -233,6 +235,7 @@ impl From<SupervisorError> for HubError {
     fn from(error: SupervisorError) -> Self {
         match error {
             SupervisorError::Sql(error) => HubError::Sql(error),
+            SupervisorError::Storage(error) => HubError::message(error),
             other => HubError::message(format!("{}: {other}", other.code())),
         }
     }
@@ -2269,6 +2272,10 @@ pub async fn admit_request_bound(
     }
     tx.commit().await?;
     changes::announce(&goal_id);
+    if terms.owner_hold.is_some() {
+        // A goal admitted already held is a settle the owner must hear about, where he asked.
+        after_settle(pool, &goal_id, RunState::AwaitingOwner).await;
+    }
     Ok(Admission {
         receipt: AdmissionReceipt {
             supervisor_id: request.supervisor_id.clone(),
@@ -3799,14 +3806,17 @@ pub mod delivery;
 pub mod dispatcher;
 pub mod fence_gate;
 pub mod handover;
+pub mod hold;
 pub mod ownership;
 pub mod goal_report;
 pub mod health;
 pub mod lessons;
 pub mod memory;
+pub mod obligations;
 pub mod memory_import;
 pub mod project_memory;
 pub mod prompt_judge;
+pub mod questions;
 pub mod receipts;
 pub mod recovery;
 pub mod reference_docs;

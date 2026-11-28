@@ -209,6 +209,19 @@ impl ActionLoop {
             release_at.as_deref(),
         )
         .await?;
+        let identity = items.iter().map(|item| item.item_key.as_str()).collect::<Vec<_>>().join(",");
+        let wake_policy = if items.iter().any(|item| item.kind == "inbox_owner" || item.kind == "inbox_urgent") {
+            "wake"
+        } else {
+            "quiet"
+        };
+        sqlx::query("UPDATE lane_events SET subject_id = ?, state_id = ?, wake_policy = ? WHERE id = ?")
+            .bind(format!("action_loop:{identity}"))
+            .bind(items.iter().map(|item| item.attempts.to_string()).collect::<Vec<_>>().join(","))
+            .bind(wake_policy)
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
         let stamp = now.to_rfc3339();
         for item in &items {
             sqlx::query(
@@ -1202,5 +1215,103 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(events, 0);
+    }
+
+    #[tokio::test]
+    async fn action_loop_sets_quiet_wake_policy_for_bot_handled_items_while_owner_urgent_stays_wake() {
+        // Given: a bot-handled inbox item and an owner-urgent item due within 24h.
+        let pool = crate::storage::memory().await.unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-11-27T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stamp = now.to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at)
+             VALUES('i-bot','imessage','m-bot','Ada','Bot Item','x',?,'h',?)",
+        )
+        .bind(&stamp)
+        .bind(&stamp)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at)
+             VALUES('i-bot','bot','r','open',?)",
+        )
+        .bind(&stamp)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let action_loop = ActionLoop::new(pool.clone(), "lead").with_cap(24);
+
+        // When: action_loop flushes the bot-handled item.
+        let bot_event_id = action_loop.flush(now).await.unwrap();
+        assert!(bot_event_id.is_some());
+
+        // Then: action_loop sets wake_policy = 'quiet'.
+        let bot_policy: String = sqlx::query_scalar(
+            "SELECT wake_policy FROM lane_events WHERE id = ?",
+        )
+        .bind(bot_event_id.unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bot_policy, "quiet", "bot-handled items must have quiet wake policy");
+
+        // When: an owner-urgent item arrives due within 24h.
+        let soon = (now + chrono::Duration::hours(2)).to_rfc3339();
+        crate::inbox::ingest(
+            &pool,
+            "i-urgent",
+            "mail",
+            "m-urgent",
+            &format!("reply {soon}"),
+            &stamp,
+        )
+        .await
+        .unwrap();
+
+        let judge = crate::judge::Judge::forced("owner_must_act");
+        let _ = crate::inbox::classify_pending(&pool, &judge, now, "lead", |_id, class| async move {
+            assert_eq!(class, crate::inbox::Class::Owner);
+            Ok(None)
+        })
+        .await
+        .unwrap();
+
+        // Then: owner-urgent lane event keeps wake policy.
+        let urgent_policy: String = sqlx::query_scalar(
+            "SELECT wake_policy FROM lane_events WHERE kind = 'inbox_urgent'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(urgent_policy, "wake", "owner-urgent items must keep wake policy");
+
+        // When: action_loop flushes an enqueued item that is owner-urgent.
+        let older = (now - chrono::Duration::minutes(35)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO action_loop_outcomes(item_key, kind, source, line, status, attempts, enqueued_at, updated_at)
+             VALUES('inbox:stale-urgent', 'inbox_urgent', 'imessage', 'urgent item', 'enqueued', 1, ?, ?)",
+        )
+        .bind(&older)
+        .bind(&older)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let loop2 = ActionLoop::new(pool.clone(), "lead-urgent").with_cap(24);
+        let urgent_event_id = loop2.flush(now).await.unwrap();
+        assert!(urgent_event_id.is_some());
+        let action_urgent_policy: String = sqlx::query_scalar(
+            "SELECT wake_policy FROM lane_events WHERE id = ?",
+        )
+        .bind(urgent_event_id.unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(action_urgent_policy, "wake", "action_loop with owner-urgent items must set wake policy");
     }
 }

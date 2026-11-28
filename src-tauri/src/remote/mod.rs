@@ -131,7 +131,7 @@ mod browser_protocol_tests;
 #[cfg(test)]
 mod browser_security_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod browser_lifecycle_tests;
 
 /// A test WebSocket handshake callback that only inspects the request and accepts it.

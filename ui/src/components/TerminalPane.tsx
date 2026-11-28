@@ -390,25 +390,60 @@ export function TerminalPane({
   useLayoutEffect(() => {
     const bar = statusBarRef.current;
     if (!statusBarShown || !bar) {
-      setStatusBarHeight(0);
+      setStatusBarHeight((prev) => (prev === 0 ? prev : 0));
       return;
     }
-    const measure = () => {
-      setStatusBarHeight(Math.ceil(bar.getBoundingClientRect().height));
-      setStatusBarHasAction(bar.querySelector("button:not(:disabled)") !== null);
+    const measureHeight = () => {
+      const next = Math.ceil(bar.getBoundingClientRect().height);
+      setStatusBarHeight((prev) => (prev === next ? prev : next));
     };
-    measure();
-    if (typeof ResizeObserver === "undefined" || typeof MutationObserver === "undefined") return;
-    // Button availability changes without a size change (pending -> idle), so watch both.
-    const mutations = new MutationObserver(measure);
-    mutations.observe(bar, { subtree: true, childList: true, attributes: true, attributeFilter: ["disabled"] });
-    const observer = new ResizeObserver(measure);
+    measureHeight();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measureHeight);
     observer.observe(bar);
     return () => {
-      mutations.disconnect();
       observer.disconnect();
     };
   }, [statusBarShown, splitStatusShown, isExited, isSuspended]);
+
+  const hasOnReconnect = Boolean(onReconnect);
+  const hasOnOpenNewShell = Boolean(onOpenNewShell);
+  const canReplaceShell = canReplaceShellSession(session);
+  const hasContinuationModes = Boolean(continuationModes && continuationModes.length > 0);
+  useLayoutEffect(() => {
+    const bar = statusBarRef.current;
+    if (!statusBarShown || !bar) {
+      setStatusBarHasAction((prev) => (prev ? false : prev));
+      return;
+    }
+    const next = bar.querySelector("button:not(:disabled)") !== null;
+    setStatusBarHasAction((prev) => (prev === next ? prev : next));
+  }, [
+    statusBarShown,
+    splitStatusShown,
+    splitPending,
+    isExited,
+    isSuspended,
+    isPending,
+    pendingLocal,
+    isSshSession,
+    isSshReconnecting,
+    isSshExpired,
+    isSshLegacyLost,
+    isAgentSession,
+    isLocalReconnecting,
+    isStandbyShell,
+    isRecoveryBlocked,
+    isRecoveryExited,
+    canRetryRecovery,
+    canReattach,
+    canReplaceShell,
+    affordance.canReconnect,
+    hasOnReconnect,
+    hasOnOpenNewShell,
+    hasContinuationModes,
+    continuationHeld,
+  ]);
 
   // If the native paired proxy session has not been established or expired,
   // do not mount local path/PTY tooling or offer SSH/agent respawn.

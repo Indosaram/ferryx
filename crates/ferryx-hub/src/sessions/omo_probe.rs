@@ -659,7 +659,18 @@ mod local {
         text_limit: usize,
     ) -> Result<LiveSession, RpcError> {
         let secret = kind == Kind::Tui;
+        let observe = match rpc(socket, json!({"type": "get_protocol_info"}), STATE_TIMEOUT, secret)
+            .await.and_then(data_of)
+        {
+            Ok(info) => info.get("capabilities").and_then(Value::as_array)
+                .is_some_and(|capabilities| capabilities.iter().any(|name| name == "observe_reads")),
+            Err(RpcError::Dead) => return Err(RpcError::Dead),
+            Err(RpcError::Failed(_)) => false,
+        };
         let mut request = json!({"type": "get_state"});
+        if observe {
+            request["observe"] = json!(true);
+        }
         if let Some(routing) = routing {
             request["sessionId"] = Value::String(routing.to_owned());
         }
@@ -671,9 +682,13 @@ mod local {
             .or_else(|| routing.map(str::to_owned))
             .unwrap_or_default();
         let address = routing.map_or_else(|| session_id.clone(), str::to_owned);
+        let mut request = json!({"type": "get_messages", "sessionId": address});
+        if observe {
+            request["observe"] = json!(true);
+        }
         let (messages, messages_error) = match rpc(
             socket,
-            json!({"type": "get_messages", "sessionId": address}),
+            request,
             MESSAGES_TIMEOUT,
             secret,
         )
@@ -993,6 +1008,7 @@ mod tests {
 
             let _tui = serve(&root.join("tui/t-1.sock"), Some("s3cr3t"), |request| {
                 match request["type"].as_str().unwrap() {
+                    "get_protocol_info" => ok(json!({"capabilities": []})),
                     "get_state" => ok(json!({
                         "sessionId": "tui-1", "sessionName": "Release", "cwd": "/w",
                         "isStreaming": false, "messageCount": 0, "pendingMessageCount": 2
@@ -1014,6 +1030,7 @@ mod tests {
             let file = session_file.display().to_string();
             let _host = serve(&root.join("p-0001.sock"), None, move |request| {
                 match request["type"].as_str().unwrap() {
+                    "get_protocol_info" => ok(json!({"capabilities": []})),
                     "list_sessions" => ok(json!({"sessions": [{"sessionId": "route-1"}, {"cwd": "/no-id"}]})),
                     "get_state" => {
                         assert_eq!(request["sessionId"], "route-1");
@@ -1061,6 +1078,32 @@ mod tests {
             assert_eq!(snapshot.errors.len(), 1, "{:?}", snapshot.errors);
             assert!(snapshot.errors[0].endpoint.ends_with("tui/t-3.sock"));
             assert_eq!(snapshot.errors[0].error, "not ready");
+        }
+
+        #[tokio::test]
+        async fn the_probe_reads_with_observe_when_advertised() {
+            let dir = scratch();
+            let root = dir.0.clone();
+            let _host = serve(&root.join("p-0001.sock"), None, |request| {
+                match request["type"].as_str().unwrap() {
+                    "get_protocol_info" => ok(json!({"capabilities": ["observe_reads"]})),
+                    "list_sessions" => ok(json!({"sessions": [{"sessionId": "route-obs"}]})),
+                    "get_state" => {
+                        assert_eq!(request["observe"], true, "get_state must send observe: true");
+                        assert_eq!(request["sessionId"], "route-obs");
+                        ok(json!({"sessionId": "route-obs", "messageCount": 1}))
+                    }
+                    "get_messages" => {
+                        assert_eq!(request["observe"], true, "get_messages must send observe: true");
+                        assert_eq!(request["sessionId"], "route-obs");
+                        ok(json!({"messages": []}))
+                    }
+                    other => panic!("unexpected {other}"),
+                }
+            });
+            let snapshot = snapshot_local(&root, 10).await;
+            assert_eq!(snapshot.sessions.len(), 1);
+            assert_eq!(snapshot.sessions[0].session_id, "route-obs");
         }
 
         #[tokio::test]

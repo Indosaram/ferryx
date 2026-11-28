@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   GENERAL_SETTINGS_STORAGE_KEY,
   SIDEBAR_OPEN_STORAGE_KEY,
+  SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY,
   getMigratedItem,
 } from "./storageKeys";
 
@@ -11,11 +12,15 @@ export type SessionRestorePolicy = "lazy" | "activeOnly" | "eager";
 export type GeneralSettings = {
   confirmCloseTab: boolean;
   sessionRestorePolicy: SessionRestorePolicy;
+  featureTipsEnabled: boolean;
+  starNagEnabled: boolean;
 };
 
 export const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   confirmCloseTab: false,
   sessionRestorePolicy: "lazy",
+  featureTipsEnabled: true,
+  starNagEnabled: true,
 };
 
 export const GENERAL_SETTINGS_EVENT = "ferryx:general-settings";
@@ -25,6 +30,8 @@ function normalizeGeneralSettings(value: unknown): GeneralSettings {
     ? value as {
         confirmCloseTab?: unknown;
         sessionRestorePolicy?: unknown;
+        featureTipsEnabled?: unknown;
+        starNagEnabled?: unknown;
       }
     : {};
   const sessionRestorePolicy: SessionRestorePolicy = source.sessionRestorePolicy === "activeOnly" || source.sessionRestorePolicy === "eager"
@@ -35,6 +42,12 @@ function normalizeGeneralSettings(value: unknown): GeneralSettings {
       ? source.confirmCloseTab
       : DEFAULT_GENERAL_SETTINGS.confirmCloseTab,
     sessionRestorePolicy,
+    featureTipsEnabled: typeof source.featureTipsEnabled === "boolean"
+      ? source.featureTipsEnabled
+      : DEFAULT_GENERAL_SETTINGS.featureTipsEnabled,
+    starNagEnabled: typeof source.starNagEnabled === "boolean"
+      ? source.starNagEnabled
+      : DEFAULT_GENERAL_SETTINGS.starNagEnabled,
   };
 }
 
@@ -101,6 +114,29 @@ export function saveSidebarOpenStartup(open: boolean, storage: Storage | null = 
     console.warn("Failed to persist sidebar open startup preference", error);
   }
   return open;
+}
+
+/**
+ * Whether creating a worktree opens the sidebar and expands that project's group. Defaults to on;
+ * only an explicit "false" turns it off, so a missing or unreadable value keeps the familiar
+ * behaviour.
+ */
+export function loadRevealOnWorktreeCreate(storage: Storage | null = browserStorage()): boolean {
+  try {
+    const raw = getMigratedItem(SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY, storage);
+    return raw !== null ? raw !== "false" : true;
+  } catch {
+    return true;
+  }
+}
+
+export function saveRevealOnWorktreeCreate(reveal: boolean, storage: Storage | null = browserStorage()): boolean {
+  try {
+    storage?.setItem(SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY, String(reveal));
+  } catch (error) {
+    console.warn("Failed to persist worktree reveal preference", error);
+  }
+  return reveal;
 }
 
 export function useGeneralSettings() {

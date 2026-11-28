@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub const APPROVAL_DENIAL_TURN_LIMIT: u32 = 5;
 const DENIAL_REASON: &str =
@@ -39,7 +39,16 @@ const GRACEFUL_EXIT_WINDOW: Duration = Duration::from_secs(5);
 /// How long after a turn's final `agent_end` mhc gets to record whether the session settled or
 /// is waiting on background work (it records that about a second after the reply).
 const LIFECYCLE_SETTLE_WINDOW: Duration = Duration::from_secs(10);
-const LIFECYCLE_POLL: Duration = Duration::from_millis(200);
+/// Progressive poll intervals while waiting for the session lifecycle record to settle.
+const LIFECYCLE_POLL_STEPS: [Duration; 3] = [
+    Duration::from_millis(200),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+];
+/// Maximum concurrent held background `mhc` engines kept alive across sessions.
+/// When a new holder exceeds this cap, the oldest holder is evicted and gracefully
+/// closed so idle background subprocesses cannot accumulate unboundedly in RAM.
+const MAX_HELD_ENGINES: usize = 6;
 /// How often a held engine re-reads the session lifecycle while it waits for a wake.
 const BACKGROUND_RECHECK: Duration = Duration::from_secs(60);
 /// The tail of the session file searched for the latest lifecycle record.
@@ -421,6 +430,9 @@ pub fn retry_request(
 /// The owner-facing line for a turn that failed with no automatic resume left (the raw error
 /// stays in the logs). It never asks the owner to resend.
 pub fn owner_failure_text(error: &str) -> String {
+    if let Some(pos) = error.find("엔진이 재시작되어 작업이 중단됐습니다") {
+        return error[pos..].to_string();
+    }
     let reason = owner_failure_reason(error);
     if crate::locale::current().is_korean() {
         format!("⚠️ 응답을 만들지 못했어요 ({reason}). 원인은 hub 로그에 남겼어요.")
@@ -1086,20 +1098,26 @@ async fn reap(child: &mut Child, group: &mut GroupKill) {
 
 /// The last `session-lifecycle` record mhc wrote to the session file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Lifecycle {
+pub(crate) struct Lifecycle {
     state: String,
     run_active: bool,
+    pub(crate) waiting_on_human_kinds: Vec<String>,
     /// Background sources and children the session still waits on; a session waiting on the
     /// owner (`waiting_human`) can have them too.
     pending_work: bool,
 }
 impl Lifecycle {
+    pub(crate) fn unsettled(&self) -> bool {
+        self.waiting_on_human_kinds.iter().any(|kind| kind == "interrupted_run")
+            || (self.state == "running" && !self.waiting())
+    }
+
     fn waiting(&self) -> bool {
         self.pending_work
             || matches!(self.state.as_str(), "waiting_background" | "waiting_children")
     }
 }
-async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
+pub(crate) async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
     use std::io::SeekFrom;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = tokio::fs::File::open(path).await.ok()?;
@@ -1128,9 +1146,24 @@ async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
             Some(Lifecycle {
                 state: data["state"].as_str()?.to_owned(),
                 run_active: data["runActive"].as_bool().unwrap_or(false),
+                waiting_on_human_kinds: waits["human"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|wait| wait["kind"].as_str().map(str::to_owned))
+                    .collect(),
                 pending_work: background || waits["children"].as_u64().unwrap_or(0) > 0,
             })
         })
+}
+
+fn settle_poll_delay(attempt: usize) -> Duration {
+    LIFECYCLE_POLL_STEPS[attempt.min(LIFECYCLE_POLL_STEPS.len() - 1)]
+}
+
+async fn lifecycle_file_sig(path: &str) -> Option<(u64, Option<std::time::SystemTime>)> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some((meta.len(), meta.modified().ok()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1147,7 +1180,11 @@ enum Settle {
 /// session file without lifecycle records (an older mhc) settles at once.
 async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle> {
     let until = tokio::time::Instant::now() + LIFECYCLE_SETTLE_WINDOW;
+    let mut poll_step = 0usize;
+    let mut last_sig: Option<(u64, Option<std::time::SystemTime>)> = None;
     loop {
+        let wait = settle_poll_delay(poll_step)
+            .min(until.saturating_duration_since(tokio::time::Instant::now()));
         // Frames the engine already wrote come before the record: a completion wake that ran to
         // its own end leaves a 'done' record while its reply is still unread in the pipe, and
         // closing on that record would drop the reply the holder exists to deliver. Draining
@@ -1160,8 +1197,22 @@ async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle
                     return Ok(Settle::Started);
                 }
             }
-            _ = tokio::time::sleep(LIFECYCLE_POLL) => {}
+            _ = tokio::time::sleep(wait) => {
+                poll_step = poll_step.saturating_add(1);
+            }
         }
+        // Stat before reading the 256 KiB tail: if `(len, mtime)` is unchanged from the last
+        // check (which already saw `run_active == true`), skip re-reading and re-parsing.
+        let Some(sig) = lifecycle_file_sig(thread).await else {
+            return Ok(Settle::Done);
+        };
+        if last_sig.as_ref() == Some(&sig) {
+            if tokio::time::Instant::now() >= until {
+                return Ok(Settle::Done);
+            }
+            continue;
+        }
+        last_sig = Some(sig);
         match latest_lifecycle(thread).await {
             None => return Ok(Settle::Done),
             Some(lifecycle) if !lifecycle.run_active => {
@@ -1179,16 +1230,105 @@ async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle
 
 /// A turn that wants a held engine: the holder answers between follow-up runs.
 type Handover = oneshot::Sender<Box<Engine>>;
-type HeldEntry = (String, UnboundedSender<Handover>);
-fn held() -> &'static Mutex<HashMap<String, HeldEntry>> {
-    static HELD: OnceLock<Mutex<HashMap<String, HeldEntry>>> = OnceLock::new();
-    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+struct HeldEntry {
+    id: String,
+    order: u64,
+    sender: UnboundedSender<Handover>,
+    evict: watch::Sender<bool>,
+}
+#[derive(Default)]
+struct HeldRegistry {
+    next_order: u64,
+    entries: HashMap<String, HeldEntry>,
+}
+impl HeldRegistry {
+    fn register(&mut self, thread: &str, max_held: usize) -> (HeldSlot, Vec<String>) {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.next_order = self.next_order.saturating_add(1);
+        let order = self.next_order;
+        let (sender, handovers) = mpsc::unbounded_channel::<Handover>();
+        let (evict_tx, evicted) = watch::channel(false);
+        if let Some(replaced) = self.entries.insert(
+            thread.to_owned(),
+            HeldEntry {
+                id: id.clone(),
+                order,
+                sender: sender.clone(),
+                evict: evict_tx.clone(),
+            },
+        ) {
+            let _ = replaced.evict.send_replace(true);
+        }
+        let evicted_threads = self.enforce_cap(max_held, Some(thread));
+        let slot = HeldSlot {
+            guard: HeldGuard {
+                thread: thread.to_owned(),
+                id,
+            },
+            order,
+            sender,
+            handovers,
+            evict_tx,
+            evicted,
+        };
+        (slot, evicted_threads)
+    }
+
+    fn reinsert(&mut self, thread: String, entry: HeldEntry, max_held: usize) -> Vec<String> {
+        let protect = thread.clone();
+        self.entries.insert(thread, entry);
+        self.enforce_cap(max_held, Some(&protect))
+    }
+
+    fn enforce_cap(&mut self, max_held: usize, keep: Option<&str>) -> Vec<String> {
+        let mut evicted = Vec::new();
+        while self.entries.len() > max_held {
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|(k, _)| keep != Some(k.as_str()))
+                .min_by_key(|(_, entry)| entry.order)
+                .or_else(|| self.entries.iter().min_by_key(|(_, entry)| entry.order))
+                .map(|(k, _)| k.clone());
+            let Some(oldest_key) = oldest else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest_key) {
+                let _ = entry.evict.send_replace(true);
+                evicted.push(oldest_key);
+            }
+        }
+        evicted
+    }
+
+    fn unregister(&mut self, thread: &str, id: &str) {
+        if self.entries.get(thread).is_some_and(|entry| entry.id == id) {
+            self.entries.remove(thread);
+        }
+    }
+
+    fn get_sender(&self, thread: &str) -> Option<UnboundedSender<Handover>> {
+        self.entries.get(thread).map(|entry| entry.sender.clone())
+    }
+}
+fn held() -> &'static Mutex<HeldRegistry> {
+    static HELD: OnceLock<Mutex<HeldRegistry>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HeldRegistry::default()))
+}
+/// True while this hub still holds the thread's engine (settling its last run or waiting on
+/// background work): the session has a live owner, whatever its last lifecycle record says.
+pub(crate) fn is_held(thread: &str) -> bool {
+    held()
+        .lock()
+        .expect("mhc held registry")
+        .entries
+        .contains_key(thread)
 }
 fn unregister_held(thread: &str, id: &str) {
-    let mut held = held().lock().expect("mhc held registry");
-    if held.get(thread).is_some_and(|(owner, _)| owner == id) {
-        held.remove(thread);
-    }
+    held()
+        .lock()
+        .expect("mhc held registry")
+        .unregister(thread, id);
 }
 struct HeldGuard {
     thread: String,
@@ -1203,8 +1343,7 @@ async fn take_held(thread: Option<&str>) -> Option<Engine> {
     let sender = held()
         .lock()
         .expect("mhc held registry")
-        .get(thread?)
-        .map(|(_, sender)| sender.clone())?;
+        .get_sender(thread?)?;
     let (reply, engine) = oneshot::channel();
     sender.send(reply).ok()?;
     // A holder that ended first drops the request; the turn then starts a fresh engine.
@@ -1215,6 +1354,7 @@ async fn take_held(thread: Option<&str>) -> Option<Engine> {
 enum HoldEnd {
     Settled,
     Expired,
+    Evicted,
     Exited,
     Failed,
 }
@@ -1224,36 +1364,64 @@ pub const BACKGROUND_LOST: &str = "⚠️ 백그라운드 작업을 실행하던
 /// A registered holder: the session's next turn asks it for the engine.
 struct HeldSlot {
     guard: HeldGuard,
+    order: u64,
     sender: UnboundedSender<Handover>,
     handovers: mpsc::UnboundedReceiver<Handover>,
+    evict_tx: watch::Sender<bool>,
+    evicted: watch::Receiver<bool>,
 }
 fn register_held(thread: &str) -> HeldSlot {
-    let id = uuid::Uuid::new_v4().to_string();
-    let (sender, handovers) = mpsc::unbounded_channel::<Handover>();
-    held()
+    let (slot, evicted) = held()
         .lock()
         .expect("mhc held registry")
-        .insert(thread.to_owned(), (id.clone(), sender.clone()));
-    HeldSlot {
-        guard: HeldGuard {
-            thread: thread.to_owned(),
-            id,
-        },
-        sender,
-        handovers,
+        .register(thread, MAX_HELD_ENGINES);
+    for session in evicted {
+        tracing::warn!(
+            session = %session,
+            max_held = MAX_HELD_ENGINES,
+            "evicting oldest held mhc engine to enforce concurrency cap"
+        );
     }
+    slot
 }
 impl HeldSlot {
     /// Gives the engine to a waiting turn; hands it back when that turn is gone.
     fn hand_over(&self, reply: Handover, engine: Box<Engine>) -> std::result::Result<(), Box<Engine>> {
         unregister_held(&self.guard.thread, &self.guard.id);
         reply.send(engine).inspect_err(|_| {
-            held().lock().expect("mhc held registry").insert(
-                self.guard.thread.clone(),
-                (self.guard.id.clone(), self.sender.clone()),
-            );
+            if !*self.evicted.borrow() {
+                let evicted = held().lock().expect("mhc held registry").reinsert(
+                    self.guard.thread.clone(),
+                    HeldEntry {
+                        id: self.guard.id.clone(),
+                        order: self.order,
+                        sender: self.sender.clone(),
+                        evict: self.evict_tx.clone(),
+                    },
+                    MAX_HELD_ENGINES,
+                );
+                for session in evicted {
+                    tracing::warn!(
+                        session = %session,
+                        max_held = MAX_HELD_ENGINES,
+                        "evicting oldest held mhc engine to enforce concurrency cap"
+                    );
+                }
+            }
         })
     }
+}
+
+async fn wait_evicted(rx: &mut watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    while rx.changed().await.is_ok() {
+        if *rx.borrow() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await
 }
 
 /// Keeps a finished turn's engine while its session waits on background work: completion
@@ -1272,10 +1440,13 @@ async fn hold(
     let deadline = tokio::time::Instant::now() + config.background_max;
     let mut announced = false;
     let end = 'hold: loop {
-        let state = match tokio::time::timeout_at(deadline, settle(&mut engine.rpc, &thread, cwd)).await {
-            Err(_) => break HoldEnd::Expired,
-            Ok(Err(_)) => break HoldEnd::Exited,
-            Ok(Ok(state)) => state,
+        let state = tokio::select! {
+            _ = wait_evicted(&mut slot.evicted) => break 'hold HoldEnd::Evicted,
+            res = tokio::time::timeout_at(deadline, settle(&mut engine.rpc, &thread, cwd)) => match res {
+                Err(_) => break HoldEnd::Expired,
+                Ok(Err(_)) => break HoldEnd::Exited,
+                Ok(Ok(state)) => state,
+            }
         };
         match state {
             // A turn that asked meanwhile gets no engine and starts its own once this one is
@@ -1302,6 +1473,7 @@ async fn hold(
         loop {
             let recheck = tokio::time::Instant::now() + BACKGROUND_RECHECK;
             tokio::select! {
+                _ = wait_evicted(&mut slot.evicted) => break 'hold HoldEnd::Evicted,
                 _ = tokio::time::sleep_until(deadline) => break 'hold HoldEnd::Expired,
                 Some(reply) = slot.handovers.recv() => match slot.hand_over(reply, engine) {
                     Ok(()) => {
@@ -1340,6 +1512,12 @@ async fn hold(
             tracing::warn!(session = %thread, limit_secs = config.background_max.as_secs(), "background work outlived its limit; stopping its engine");
             let _ = followups.send(BACKGROUND_EXPIRED.to_owned());
         }
+        HoldEnd::Evicted => {
+            tracing::warn!(session = %thread, max_held = MAX_HELD_ENGINES, "held mhc engine evicted by concurrency cap; closing it");
+            if announced {
+                let _ = followups.send(BACKGROUND_LOST.to_owned());
+            }
+        }
         HoldEnd::Exited => {
             tracing::warn!(session = %thread, "held mhc engine exited before its background work settled");
             let _ = followups.send(BACKGROUND_LOST.to_owned());
@@ -1349,7 +1527,7 @@ async fn hold(
         }
         HoldEnd::Settled | HoldEnd::Failed => {}
     }
-    close(*engine, end == HoldEnd::Settled).await;
+    close(*engine, matches!(end, HoldEnd::Settled | HoldEnd::Evicted)).await;
     // Only now does a turn that asked for this engine hear there is none and start its own,
     // so two engines never run the same session file.
     drop(slot);
@@ -1743,15 +1921,15 @@ fn workspace_in(root: &std::path::Path, persona: Option<&str>) -> Option<protoco
 }
 
 #[cfg(all(test, unix))]
-mod rpc_tests {
+pub(crate) mod rpc_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    struct Script {
-        dir: PathBuf,
-        config: OmoClientConfig,
+    pub(crate) struct Script {
+        pub(crate) dir: PathBuf,
+        pub(crate) config: OmoClientConfig,
     }
     impl Script {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let dir = std::env::temp_dir().join(format!("hub-mhc-rpc-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
             let binary = dir.join("mhc");
@@ -1760,6 +1938,18 @@ import json, os, sys, pathlib, threading, time
 root = pathlib.Path(__file__).parent
 with (root / 'pids').open('a') as out: out.write(str(os.getpid())+'\n')
 session = root / 'session.jsonl'
+resumed = '--session' in sys.argv
+if not resumed and session.exists(): session = root / 'fresh-session.jsonl'
+unsettled = False
+if resumed and session.exists():
+    for line in session.read_text().splitlines():
+        entry = json.loads(line)
+        if entry.get('customType') == 'session-lifecycle':
+            data = entry['data']
+            waits = data.get('waitingOn', {})
+            interrupted = any(h.get('kind') == 'interrupted_run' for h in waits.get('human', []))
+            custody = waits.get('children', 0) or any(b.get('activeCount', 1) for b in waits.get('background', []))
+            unsettled = interrupted or (data['state'] == 'running' and not custody)
 log = root / 'commands.jsonl'
 scenario = ''
 prompts = 0
@@ -1781,6 +1971,9 @@ def wake():
     message('background done','wake-1')
     lifecycle('done',False)
     event('agent_end',messages=[],willRetry=False)
+def settle_later():
+    with open(root / 'release') as gate: gate.read()
+    lifecycle('done',False)
 assert '--mode' in sys.argv and 'rpc' in sys.argv
 assert sys.argv[1:4] == ['--mode','rpc','--no-model-fallback']
 assert '--multi-session' not in sys.argv
@@ -1793,11 +1986,12 @@ for line in sys.stdin:
     assert kind != 'open_session'
     if kind=='get_state':
         if '--session' in sys.argv: assert sys.argv[sys.argv.index('--session')+1]==str(session)
-        session.write_text(json.dumps(dict(type='session',id='durable-id'))+'\n')
+        if not resumed: session.write_text(json.dumps(dict(type='session',id='durable-id'))+'\n')
         answer(c,dict(sessionId='durable-id',sessionFile=str(session)))
     elif kind in ['set_auto_retry','set_model','set_thinking_level']:
         emit(dict(type='response',id=c['id'],command=kind,success=False,error='persists global settings'))
     elif kind=='prompt':
+        if unsettled or c['message']=='ack-timeout': continue
         prompts+=1
         if c['message']=='.':
             # The hub's continue prompt after an aborted run the engine did not resume.
@@ -1878,7 +2072,12 @@ for line in sys.stdin:
             message('final','m2')
             event('agent_end',messages=[])
             # Recorded before the boundary so a released wake always comes after it.
-            lifecycle('waiting_background' if scenario=='background' else 'done',False)
+            if scenario=='lingering':
+                # mhc keeps the run active through its post-turn work and settles once it ends.
+                os.mkfifo(root / 'release')
+                threading.Thread(target=settle_later,daemon=True).start()
+            else:
+                lifecycle('waiting_background' if scenario=='background' else 'done',False)
             event('agent_end',messages=[],willRetry=False)
             if scenario=='success-exit': sys.exit(0)
     elif kind=='extension_ui_response':
@@ -1903,14 +2102,14 @@ for line in sys.stdin:
             config.idle_timeout = Duration::from_secs(5);
             Self { dir, config }
         }
-        fn commands(&self) -> Vec<Value> {
+        pub(crate) fn commands(&self) -> Vec<Value> {
             std::fs::read_to_string(self.dir.join("commands.jsonl"))
                 .unwrap()
                 .lines()
                 .map(|s| serde_json::from_str(s).unwrap())
                 .collect()
         }
-        fn argv(&self) -> Vec<String> {
+        pub(crate) fn argv(&self) -> Vec<String> {
             serde_json::from_str(&std::fs::read_to_string(self.dir.join("argv.json")).unwrap())
                 .unwrap()
         }
@@ -1958,7 +2157,7 @@ for line in sys.stdin:
             .await;
             (result, replies)
         }
-        fn session(&self) -> String {
+        pub(crate) fn session(&self) -> String {
             self.dir.join("session.jsonl").to_string_lossy().into_owned()
         }
         fn pids(&self) -> Vec<i32> {
@@ -1969,7 +2168,7 @@ for line in sys.stdin:
                 .collect()
         }
         /// Lets the fixture's background task finish: its reader blocks until a writer opens.
-        async fn release_background(&self) {
+        pub(crate) async fn release_background(&self) {
             let path = self.dir.join("release");
             tokio::task::spawn_blocking(move || std::fs::write(path, b"go"))
                 .await
@@ -2664,6 +2863,10 @@ mod lifecycle_tests {
         assert!(korean.contains("5분 뒤"), "{korean}");
         assert!(!korean.contains("다시 보내 주시면"), "{korean}");
         assert!(!owner_failure_text("boom").contains("다시 보내 주시면"));
+        assert_eq!(
+            owner_failure_text("MHC_ENGINE_EXITED: 엔진이 재시작되어 작업이 중단됐습니다: engine exited"),
+            "엔진이 재시작되어 작업이 중단됐습니다: engine exited"
+        );
         crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
             let english = owner_resume_text("429 quota", 5);
             assert_eq!(
@@ -2718,5 +2921,57 @@ mod lifecycle_tests {
             Some(home.join(".ferryx").join("hub").join("workspace"))
         );
         assert_eq!(workspace_root_from(None, None), None);
+    }
+
+    #[test]
+    fn settle_poll_backs_off_from_200ms_to_500ms_to_1s() {
+        assert_eq!(settle_poll_delay(0), Duration::from_millis(200));
+        assert_eq!(settle_poll_delay(1), Duration::from_millis(500));
+        assert_eq!(settle_poll_delay(2), Duration::from_secs(1));
+        assert_eq!(settle_poll_delay(10), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn held_registry_caps_concurrency_by_evicting_oldest_holder() {
+        let mut registry = HeldRegistry::default();
+        let (mut slot1, evicted) = registry.register("s1", 3);
+        assert!(evicted.is_empty());
+        let (slot2, evicted) = registry.register("s2", 3);
+        assert!(evicted.is_empty());
+        let (slot3, evicted) = registry.register("s3", 3);
+        assert!(evicted.is_empty());
+        assert_eq!(registry.entries.len(), 3);
+        assert!(!*slot1.evicted.borrow());
+        assert!(!*slot2.evicted.borrow());
+        assert!(!*slot3.evicted.borrow());
+
+        // Exceeding the cap evicts the oldest holder (s1) and signals its watch channel.
+        let (slot4, evicted) = registry.register("s4", 3);
+        assert_eq!(evicted, vec!["s1".to_owned()]);
+        assert_eq!(registry.entries.len(), 3);
+        assert!(*slot1.evicted.borrow());
+        assert!(registry.get_sender("s1").is_none());
+        assert!(!*slot2.evicted.borrow());
+        assert!(!*slot3.evicted.borrow());
+        assert!(!*slot4.evicted.borrow());
+        tokio::time::timeout(Duration::from_secs(1), wait_evicted(&mut slot1.evicted))
+            .await
+            .expect("evicted holder wakes immediately");
+
+        // Re-registering an existing session replaces its old slot without evicting others.
+        let (slot3_new, evicted) = registry.register("s3", 3);
+        assert!(evicted.is_empty());
+        assert_eq!(registry.entries.len(), 3);
+        assert!(*slot3.evicted.borrow());
+        assert!(!*slot2.evicted.borrow());
+        assert!(!*slot4.evicted.borrow());
+        assert!(!*slot3_new.evicted.borrow());
+
+        // A fifth distinct session now evicts s2 (the oldest remaining holder).
+        let (_slot5, evicted) = registry.register("s5", 3);
+        assert_eq!(evicted, vec!["s2".to_owned()]);
+        assert!(*slot2.evicted.borrow());
+        assert!(registry.get_sender("s2").is_none());
+        assert_eq!(registry.entries.len(), 3);
     }
 }

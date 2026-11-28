@@ -1177,21 +1177,29 @@ impl MahoRpcProvider {
     }
 }
 
+/// Maximum raw image attachment size inlined as base64 (larger files fall back to `@path`).
+const MAX_INLINE_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
 fn encode_attachments(text: &str, attachments: &[String]) -> (String, Option<Vec<Value>>) {
     let mut message = text.to_owned();
     let mut images = Vec::new();
     for path in attachments {
         let lower = path.to_ascii_lowercase();
         if let Some(mime) = image_mime_for_ext(&lower) {
-            if let Ok(bytes) = std::fs::read(path) {
-                use base64::Engine;
-                let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-                images.push(json!({
-                    "type": "image",
-                    "data": data,
-                    "mimeType": mime,
-                }));
-                continue;
+            let within_limit = std::fs::metadata(path)
+                .map(|meta| meta.is_file() && meta.len() <= MAX_INLINE_IMAGE_BYTES)
+                .unwrap_or(false);
+            if within_limit {
+                if let Ok(bytes) = std::fs::read(path) {
+                    use base64::Engine;
+                    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    images.push(json!({
+                        "type": "image",
+                        "data": data,
+                        "mimeType": mime,
+                    }));
+                    continue;
+                }
             }
         }
         if !message.is_empty() && !message.ends_with('\n') {

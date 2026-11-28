@@ -82,6 +82,12 @@ use crate::error::{KeeperError, KeeperErrorCode, KeeperResult};
 /// The per-session replay cap (8 MiB), re-exported so the keeper charges exactly what a log keeps.
 pub use crate::REPLAY_SESSION_BYTES;
 
+/// Initial backing allocation for a replay log (64 KiB). Logs with a larger logical `capacity`
+/// start at this size and double on demand up to `capacity` as retained bytes grow, so idle
+/// sessions do not eagerly allocate multi-megabyte buffers while upfront budget accounting remains
+/// unchanged.
+pub const REPLAY_INITIAL_BYTES: usize = 64 * 1024;
+
 /// A discontinuity in the replay stream. The consumer must reset terminal state and resume at
 /// `resumed_at_offset`; everything before it is lost and was never partially retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,8 +132,11 @@ impl ReplayGap {
 /// copying its bytes and doubling its footprint.
 pub struct ReplayLog {
     session_id: String,
-    /// Exactly `capacity` bytes, allocated once. Retention is the window `start..start + len`,
-    /// wrapping at the end of the buffer; the slice's length is the cap and never changes.
+    /// Logical retention cap (maximum bytes this log will retain).
+    capacity: usize,
+    /// Backing ring buffer; starts at `capacity.min(REPLAY_INITIAL_BYTES)` and grows by doubling
+    /// (clamped to `capacity`) as retained bytes require. Retention is the window
+    /// `start..start + len`, wrapping at `storage.len()`.
     storage: Box<[u8]>,
     /// Index of the oldest retained byte. Always `0` when `len == 0`.
     start: usize,
@@ -156,15 +165,15 @@ impl std::fmt::Debug for ReplayLog {
 impl ReplayLog {
     /// A log holding at most `capacity` bytes for `session_id`.
     ///
-    /// The buffer is allocated here, at its final size, and boxed so the allocation is exactly the
-    /// capacity: `vec![0u8; capacity]` is zeroed with `alloc_zeroed` and `into_boxed_slice` leaves
-    /// no spare capacity behind for a later push to grow into. A large zeroed allocation usually
-    /// arrives as untouched pages that fault in as they are written, so a session with little
-    /// output does not pay for the whole reservation up front.
+    /// Backing storage starts at `capacity.min(REPLAY_INITIAL_BYTES)` and doubles lazily up to
+    /// `capacity` as retained bytes demand, so idle shells avoid allocating a full 8 MiB buffer up
+    /// front while the keeper's upfront budget reservation still covers the full `capacity` ceiling.
     pub fn new(session_id: impl Into<String>, capacity: usize) -> Self {
+        let initial = capacity.min(REPLAY_INITIAL_BYTES);
         Self {
             session_id: session_id.into(),
-            storage: vec![0u8; capacity].into_boxed_slice(),
+            capacity,
+            storage: vec![0u8; initial].into_boxed_slice(),
             start: 0,
             len: 0,
             start_offset: 0,
@@ -184,11 +193,11 @@ impl ReplayLog {
     }
 
     pub fn capacity(&self) -> usize {
-        self.storage.len()
+        self.capacity
     }
 
-    /// Bytes this log actually holds, allocation included - the number a budget must charge for it.
-    /// Equal to [`ReplayLog::capacity`] for the whole life of the log.
+    /// Bytes this log currently holds allocated in its backing ring buffer. Starts at
+    /// `capacity.min(REPLAY_INITIAL_BYTES)` and never exceeds [`ReplayLog::capacity`].
     pub fn allocated_bytes(&self) -> usize {
         self.storage.len()
     }
@@ -255,7 +264,7 @@ impl ReplayLog {
             return start;
         }
         self.head_offset = self.head_offset.saturating_add(bytes.len() as u64);
-        let capacity = self.capacity();
+        let capacity = self.capacity;
         // Overflow-free: the second arm is evaluated only when the run itself fits, so `capacity
         // - bytes.len()` cannot underflow.
         let overflows = bytes.len() > capacity || self.len > capacity - bytes.len();
@@ -271,8 +280,10 @@ impl ReplayLog {
             self.gap = Some(self.gap_for(start));
             return start;
         }
+        self.ensure_backing(self.len + bytes.len());
+        let backing = self.storage.len();
         let write_at = self.write_index(self.len);
-        let first = (capacity - write_at).min(bytes.len());
+        let first = (backing - write_at).min(bytes.len());
         self.storage[write_at..write_at + first].copy_from_slice(&bytes[..first]);
         if first < bytes.len() {
             self.storage[..bytes.len() - first].copy_from_slice(&bytes[first..]);
@@ -280,6 +291,30 @@ impl ReplayLog {
         self.len += bytes.len();
         self.start_offset = self.head_offset.saturating_sub(self.len as u64);
         start
+    }
+
+    /// Grows the backing ring buffer by doubling (clamped to `self.capacity`) when the retained
+    /// window needs more room, linearizing any wrapped window to index `0`.
+    fn ensure_backing(&mut self, needed: usize) {
+        let old_backing = self.storage.len();
+        if needed <= old_backing {
+            return;
+        }
+        let mut new_backing = old_backing.max(REPLAY_INITIAL_BYTES).max(1);
+        while new_backing < needed && new_backing < self.capacity {
+            new_backing = new_backing.saturating_mul(2).min(self.capacity);
+        }
+        new_backing = new_backing.min(self.capacity).max(needed);
+        let mut next = vec![0u8; new_backing].into_boxed_slice();
+        if self.len > 0 {
+            let first = (old_backing - self.start).min(self.len);
+            next[..first].copy_from_slice(&self.storage[self.start..self.start + first]);
+            if first < self.len {
+                next[first..self.len].copy_from_slice(&self.storage[..self.len - first]);
+            }
+        }
+        self.storage = next;
+        self.start = 0;
     }
 
     /// Drops everything retained before `offset`, keeping the tail so `offset..head` still replays.
@@ -354,9 +389,9 @@ impl ReplayLog {
         if len == 0 {
             return Ok(0);
         }
-        let capacity = self.capacity();
+        let backing = self.storage.len();
         let begin = self.write_index((after_offset - self.start_offset) as usize);
-        let first = (capacity - begin).min(len);
+        let first = (backing - begin).min(len);
         out.reserve_exact(len);
         out.extend_from_slice(&self.storage[begin..begin + first]);
         if first < len {
@@ -385,9 +420,9 @@ impl ReplayLog {
         if take == 0 {
             return Ok((0, false));
         }
-        let capacity = self.capacity();
+        let backing = self.storage.len();
         let begin = self.write_index((after_offset - self.start_offset) as usize);
-        let first = (capacity - begin).min(take);
+        let first = (backing - begin).min(take);
         out.reserve_exact(take);
         out.extend_from_slice(&self.storage[begin..begin + first]);
         if first < take {
@@ -406,8 +441,8 @@ impl ReplayLog {
     pub fn snapshot(&self) -> (u64, Vec<u8>) {
         let mut out = Vec::with_capacity(self.len);
         if self.len > 0 {
-            let capacity = self.capacity();
-            let first = (capacity - self.start).min(self.len);
+            let backing = self.storage.len();
+            let first = (backing - self.start).min(self.len);
             out.extend_from_slice(&self.storage[self.start..self.start + first]);
             if first < self.len {
                 out.extend_from_slice(&self.storage[..self.len - first]);
@@ -417,11 +452,11 @@ impl ReplayLog {
     }
 
     /// Buffer index of the byte `skip` positions into the window. Only meaningful for a non-empty
-    /// window, which is the only case that has a capacity to take a remainder of.
+    /// window, which is the only case that has a backing buffer to take a remainder of.
     fn write_index(&self, skip: usize) -> usize {
-        let capacity = self.capacity();
-        debug_assert!(capacity > 0, "a window over a zero-capacity log has no index");
-        (self.start + skip) % capacity
+        let backing = self.storage.len();
+        debug_assert!(backing > 0, "a window over a zero-capacity log has no index");
+        (self.start + skip) % backing
     }
 
     fn gap_for(&self, requested_after_offset: u64) -> ReplayGap {
@@ -768,5 +803,84 @@ mod tests {
         assert_eq!(error.code, KeeperErrorCode::ReplayGap);
         assert_eq!(error.offset, Some(40));
         assert!(error.message.contains("s1"));
+    }
+
+    #[test]
+    fn lazy_growth_doubles_across_wrapped_windows_and_preserves_budget_accounting() {
+        use crate::budget::MemoryBudget;
+
+        let mut budget = MemoryBudget::default();
+        budget
+            .try_reserve_replay(REPLAY_SESSION_BYTES as u64)
+            .expect("upfront reservation for full 8 MiB ceiling");
+
+        let mut log = ReplayLog::with_default_capacity("lazy-s1");
+        assert_eq!(log.capacity(), REPLAY_SESSION_BYTES);
+        assert_eq!(
+            log.allocated_bytes(),
+            REPLAY_INITIAL_BYTES,
+            "an idle 8 MiB log starts with the 64 KiB initial backing buffer"
+        );
+        assert_eq!(budget.replay_bytes(), REPLAY_SESSION_BYTES as u64);
+
+        let pattern = |start: usize, len: usize| -> Vec<u8> {
+            (start..start + len).map(|i| ((i * 31 + 7) % 251) as u8).collect()
+        };
+
+        // Fill 48 KiB, truncate 32 KiB, then push 40 KiB so the window wraps inside 64 KiB.
+        let p1 = pattern(0, 48 * 1024);
+        assert_eq!(log.push(&p1), 0);
+        assert_eq!(log.truncate_before(32 * 1024), 32 * 1024);
+        let p2 = pattern(48 * 1024, 40 * 1024);
+        assert_eq!(log.push(&p2), 48 * 1024);
+        assert_eq!(log.allocated_bytes(), REPLAY_INITIAL_BYTES);
+        assert_eq!(log.retained_bytes(), 56 * 1024);
+        assert_eq!(
+            log.read_from(32 * 1024).expect("wrapped window inside 64 KiB"),
+            pattern(32 * 1024, 56 * 1024)
+        );
+
+        // Push 24 KiB while wrapped -> 80 KiB retained triggers doubling to 128 KiB.
+        let p3 = pattern(88 * 1024, 24 * 1024);
+        assert_eq!(log.push(&p3), 88 * 1024);
+        assert_eq!(log.allocated_bytes(), 128 * 1024);
+        assert_eq!(log.retained_bytes(), 80 * 1024);
+        assert_eq!(
+            log.read_from(32 * 1024).expect("linearized after growth"),
+            pattern(32 * 1024, 80 * 1024)
+        );
+        assert_eq!(
+            log.snapshot(),
+            (32 * 1024, pattern(32 * 1024, 80 * 1024))
+        );
+
+        // Wrap inside 128 KiB and grow again to 256 KiB.
+        assert_eq!(log.truncate_before(96 * 1024), 96 * 1024);
+        let p4 = pattern(112 * 1024, 128 * 1024);
+        assert_eq!(log.push(&p4), 112 * 1024);
+        assert_eq!(log.allocated_bytes(), 256 * 1024);
+        assert_eq!(log.retained_bytes(), 144 * 1024);
+        assert_eq!(
+            log.read_from(96 * 1024).expect("second wrap + growth"),
+            pattern(96 * 1024, 144 * 1024)
+        );
+
+        // Grow all the way to the 8 MiB ceiling and verify it never exceeds `capacity()`.
+        let remaining = REPLAY_SESSION_BYTES - log.retained_bytes();
+        let tail = vec![0xAB; remaining];
+        log.push(&tail);
+        assert_eq!(log.retained_bytes(), REPLAY_SESSION_BYTES);
+        assert_eq!(log.allocated_bytes(), REPLAY_SESSION_BYTES);
+
+        // One more byte triggers lossy reset without growing past `capacity()`.
+        let head_before = log.head();
+        log.push(b"!");
+        assert!(log.is_empty());
+        assert_eq!(log.allocated_bytes(), REPLAY_SESSION_BYTES);
+        assert_eq!(log.take_gap().expect("gap").resumed_at_offset, head_before + 1);
+
+        budget.release_replay(REPLAY_SESSION_BYTES as u64);
+        assert_eq!(budget.replay_bytes(), 0);
+        assert_eq!(budget.used(), 0);
     }
 }

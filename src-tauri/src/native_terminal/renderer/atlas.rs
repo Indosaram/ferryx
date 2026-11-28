@@ -7,17 +7,18 @@ use std::hash::{Hash, Hasher};
 use super::rasterizer::{rasterize_glyph_with_scale, RasterizedGlyph};
 use super::types::{GlyphAtlasStats, RendererConfig};
 use crate::native_terminal::error::NativeTerminalError;
+use crate::native_terminal::snapshot::CellText;
 
 const BASE_DIMENSION: u32 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
-    pub text: String,
+    pub text: CellText,
     pub bold: bool,
     pub italic: bool,
 }
 
-/// Borrowed view of a [`GlyphKey`] so lookups need no `String` allocation. Hash and equality
+/// Borrowed view of a [`GlyphKey`] so lookups need no allocation. Hash and equality
 /// match the derived `GlyphKey` impls field for field, as `Borrow` requires.
 pub trait GlyphKeyView {
     fn view(&self) -> (&str, bool, bool);
@@ -25,7 +26,7 @@ pub trait GlyphKeyView {
 
 impl GlyphKeyView for GlyphKey {
     fn view(&self) -> (&str, bool, bool) {
-        (&self.text, self.bold, self.italic)
+        (self.text.as_str(), self.bold, self.italic)
     }
 }
 
@@ -181,10 +182,19 @@ pub struct GlyphAtlas {
     shelf: Shelf,
     pub dimension: u32,
     pub max_dimension: u32,
+    upload_scratch: Vec<u8>,
     #[cfg(test)]
     pub growth_count: usize,
     #[cfg(test)]
     pub fail_after_insertions: Option<usize>,
+}
+
+fn expand_alpha_to_rgba(alpha: &[u8], scratch: &mut Vec<u8>) {
+    scratch.clear();
+    scratch.reserve(alpha.len() * 4);
+    for &a in alpha {
+        scratch.extend_from_slice(&[a, a, a, a]);
+    }
 }
 
 impl GlyphAtlas {
@@ -236,6 +246,7 @@ impl GlyphAtlas {
             shelf: Shelf::default(),
             dimension,
             max_dimension: device.limits().max_texture_dimension_2d,
+            upload_scratch: Vec::new(),
             #[cfg(test)]
             growth_count: 0,
             #[cfg(test)]
@@ -248,6 +259,7 @@ impl GlyphAtlas {
             let mut replacement = Self::with_dimension(device, dimension);
             replacement.generation = self.generation;
             replacement.max_dimension = self.max_dimension;
+            replacement.upload_scratch = std::mem::take(&mut self.upload_scratch);
             #[cfg(test)]
             {
                 replacement.growth_count = self.growth_count + 1;
@@ -280,7 +292,7 @@ impl GlyphAtlas {
             return Ok(Some(entry));
         }
         let key = GlyphKey {
-            text: text.to_string(),
+            text: CellText::from(text),
             bold,
             italic,
         };
@@ -312,11 +324,10 @@ impl GlyphAtlas {
             .place(width, height, self.dimension)
             .ok_or(NativeTerminalError::LimitExceeded)?;
         let is_color = rasterized.is_color();
-        let alpha_rgba;
         let (texture, bytes) = match rasterized {
             RasterizedGlyph::Alpha(alpha) => {
-                alpha_rgba = alpha.iter().flat_map(|&a| [a, a, a, a]).collect::<Vec<_>>();
-                (&self.mask_texture, alpha_rgba.as_slice())
+                expand_alpha_to_rgba(alpha, &mut self.upload_scratch);
+                (&self.mask_texture, self.upload_scratch.as_slice())
             }
             RasterizedGlyph::Subpixel(bytes) => (&self.mask_texture, bytes.as_slice()),
             RasterizedGlyph::Color(bytes) => (&self.color_texture, bytes.as_slice()),
@@ -522,5 +533,55 @@ mod tests {
             before,
             "all-zero raster must not allocate an atlas slot"
         );
+    }
+
+    #[test]
+    fn expand_alpha_to_rgba_reuses_scratch_buffer_without_reallocation() {
+        let mut scratch = Vec::new();
+        expand_alpha_to_rgba(&[0, 64, 128, 255], &mut scratch);
+        assert_eq!(
+            scratch,
+            vec![0, 0, 0, 0, 64, 64, 64, 64, 128, 128, 128, 128, 255, 255, 255, 255]
+        );
+        let ptr_after_first = scratch.as_ptr();
+        let cap_after_first = scratch.capacity();
+
+        expand_alpha_to_rgba(&[10, 20], &mut scratch);
+        assert_eq!(scratch, vec![10, 10, 10, 10, 20, 20, 20, 20]);
+        assert_eq!(
+            scratch.as_ptr(),
+            ptr_after_first,
+            "smaller upload must reuse scratch buffer allocation"
+        );
+        assert_eq!(scratch.capacity(), cap_after_first);
+    }
+
+    #[test]
+    fn glyph_key_cell_text_borrowed_lookup_matches_inline_and_heap() {
+        let long_cluster = "e\u{0301}".repeat(10); // 30 UTF-8 bytes -> Heap
+        let mut map = HashMap::new();
+        map.insert(
+            GlyphKey {
+                text: CellText::from("東"),
+                bold: true,
+                italic: false,
+            },
+            1usize,
+        );
+        map.insert(
+            GlyphKey {
+                text: CellText::from(long_cluster.as_str()),
+                bold: false,
+                italic: true,
+            },
+            2usize,
+        );
+
+        assert_eq!(map.get(&("東", true, false) as &dyn GlyphKeyView), Some(&1));
+        assert_eq!(
+            map.get(&(long_cluster.as_str(), false, true) as &dyn GlyphKeyView),
+            Some(&2)
+        );
+        assert_eq!(map.get(&("東", false, false) as &dyn GlyphKeyView), None);
     }
 }

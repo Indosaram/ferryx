@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 #[cfg(windows)]
-const WINDOWS_STDOUT_CHECK_INTERVAL: Duration = Duration::from_millis(25);
+const WINDOWS_STDOUT_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 
 fn invalid(message: &str) -> IpcError {
     IpcError::new(IpcErrorCode::InvalidPath, message)
@@ -326,7 +326,13 @@ pub fn shell_plan(host: &SshHost, root: &str) -> Result<ShellCommandPlan, IpcErr
 
 pub async fn ensure_remote_extension_installed(host: &SshHost) -> Result<(), IpcError> {
     let environment = super::runtime::detect(host).await?;
-    super::operations::prepare_integration(host, &environment).await
+    super::operations::prepare_integration(host, &environment)
+        .await
+        .inspect_err(|err| {
+            if err.code == IpcErrorCode::IoError {
+                super::runtime::invalidate(host);
+            }
+        })
 }
 
 pub fn upload_temp_command(file_name: &str) -> Result<String, IpcError> {
@@ -355,7 +361,13 @@ pub async fn upload_temp_file(
     bytes: Vec<u8>,
 ) -> Result<String, IpcError> {
     let environment = super::runtime::detect(host).await?;
-    super::operations::upload(host, &environment, file_name, bytes).await
+    super::operations::upload(host, &environment, file_name, bytes)
+        .await
+        .inspect_err(|err| {
+            if err.code == IpcErrorCode::IoError {
+                super::runtime::invalidate(host);
+            }
+        })
 }
 
 pub fn probe_command(path: &str) -> Result<String, IpcError> {
@@ -399,7 +411,13 @@ pub async fn probe(
     path: &str,
 ) -> Result<(String, Option<String>, Option<String>), IpcError> {
     let environment = super::runtime::detect(host).await?;
-    let probed = super::operations::probe(host, &environment, path).await?;
+    let probed = super::operations::probe(host, &environment, path)
+        .await
+        .inspect_err(|err| {
+            if err.code == IpcErrorCode::IoError {
+                super::runtime::invalidate(host);
+            }
+        })?;
     Ok((probed.repo_root, probed.git_root, probed.git_remote))
 }
 
@@ -772,6 +790,15 @@ async fn collect_pipe_output(
     Err(error)
 }
 
+#[cfg(any(windows, test))]
+fn append_stderr_prefix(prefix: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) {
+    let remaining = max_bytes.saturating_sub(prefix.len());
+    if remaining > 0 {
+        let take = chunk.len().min(remaining);
+        prefix.extend_from_slice(&chunk[..take]);
+    }
+}
+
 #[cfg(windows)]
 async fn collect_windows_output(
     mut child: tokio::process::Child,
@@ -799,8 +826,11 @@ async fn collect_windows_output(
                 break;
             }
             bytes.extend_from_slice(&chunk[..count]);
-            let captured_len = bytes.len().min(max_bytes);
-            *stderr_prefix_reader.lock().unwrap() = bytes[..captured_len].to_vec();
+            append_stderr_prefix(
+                &mut stderr_prefix_reader.lock().unwrap(),
+                &chunk[..count],
+                max_bytes,
+            );
         }
         if bytes.len() > max_bytes {
             return Err(std::io::Error::other(format!("SSH stderr exceeds {max_bytes} bytes")));
@@ -910,3 +940,19 @@ fn ssh_status_error(status: std::process::ExitStatus, stderr: &[u8]) -> IpcError
 #[cfg(test)]
 #[path = "direct_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod stderr_prefix_tests {
+    use super::append_stderr_prefix;
+
+    #[test]
+    fn appends_incrementally_and_truncates_at_max_bytes() {
+        let mut prefix = Vec::new();
+        append_stderr_prefix(&mut prefix, b"abcd", 6);
+        assert_eq!(prefix, b"abcd");
+        append_stderr_prefix(&mut prefix, b"efgh", 6);
+        assert_eq!(prefix, b"abcdef");
+        append_stderr_prefix(&mut prefix, b"ijkl", 6);
+        assert_eq!(prefix, b"abcdef");
+    }
+}

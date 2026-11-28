@@ -188,6 +188,19 @@ pub struct PumpToken(u64);
 static NEXT_PUMP_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static PUMP_BINDINGS: Mutex<Option<HashMap<String, PumpToken>>> = Mutex::new(None);
 
+/// Validates a pump token without holding `PUMP_BINDINGS` across the batch drain, frame encoding,
+/// `TERMINAL_OUTPUT_CHANNEL`, or `app.emit`. Those can take milliseconds, and every other pump,
+/// attach and stop would queue behind them on one global mutex.
+#[cfg(feature = "desktop")]
+fn pump_binding_is_current(session_id: &str, token: PumpToken) -> bool {
+    let bindings = PUMP_BINDINGS.lock();
+    bindings
+        .as_ref()
+        .and_then(|map| map.get(session_id))
+        .copied()
+        == Some(token)
+}
+
 pub fn reserve_managed_pump(session_id: &str) -> PumpToken {
     let mut pumps = ACTIVE_PUMPS.lock();
     let mut bindings = PUMP_BINDINGS.lock();
@@ -275,8 +288,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                 tokio::select! {
                     msg = messages.recv() => msg,
                     _ = tokio::time::sleep_until(flush_deadline) => {
-                        let bindings = PUMP_BINDINGS.lock();
-                        if bindings.as_ref().and_then(|map| map.get(&session_id_clone)).copied() != Some(token) {
+                        if !pump_binding_is_current(&session_id_clone, token) {
                             return;
                         }
                         flush_terminal_output(
@@ -291,8 +303,7 @@ pub fn start_managed_pump_token<R: Runtime>(
                 }
             };
 
-            let bindings = PUMP_BINDINGS.lock();
-            if bindings.as_ref().and_then(|map| map.get(&session_id_clone)).copied() != Some(token) {
+            if !pump_binding_is_current(&session_id_clone, token) {
                 return;
             }
             match next {
@@ -488,7 +499,6 @@ pub fn start_managed_pump_token<R: Runtime>(
                 }
                 None => break,
             }
-            drop(bindings);
         }
 
         let mut guard = ACTIVE_PUMPS.lock();
@@ -781,6 +791,14 @@ fn flush_terminal_output<R: Runtime>(
         return true;
     }
 
+    // A single large burst can leave a multi-megabyte allocation parked for the session's whole
+    // lifetime. Give the memory back once the buffer has grown well past a normal batch.
+    fn shrink_oversized_buffer(buffer: &mut Vec<u8>) {
+        if buffer.capacity() > BATCH_MAX_BYTES * 4 {
+            buffer.shrink_to(BATCH_MAX_BYTES);
+        }
+    }
+
     let channel = TERMINAL_OUTPUT_CHANNEL.lock().clone();
     if let Some(channel) = channel {
         if let Some(frame) =
@@ -790,6 +808,7 @@ fn flush_terminal_output<R: Runtime>(
                 Ok(()) => {
                     crate::terminal::metrics::record_channel_send_for_session(session_id);
                     buffer.clear();
+                    shrink_oversized_buffer(buffer);
                     return true;
                 }
                 Err(error) => {
@@ -820,6 +839,7 @@ fn flush_terminal_output<R: Runtime>(
         end_sequence: None,
     };
     buffer.clear();
+    shrink_oversized_buffer(buffer);
     crate::terminal::metrics::clear_pending_batch_read(session_id);
     if let Err(error) = app.emit(TERMINAL_OUTPUT_EVENT, payload) {
         tracing::debug!("Failed to emit terminal output event: {error}");
@@ -1093,6 +1113,10 @@ pub struct PendingCreateRecord {
     pub cancelled: bool,
     pub status: PendingCreateStatus,
     pub session: Option<crate::remote::machine_protocol::Session>,
+    /// When the record reached a terminal status. Process-local (never persisted): it only feeds
+    /// the prune of resolved records so the in-memory map cannot grow for the daemon's lifetime.
+    #[serde(skip)]
+    pub resolved_at: Option<Instant>,
 }
 
 static PENDING_CREATES: std::sync::LazyLock<
@@ -1119,7 +1143,6 @@ pub fn cancel_pending_create(request_id: &str) {
     }
     persist_pending_creates();
 }
-
 // P10 (round 2): pending creates survive process restarts. The paired host's
 // operation journal is the durable record; the local file keeps the logical
 // intent (adopt-or-cancel) so the reaper revisits records after a restart.
@@ -1156,21 +1179,39 @@ fn ensure_pending_creates_loaded() {
     }
 }
 
+/// Serializes disk writes of the pending-creates store without holding `PENDING_CREATES` across
+/// filesystem I/O. Lock order is always `PENDING_CREATES_WRITE_LOCK -> PENDING_CREATES`.
+static PENDING_CREATES_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 fn persist_pending_creates() {
+    let _write_guard = PENDING_CREATES_WRITE_LOCK.lock();
+    let snapshot = pending_create_persist_snapshot();
+    write_pending_creates_snapshot(&snapshot);
+}
+
+/// Clones only the still-reconcilable records so the caller can write them to disk after the
+/// `PENDING_CREATES` lock is released.
+fn pending_create_persist_snapshot() -> std::collections::HashMap<String, PendingCreateRecord> {
+    let guard = PENDING_CREATES.lock();
+    // Only still-reconcilable records belong on disk; terminal records are
+    // dropped so the file never grows unboundedly.
+    guard
+        .iter()
+        .filter(|(_, r)| matches!(r.status, PendingCreateStatus::Pending))
+        .map(|(key, record)| (key.clone(), record.clone()))
+        .collect()
+}
+
+fn write_pending_creates_snapshot(
+    snapshot: &std::collections::HashMap<String, PendingCreateRecord>,
+) {
     let Some(path) = default_pending_creates_path() else {
         return;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let guard = PENDING_CREATES.lock();
-    // Only still-reconcilable records belong on disk; terminal records are
-    // dropped so the file never grows unboundedly.
-    let live: std::collections::HashMap<&String, &PendingCreateRecord> = guard
-        .iter()
-        .filter(|(_, r)| matches!(r.status, PendingCreateStatus::Pending))
-        .collect();
-    if let Ok(bytes) = serde_json::to_vec_pretty(&live) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(snapshot) {
         let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         if std::fs::write(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
@@ -1178,12 +1219,30 @@ fn persist_pending_creates() {
     }
 }
 
+/// Snapshot-then-write off the async worker: the serialize + `fs::write` of the pending-create
+/// store is disk I/O that must not block a Tokio worker while it settles a paired create.
+/// Acquires `PENDING_CREATES_WRITE_LOCK` on the blocking thread before taking the snapshot so
+/// concurrent writers never clobber `tmp.<pid>` or overwrite newer durable state.
+async fn persist_pending_creates_offloaded() {
+    let _ = run_blocking(move || {
+        persist_pending_creates();
+        Ok::<(), IpcError>(())
+    })
+    .await;
+}
+
 pub fn clear_pending_creates_for_test() {
     PENDING_CREATES.lock().clear();
 }
 
 const PENDING_CREATE_BACKGROUND_WINDOW_SECS: u64 = 600;
+/// First poll delay. Later polls grow geometrically to `PENDING_CREATE_BACKGROUND_MAX_POLL_MS`, so
+/// an operation that stays unknown for minutes costs a handful of journal reads instead of one
+/// every 250 ms for the whole window.
 const PENDING_CREATE_BACKGROUND_POLL_MS: u64 = 250;
+const PENDING_CREATE_BACKGROUND_MAX_POLL_MS: u64 = 5_000;
+/// How long a resolved record stays readable in memory before the sweep drops it.
+const PENDING_CREATE_RESOLVED_TTL: Duration = Duration::from_secs(600);
 
 /// P10: a create whose journal outcome stayed unknown after the inline burst is
 /// NOT abandoned — the logical intent is retained and a bounded background
@@ -1206,6 +1265,7 @@ pub(crate) fn register_pending_create(
                 cancelled,
                 status: PendingCreateStatus::Pending,
                 session: None,
+                resolved_at: None,
             },
         );
     }
@@ -1224,11 +1284,11 @@ fn spawn_background_create_reconciler(
     tokio::spawn(async move {
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_secs(PENDING_CREATE_BACKGROUND_WINDOW_SECS);
+        let mut poll_delay_ms = PENDING_CREATE_BACKGROUND_POLL_MS;
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                PENDING_CREATE_BACKGROUND_POLL_MS,
-            ))
-            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(poll_delay_ms)).await;
+            poll_delay_ms = (poll_delay_ms + poll_delay_ms / 2)
+                .min(PENDING_CREATE_BACKGROUND_MAX_POLL_MS);
             if std::time::Instant::now() >= deadline {
                 // Window exhausted: leave the record Pending so a later pass
                 // (or operator action) can still reconcile it.
@@ -1315,9 +1375,10 @@ async fn resolve_pending_create_terminal(
                         } else {
                             record.session = Some(session);
                         }
+                        record.resolved_at = Some(Instant::now());
                     }
                 }
-                persist_pending_creates();
+                persist_pending_creates_offloaded().await;
             } else {
                 let descriptor = crate::terminal::paired_daemon::Descriptor {
                     host_id: host_id.clone(),
@@ -1339,9 +1400,10 @@ async fn resolve_pending_create_terminal(
                                 record.session = Some(session);
                             }
                         }
+                        record.resolved_at = Some(Instant::now());
                     }
                 }
-                persist_pending_creates();
+                persist_pending_creates_offloaded().await;
             }
         }
         crate::remote::machine_protocol::OperationOutcome::Error { error } => {
@@ -1351,15 +1413,32 @@ async fn resolve_pending_create_terminal(
                     record.status = PendingCreateStatus::Failed {
                         error: error.message.clone(),
                     };
+                    record.resolved_at = Some(Instant::now());
                 }
             }
-            persist_pending_creates();
+            persist_pending_creates_offloaded().await;
         }
         _ => {}
     }
 }
 
 const PENDING_CREATE_REAPER_INTERVAL_SECS: u64 = 60;
+
+/// Drops resolved records once they have been readable for their TTL, so a long-lived daemon's
+/// `PENDING_CREATES` map does not grow with every create it ever settled. Pending records are
+/// never pruned: they are the durable intent the reaper keeps revisiting.
+fn prune_resolved_pending_creates(
+    records: &mut std::collections::HashMap<String, PendingCreateRecord>,
+) {
+    records.retain(|_, record| {
+        if matches!(record.status, PendingCreateStatus::Pending) {
+            return true;
+        }
+        record
+            .resolved_at
+            .is_none_or(|resolved_at| resolved_at.elapsed() < PENDING_CREATE_RESOLVED_TTL)
+    });
+}
 
 /// P10 (round 2): production scanner for still-pending creates. The bounded
 /// background reconciler only covers the spawn window; this reaper keeps
@@ -1375,7 +1454,8 @@ pub async fn start_pending_create_reaper(daemon_client: Arc<DaemonClient>) {
         loop {
             let pending: Vec<PendingCreateRecord> = {
                 ensure_pending_creates_loaded();
-                let guard = PENDING_CREATES.lock();
+                let mut guard = PENDING_CREATES.lock();
+                prune_resolved_pending_creates(&mut guard);
                 guard
                     .values()
                     .filter(|r| matches!(r.status, PendingCreateStatus::Pending))
@@ -5790,7 +5870,7 @@ pub(crate) fn map_client_error(
     IpcError::new(code, message).with_details(serde_json::Value::Object(details))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;

@@ -23,6 +23,20 @@ use super::{SshAuthMethod, SshHost};
 use crate::ipc::{IpcError, IpcErrorCode};
 
 const ESTABLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+/// Window during which a cached master whose socket still exists is reused without
+/// spawning `ssh -O check`.
+const LIVENESS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const INITIAL_POLL_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+const MID_POLL_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const MAX_POLL_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn next_poll_delay(current: std::time::Duration) -> std::time::Duration {
+    if current < MID_POLL_DELAY {
+        MID_POLL_DELAY
+    } else {
+        MAX_POLL_DELAY
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 // `pub(crate)` for the argv pin in `ssh::tunnel::refusals`, which builds the real
@@ -52,6 +66,8 @@ struct MasterEntry {
     /// never on elapsed time alone: an elapsed-time reaper could close a socket a live
     /// terminal session or a slow git probe is still using.
     active: std::sync::atomic::AtomicUsize,
+    /// Timestamp of the last successful liveness verification (`ssh -O check` or establishment).
+    last_verified: Mutex<std::time::Instant>,
 }
 
 impl MasterEntry {
@@ -62,10 +78,68 @@ impl MasterEntry {
     fn socket(&self) -> &Path {
         &self.socket
     }
+
+    fn recently_verified(&self, ttl: std::time::Duration) -> bool {
+        self.last_verified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .elapsed()
+            < ttl
+    }
+
+    fn mark_verified(&self) {
+        *self
+            .last_verified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
+    }
 }
 
 static MASTERS: LazyLock<Mutex<HashMap<ConnectionKey, Arc<MasterEntry>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static CREATE_LOCKS: LazyLock<Mutex<HashMap<ConnectionKey, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct CreateLockGuard {
+    key: ConnectionKey,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for CreateLockGuard {
+    fn drop(&mut self) {
+        // Release the mutex and its Arc clone before checking whether the map
+        // holds the last strong reference.
+        let _ = self.guard.take();
+        let mut locks = CREATE_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = locks.get(&self.key) {
+            if Arc::strong_count(existing) == 1 {
+                locks.remove(&self.key);
+            }
+        }
+    }
+}
+
+async fn acquire_create_lock(key: &ConnectionKey) -> CreateLockGuard {
+    let lock = {
+        let mut locks = CREATE_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, existing| Arc::strong_count(existing) > 1);
+        Arc::clone(
+            locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    let guard = lock.lock_owned().await;
+    CreateLockGuard {
+        key: key.clone(),
+        guard: Some(guard),
+    }
+}
 
 #[cfg(not(windows))]
 fn control_path(key: &ConnectionKey) -> PathBuf {
@@ -247,15 +321,14 @@ fn reap_when_idle(key: ConnectionKey, entry: Arc<MasterEntry>, grace: std::time:
                 _ => None,
             }
         };
-        // Dropping the entry closes the supervisor's liveness pipe, whose EOF tears the whole
-        // connection tree down. Nothing here sends a signal to a connection we do not own.
-        drop(removed);
-        let socket = entry.socket.clone();
-        let _ = crate::ipc::run_blocking(move || {
-            let _ = std::fs::remove_file(&socket);
-            Ok::<(), IpcError>(())
-        })
-        .await;
+        if let Some(removed) = removed {
+            // Dropping the entry closes the supervisor's liveness pipe, whose EOF tears the whole
+            // connection tree down. Nothing here sends a signal to a connection we do not own.
+            // Only unlink the socket when THIS entry was the active one we just removed; a newer
+            // master sharing the same control path must never have its live socket unlinked.
+            drop(removed);
+            unlink_socket(&entry.socket).await;
+        }
     });
 }
 
@@ -291,17 +364,28 @@ pub async fn acquire(host: &SshHost) -> Result<Option<MasterLease>, IpcError> {
     let key = ConnectionKey::of(host);
     let socket = control_path(&key);
     if let Some(entry) = lookup(&key) {
-        // A cached entry whose master has died (host rebooted, connection dropped) must never be
-        // handed out: the client would fail with a socket nobody is listening on. Re-check and
-        // fall through to establish a fresh one.
-        let program = super::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
-        if master_is_live(&program, &entry.socket, &key.target, key.port).await {
+        // Fast path: skip spawning `ssh -O check` while liveness is fresh and the socket exists.
+        let live = if entry.recently_verified(LIVENESS_TTL) && probe_socket(&entry.socket).await {
+            true
+        } else {
+            // A cached entry whose master has died (host rebooted, connection dropped) must never
+            // be handed out: the client would fail with a socket nobody is listening on. Re-check
+            // and fall through to establish a fresh one.
+            let program =
+                super::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
+            if master_is_live(&program, &entry.socket, &key.target, key.port).await {
+                entry.mark_verified();
+                true
+            } else {
+                false
+            }
+        };
+        if live {
             return Ok(Some(lease(key, entry)));
         }
         forget_entry(&key, &entry).await;
     }
-    static CREATE_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
-    let _guard = CREATE_LOCK.lock().await;
+    let _guard = acquire_create_lock(&key).await;
     if let Some(entry) = lookup(&key) {
         return Ok(Some(lease(key, entry)));
     }
@@ -339,12 +423,20 @@ pub async fn acquire(host: &SshHost) -> Result<Option<MasterLease>, IpcError> {
 
     let deadline = tokio::time::Instant::now() + ESTABLISH_BUDGET;
     let mut established = false;
+    let mut poll_delay = INITIAL_POLL_DELAY;
     while tokio::time::Instant::now() < deadline {
-        if master_is_live(&program, &socket, &key.target, key.port).await {
+        if probe_socket(&socket).await
+            && master_is_live(&program, &socket, &key.target, key.port).await
+        {
             established = true;
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(poll_delay.min(remaining)).await;
+        poll_delay = next_poll_delay(poll_delay);
     }
     if !established {
         unlink_socket(&socket).await;
@@ -366,6 +458,7 @@ pub async fn acquire(host: &SshHost) -> Result<Option<MasterLease>, IpcError> {
         socket: socket.clone(),
         _liveness: liveness,
         active: std::sync::atomic::AtomicUsize::new(0),
+        last_verified: Mutex::new(std::time::Instant::now()),
     });
     let entry = {
         let mut masters = MASTERS
@@ -552,6 +645,7 @@ mod tests {
             socket: control_path(key),
             _liveness: liveness,
             active: std::sync::atomic::AtomicUsize::new(0),
+            last_verified: Mutex::new(std::time::Instant::now()),
         })
     }
 
@@ -601,6 +695,104 @@ mod tests {
             "an idle master must leave the table so the next call re-establishes it"
         );
         assert!(!socket.exists(), "the control socket must not outlive its master");
+    }
+
+    #[tokio::test]
+    async fn a_replaced_masters_socket_is_not_unlinked_by_an_old_reaper() {
+        let key = ConnectionKey::of(&host("replaced.example"));
+        let old_entry = entry_for(&key).await;
+        let new_entry = entry_for(&key).await;
+        let socket = new_entry.socket.clone();
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).expect("socket dir is creatable");
+        }
+        std::fs::write(&socket, b"live-replacement").expect("placeholder socket is writable");
+        MASTERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), Arc::clone(&new_entry));
+
+        reap_when_idle(
+            key.clone(),
+            Arc::clone(&old_entry),
+            std::time::Duration::from_millis(20),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+        let surviving = lookup(&key);
+        assert!(
+            surviving
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &new_entry)),
+            "replacement master must stay registered when old reaper fires"
+        );
+        assert!(
+            socket.exists(),
+            "old reaper must never unlink a replacement master's live socket"
+        );
+
+        forget_entry(&key, &new_entry).await;
+    }
+
+    #[tokio::test]
+    async fn per_key_create_locks_do_not_block_other_hosts_and_prune_on_drop() {
+        let key_a = ConnectionKey::of(&host("lock-a.example"));
+        let key_b = ConnectionKey::of(&host("lock-b.example"));
+
+        let guard_a = acquire_create_lock(&key_a).await;
+        // Acquiring a lock for a different host must succeed immediately even while key_a is held.
+        let guard_b = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            acquire_create_lock(&key_b),
+        )
+        .await
+        .expect("different ConnectionKey must not be blocked by another host's create lock");
+
+        drop(guard_b);
+        assert!(
+            !CREATE_LOCKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&key_b),
+            "idle per-key create lock must be pruned when dropped"
+        );
+        drop(guard_a);
+        assert!(
+            !CREATE_LOCKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&key_a),
+            "idle per-key create lock must be pruned when dropped"
+        );
+    }
+
+    #[test]
+    fn readiness_poll_delay_backs_off_from_50ms_to_250ms() {
+        assert_eq!(INITIAL_POLL_DELAY, std::time::Duration::from_millis(50));
+        let second = next_poll_delay(INITIAL_POLL_DELAY);
+        assert_eq!(second, std::time::Duration::from_millis(100));
+        let third = next_poll_delay(second);
+        assert_eq!(third, std::time::Duration::from_millis(250));
+        assert_eq!(next_poll_delay(third), std::time::Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn recently_verified_honors_ttl_and_refresh() {
+        let key = ConnectionKey::of(&host("ttl.example"));
+        let entry = entry_for(&key).await;
+        assert!(entry.recently_verified(LIVENESS_TTL));
+        assert!(!entry.recently_verified(std::time::Duration::ZERO));
+        if let Some(stale) = std::time::Instant::now()
+            .checked_sub(LIVENESS_TTL + std::time::Duration::from_secs(1))
+        {
+            *entry
+                .last_verified
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = stale;
+            assert!(!entry.recently_verified(LIVENESS_TTL));
+            entry.mark_verified();
+            assert!(entry.recently_verified(LIVENESS_TTL));
+        }
     }
 
     /// Password auth cannot be handed to a multiplexed master: there is no agent socket for the

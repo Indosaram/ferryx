@@ -428,18 +428,25 @@ export class TerminalEventBus {
       entry.chunks.push(data);
       entry.totalBytes += data.byteLength;
 
-      while (entry.totalBytes > MAX_BACKLOG_BYTES && entry.chunks.length > 0) {
-        const oldest = entry.chunks[0];
-        if (oldest === undefined) break;
-        const overflow = entry.totalBytes - MAX_BACKLOG_BYTES;
-        if (oldest.byteLength <= overflow) {
-          entry.chunks.shift();
-          entry.totalBytes -= oldest.byteLength;
-        } else {
-          // slice copies, so the retained tail no longer pins the whole original frame buffer.
-          entry.chunks[0] = oldest.slice(overflow);
-          entry.totalBytes -= overflow;
-          break;
+      if (entry.totalBytes > MAX_BACKLOG_BYTES && entry.chunks.length > 0) {
+        let dropCount = 0;
+        let overflow = entry.totalBytes - MAX_BACKLOG_BYTES;
+        while (dropCount < entry.chunks.length && overflow > 0) {
+          const oldest = entry.chunks[dropCount];
+          if (oldest === undefined) break;
+          if (oldest.byteLength <= overflow) {
+            overflow -= oldest.byteLength;
+            entry.totalBytes -= oldest.byteLength;
+            dropCount += 1;
+          } else {
+            // slice copies, so the retained tail no longer pins the whole original frame buffer.
+            entry.chunks[dropCount] = oldest.slice(overflow);
+            entry.totalBytes -= overflow;
+            break;
+          }
+        }
+        if (dropCount > 0) {
+          entry.chunks.splice(0, dropCount);
         }
       }
       alignBacklogToUtf8Boundary(entry);

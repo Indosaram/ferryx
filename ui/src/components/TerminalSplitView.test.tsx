@@ -22,6 +22,13 @@ const mockClipboard = vi.hoisted(() => ({
   copyTextToClipboard: vi.fn().mockResolvedValue(true),
 }));
 
+const paneRenderCounts = vi.hoisted(() => ({
+  counts: {} as Record<string, number>,
+  reset() {
+    this.counts = {};
+  },
+}));
+
 vi.mock("../lib/clipboard", () => ({
   copyTextToClipboard: (text: string) => mockClipboard.copyTextToClipboard(text),
 }));
@@ -62,22 +69,26 @@ vi.mock("./TerminalPane", () => ({
     headerHovered?: boolean;
     needsAttention?: boolean;
     onReconnect?: (sessionId: string) => unknown;
-  }) => (
-    <div
-      data-testid="terminal-pane"
-      data-backend-session-id={session.backendSessionId ?? session.id}
-      data-search-open={String(Boolean(searchOpen))}
-      data-header-hovered={String(Boolean(headerHovered))}
-      data-needs-attention={String(Boolean(needsAttention))}
-    >
-      <button type="button" data-testid="mock-pane-reconnect" onClick={() => onReconnect?.(session.id)} />
-    </div>
-  ),
+  }) => {
+    paneRenderCounts.counts[session.id] = (paneRenderCounts.counts[session.id] ?? 0) + 1;
+    return (
+      <div
+        data-testid="terminal-pane"
+        data-backend-session-id={session.backendSessionId ?? session.id}
+        data-search-open={String(Boolean(searchOpen))}
+        data-header-hovered={String(Boolean(headerHovered))}
+        data-needs-attention={String(Boolean(needsAttention))}
+      >
+        <button type="button" data-testid="mock-pane-reconnect" onClick={() => onReconnect?.(session.id)} />
+      </div>
+    );
+  },
 }));
 
 beforeEach(() => {
   resetNotificationSettings();
   mockClipboard.copyTextToClipboard.mockResolvedValue(true);
+  paneRenderCounts.reset();
 });
 
 afterEach(() => {
@@ -1110,5 +1121,145 @@ describe("TerminalSplitView pane copy debug info", () => {
     fireEvent.blur(toolbar, { relatedTarget: document.body });
     expect(toolbar).toHaveClass("pointer-events-none");
     expect(toolbar).toHaveClass("opacity-0");
+  });
+});
+
+describe("TerminalSplitView hidden tab memoization", () => {
+  it("skips re-rendering hidden tabs on unrelated session/activity updates while preserving own-leaf updates", () => {
+    const activeTab = tab("tab-active", "session-active");
+    const hiddenTab = tab("tab-hidden", "session-hidden-1");
+    const layout: LayoutState = {
+      tabs: [activeTab, hiddenTab],
+      activeTabId: "tab-active",
+      layoutsByTabId: {
+        "tab-active": {
+          root: { type: "leaf", leafId: "leaf-active" },
+          activeLeafId: "leaf-active",
+          expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-active": "session-active" },
+        },
+        "tab-hidden": {
+          root: {
+            type: "split",
+            direction: "horizontal",
+            first: { type: "leaf", leafId: "leaf-hidden-1" },
+            second: { type: "leaf", leafId: "leaf-hidden-2" },
+            ratio: 0.5,
+          },
+          activeLeafId: "leaf-hidden-1",
+          expandedLeafId: null,
+          sessionIdsByLeafId: {
+            "leaf-hidden-1": "session-hidden-1",
+            "leaf-hidden-2": "session-hidden-2",
+          },
+        },
+      },
+    };
+
+    const hiddenSession1 = session("session-hidden-1", "backend-hidden-1");
+    const hiddenSession2 = session("session-hidden-2", "backend-hidden-2");
+    const activeSession = session("session-active", "backend-active");
+    const initialSessions: Record<string, TerminalSession> = {
+      "session-active": activeSession,
+      "session-hidden-1": hiddenSession1,
+      "session-hidden-2": hiddenSession2,
+    };
+
+    const { rerender } = render(
+      <TerminalSplitView
+        layout={layout}
+        sessions={initialSessions}
+        activityBySessionId={{}}
+        onReconnectAgentSession={() => undefined}
+        onBackendSessionUnavailable={() => undefined}
+      />,
+    );
+
+    paneRenderCounts.reset();
+
+    // Unrelated output/session update on the active tab must NOT re-render either hidden leaf.
+    const nextActiveSession: TerminalSession = { ...activeSession, cwd: "/repo/sub" };
+    rerender(
+      <TerminalSplitView
+        layout={layout}
+        sessions={{
+          "session-active": nextActiveSession,
+          "session-hidden-1": hiddenSession1,
+          "session-hidden-2": hiddenSession2,
+        }}
+        activityBySessionId={{
+          "session-active": { state: "working", title: "running", isAgent: false },
+        }}
+        onReconnectAgentSession={() => undefined}
+        onBackendSessionUnavailable={() => undefined}
+      />,
+    );
+
+    expect(paneRenderCounts.counts["session-active"]).toBe(1);
+    expect(paneRenderCounts.counts["session-hidden-1"] ?? 0).toBe(0);
+    expect(paneRenderCounts.counts["session-hidden-2"] ?? 0).toBe(0);
+
+    // Updating hidden leaf 1's own session must re-render hidden leaf 1 only, not its hidden sibling.
+    const exitedHidden1: TerminalSession = { ...hiddenSession1, lifecycle: "exited", backendSessionId: null };
+    rerender(
+      <TerminalSplitView
+        layout={layout}
+        sessions={{
+          "session-active": nextActiveSession,
+          "session-hidden-1": exitedHidden1,
+          "session-hidden-2": hiddenSession2,
+        }}
+        activityBySessionId={{
+          "session-active": { state: "working", title: "running", isAgent: false },
+        }}
+        onReconnectAgentSession={() => undefined}
+        onBackendSessionUnavailable={() => undefined}
+      />,
+    );
+
+    expect(paneRenderCounts.counts["session-hidden-1"]).toBe(1);
+    expect(paneRenderCounts.counts["session-hidden-2"] ?? 0).toBe(0);
+
+    // Updating hidden leaf 2's own activity must re-render hidden leaf 2 only.
+    rerender(
+      <TerminalSplitView
+        layout={layout}
+        sessions={{
+          "session-active": nextActiveSession,
+          "session-hidden-1": exitedHidden1,
+          "session-hidden-2": hiddenSession2,
+        }}
+        activityBySessionId={{
+          "session-active": { state: "working", title: "running", isAgent: false },
+          "session-hidden-2": { state: "done", title: "finished", isAgent: true },
+        }}
+        onReconnectAgentSession={() => undefined}
+        onBackendSessionUnavailable={() => undefined}
+      />,
+    );
+
+    expect(paneRenderCounts.counts["session-hidden-1"]).toBe(1);
+    expect(paneRenderCounts.counts["session-hidden-2"]).toBe(1);
+
+    // Becoming visible must re-render both hidden leaves immediately.
+    rerender(
+      <TerminalSplitView
+        layout={{ ...layout, activeTabId: "tab-hidden" }}
+        sessions={{
+          "session-active": nextActiveSession,
+          "session-hidden-1": exitedHidden1,
+          "session-hidden-2": hiddenSession2,
+        }}
+        activityBySessionId={{
+          "session-active": { state: "working", title: "running", isAgent: false },
+          "session-hidden-2": { state: "done", title: "finished", isAgent: true },
+        }}
+        onReconnectAgentSession={() => undefined}
+        onBackendSessionUnavailable={() => undefined}
+      />,
+    );
+
+    expect(paneRenderCounts.counts["session-hidden-1"]).toBe(2);
+    expect(paneRenderCounts.counts["session-hidden-2"]).toBe(2);
   });
 });

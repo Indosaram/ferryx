@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Mutex;
 
+use sqlx::SqlitePool;
+
 use super::*;
 use crate::error::HubError;
 use crate::supervisor::health::SessionHealthClassifier;
@@ -14,10 +16,32 @@ use crate::supervisor::panel_contract::{
 const T0: i64 = 1_800_000_000_000;
 const MIN: i64 = 60_000;
 
+struct NoopWake;
+#[async_trait]
+impl crate::supervisor::wakes::WakeHandler for NoopWake {
+    async fn handle(&self, _turn: &crate::supervisor::wakes::WakeTurn) -> crate::supervisor::wakes::WakeAck {
+        crate::supervisor::wakes::WakeAck::Done
+    }
+}
+
 struct FakeClock(AtomicI64);
 impl Clock for FakeClock {
     fn now_ms(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+struct PersistedPause { pool: SqlitePool, alerts: Mutex<HashSet<SessionRef>> }
+#[async_trait]
+impl PauseGate for PersistedPause {
+    async fn paused(&self) -> bool { false }
+    async fn lane_paused(&self, lane: &str) -> bool {
+        crate::supervisor::hold::lane_held(&self.pool, lane).await.unwrap_or(true)
+    }
+    async fn observe_held(&self, session: &FleetSession) -> bool {
+        let first = crate::supervisor::hold::observe(&self.pool, session).await.expect("observe failed");
+        if first { self.alerts.lock().unwrap().insert(session.session_ref.clone()); }
+        first
     }
 }
 
@@ -900,6 +924,64 @@ async fn a_vanished_session_is_never_reported_as_resumed() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(!rows[0].live, "{rows:?}");
     assert_ne!(rows[0].kind, ActionKind::Resumed, "{rows:?}");
+}
+
+#[tokio::test]
+async fn recovery_and_wakes_never_continue_a_held_lane() {
+    let pool = crate::storage::memory().await.unwrap();
+    crate::lanes::state::insert_lane(&pool, "held-lane", "Held", "lead-a", "/tmp", "done").await.unwrap();
+    crate::lanes::state::transition(&pool, "held-lane", crate::lanes::state::LaneStatus::Working, Some("started")).await.unwrap();
+    crate::lanes::pause::pause(&pool, "held-lane", "owner").await.unwrap();
+    crate::lanes::threads::remember_thread_ref(&pool, "held-lane", "slack:C123:1700000000.000001").await.unwrap();
+
+    let retry = Arc::new(ScriptedRetry { calls: Mutex::new(Vec::new()), gave_up: Mutex::new(Vec::new()), script: Mutex::new(vec![Ok(RetryOutcome::Resumed)]) });
+    let gate = Arc::new(PersistedPause { pool: pool.clone(), alerts: Mutex::new(HashSet::new()) });
+    let rig = rig(vec![session("local", "lead-a", "claude", "working", "screen", T0)], "");
+    let scheduler = Arc::new(RecoveryScheduler::new(RecoveryDeps {
+        fleet: rig.fleet.clone(), control: rig.world.clone(), rules: rig.rules.clone(), log: rig.log.clone(),
+        classifier: Arc::new(SessionHealthClassifier), clock: rig.clock.clone(), pause: gate.clone(), escalations: rig.cards.clone(),
+    }));
+    scheduler.set_loop_retry(retry.clone());
+    scheduler.report_goal_quota("held-lane", Some(rig.refs[0].clone()), "Try again in 1 minutes").await;
+    rig.clock.0.fetch_add(2 * MIN, Ordering::SeqCst);
+    scheduler.tick().await;
+    assert!(retry.calls.lock().unwrap().is_empty());
+    assert!(crate::lanes::pause::is_paused(&pool, "held-lane").await.unwrap());
+    let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key='held-lane'").fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "working");
+
+    let wake = crate::supervisor::wakes::WakeScheduler::new(pool.clone(), Arc::new(NoopWake));
+    wake.tick(chrono::Utc::now()).await.unwrap();
+    assert!(crate::lanes::pause::is_paused(&pool, "held-lane").await.unwrap());
+
+    let worker = FleetSession { state: "working".into(), ..rig.fleet.0.lock().unwrap()[0].clone() };
+    assert_eq!(gate.alerts.lock().unwrap().len(), 1, "tick observed the active stretch once");
+    let alerts = || async {
+        sqlx::query_as::<_, (String, Option<String>, String, String)>(
+            "SELECT kind, lane_key, lead_session_key, body FROM lane_events WHERE kind = 'held_lane_active' ORDER BY id",
+        ).fetch_all(&pool).await.unwrap()
+    };
+    let first = alerts().await;
+    assert_eq!(first.len(), 1, "the lead is told once when a held lane starts working: {first:?}");
+    assert_eq!(first[0].1.as_deref(), Some("held-lane"));
+    assert_eq!(first[0].2, "lead-a");
+    assert!(first[0].3.contains("held-lane") && first[0].3.contains("local:lead-a"), "{}", first[0].3);
+    assert!(!gate.observe_held(&worker).await, "one active working stretch alerts once");
+    scheduler.tick().await;
+    assert_eq!(alerts().await.len(), 1, "a second pass in the same stretch is not a second notice");
+    let stopped = FleetSession { state: "idle".into(), ..worker.clone() };
+    assert!(!gate.observe_held(&stopped).await);
+    assert!(gate.observe_held(&worker).await, "a new active stretch alerts once again");
+    assert_eq!(alerts().await.len(), 2, "the idle gap ended the stretch: the lead hears the next one");
+    assert_eq!(gate.alerts.lock().unwrap().len(), 1);
+    // Explicit continue releases the lane and clears its stretch, so a lane held again is news.
+    assert_eq!(crate::supervisor::hold::resume_slack_thread(&pool, "C123", "1700000000.000001").await.unwrap(), vec!["held-lane".to_owned()]);
+    assert!(crate::lanes::pause::pause(&pool, "held-lane", "owner").await.unwrap());
+    assert!(gate.observe_held(&worker).await, "a re-held lane alerts on its next active stretch");
+    assert_eq!(alerts().await.len(), 3, "one notice per active stretch, never per pass");
+    assert!(crate::lanes::pause::is_paused(&pool, "held-lane").await.unwrap());
+    let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key='held-lane'").fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "working");
 }
 
 #[tokio::test]

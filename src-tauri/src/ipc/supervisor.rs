@@ -323,10 +323,11 @@ pub async fn cmd_supervisor_converse(
     text: String,
     mentions: Vec<String>,
     request_id: String,
+    question_id: Option<String>,
 ) -> Result<serde_json::Value, IpcError> {
     converse_from(
         daemon_client
-            .send_request(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id })
+            .send_request(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id, question_id })
             .await?,
     )
 }

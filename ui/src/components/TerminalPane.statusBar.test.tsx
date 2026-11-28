@@ -108,4 +108,66 @@ describe("TerminalPane docked status bar", () => {
     fireEvent.keyDown(screen.getByTestId("native-terminal"), { key: "Enter" });
     expect(onOpenNewShell).not.toHaveBeenCalled();
   });
+
+  it("updates action availability reactively without installing a MutationObserver on the status bar", () => {
+    const OriginalMutationObserver = globalThis.MutationObserver;
+    const observedTargets: Node[] = [];
+    class RecordingMutationObserver {
+      observe(target: Node) {
+        observedTargets.push(target);
+      }
+      disconnect() {}
+      takeRecords(): MutationRecord[] {
+        return [];
+      }
+    }
+    vi.stubGlobal("MutationObserver", RecordingMutationObserver);
+    try {
+      const disconnected = sshSession({ remoteConnectionState: "disconnected" });
+      const view = render(<TerminalPane session={disconnected} active />);
+      const bar = screen.getByTestId("terminal-pane-overlay");
+
+      expect(observedTargets).toHaveLength(0);
+      expect(bar).not.toHaveAttribute("aria-keyshortcuts");
+
+      view.rerender(<TerminalPane session={disconnected} active onReconnect={vi.fn()} />);
+      expect(bar).toHaveAttribute("aria-keyshortcuts", "Enter");
+      expect(observedTargets).toHaveLength(0);
+
+      view.rerender(<TerminalPane session={disconnected} active />);
+      expect(bar).not.toHaveAttribute("aria-keyshortcuts");
+      expect(observedTargets).toHaveLength(0);
+    } finally {
+      vi.stubGlobal("MutationObserver", OriginalMutationObserver);
+    }
+  });
+
+  it("tracks docked status bar height changes through ResizeObserver", () => {
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | null = null;
+    class ManualResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        resizeCallback = cb;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", ManualResizeObserver);
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    try {
+      rectSpy.mockReturnValue(new DOMRect(0, 0, 600, 36));
+      render(<TerminalPane session={sshSession({ remoteConnectionState: "disconnected" })} active onReconnect={vi.fn()} />);
+      const viewport = screen.getByTestId("terminal-native-viewport");
+      expect(viewport).toHaveStyle({ top: "36px", bottom: "0px" });
+
+      rectSpy.mockReturnValue(new DOMRect(0, 0, 600, 52));
+      act(() => {
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+      expect(viewport).toHaveStyle({ top: "52px", bottom: "0px" });
+    } finally {
+      vi.stubGlobal("ResizeObserver", OriginalResizeObserver);
+    }
+  });
 });

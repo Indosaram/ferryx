@@ -12,6 +12,7 @@
 //! the session store on Tokio worker threads; spawning a process on the reactor thread would
 //! block unrelated sessions for the length of a `git add -A` over a large worktree.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::types::StructuredChatError;
@@ -63,9 +64,24 @@ pub async fn capture_snapshot(cwd: &Path) -> Result<Option<TurnSnapshot>, Struct
     let captured = crate::ipc::run_blocking(move || {
         let index = TempIndex::new()?;
         let root = worktree_root(&index, &cwd)?;
-        let _ = index.run(&root, &["read-tree", "HEAD"]);
+        // Seed the temporary index from the repository's real git index when present so
+        // `git add -A` reuses git's stat cache instead of re-hashing every unchanged file.
+        let seeded = seed_from_repo_index(&index, &root);
+        if !seeded {
+            let _ = index.run(&root, &["read-tree", "HEAD"]);
+        }
         index.run(&root, &["add", "-A", "--", "."])?;
-        let tree = index.run(&root, &["write-tree"])?;
+        let tree = match index.run(&root, &["write-tree"]) {
+            Ok(tree) => tree,
+            Err(_) if seeded => {
+                // Fallback if the copied index had unmerged/incompatible state.
+                let _ = std::fs::remove_file(&index.path);
+                let _ = index.run(&root, &["read-tree", "HEAD"]);
+                index.run(&root, &["add", "-A", "--", "."])?;
+                index.run(&root, &["write-tree"])?
+            }
+            Err(err) => return Err(err),
+        };
         Ok(Some(tree))
     })
     .await
@@ -109,7 +125,9 @@ pub async fn restore_snapshot(
         let index = TempIndex::new()?;
         let root = worktree_root(&index, &cwd)?;
         index.run(&root, &["read-tree", &tree_oid])?;
-        let in_tree = split_z(&index.run(&root, &["ls-tree", "-r", "--name-only", "-z", &tree_oid])?);
+        let in_tree_entries =
+            split_z(&index.run(&root, &["ls-tree", "-r", "--name-only", "-z", &tree_oid])?);
+        let in_tree: HashSet<&str> = in_tree_entries.iter().map(String::as_str).collect();
         let present = split_z(&index.run(
             &root,
             &["ls-files", "-co", "--exclude-standard", "-z"],
@@ -117,7 +135,7 @@ pub async fn restore_snapshot(
 
         let mut remove_errors = Vec::new();
         for relative in &present {
-            if in_tree.iter().any(|known| known == relative) {
+            if in_tree.contains(relative.as_str()) {
                 continue;
             }
             let Some(path) = safe_join(&root, relative) else {
@@ -157,6 +175,28 @@ fn split_z(output: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn seed_from_repo_index(index: &TempIndex, root: &Path) -> bool {
+    let dot_git = root.join(".git");
+    let real_index = if dot_git.is_dir() {
+        dot_git.join("index")
+    } else {
+        let Ok(raw) = index.run(root, &["rev-parse", "--git-path", "index"]) else {
+            return false;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let candidate = PathBuf::from(trimmed);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            root.join(candidate)
+        }
+    };
+    real_index.is_file() && std::fs::copy(&real_index, &index.path).is_ok()
 }
 
 fn worktree_root(index: &TempIndex, cwd: &Path) -> Result<PathBuf, crate::ipc::IpcError> {

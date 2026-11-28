@@ -12,7 +12,7 @@
 use crate::browser::{BrowserError, LogicalRect};
 pub use ferryx_browser_engine_protocol::Event;
 use ferryx_browser_engine_protocol::{Command as EngineCommand, ExtensionCall, Rect};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -63,8 +63,218 @@ impl From<PhysicalRect> for Rect {
 /// Receives an engine's events with the profile it serves. Runs on the engine's reader thread.
 pub type EventSink = Arc<dyn Fn(&str, Event) + Send + Sync>;
 
+struct EngineProcessInner {
+    pid: u32,
+    #[cfg(unix)]
+    reaped: Mutex<bool>,
+    #[cfg(windows)]
+    dup_handle: Mutex<Option<std::os::windows::io::OwnedHandle>>,
+    exit_status: Mutex<Option<Option<std::process::ExitStatus>>>,
+    exited: Condvar,
+}
+
+/// Handle to a running or quitting CEF engine process, backed by one blocking waiter thread
+/// that reaps the child with 0% idle CPU and wakes waiters immediately on exit.
+#[derive(Clone)]
+struct EngineProcess {
+    inner: Arc<EngineProcessInner>,
+}
+
+#[cfg(windows)]
+fn duplicate_process_handle(child: &Child) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+    use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let mut dup: HANDLE = std::ptr::null_mut();
+    // SAFETY: `child.as_raw_handle()` is a live process handle owned by `child`;
+    // both process handles are the current-process pseudo-handle.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            child.as_raw_handle() as HANDLE,
+            GetCurrentProcess(),
+            &mut dup,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `DuplicateHandle` succeeded and returned a freshly owned handle.
+    Ok(unsafe { OwnedHandle::from_raw_handle(dup as RawHandle) })
+}
+
+impl EngineProcess {
+    fn prepare(child: &Child) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        let dup_handle = duplicate_process_handle(child)?;
+        Ok(Self {
+            inner: Arc::new(EngineProcessInner {
+                pid: child.id(),
+                #[cfg(unix)]
+                reaped: Mutex::new(false),
+                #[cfg(windows)]
+                dup_handle: Mutex::new(Some(dup_handle)),
+                exit_status: Mutex::new(None),
+                exited: Condvar::new(),
+            }),
+        })
+    }
+
+    fn spawn_waiter(
+        &self,
+        child: Child,
+        thread_name: String,
+        watch: Option<(String, std::sync::mpsc::Receiver<()>)>,
+    ) -> std::io::Result<()> {
+        let inner = Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || wait_and_reap(child, inner, watch))
+            .map(|_| ())
+    }
+
+    #[cfg(test)]
+    fn spawn_detached(mut child: Child) -> std::io::Result<Self> {
+        let process = match Self::prepare(&child) {
+            Ok(process) => process,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        process.spawn_waiter(child, "cef-engine-exit-test".into(), None)?;
+        Ok(process)
+    }
+
+    fn pid(&self) -> u32 {
+        self.inner.pid
+    }
+
+    fn has_exited(&self) -> bool {
+        self.inner.exit_status.lock().is_some()
+    }
+
+    fn wait(&self) -> Option<std::process::ExitStatus> {
+        let mut status = self.inner.exit_status.lock();
+        while status.is_none() {
+            self.inner.exited.wait(&mut status);
+        }
+        (*status).flatten()
+    }
+
+    fn wait_timeout(&self, timeout: Duration) -> bool {
+        let mut status = self.inner.exit_status.lock();
+        if status.is_some() {
+            return true;
+        }
+        if timeout.is_zero() {
+            return false;
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        while status.is_none() {
+            if self.inner.exited.wait_until(&mut status, deadline).timed_out() {
+                return status.is_some();
+            }
+        }
+        true
+    }
+
+    fn kill(&self) {
+        #[cfg(unix)]
+        {
+            let reaped = self.inner.reaped.lock();
+            if !*reaped {
+                // SAFETY: `reaped` is false and the waiter only sets it to true and reaps
+                // the child after acquiring this lock, so `pid` cannot have been recycled.
+                unsafe {
+                    libc::kill(self.inner.pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::System::Threading::TerminateProcess;
+
+            let handle = self.inner.dup_handle.lock();
+            if let Some(handle) = handle.as_ref() {
+                // SAFETY: `handle` is an owned duplicated process handle kept alive under the lock.
+                unsafe {
+                    let _ = TerminateProcess(handle.as_raw_handle() as HANDLE, 1);
+                }
+            }
+        }
+    }
+}
+
+/// Blocks on OS process exit with zero polling, reaps the child safely without PID-reuse
+/// races, notifies any exit waiters, and tears down orphaned tabs if the engine died while
+/// still registered in [`ENGINES`].
+fn wait_and_reap(
+    mut child: Child,
+    inner: Arc<EngineProcessInner>,
+    watch: Option<(String, std::sync::mpsc::Receiver<()>)>,
+) {
+    let status = {
+        #[cfg(unix)]
+        {
+            loop {
+                // SAFETY: zero-initialized `siginfo_t` is valid as an out-param to `waitid`.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // Peek exit without reaping (`WNOWAIT`) so the PID stays reserved until we
+                // synchronize with any concurrent `kill()` under `inner.reaped`.
+                let rc = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        inner.pid as libc::id_t,
+                        &mut info,
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                };
+                if rc == 0 {
+                    break;
+                }
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                break;
+            }
+            {
+                let mut reaped = inner.reaped.lock();
+                *reaped = true;
+            }
+            child.wait().ok()
+        }
+        #[cfg(windows)]
+        {
+            let status = child.wait().ok();
+            let handle = inner.dup_handle.lock().take();
+            drop(handle);
+            status
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            child.wait().ok()
+        }
+    };
+    {
+        let mut exit_status = inner.exit_status.lock();
+        *exit_status = Some(status);
+        inner.exited.notify_all();
+    }
+    if let Some((profile, reader_finished)) = watch {
+        finish_engine_watch(&profile, inner.pid, &reader_finished);
+    }
+}
+
 struct Engine {
-    child: Child,
+    process: EngineProcess,
     stdin: ChildStdin,
     /// The Ferryx window the engine's windows sit in (Windows) or above (macOS).
     parent: isize,
@@ -84,19 +294,11 @@ static ENGINES: LazyLock<Mutex<HashMap<String, Engine>>> = LazyLock::new(Default
 static LAUNCHING: Mutex<()> = Mutex::new(());
 static TABS: LazyLock<Mutex<HashMap<String, Tab>>> = LazyLock::new(Default::default);
 /// An engine told to quit (its last tab closed) whose process may still run: Chromium refuses
-/// a profile dir another live engine holds, so the next engine of that profile waits for it.
-struct Exiting {
-    child: Arc<Mutex<Child>>,
-    /// Gets a message (or is dropped) once the process is gone.
-    exited: std::sync::mpsc::Receiver<()>,
-}
-
-static EXITING: LazyLock<Mutex<HashMap<String, Exiting>>> = LazyLock::new(Default::default);
+/// a profile dir another live engine holds, so the next engine of that profile waits on the
+/// single [`EngineProcess`] waiter until it exits.
+static EXITING: LazyLock<Mutex<HashMap<String, EngineProcess>>> = LazyLock::new(Default::default);
 /// How long a quitting engine gets before the next engine of its profile ends it.
 const PREVIOUS_ENGINE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
-/// How often the exit watcher checks a quitting engine. Faster than [`EXIT_POLL`]: this one
-/// only runs after a quit was requested, and the profile's next launch blocks on it.
-const EXIT_POLL_QUITTING: Duration = Duration::from_millis(100);
 
 /// How the profile's previous engine was out of the way of a new one.
 #[derive(Debug, PartialEq, Eq)]
@@ -106,37 +308,18 @@ enum PreviousEngine {
     Killed,
 }
 
-/// Tells `child` (the profile's engine, stdin already closed) to quit: a watcher reaps it so no
-/// zombie is left, and the profile's next launch waits for it (see [`end_previous_engine`]).
-fn begin_exit(profile: &str, child: Child) {
-    let child = Arc::new(Mutex::new(child));
-    let (exited, receiver) = std::sync::mpsc::channel();
-    EXITING.lock().insert(profile.to_string(), Exiting { child: child.clone(), exited: receiver });
-    // Polls instead of `wait()` so the launcher can take the child to kill it.
-    let _ = std::thread::Builder::new().name("cef-engine-exit".into()).spawn(move || loop {
-        if !matches!(child.lock().try_wait(), Ok(None)) {
-            let _ = exited.send(());
-            return;
-        }
-        std::thread::sleep(EXIT_POLL_QUITTING);
-    });
-}
-
 /// Makes sure the profile's previous engine is gone: waits up to `timeout` for it to quit, then
 /// kills it. Blocking; runs under [`LAUNCHING`].
 fn end_previous_engine(profile: &str, timeout: Duration) -> PreviousEngine {
     let Some(previous) = EXITING.lock().remove(profile) else {
         return PreviousEngine::None;
     };
-    if previous.exited.recv_timeout(timeout).is_ok()
-        || matches!(previous.child.lock().try_wait(), Ok(Some(_)) | Err(_))
-    {
+    if previous.wait_timeout(timeout) {
         return PreviousEngine::Exited;
     }
     tracing::warn!(%profile, "the previous Chromium engine did not quit in time; ending it");
-    let mut child = previous.child.lock();
-    let _ = child.kill();
-    let _ = child.wait();
+    previous.kill();
+    let _ = previous.wait();
     PreviousEngine::Killed
 }
 
@@ -207,7 +390,7 @@ fn send(profile: &str, command: &EngineCommand) -> bool {
         };
         writeln!(engine.stdin, "{}", command.to_line())
             .and_then(|()| engine.stdin.flush())
-            .map_err(|error| (error, engine.child.id()))
+            .map_err(|error| (error, engine.process.pid()))
     };
     match result {
         Ok(()) => true,
@@ -226,15 +409,16 @@ fn engine_gone(profile: &str, pid: u32) {
     let engine = {
         let mut engines = ENGINES.lock();
         match engines.get(profile) {
-            Some(engine) if engine.child.id() == pid => engines.remove(profile),
+            Some(engine) if engine.process.pid() == pid => engines.remove(profile),
             _ => None,
         }
     };
-    let Some(mut engine) = engine else {
+    let Some(engine) = engine else {
         return;
     };
-    let _ = engine.child.kill();
-    let _ = engine.child.wait();
+    drop(engine.stdin);
+    engine.process.kill();
+    let _ = engine.process.wait();
     // Dropping the waiters tells every DevTools call in flight that the engine is gone.
     DEVTOOLS_CALLS.lock().retain(|_, pending| pending.profile != profile);
     EXTENSION_CALLS.lock().retain(|_, pending| pending.profile != profile);
@@ -299,8 +483,8 @@ fn debug_engine_args(value: Option<&str>) -> Vec<String> {
 /// Blocking: run it through `run_blocking`.
 pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink) -> Result<(), BrowserError> {
     // An engine that died since its last command is replaced, not written to.
-    let dead = ENGINES.lock().get_mut(profile).and_then(|engine| {
-        matches!(engine.child.try_wait(), Ok(Some(_))).then(|| engine.child.id())
+    let dead = ENGINES.lock().get(profile).and_then(|engine| {
+        engine.process.has_exited().then(|| engine.process.pid())
     });
     if let Some(pid) = dead {
         engine_gone(profile, pid);
@@ -370,7 +554,7 @@ pub fn open(
     }
 }
 
-/// Starts an engine process and the thread that reads its events.
+/// Starts an engine process, its stdout reader thread, and its single blocking exit waiter.
 fn start(mut command: Command, profile: &str, parent: isize, sink: EventSink) -> std::io::Result<()> {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -378,76 +562,89 @@ fn start(mut command: Command, profile: &str, parent: isize, sink: EventSink) ->
         let _ = child.wait();
         return Err(std::io::Error::other("engine pipes unavailable"));
     };
-    let pid = child.id();
-    ENGINES.lock().insert(profile.to_string(), Engine { child, stdin, parent, sink: Arc::clone(&sink) });
-    // The reader drops `reader_done` when it returns, which tells the exit watcher the engine's
+    let process = match EngineProcess::prepare(&child) {
+        Ok(process) => process,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let pid = process.pid();
+    ENGINES.lock().insert(
+        profile.to_string(),
+        Engine { process: process.clone(), stdin, parent, sink: Arc::clone(&sink) },
+    );
+    // The reader drops `reader_done` when it returns, which tells the exit waiter the engine's
     // last events were delivered.
     let (reader_done, reader_finished) = std::sync::mpsc::channel::<()>();
     let reader_profile = profile.to_string();
-    std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name(format!("cef-engine-{reader_profile}"))
         .spawn(move || {
             let _reader_done = reader_done;
             read_events(stdout, &reader_profile, pid, &sink);
-        })?;
+        })
+    {
+        let mut engines = ENGINES.lock();
+        if engines.get(profile).is_some_and(|engine| engine.process.pid() == pid) {
+            engines.remove(profile);
+        }
+        drop(engines);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     let watched_profile = profile.to_string();
-    std::thread::Builder::new()
-        .name(format!("cef-engine-exit-{watched_profile}"))
-        .spawn(move || watch_exit(&watched_profile, pid, &reader_finished))?;
+    if let Err(error) = process.spawn_waiter(
+        child,
+        format!("cef-engine-exit-{watched_profile}"),
+        Some((watched_profile, reader_finished)),
+    ) {
+        let mut engines = ENGINES.lock();
+        if engines.get(profile).is_some_and(|engine| engine.process.pid() == pid) {
+            engines.remove(profile);
+        }
+        drop(engines);
+        process.kill();
+        return Err(error);
+    }
     Ok(())
 }
 
-/// How often the exit watcher looks at the engine process.
-const EXIT_POLL: Duration = Duration::from_millis(500);
-/// How long the exit watcher lets the reader deliver an exited engine's last events before it
+/// How long the exit waiter lets the reader deliver an exited engine's last events before it
 /// closes the tabs itself (the reader never finishes while a helper process holds stdout).
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
 
-/// What the exit watcher found for one engine on one look.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EngineWatch {
-    /// Still running: look again later.
-    Running,
-    /// The process exited while Ferryx still had it registered: its tabs must close.
-    Exited,
-    /// Ferryx no longer holds this engine (closed, replaced, or already reported gone).
-    Released,
+/// Whether [`ENGINES`] still holds the engine of `profile` started as `pid`. A successor engine
+/// of the same profile (another pid) is not this waiter's business.
+fn is_owned_engine(profile: &str, pid: u32) -> bool {
+    ENGINES
+        .lock()
+        .get(profile)
+        .is_some_and(|engine| engine.process.pid() == pid)
 }
 
-/// Looks once at the engine of `profile` started as `pid`. A successor engine of the same
-/// profile (another pid) is not this watcher's business.
-fn check_engine(profile: &str, pid: u32) -> EngineWatch {
-    let mut engines = ENGINES.lock();
-    match engines.get_mut(profile) {
-        Some(engine) if engine.child.id() == pid => match engine.child.try_wait() {
-            Ok(None) => EngineWatch::Running,
-            // An error from try_wait means the child cannot be observed any more; treat it as
-            // gone rather than leave its tabs over a dead process.
-            Ok(Some(_)) | Err(_) => EngineWatch::Exited,
-        },
-        _ => EngineWatch::Released,
+/// Closes tabs when the engine main process exits while still registered in [`ENGINES`]. The
+/// reader thread only sees the end of stdout, and a Chromium helper process (GPU, zygote,
+/// renderer) that outlives a killed engine keeps that pipe open (linux CI run 41801115761:
+/// four engine tabs stayed listed after SIGKILL), so process exit itself has to close the tabs.
+fn finish_engine_watch(
+    profile: &str,
+    pid: u32,
+    reader_finished: &std::sync::mpsc::Receiver<()>,
+) {
+    if !is_owned_engine(profile, pid) {
+        return;
     }
-}
-
-/// Waits for the engine main process to exit. The reader thread only sees the end of stdout,
-/// and a Chromium helper process (GPU, zygote, renderer) that outlives a killed engine keeps
-/// that pipe open (linux CI run 41801115761: four engine tabs stayed listed after SIGKILL), so
-/// the process exit itself has to close the tabs.
-fn watch_exit(profile: &str, pid: u32, reader_finished: &std::sync::mpsc::Receiver<()>) {
-    loop {
-        match check_engine(profile, pid) {
-            EngineWatch::Running => std::thread::sleep(EXIT_POLL),
-            EngineWatch::Exited => {
-                // Normally the reader reaches the end of stdout right away and reports the
-                // tabs closed after the engine's last events; then engine_gone below is a no-op.
-                let _ = reader_finished.recv_timeout(EXIT_DRAIN);
-                tracing::warn!(%profile, pid, "CEF engine process exited");
-                engine_gone(profile, pid);
-                return;
-            }
-            EngineWatch::Released => return,
-        }
+    // Normally the reader reaches the end of stdout right away and reports the
+    // tabs closed after the engine's last events; then engine_gone below is a no-op.
+    let _ = reader_finished.recv_timeout(EXIT_DRAIN);
+    if !is_owned_engine(profile, pid) {
+        return;
     }
+    tracing::warn!(%profile, pid, "CEF engine process exited");
+    engine_gone(profile, pid);
 }
 
 fn read_events(stdout: std::process::ChildStdout, profile: &str, pid: u32, sink: &EventSink) {
@@ -524,10 +721,10 @@ pub fn close(browser_id: &str) -> bool {
     send(&tab.profile, &EngineCommand::Close { tab: browser_id.to_string() });
     let last = !TABS.lock().values().any(|other| other.profile == tab.profile);
     if last {
-        // Dropping stdin tells the engine to quit.
-        if let Some(Engine { child, stdin, .. }) = ENGINES.lock().remove(&tab.profile) {
+        // Dropping stdin tells the engine to quit; its single waiter thread reaps it.
+        if let Some(Engine { process, stdin, .. }) = ENGINES.lock().remove(&tab.profile) {
             drop(stdin);
-            begin_exit(&tab.profile, child);
+            EXITING.lock().insert(tab.profile, process);
         }
     }
     true
@@ -829,14 +1026,15 @@ mod tests {
     fn a_new_engine_ends_the_previous_one_of_its_profile_first() {
         assert_eq!(end_previous_engine("exit-none", Duration::ZERO), PreviousEngine::None);
 
-        begin_exit("exit-done", quitting_engine(true));
+        let done = EngineProcess::spawn_detached(quitting_engine(true)).expect("watch done");
+        EXITING.lock().insert("exit-done".to_string(), done);
         assert_eq!(end_previous_engine("exit-done", Duration::from_secs(30)), PreviousEngine::Exited);
         assert!(!EXITING.lock().contains_key("exit-done"));
 
-        begin_exit("exit-stuck", quitting_engine(false));
-        let child = EXITING.lock().get("exit-stuck").map(|exiting| exiting.child.clone()).expect("registered");
+        let stuck = EngineProcess::spawn_detached(quitting_engine(false)).expect("watch stuck");
+        EXITING.lock().insert("exit-stuck".to_string(), stuck.clone());
         assert_eq!(end_previous_engine("exit-stuck", Duration::ZERO), PreviousEngine::Killed);
-        assert!(matches!(child.lock().try_wait(), Ok(Some(_))));
+        assert!(stuck.has_exited());
         assert_eq!(end_previous_engine("exit-stuck", Duration::ZERO), PreviousEngine::None);
     }
 
@@ -1053,7 +1251,10 @@ mod tests {
     /// pid, alone.
     #[test]
     fn the_exit_watcher_ignores_engines_it_does_not_own() {
-        assert_eq!(check_engine("never-started-profile", 1), EngineWatch::Released);
+        assert!(!is_owned_engine("never-started-profile", 1));
+        let (_tx, rx) = mpsc::channel();
+        // Returns immediately without waiting EXIT_DRAIN when not owned.
+        finish_engine_watch("never-started-profile", 1, &rx);
     }
 
     /// Two tabs of one profile opening at once (a restored tab and a cold launch's inbound
@@ -1100,9 +1301,10 @@ mod tests {
             .spawn()
             .expect("stand-in engine starts");
         let stdin = child.stdin.take().expect("stdin");
+        let process = EngineProcess::spawn_detached(child).expect("watch print engine");
         let profile = "print-profile";
         let sink: EventSink = Arc::new(|_: &str, _: Event| {});
-        ENGINES.lock().insert(profile.to_string(), Engine { child, stdin, parent: 0, sink });
+        ENGINES.lock().insert(profile.to_string(), Engine { process, stdin, parent: 0, sink });
         TABS.lock().insert("print-tab".into(), Tab { profile: profile.into(), handle: None });
 
         let app = tauri::test::mock_app();
@@ -1114,9 +1316,9 @@ mod tests {
         system::print_pdf("print-tab", &pdf).expect("pdf reaches the engine");
 
         TABS.lock().remove("print-tab");
-        let Engine { mut child, stdin, .. } = ENGINES.lock().remove(profile).expect("engine");
+        let Engine { process, stdin, .. } = ENGINES.lock().remove(profile).expect("engine");
         drop(stdin);
-        assert!(child.wait().expect("stand-in exits").success());
+        assert!(process.wait().expect("stand-in exits").success());
         let mut lines: Vec<String> = std::fs::read_to_string(&received)
             .unwrap()
             .lines()

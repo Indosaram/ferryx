@@ -30,9 +30,20 @@ pub async fn paused_keys(pool: &SqlitePool) -> Result<HashSet<String>> {
 /// the history row records the pause with from = to = current status, as omo.
 pub async fn pause(pool: &SqlitePool, key: &str, by: &str) -> Result<bool> {
     let mut tx = pool.begin_write().await?;
+    let changed = pause_in(&mut tx, key, by).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Install and read back the hub-loop fence before recording a confirmed hold.
+pub(crate) async fn pause_in(
+    conn: &mut sqlx::SqliteConnection,
+    key: &str,
+    by: &str,
+) -> Result<bool> {
     let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
         .bind(key)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?
         .ok_or_else(|| HubError::message(format!("lane not found: {key}")))?;
     if matches!(status.as_str(), "closed" | "failed" | "verified_done") {
@@ -42,7 +53,7 @@ pub async fn pause(pool: &SqlitePool, key: &str, by: &str) -> Result<bool> {
         "SELECT EXISTS(SELECT 1 FROM lane_pauses WHERE lane_key = ? AND resumed_at IS NULL)",
     )
     .bind(key)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     if paused {
         return Ok(false);
@@ -55,14 +66,23 @@ pub async fn pause(pool: &SqlitePool, key: &str, by: &str) -> Result<bool> {
     .bind(key)
     .bind(&now)
     .bind(by)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
+    let confirmed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM lane_pauses WHERE lane_key = ? AND resumed_at IS NULL)",
+    )
+    .bind(key)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !confirmed {
+        return Err(HubError::message("HOLD_UNCONFIRMED: not held; pause readback failed"));
+    }
     sqlx::query("INSERT INTO lane_history(lane_key, at, from_status, to_status, reason) VALUES (?, ?, ?, ?, 'paused')")
         .bind(key)
         .bind(&now)
         .bind(&status)
         .bind(&status)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     // A supervisor dispatch of this lane already claimed may be waiting for its pane: the
     // pause revokes it in the typing fence, so nothing of it is typed.
@@ -72,10 +92,9 @@ pub async fn pause(pool: &SqlitePool, key: &str, by: &str) -> Result<bool> {
           WHERE g.lane_key = ? AND d.state = 'claimed'",
     )
     .bind(key)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
     crate::supervisor::delivery::revoke(claimed);
-    tx.commit().await?;
     Ok(true)
 }
 
@@ -104,19 +123,14 @@ pub async fn resume(pool: &SqlitePool, key: &str) -> Result<bool> {
         .bind(&status)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("UPDATE lanes SET last_activity_at = ?, updated_at = ? WHERE key = ?")
+        .bind(&now)
+        .bind(&now)
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(true)
-}
-
-/// A pause is a throttle for the run it was set in, not a property of the lane: close does
-/// not clear it, so a reopen must, or the reopened lane is skipped forever (omo).
-pub async fn clear_on_reopen(pool: &SqlitePool, key: &str) -> Result<()> {
-    sqlx::query("UPDATE lane_pauses SET resumed_at = ? WHERE lane_key = ? AND resumed_at IS NULL")
-        .bind(now_rfc3339())
-        .bind(key)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -125,7 +139,7 @@ mod tests {
     use crate::lanes::state::{insert_lane, transition, LaneStatus};
 
     #[tokio::test]
-    async fn a_paused_lane_keeps_its_status_and_a_reopen_clears_the_pause() {
+    async fn a_paused_lane_keeps_its_status_and_reopen_keeps_the_hold() {
         let pool = crate::storage::memory().await.unwrap();
         insert_lane(&pool, "ledger", "Ledger", "lead", "/tmp", "file marker")
             .await
@@ -161,7 +175,7 @@ mod tests {
         transition(&pool, "ledger", LaneStatus::Working, Some("note: reopened"))
             .await
             .unwrap();
-        assert!(!is_paused(&pool, "ledger").await.unwrap());
+        assert!(is_paused(&pool, "ledger").await.unwrap());
         let reasons: Vec<Option<String>> = sqlx::query_scalar(
             "SELECT reason FROM lane_history WHERE lane_key = 'ledger' ORDER BY id",
         )

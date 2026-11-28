@@ -1,0 +1,11 @@
+[
+  {"kind":"action_loop","created_at":"2026-11-27T01:00:00Z","body":"[GitHub] PR #50 changed (<redacted-link>)"},
+  {"kind":"action_loop","created_at":"2026-11-27T01:20:00Z","body":"[GitHub] PR #50 has updates (<redacted-link>)"},
+  {"kind":"action_loop","created_at":"2026-11-27T01:40:00Z","body":"[GitHub] PR #50 review requested (<redacted-link>)"},
+  {"kind":"action_loop","created_at":"2026-11-27T02:00:00Z","body":"[GitHub] PR #50 activity (<redacted-link>)"},
+  {"kind":"action_loop","created_at":"2026-11-27T02:20:00Z","body":"[GitHub] PR #50 changed (<redacted-link>)"},
+  {"kind":"action_loop","created_at":"2026-11-27T02:40:00Z","body":"[GitHub] PR #50 has updates (<redacted-link>)"},
+  {"kind":"action_loop","created_at":"2026-11-27T03:00:00Z","body":"[GitHub] PR #50 review requested (<redacted-link>)"},
+  {"kind":"action_loop","created_at":"2026-11-27T03:20:00Z","body":"[GitHub] PR #50 activity (<redacted-link>)"},
+  {"kind":"inbox_urgent","created_at":"2026-11-27T03:21:00Z","body":"inbox:<redacted-id> due <redacted-time>"}
+]

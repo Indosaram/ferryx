@@ -35,6 +35,10 @@ pub const GRANT_TTL: Duration = Duration::from_secs(600);
 /// origin with its own page, which strips the typed code and message the client shows.
 const GRANT_DELIVERY_FAILURE_STATUS: StatusCode = StatusCode::SERVICE_UNAVAILABLE;
 
+/// Hard upper bound on in-memory rate-limiter and challenge maps so distinct keys cannot grow
+/// without bound even within a single expiry window.
+const RATE_TABLE_MAX_ENTRIES: usize = 4096;
+
 /// Freshness window for determining machine online status from `last_seen_at`.
 ///
 /// In Ferryx, daemons establish active presence through control channels and periodic
@@ -211,29 +215,63 @@ impl AccountState {
     }
 
     fn allow_login_request(&self, email: &str) -> bool {
-        let mut attempts = self.login_attempts.lock();
-        let window = attempts.entry(email.to_string()).or_default();
-        window.retain(|at| at.elapsed() < Duration::from_secs(3600));
-        if window.len() as u32 >= self.login_requests_per_hour {
+        if self.login_requests_per_hour == 0 {
             return false;
         }
-        window.push(Instant::now());
+        let login_window = Duration::from_secs(3600);
+        let mut attempts = self.login_attempts.lock();
+        attempts.retain(|_, hits| {
+            hits.retain(|at| at.elapsed() < login_window);
+            !hits.is_empty()
+        });
+        if let Some(window) = attempts.get_mut(email) {
+            if window.len() as u32 >= self.login_requests_per_hour {
+                return false;
+            }
+            window.push(Instant::now());
+            return true;
+        }
+        if attempts.len() >= RATE_TABLE_MAX_ENTRIES {
+            if let Some(oldest_key) = attempts
+                .iter()
+                .min_by_key(|(_, hits)| hits.last().copied())
+                .map(|(k, _)| k.clone())
+            {
+                attempts.remove(&oldest_key);
+            }
+        }
+        attempts.insert(email.to_string(), vec![Instant::now()]);
         true
     }
 
     /// Sliding-window limiter for the onboarding endpoints (machine-request create per IP,
     /// lookup per user). Records the attempt only when it is allowed.
     pub(crate) fn allow_onboarding_rate(&self, key: &str, limit: usize, window: Duration) -> bool {
+        if limit == 0 {
+            return false;
+        }
         let mut rates = self.onboarding_rates.lock();
         rates.retain(|_, hits| {
             hits.retain(|at| at.elapsed() < window);
             !hits.is_empty()
         });
-        let hits = rates.entry(key.to_string()).or_default();
-        if hits.len() >= limit {
-            return false;
+        if let Some(hits) = rates.get_mut(key) {
+            if hits.len() >= limit {
+                return false;
+            }
+            hits.push(Instant::now());
+            return true;
         }
-        hits.push(Instant::now());
+        if rates.len() >= RATE_TABLE_MAX_ENTRIES {
+            if let Some(oldest_key) = rates
+                .iter()
+                .min_by_key(|(_, hits)| hits.last().copied())
+                .map(|(k, _)| k.clone())
+            {
+                rates.remove(&oldest_key);
+            }
+        }
+        rates.insert(key.to_string(), vec![Instant::now()]);
         true
     }
 
@@ -243,6 +281,15 @@ impl AccountState {
         let expires_at = timestamp + 120;
         let mut challenges = self.challenges.lock();
         challenges.retain(|_, challenge| challenge.expires_at > timestamp);
+        if !challenges.contains_key(machine_id) && challenges.len() >= RATE_TABLE_MAX_ENTRIES {
+            if let Some(oldest_key) = challenges
+                .iter()
+                .min_by_key(|(_, challenge)| challenge.expires_at)
+                .map(|(k, _)| k.clone())
+            {
+                challenges.remove(&oldest_key);
+            }
+        }
         challenges.insert(
             machine_id.to_string(),
             EnrollChallenge {
@@ -4192,5 +4239,70 @@ mod tests {
             .unwrap();
         let foreign = sign(&holder.machine_record_id, &attach, now);
         assert_eq!(vouch(&request(Some(foreign))).unwrap_err().code, "GRANT_REQUESTER_INVALID");
+    }
+
+    #[test]
+    fn login_attempts_prunes_expired_keys_and_enforces_cardinality_caps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(
+            tmp.path().join("mail"),
+        ));
+        let state = AccountState::new(tmp.path().join("account"), "https://account.test", mailer);
+
+        // Seed an empty key and (when monotonic clock allows) an expired 1h+ key.
+        {
+            let mut attempts = state.login_attempts.lock();
+            attempts.insert("empty@example.test".into(), Vec::new());
+            if let Some(expired) = Instant::now().checked_sub(Duration::from_secs(3601)) {
+                attempts.insert("expired@example.test".into(), vec![expired]);
+            }
+        }
+        assert!(state.allow_login_request("fresh@example.test"));
+        {
+            let attempts = state.login_attempts.lock();
+            assert!(!attempts.contains_key("empty@example.test"), "empty keys must be pruned");
+            assert!(!attempts.contains_key("expired@example.test"), "expired keys must be pruned");
+            assert!(attempts.contains_key("fresh@example.test"));
+        }
+
+        // Verify hard cardinality cap on login_attempts, onboarding_rates, and challenges.
+        let now_inst = Instant::now();
+        {
+            let mut attempts = state.login_attempts.lock();
+            attempts.clear();
+            for i in 0..RATE_TABLE_MAX_ENTRIES {
+                attempts.insert(format!("user-{i}@example.test"), vec![now_inst]);
+            }
+        }
+        assert!(state.allow_login_request("overflow@example.test"));
+        assert_eq!(state.login_attempts.lock().len(), RATE_TABLE_MAX_ENTRIES);
+        assert!(state.login_attempts.lock().contains_key("overflow@example.test"));
+
+        {
+            let mut rates = state.onboarding_rates.lock();
+            for i in 0..RATE_TABLE_MAX_ENTRIES {
+                rates.insert(format!("ip-{i}"), vec![now_inst]);
+            }
+        }
+        assert!(state.allow_onboarding_rate("ip-overflow", 5, Duration::from_secs(60)));
+        assert_eq!(state.onboarding_rates.lock().len(), RATE_TABLE_MAX_ENTRIES);
+        assert!(state.onboarding_rates.lock().contains_key("ip-overflow"));
+
+        let now_ts = now_secs();
+        {
+            let mut challenges = state.challenges.lock();
+            for i in 0..RATE_TABLE_MAX_ENTRIES {
+                challenges.insert(
+                    format!("mach-{i}"),
+                    EnrollChallenge {
+                        nonce: format!("n-{i}"),
+                        expires_at: now_ts + 60,
+                    },
+                );
+            }
+        }
+        let _ = state.open_challenge("mach-overflow");
+        assert_eq!(state.challenges.lock().len(), RATE_TABLE_MAX_ENTRIES);
+        assert!(state.challenges.lock().contains_key("mach-overflow"));
     }
 }

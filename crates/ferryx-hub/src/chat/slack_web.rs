@@ -87,6 +87,16 @@ pub async fn post_message(channel: &str, text: &str) -> Result<String> {
         .ok_or_else(|| HubError::message("slack chat.postMessage returned no ts"))
 }
 
+/// Posts a threaded supervisor reply and returns Slack's message timestamp when available.
+pub async fn post_returning_ts(channel: &str, thread: Option<&str>, text: &str) -> Result<Option<String>> {
+    let mut body = serde_json::json!({"channel": channel, "text": text});
+    if let Some(thread) = thread {
+        body["thread_ts"] = Value::String(thread.to_owned());
+    }
+    let value = post_json("chat.postMessage", &body).await?;
+    Ok(value.get("ts").and_then(Value::as_str).map(str::to_owned))
+}
+
 pub async fn update_message(channel: &str, ts: &str, text: &str) -> Result<()> {
     post_json(
         "chat.update",

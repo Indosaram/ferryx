@@ -7,6 +7,36 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+
+struct ProgressThrottle {
+    interval: Duration,
+    last_emitted: Option<Instant>,
+}
+
+impl ProgressThrottle {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_emitted: None,
+        }
+    }
+
+    fn should_emit(&mut self, now: Instant, force: bool) -> bool {
+        if force
+            || self
+                .last_emitted
+                .map_or(true, |last| now.saturating_duration_since(last) >= self.interval)
+        {
+            self.last_emitted = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,10 +160,34 @@ mod platform {
     pub fn is_link(_path: &std::path::Path, metadata: &std::fs::Metadata) -> bool {
         metadata.file_type().is_symlink()
     }
+
+    #[cfg(unix)]
+    pub type DirIdentity = (u64, u64);
+
+    #[cfg(unix)]
+    pub fn dir_identity(
+        _path: &std::path::Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<DirIdentity, crate::ipc::IpcError> {
+        use std::os::unix::fs::MetadataExt;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    #[cfg(not(unix))]
+    pub type DirIdentity = std::path::PathBuf;
+
+    #[cfg(not(unix))]
+    pub fn dir_identity(
+        path: &std::path::Path,
+        _metadata: &std::fs::Metadata,
+    ) -> Result<DirIdentity, crate::ipc::IpcError> {
+        std::fs::canonicalize(path).map_err(|error| super::io_error(path, error))
+    }
 }
 
 /// Iterative depth-first walk keeps directory handles proportional to depth;
-/// a canonical-directory set additionally guards against cycles during tree changes.
+/// a visited-directory set (`(dev, ino)` on Unix, canonical path on Windows)
+/// guards against cycles during tree changes without paying `canonicalize` per directory on Unix.
 /// Cancellation is checked between every filesystem operation/entry. Individual OS
 /// calls cannot be interrupted, but no subsequent traversal proceeds after cancel.
 /// Nested worktree roots are excluded so a repository row does not count them twice.
@@ -145,7 +199,7 @@ pub fn scan_path(
 ) -> Result<DiskWalkProgress, IpcError> {
     let mut total = DiskWalkProgress::default();
     let mut directories: Vec<(PathBuf, fs::ReadDir)> = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<platform::DirIdentity> = HashSet::new();
     let mut next = Some(root.to_path_buf());
     loop {
         check_cancelled(cancelled)?;
@@ -171,8 +225,8 @@ pub fn scan_path(
         if !platform::is_link(&path, &metadata) {
             if metadata.is_dir() {
                 check_cancelled(cancelled)?;
-                let canonical = fs::canonicalize(&path).map_err(|error| io_error(&path, error))?;
-                if seen.insert(canonical) {
+                let identity = platform::dir_identity(&path, &metadata)?;
+                if seen.insert(identity) {
                     check_cancelled(cancelled)?;
                     directories.push((
                         path.clone(),
@@ -284,11 +338,14 @@ pub fn collect_workspace(
         total_worktrees: worktrees.len(),
         ..Default::default()
     };
+    let mut throttle = ProgressThrottle::new(PROGRESS_EMIT_INTERVAL);
     let mut rows = Vec::new();
     for worktree in worktrees {
         check_cancelled(cancelled)?;
         status.current_path = Some(worktree.path.clone());
-        progress(status.clone())?;
+        if throttle.should_emit(Instant::now(), false) {
+            progress(status.clone())?;
+        }
         let mut row = WorktreeDiskRow {
             last_commit_at: worktree
                 .branch
@@ -333,7 +390,7 @@ pub fn collect_workspace(
             status.scanned_bytes = base.scanned_bytes + walk.bytes;
             status.scanned_files = base.scanned_files + walk.files;
             status.scanned_entries = base.scanned_entries + walk.entries;
-            if walk.entries == 1 || walk.entries % 256 == 0 {
+            if walk.entries % 256 == 0 && throttle.should_emit(Instant::now(), false) {
                 progress(status.clone())?;
             }
             Ok(())
@@ -356,7 +413,10 @@ pub fn collect_workspace(
         check_cancelled(cancelled)?;
         rows.push(row);
         status.completed_worktrees += 1;
-        progress(status.clone())?;
+        let is_final = status.completed_worktrees == status.total_worktrees;
+        if throttle.should_emit(Instant::now(), is_final) {
+            progress(status.clone())?;
+        }
     }
     check_cancelled(cancelled)?;
     Ok(rows)
@@ -392,5 +452,46 @@ mod reparse_point_tests {
         // The attribute bit still gates the tag: a tag without it is not a reparse point.
         assert!(!is_link_reparse_point(0, IO_REPARSE_TAG_SYMLINK));
         assert!(!is_link_reparse_point(0, 0));
+    }
+
+    #[test]
+    fn progress_throttle_enforces_interval_and_always_allows_final() {
+        let mut throttle = ProgressThrottle::new(PROGRESS_EMIT_INTERVAL);
+        let t0 = Instant::now();
+        assert!(throttle.should_emit(t0, false), "first progress emits immediately");
+        assert!(
+            !throttle.should_emit(t0 + Duration::from_millis(50), false),
+            "progress inside 100ms window is throttled"
+        );
+        assert!(
+            throttle.should_emit(t0 + PROGRESS_EMIT_INTERVAL, false),
+            "progress at 100ms boundary emits"
+        );
+        assert!(
+            !throttle.should_emit(t0 + PROGRESS_EMIT_INTERVAL + Duration::from_millis(10), false),
+            "non-final progress shortly after emit is throttled"
+        );
+        assert!(
+            throttle.should_emit(t0 + PROGRESS_EMIT_INTERVAL + Duration::from_millis(10), true),
+            "final progress is always emitted regardless of interval"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_dir_identity_uses_dev_ino_from_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let root_meta = fs::symlink_metadata(dir.path()).unwrap();
+        let sub_meta = fs::symlink_metadata(&sub).unwrap();
+        let root_id = platform::dir_identity(dir.path(), &root_meta).unwrap();
+        let sub_id = platform::dir_identity(&sub, &sub_meta).unwrap();
+        assert_ne!(root_id, sub_id);
+        let dot_meta = fs::symlink_metadata(dir.path().join(".")).unwrap();
+        assert_eq!(
+            root_id,
+            platform::dir_identity(&dir.path().join("."), &dot_meta).unwrap()
+        );
     }
 }

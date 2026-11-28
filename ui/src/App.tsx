@@ -72,7 +72,7 @@ import {
   type BrowserModeShortcutDetail,
 } from "./components/browser/maho/MahoBrowserShell";
 import { useBrowserAgentActivity } from "./components/browser/maho/MahoAgentControl";
-import { useGeneralSettings } from "./lib/generalSettings";
+import { loadRevealOnWorktreeCreate, useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
 import { startDaemonAttentionFeed } from "./lib/attentionFeed";
@@ -98,7 +98,7 @@ import { planOrphanAdoption } from "./state/orphanAdoption";
 import { movedEverySession, planTabMove } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
-import { isMacShortcutPlatform, resolvedShortcuts, routeBrowserModeShortcut, useShortcuts } from "./lib/shortcuts";
+import { isMacShortcutPlatform, resolvedShortcuts, routeBrowserModeShortcut, shortcutLabel, useShortcuts } from "./lib/shortcuts";
 import { useShortcutOverrides, useShortcutPreset } from "./lib/shortcutOverrides";
 import { initUpdateToasts } from "./lib/updateToast";
 // Wave 3a cross-platform onboarding, release notes, and getting started checklist
@@ -123,6 +123,14 @@ import {
 } from "./lib/whatsNew";
 import { showNotificationPermissionHint } from "./lib/notificationPermissionHint";
 import { getCurrentVersion } from "./lib/updater";
+import { installCliLauncher } from "./lib/tauri";
+import { AgentValueMomentObserver } from "./components/star-nag/AgentValueMomentObserver";
+import { FeatureTipDialog } from "./components/feature-tips/FeatureTipDialog";
+import { StarNagCard } from "./components/star-nag/StarNagCard";
+import { showStarNagToast } from "./components/star-nag/StarNagToast";
+import { type CompletedFeatureTipState, type FeatureTipAction } from "./lib/featureTips";
+
+import { useTipAndStarNag } from "./state/useTipAndStarNag";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { SetupProgressPanel } from "./components/onboarding/SetupProgressPanel";
 import { buildSetupProgress } from "./lib/setupProgress";
@@ -222,6 +230,7 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
+import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume, startAgentAutoResumeWatcher } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler, setSessionSleeping } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
@@ -845,28 +854,40 @@ export function deriveFocusedTerminal(
       });
     });
   // Every waiting or unseen-done session of every project, so the phone Inbox spans the host.
-  const sessionAttention = [[workspaceId, state] as const, ...snapshots.filter(([id]) => id !== workspaceId)]
-    .flatMap(([id, snapshot]) =>
-      [snapshot.layout, ...Object.values(snapshot.worktreeLayouts ?? {})].flatMap((ownerLayout) =>
-        ownerLayout.tabs.filter(isTerminalTab).flatMap((tab) => [...getTabSessionIds(snapshot, tab.id)].flatMap((sessionId) => {
+  const seenAttentionSessionIds = new Set<string>();
+  const sessionAttention: Array<{
+    backendSessionId: string;
+    workspaceId: string;
+    worktreeSlug: string | null;
+    state: "waiting" | "done";
+    agentType?: string;
+  }> = [];
+  for (const [id, snapshot] of [[workspaceId, state] as const, ...snapshots.filter(([sid]) => sid !== workspaceId)]) {
+    const worktreesByPath = new Map(snapshot.worktrees.map((wt) => [wt.path, wt]));
+    for (const ownerLayout of [snapshot.layout, ...Object.values(snapshot.worktreeLayouts ?? {})]) {
+      for (const tab of ownerLayout.tabs) {
+        if (!isTerminalTab(tab)) continue;
+        for (const sessionId of getTabSessionIds(snapshot, tab.id)) {
           const activity = selectSessionActivity(snapshot, sessionId, attentionBySessionId);
           const drawn = activity ? activityStateOfGroup(groupOf(activity)) : null;
           const paneSession = snapshot.sessions[sessionId];
           const backendSessionId = publishableBackendSessionId(paneSession?.backendSessionId);
-          if (!backendSessionId || !activity || (drawn !== "waiting" && drawn !== "done")) return [];
+          if (!backendSessionId || !activity || (drawn !== "waiting" && drawn !== "done")) continue;
+          if (seenAttentionSessionIds.has(backendSessionId)) continue;
+          seenAttentionSessionIds.add(backendSessionId);
           const panePath = paneSession.worktreePath ?? paneSession.cwd;
-          const paneWorktree = panePath ? snapshot.worktrees.find((wt) => wt.path === panePath) : undefined;
-          return [{
+          const paneWorktree = panePath ? worktreesByPath.get(panePath) : undefined;
+          sessionAttention.push({
             backendSessionId,
             workspaceId: id,
             worktreeSlug: (paneWorktree ? worktreeIdentity(paneWorktree) : null)?.slug ?? null,
             state: drawn,
             ...(activity.agentType ? { agentType: activity.agentType } : {}),
-          }];
-        })),
-      ),
-    )
-    .filter((entry, index, all) => all.findIndex((other) => other.backendSessionId === entry.backendSessionId) === index);
+          });
+        }
+      }
+    }
+  }
   const focusedGroup = state.layout.focusedGroupId
     ? state.layout.tabGroups?.[state.layout.focusedGroupId]
     : undefined;
@@ -1110,6 +1131,10 @@ function WorkspaceApp({
   } | null>(null);
   const lastRestoredSessionsRef = useRef<Record<string, TerminalSession>>({});
   const { settings: generalSettings } = useGeneralSettings();
+  const [cliInstalled, setCliInstalled] = useState<boolean | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [starNagJustCompletedOnboarding, setStarNagJustCompletedOnboarding] = useState(false);
+  const closeFeatureTipRef = useRef<() => void>(() => {});
   const activeProject = useMemo(
     () => projects.find((project) => project.workspaceId === activeProjectId) ?? projects[0] ?? DEFAULT_PROJECT,
     [activeProjectId, projects],
@@ -2814,6 +2839,8 @@ function WorkspaceApp({
       persistSidebarOpen(true);
     }
   }, [isSidebarOpen]);
+  const [revealGroupRequest, setRevealGroupRequest] = useState<{ groupId: string; id: number } | null>(null);
+  const revealGroupRequestIdRef = useRef(0);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
@@ -3684,9 +3711,30 @@ function WorkspaceApp({
   // Local projects supervisor setup maps (onboarding step and setup banner).
   const setupProjects = useMemo(() => setupProjectsFrom(projects), [projects]);
 
+  // Creating a worktree is a request to look at it: the sidebar opens (when the setting is on) and
+  // the owning project's group expands, so the new row is visible instead of hidden behind a
+  // collapsed group the user closed long ago. A worktree created while the sidebar is closed used
+  // to appear nowhere at all.
+  const handleRevealGroupHandled = useCallback(() => setRevealGroupRequest(null), []);
+
+  const revealWorktreeProject = useCallback((owner: RegisteredProject) => {
+    if (!loadRevealOnWorktreeCreate()) return;
+    const group = groupProjects(projectsRef.current).find((candidate) =>
+      candidate.memberProjects.some((member) => member.workspaceId === owner.workspaceId),
+    );
+    setIsSidebarOpen((current) => {
+      if (current) return current;
+      persistSidebarOpen(true);
+      return true;
+    });
+    revealGroupRequestIdRef.current += 1;
+    setRevealGroupRequest({ groupId: group?.groupId ?? owner.workspaceId, id: revealGroupRequestIdRef.current });
+  }, []);
+
   const handleWorktreeCreated = useCallback(
     async (owner: RegisteredProject, worktree: Worktree, launch?: WorktreeAgentLaunch) => {
       if (activeRemoteHostRef.current) return;
+      revealWorktreeProject(owner);
       if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
         // The project switch clears any pending worktree and its agent, so record the agent after it.
         handleSelectProject(owner);
@@ -3698,7 +3746,7 @@ function WorkspaceApp({
       await ensureTabForWorktree(worktree).catch(reportRuntimeError);
       if (launch) await launchAgentByIdInWorktree(worktree, launch.agentId);
     },
-    [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError],
+    [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError, revealWorktreeProject],
   );
 
   useEffect(() => {
@@ -4555,6 +4603,7 @@ function WorkspaceApp({
     let cancelled = false;
     void getCurrentVersion().then((version) => {
       if (cancelled || !version) return;
+      setAppVersion(version);
       const entry = resolveWhatsNew(version);
       if (!cancelled && entry) {
         setWhatsNew(entry);
@@ -4564,6 +4613,25 @@ function WorkspaceApp({
       cancelled = true;
     };
   }, [isNativeRuntime, isPrimary]);
+
+  // The feature-tip scheduler needs a definite answer on the CLI launcher before it may open.
+  useEffect(() => {
+    if (!isNativeRuntime) {
+      setCliInstalled(false);
+      return;
+    }
+    let cancelled = false;
+    void getCliLauncherStatus()
+      .then((status) => {
+        if (!cancelled) setCliInstalled(status.isInstalled);
+      })
+      .catch(() => {
+        if (!cancelled) setCliInstalled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNativeRuntime]);
 
   const handleToggleSettings = useCallback(() => {
     preloadSettingsDialog();
@@ -5599,6 +5667,105 @@ function WorkspaceApp({
     },
   });
   const isMacPlatform = isMacShortcutPlatform();
+  // ---- Feature tips & star prompt (Orca parity) -------------------------------------------
+  // Ferryx has no per-feature "already used this" flags yet, so only the CLI launcher is known.
+  const completedFeatureTipState = useMemo<CompletedFeatureTipState>(
+    () => ({
+      cliInstalled: cliInstalled === true,
+      voiceDictationEnabled: false,
+      sessionSearchTipCompleted: false,
+      chatUiLaunchTipCompleted: false,
+      supervisorTipCompleted: false,
+    }),
+    [cliInstalled],
+  );
+  const activeModalIsNone = !isAddProjectOpen && !isCommandPaletteOpen && !isSettingsOpen
+    && !isResourcesOpen && !isCreateOpen && !historyProject && !deleteTarget && !diskManageProject
+    && !pendingProjectRemove && !restartPaneRequest && !whatsNew
+    && (!onboardingSteps || onboardingSteps.length === 0);
+  const tipShortcut = useMemo(() => shortcutLabel("commandPalette.open"), []);
+  const handleFeatureTipAction = useCallback((action: FeatureTipAction) => {
+    closeFeatureTipRef.current();
+    if (action === "use-chat-ui") {
+      const tab = state.layout.tabs.find((candidate) => candidate.id === state.layout.activeTabId)
+        ?? state.layout.tabs[0];
+      const layout = tab ? state.layout.layoutsByTabId?.[tab.id] : undefined;
+      const leafId = layout?.activeLeafId ?? (layout ? collectLeafIds(layout.root)[0] : null);
+      if (tab && leafId && chatViewAvailable) {
+        handleSetPaneView(tab.id, leafId, "chat");
+        return;
+      }
+      toast.info("Chat view is unavailable for this pane. Open a project first.");
+      return;
+    }
+    if (action === "enable-session-search") {
+      const project = activeProject;
+      setHistoryProject(project);
+      return;
+    }
+    if (action === "setup-cli") {
+      void installCliLauncher()
+        .then((status) => {
+          setCliInstalled(status.isInstalled);
+          toast.success("The ferryx command is ready in your terminal.");
+        })
+        .catch(() => toast.error("Could not install the ferryx command."));
+      return;
+    }
+    if (action === "learn-cmd-j-palette") {
+      setIsCommandPaletteOpen(true);
+      return;
+    }
+    if (action === "create-supervisor") {
+      toast.info("Open the Supervisor panel from the sidebar to add a teammate agent.");
+      return;
+    }
+    toast.info("Voice dictation is available in the remote chat composer.");
+  }, [
+    activeProject,
+    chatViewAvailable,
+    handleSetPaneView,
+    state.layout,
+  ]);
+  const tipStarNag = useTipAndStarNag({
+    enabled: isNativeRuntime && isPrimary,
+    featureTipsEnabled: generalSettings.featureTipsEnabled,
+    starNagEnabled: generalSettings.starNagEnabled,
+    onboardingPending: Boolean(onboardingSteps && onboardingSteps.length > 0),
+    persistedUIReady: workspaceRestoreStatus === "restored",
+    activeModalIsNone,
+    cliInstalled,
+    completedTips: completedFeatureTipState,
+    appVersion,
+    onboardingJustCompleted: starNagJustCompletedOnboarding,
+    onTipAction: handleFeatureTipAction,
+  });
+  closeFeatureTipRef.current = tipStarNag.closeTip;
+
+  // The onboarding-completed star prompt is a toast (Orca's `surface: 'toast'`), not the card.
+  const starToastPending = tipStarNag.starToastPending;
+  const starToastStar = tipStarNag.starToastStar;
+  const starToastOpenWeb = tipStarNag.starToastOpenWeb;
+  const starToastDefer = tipStarNag.starToastDefer;
+  useEffect(() => {
+    if (!starToastPending || activeRemoteHost) return;
+    const clear = showStarNagToast({
+      mode: tipStarNag.starToastMode,
+      onStar: starToastStar,
+      onOpenWeb: starToastOpenWeb,
+      onDismissed: (resolved) => {
+        if (!resolved) starToastDefer();
+      },
+    });
+    return clear;
+  }, [
+    activeRemoteHost,
+    starToastDefer,
+    starToastOpenWeb,
+    starToastPending,
+    starToastStar,
+    tipStarNag.starToastMode,
+  ]);
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
@@ -5680,6 +5847,8 @@ function WorkspaceApp({
           onOpenResources={() => setIsResourcesOpen(true)}
 
           onFocusSupervisorSession={handleFocusSupervisorSession}
+          revealGroupRequest={revealGroupRequest}
+          onRevealGroupHandled={handleRevealGroupHandled}
           footerSlot={
             !activeRemoteHost && setupProgressCtx && !setupProgressDismissed ? (
               <SetupProgressPanel
@@ -5947,6 +6116,7 @@ function WorkspaceApp({
               setOnboardingRecordedSteps(markOnboardingStepsCompleted([step]).completedSteps);
             }}
             onFinish={() => {
+              setStarNagJustCompletedOnboarding(true);
               setOnboardingAddedProject(null);
               setOnboardingSteps(null);
             }}
@@ -6001,6 +6171,32 @@ function WorkspaceApp({
           />
         </Suspense>
       ) : null}
+      {tipStarNag.tip && !activeRemoteHost ? (
+        <FeatureTipDialog
+          tip={tipStarNag.tip}
+          shortcut={tipShortcut}
+          onClose={tipStarNag.closeTip}
+          onAction={tipStarNag.runTipAction}
+        />
+      ) : null}
+      {tipStarNag.starCardVisible && !activeRemoteHost ? (
+        <div className="pointer-events-none fixed bottom-6 right-6 z-40 flex justify-end">
+          <div className="pointer-events-auto">
+            <StarNagCard
+              initialMode={tipStarNag.starCardMode}
+              busy={tipStarNag.starCardBusy}
+              onStar={tipStarNag.starCardStar}
+              onLater={tipStarNag.starCardLater}
+              onDismiss={tipStarNag.starCardDismiss}
+            />
+          </div>
+        </div>
+      ) : null}
+      <AgentValueMomentObserver
+        activityBySession={paneActivityBySessionId ?? {}}
+        enabled={tipStarNag.valueMomentEnabled}
+        onValueMoment={tipStarNag.onValueMoment}
+      />
       {externalWorktreePrompt.prompt && !activeRemoteHost ? (
         <ExternalWorktreeImportDialog
           key={externalWorktreePrompt.prompt.workspaceId}

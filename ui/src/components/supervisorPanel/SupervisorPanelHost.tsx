@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { SidebarSupervisorVisibilityContext } from '../sidebar/SidebarView';
 
 import type { PanelActions } from '../../lib/supervisorPanel/actions';
 import type { PanelEvent, PanelSnapshot, SessionRef } from '../../lib/supervisorPanel/contract';
@@ -49,6 +50,8 @@ export type SupervisorPanelHostProps = {
    * this to match `workspaceId` — the same gate the workspace runtime uses.
    */
   registeredWorkspaceId?: string | null;
+  /** Whether the supervisor panel is currently shown; defaults to sidebar visibility (true standalone). */
+  visible?: boolean;
 };
 
 async function adoptResult(call: Promise<SupervisorCallResult>): Promise<LeaseAdoptResult> {
@@ -75,7 +78,10 @@ export function SupervisorPanelHost({
   loadWorktrees,
   workspaceId = null,
   registeredWorkspaceId,
+  visible,
 }: SupervisorPanelHostProps) {
+  const sidebarVisible = useContext(SidebarSupervisorVisibilityContext);
+  const isVisible = visible ?? sidebarVisible;
   const [snapshot, setSnapshot] = useState<PanelSnapshot | null>(null);
   const [prLane, setPrLane] = useState<PrLane | null>(null);
   const [worktrees, setWorktrees] = useState<readonly WorktreeOnBranch[]>([]);
@@ -122,11 +128,13 @@ export function SupervisorPanelHost({
     };
   }, [load, subscribe]);
 
-  // Ages ("waiting 23 min") move without an event; one slow tick keeps them honest.
+  // Ages ("waiting 23 min") move without an event; one slow tick keeps them honest while visible.
   useEffect(() => {
+    if (!isVisible) return;
+    setTick(now());
     const timer = window.setInterval(() => setTick(now()), 30_000);
     return () => window.clearInterval(timer);
-  }, [now]);
+  }, [isVisible, now]);
 
   // The PR lane is its own read and its own frame (`panel.prs`); a build without the route keeps
   // the section hidden instead of showing an empty lane that claims nothing waits on the owner.
@@ -143,10 +151,27 @@ export function SupervisorPanelHost({
   }, [refreshPrs]);
 
   // A hand-off needs the checkout on the PR's head branch; it is read when the lane arrives and
-  // after a hand-off, never created here.
+  // after a hand-off, never created here. Deferred while hidden and refreshed once on reveal if dirty.
   const loadWorktreesRef = useRef(loadWorktrees);
   loadWorktreesRef.current = loadWorktrees;
+  const worktreesDirtyRef = useRef(true);
+  const lastWorktreesInputsRef = useRef<{
+    prLane: PrLane | null;
+    registeredWorkspaceId: string | null | undefined;
+    workspaceId: string | null;
+  } | null>(null);
   useEffect(() => {
+    const prev = lastWorktreesInputsRef.current;
+    if (
+      prev === null ||
+      prev.prLane !== prLane ||
+      prev.registeredWorkspaceId !== registeredWorkspaceId ||
+      prev.workspaceId !== workspaceId
+    ) {
+      lastWorktreesInputsRef.current = { prLane, registeredWorkspaceId, workspaceId };
+      worktreesDirtyRef.current = true;
+    }
+    if (!isVisible || !worktreesDirtyRef.current) return;
     // A host whose registration was rejected cannot list worktrees: the read
     // would fail with WORKSPACE_NOT_FOUND and (with no host at all) look like a
     // local listing. Wait until registration accepts this workspace.
@@ -156,14 +181,17 @@ export function SupervisorPanelHost({
     let disposed = false;
     read().then(
       (list) => {
-        if (!disposed) setWorktrees(list);
+        if (!disposed) {
+          worktreesDirtyRef.current = false;
+          setWorktrees(list);
+        }
       },
       () => undefined,
     );
     return () => {
       disposed = true;
     };
-  }, [prLane, registeredWorkspaceId, workspaceId]);
+  }, [isVisible, prLane, registeredWorkspaceId, workspaceId]);
 
   // After an accepted write the hub is read again; only the newest read lands, and a failed
   // read keeps what is on screen.
@@ -200,10 +228,27 @@ export function SupervisorPanelHost({
     [snapshot, hub.lanes],
   );
 
-  // The stored conversation is read again whenever the panel or the hub snapshot changed: a sent
-  // prompt, its Reply and a worker report all end in one of those.
-  const transcriptVersion = useMemo(() => ({ snapshot, hub }), [snapshot, hub]);
-  const transcript = useTranscript(loadTranscript, transcriptVersion);
+  // The stored conversation is read again whenever the panel or the hub snapshot changed while
+  // visible; updates while hidden mark dirty and trigger one refresh when revealed.
+  const transcriptVersionRef = useRef<{ snapshot: PanelSnapshot | null; hub: typeof hub } | null>(null);
+  const lastTranscriptInputsRef = useRef<{ snapshot: PanelSnapshot | null; hub: typeof hub } | null>(null);
+  const transcriptDirtyRef = useRef(true);
+  if (
+    lastTranscriptInputsRef.current === null ||
+    lastTranscriptInputsRef.current.snapshot !== snapshot ||
+    lastTranscriptInputsRef.current.hub !== hub
+  ) {
+    lastTranscriptInputsRef.current = { snapshot, hub };
+    transcriptDirtyRef.current = true;
+  }
+  if (isVisible && (transcriptVersionRef.current === null || transcriptDirtyRef.current)) {
+    transcriptVersionRef.current = { snapshot, hub };
+    transcriptDirtyRef.current = false;
+  }
+  const transcript = useTranscript(
+    isVisible || transcriptVersionRef.current !== null ? loadTranscript : null,
+    transcriptVersionRef.current,
+  );
 
   return (
     <div

@@ -254,6 +254,8 @@ pub(crate) async fn seed_omo_memory(
         "referenceDocs": scan.docs.len(),
         "indexed": index,
         "budget": budget,
+        "stopReason": ingest.stop_reason,
+        "dailyTokens": memory_import::daily_tokens(pool, ferryx_hub::storage::now_rfc3339(), memory_import::daily_cap()).await?,
     });
     let pass = memory_import::record_pass(
         pool,

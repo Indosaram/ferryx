@@ -158,6 +158,13 @@ workflows:
           bun install --cwd ui --frozen-lockfile
           bun scripts/fetch-mhc.mjs --target "$TARGET_TRIPLE" --prune
           bun scripts/fetch-ffmpeg.mjs --target "$TARGET_TRIPLE"
+          # fetch-ffmpeg ships a universal macOS SDK; thin dylibs to arm64 before staging so
+          # local finalize's assertMacosArm64 gate passes without manual thinning.
+          for f in src-tauri/resources/ffmpeg/sdk/lib/lib*.dylib; do
+            if [ -f "$f" ] && lipo -archs "$f" 2>/dev/null | grep -q 'x86_64'; then
+              lipo -thin arm64 "$f" -output "$f.arm64" && mv -f "$f.arm64" "$f"
+            fi
+          done
           bun scripts/stage-ffmpeg.mjs --target "$TARGET_TRIPLE" --prefix src-tauri/resources/ffmpeg/sdk --prune
           bun scripts/stage-ffmpeg.mjs --target "$TARGET_TRIPLE" --check
 

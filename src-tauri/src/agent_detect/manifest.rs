@@ -86,11 +86,22 @@ pub struct CompiledRule {
     pub declaration_index: usize,
 }
 
+pub(crate) fn matcher_needs_lower(node: &CompiledMatcherNode) -> bool {
+    !node.contains_lower.is_empty()
+        || node.any.iter().any(matcher_needs_lower)
+        || node.all.iter().any(matcher_needs_lower)
+        || node.not.iter().any(matcher_needs_lower)
+}
+
 impl CompiledRule {
     pub fn matches(&self, input: &ScreenInput) -> bool {
         let view = self.region.resolve(input);
-        let text_lower = view.text.to_lowercase();
-        self.matcher.matches(&view, &text_lower)
+        if matcher_needs_lower(&self.matcher) {
+            let text_lower = view.text.to_lowercase();
+            self.matcher.matches(&view, &text_lower)
+        } else {
+            self.matcher.matches(&view, "")
+        }
     }
 }
 

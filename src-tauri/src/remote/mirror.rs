@@ -234,7 +234,7 @@ fn build_runs(cells: &[CellSnapshot]) -> Vec<RemoteGridRun> {
             text: if cell.text.is_empty() {
                 " ".to_string()
             } else {
-                cell.text.clone()
+                cell.text.as_str().to_owned()
             },
             fg: cell.fg.map(color_array),
             bg: cell.bg.map(color_array),

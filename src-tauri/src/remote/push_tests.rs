@@ -1109,3 +1109,23 @@ async fn push_test_reports_a_missing_apple_key_instead_of_success() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     server.abort();
 }
+
+#[tokio::test]
+async fn a_settled_phone_goal_sends_one_report_push_unless_the_panel_is_shown() {
+    use ferryx_hub::supervisor::goal_report::ReportNotice;
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    let notice = ReportNotice {
+        goal_id: "g1".into(),
+        state: ferryx_hub::supervisor::RunState::Completed,
+        title: "Fix cache".into(),
+    };
+    let t0 = Instant::now();
+    assert_eq!(state.push_goal_report(&notice, t0).await, 1);
+    assert_eq!(mock.received().len(), 1, "exactly one POST");
+    state.set_panel_visible("phone", true);
+    assert_eq!(state.push_goal_report(&notice, Instant::now()).await, 0, "the panel is shown");
+    assert!(mock.received().is_empty());
+}

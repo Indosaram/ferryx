@@ -8,7 +8,34 @@ const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
 }));
 
+const renderSpies = vi.hoisted(() => ({
+  diffViewRender: vi.fn(),
+  cnCall: vi.fn(),
+}));
+
 vi.mock("@tauri-apps/api/core", () => core);
+
+vi.mock("./ui/SegmentedControl", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ui/SegmentedControl")>();
+  return {
+    ...actual,
+    SegmentedControl: (props: Parameters<typeof actual.SegmentedControl>[0]) => {
+      renderSpies.diffViewRender();
+      return actual.SegmentedControl(props);
+    },
+  };
+});
+
+vi.mock("../lib/cn", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/cn")>();
+  return {
+    ...actual,
+    cn: (...inputs: Parameters<typeof actual.cn>) => {
+      renderSpies.cnCall();
+      return actual.cn(...inputs);
+    },
+  };
+});
 
 const worktree = { wsId: "ws-main", slug: "feature" };
 const request = { workspaceId: "workspace-main", worktree };
@@ -54,6 +81,8 @@ function renderPanel() {
 describe("ChangesPanel", () => {
   beforeEach(() => {
     core.invoke.mockReset();
+    renderSpies.diffViewRender.mockClear();
+    renderSpies.cnCall.mockClear();
   });
 
   afterEach(() => {
@@ -217,5 +246,39 @@ describe("ChangesPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Push" }));
     const alert = await screen.findByRole("alert");
     expect(alert.getAttribute("data-error-code")).toBe("GIT_NO_REMOTE");
+  });
+
+  it("does not re-render the file tree or diff view while typing a commit message", async () => {
+    mockIpc({ status: () => ({ isDirty: true, files: [{ statusCode: " M", path: "README.md" }] }) });
+    renderPanel();
+    await waitFor(() => expect(screen.queryAllByTestId("diff-row").length).toBeGreaterThan(0));
+
+    renderSpies.diffViewRender.mockClear();
+    renderSpies.cnCall.mockClear();
+
+    const box = screen.getByRole("textbox", { name: "Commit message" });
+    fireEvent.change(box, { target: { value: "f" } });
+    fireEvent.change(box, { target: { value: "fi" } });
+    fireEvent.change(box, { target: { value: "fix: keep typing fast" } });
+
+    expect(renderSpies.diffViewRender).not.toHaveBeenCalled();
+    expect(renderSpies.cnCall).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Commit" })).toBeEnabled();
+  });
+
+  it("skips re-rendering the memoized diff view on unrelated panel error/busy updates", async () => {
+    mockIpc({
+      status: () => ({ isDirty: true, files: [{ statusCode: " M", path: "README.md" }] }),
+      push: () => Promise.reject({ code: "GIT_NO_REMOTE", message: "no remote", details: {} }),
+    });
+    renderPanel();
+    await waitFor(() => expect(screen.queryAllByTestId("diff-row").length).toBeGreaterThan(0));
+
+    renderSpies.diffViewRender.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Push" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.getAttribute("data-error-code")).toBe("GIT_NO_REMOTE");
+    expect(renderSpies.diffViewRender).not.toHaveBeenCalled();
   });
 });

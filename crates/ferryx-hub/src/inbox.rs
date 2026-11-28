@@ -568,12 +568,14 @@ where
             // omo: an owner item due within a day wakes the lead. Anything later stays on the row.
             if class == Class::Owner && due <= now + TimeDelta::hours(24) {
                 sqlx::query(
-                    "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at)
-                     VALUES(NULL, ?, 'inbox_urgent', ?, ?)",
+                    "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, subject_id, state_id, wake_policy)
+                     VALUES(NULL, ?, 'inbox_urgent', ?, ?, ?, ?, 'wake')",
                 )
                 .bind(lead)
                 .bind(format!("inbox:{id} due {}", due.to_rfc3339()))
                 .bind(now.to_rfc3339())
+                .bind(format!("inbox_urgent:{id}"))
+                .bind(due.to_rfc3339())
                 .execute(pool)
                 .await?;
             }

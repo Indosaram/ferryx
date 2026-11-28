@@ -366,7 +366,7 @@ pub fn guard_reveal(workspace_id: Option<&str>) -> Result<(), IpcError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "projects_tests.rs"]
 mod tests;
 

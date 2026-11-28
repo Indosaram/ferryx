@@ -251,6 +251,86 @@ impl CaptureConfig {
     }
 }
 
+/// Bounded count of reusable BGRA frame buffers kept by [`BgraBufferPool`]
+/// (matches `CAPTURE_QUEUE_DEPTH` plus one in-flight encoder frame).
+const BGRA_BUFFER_POOL_SLOTS: usize = 4;
+
+/// Reusable `Vec<u8>` pool for copied BGRA frames so compatibility capture does
+/// not allocate and free multi-MB buffers on every frame (~2 GB/s at 4K60).
+struct BgraBufferPool {
+    slots: Mutex<Vec<Vec<u8>>>,
+    max_slots: usize,
+}
+
+impl BgraBufferPool {
+    fn new(max_slots: usize) -> Self {
+        Self {
+            slots: Mutex::new(Vec::with_capacity(max_slots)),
+            max_slots,
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn checkout(&self, len: usize) -> Vec<u8> {
+        let mut buf = {
+            let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(index) = slots.iter().position(|slot| slot.capacity() >= len) {
+                slots.swap_remove(index)
+            } else {
+                slots.pop().unwrap_or_default()
+            }
+        };
+        buf.clear();
+        if len > 0 && buf.capacity() > len.saturating_mul(2) {
+            // Release oversized allocations after a display downsize.
+            buf = Vec::with_capacity(len);
+        } else if buf.capacity() < len {
+            buf.reserve_exact(len);
+        }
+        buf
+    }
+
+    fn recycle(&self, mut buf: Vec<u8>) {
+        if buf.capacity() == 0 {
+            return;
+        }
+        buf.clear();
+        let evicted = {
+            let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            if slots.len() < self.max_slots {
+                slots.push(buf);
+                return;
+            }
+            if let Some((min_idx, min_cap)) = slots
+                .iter()
+                .enumerate()
+                .map(|(idx, slot)| (idx, slot.capacity()))
+                .min_by_key(|&(_, cap)| cap)
+            {
+                if buf.capacity() > min_cap {
+                    std::mem::replace(&mut slots[min_idx], buf)
+                } else {
+                    buf
+                }
+            } else {
+                buf
+            }
+        };
+        drop(evicted);
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn clear(&self) {
+        let drained = std::mem::take(&mut *self.slots.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(drained);
+    }
+}
+
+fn bgra_buffer_pool() -> &'static BgraBufferPool {
+    static POOL: std::sync::OnceLock<BgraBufferPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| BgraBufferPool::new(BGRA_BUFFER_POOL_SLOTS))
+}
+
 #[derive(Debug)]
 pub struct CaptureFrame {
     pub width: u32,
@@ -258,6 +338,13 @@ pub struct CaptureFrame {
     pub bytes_per_row: usize,
     pub bgra: Vec<u8>,
     pub captured_at: Instant,
+}
+
+impl Drop for CaptureFrame {
+    fn drop(&mut self) {
+        let buf = std::mem::take(&mut self.bgra);
+        bgra_buffer_pool().recycle(buf);
+    }
 }
 
 /// A retained, refcounted CoreVideo pixel buffer. Dropping it releases the
@@ -622,8 +709,14 @@ mod macos {
         let base = CVPixelBufferGetBaseAddress(&image).cast::<u8>();
         let bgra = if base.is_null() {
             None
+        } else if let Some(byte_len) = bytes_per_row.checked_mul(height) {
+            let mut buf = bgra_buffer_pool().checkout(byte_len);
+            // SAFETY: `image` is locked read-only above and `base` is non-null
+            // for `bytes_per_row * height` bytes until `CVPixelBufferUnlockBaseAddress`.
+            buf.extend_from_slice(unsafe { std::slice::from_raw_parts(base, byte_len) });
+            Some(buf)
         } else {
-            Some(std::slice::from_raw_parts(base, bytes_per_row * height).to_vec())
+            None
         };
         let _ = CVPixelBufferUnlockBaseAddress(&image, flags);
         bgra.map(|bgra| CaptureFrame {
@@ -1058,6 +1151,7 @@ mod macos {
             );
             let stopped = RcBlock::new(move |error: *mut NSError| {
                 let _ = &resources;
+                bgra_buffer_pool().clear();
                 // SAFETY: SCK lends a valid NSError during this callback, or null.
                 let result = unsafe {
                     if error.is_null() {
@@ -1106,6 +1200,7 @@ mod macos {
                 );
                 let stopped = RcBlock::new(move |error: *mut NSError| {
                     let _ = &resources;
+                    bgra_buffer_pool().clear();
                     if !error.is_null() {
                         // SAFETY: SCK lends a valid NSError during this callback.
                         let message = unsafe { (*error).localizedDescription().to_string() };
@@ -1499,6 +1594,55 @@ mod tests {
         // Then: the audio packet survives the video backlog.
         assert_eq!(outputs.audio.try_iter().count(), 1);
         assert_eq!(outputs.dropped_audio_packets(), 0);
+    }
+
+    #[test]
+    fn bgra_buffer_pool_reuses_buffers_within_slot_cap_and_shrinks_on_downsize() {
+        let pool = BgraBufferPool::new(BGRA_BUFFER_POOL_SLOTS);
+        let mut first = pool.checkout(4096);
+        assert!(first.is_empty());
+        assert!(first.capacity() >= 4096);
+        first.extend_from_slice(&[0xAB; 4096]);
+        let ptr = first.as_ptr();
+        pool.recycle(first);
+
+        let reused = pool.checkout(4096);
+        assert!(reused.is_empty());
+        assert_eq!(reused.as_ptr(), ptr, "pooled buffer should be reused without reallocating");
+        pool.recycle(reused);
+
+        // Exceeding the slot cap keeps at most BGRA_BUFFER_POOL_SLOTS buffers.
+        for _ in 0..(BGRA_BUFFER_POOL_SLOTS + 3) {
+            pool.recycle(Vec::with_capacity(4096));
+        }
+        assert_eq!(pool.slots.lock().unwrap().len(), BGRA_BUFFER_POOL_SLOTS);
+
+        // Downsizing releases oversized buffers instead of pinning stale capacity.
+        let downsize_pool = BgraBufferPool::new(1);
+        downsize_pool.recycle(Vec::with_capacity(64 * 1024));
+        let shrunk = downsize_pool.checkout(1024);
+        assert!(shrunk.capacity() <= 2048);
+
+        pool.clear();
+        assert!(pool.slots.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dropping_capture_frame_recycles_bgra_buffer_into_pool() {
+        let byte_len = 128 * 1024;
+        let bgra = vec![0x5A; byte_len];
+        let ptr = bgra.as_ptr();
+        let frame = CaptureFrame {
+            width: 256,
+            height: 128,
+            bytes_per_row: 1024,
+            bgra,
+            captured_at: Instant::now(),
+        };
+        drop(frame);
+
+        let reused = bgra_buffer_pool().checkout(byte_len);
+        assert_eq!(reused.as_ptr(), ptr, "dropped CaptureFrame buffer should be recycled");
     }
 }
 

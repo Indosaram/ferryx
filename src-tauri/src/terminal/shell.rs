@@ -497,7 +497,9 @@ pub(crate) fn legacy_search_paths() -> Vec<std::path::PathBuf> {
     if let Some(discovery) = PATH_DISCOVERY.with(|slot| slot.borrow().clone()) {
         return discovery();
     }
-    crate::ipc::agents::search_paths()
+    // `search_paths()` now hands out the process-wide slice instead of cloning it on every call;
+    // this legacy `Vec`-returning wrapper is the one place that still needs an owned copy.
+    crate::ipc::agents::search_paths().to_vec()
 }
 
 fn is_on_path(exe: &str) -> bool {

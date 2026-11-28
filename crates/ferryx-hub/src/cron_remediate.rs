@@ -1834,6 +1834,10 @@ impl Runtime for HubRuntime {
         // One remediation pane at a time across every producer (a racing tick, an MCP call, a
         // restart): the slot is reserved in the same transaction that inserts the lane, so two
         // callers never both launch. A second problem waits for the live lane to settle.
+        let done_signals = match crate::lanes::signals::parse_signals(&request.done) {
+            Ok(signals) => serde_json::to_string(&signals).map_err(|error| HubError::message(error.to_string()))?,
+            Err(error) => return Err(HubError::message(error.to_string())),
+        };
         let reserved = crate::lanes::state::insert_lane_sole_live(
             &self.pool,
             &request.key,
@@ -1841,7 +1845,7 @@ impl Runtime for HubRuntime {
             &request.title,
             &request.lead,
             &request.cwd.to_string_lossy(),
-            &request.done,
+            &done_signals,
         )
         .await?;
         if !reserved {

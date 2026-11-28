@@ -258,22 +258,21 @@ export function useRemoteBrowserDriver({
     };
   }, [driverState, client, leaseEpoch]);
 
-  // Live lease expiry sweeper: enforces lease timeout without requiring new drive events (R4-13)
+  // Live lease expiry deadline: one-shot timeout enforces lease timeout without 500ms polling (R4-13)
   useEffect(() => {
     if (driverState !== "driving" || expiresAt === null) {
       return;
     }
 
-    const checkInterval = setInterval(() => {
-      if (Date.now() >= expiresAt) {
-        setDriverState("revoked");
-        setLeaseEpoch(null);
-        setExpiresAt(null);
-        setError(new Error("Driver lease expired: heartbeat deadline exceeded"));
-      }
-    }, 500);
+    const remainingMs = Math.max(0, expiresAt - Date.now());
+    const timer = setTimeout(() => {
+      setDriverState("revoked");
+      setLeaseEpoch(null);
+      setExpiresAt(null);
+      setError(new Error("Driver lease expired: heartbeat deadline exceeded"));
+    }, remainingMs);
 
-    return () => clearInterval(checkInterval);
+    return () => clearTimeout(timer);
   }, [driverState, expiresAt]);
 
   // Client/browser switch or unmount: clear heartbeat timers only. No release is sent from here: the owning

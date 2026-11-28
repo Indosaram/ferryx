@@ -174,6 +174,48 @@ function withWarning(warnings: readonly string[], warning: string): readonly str
   return warnings.includes(warning) ? warnings : [...warnings, warning];
 }
 
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (!sameJsonValue(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  const leftObj = left as Record<string, unknown>;
+  const rightObj = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftObj);
+  const rightKeys = Object.keys(rightObj);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(rightObj, key)) return false;
+    if (!sameJsonValue(leftObj[key], rightObj[key])) return false;
+  }
+  return true;
+}
+
+function sameHistoryPage(previous: ReferenceHistoryPage | null, next: ReferenceHistoryPage): boolean {
+  if (previous === next) return true;
+  if (previous === null) return false;
+  if (
+    previous.generation !== next.generation ||
+    previous.turns.length !== next.turns.length ||
+    previous.hasMore !== next.hasMore ||
+    previous.source !== next.source ||
+    previous.availability !== next.availability ||
+    previous.unavailableReason !== next.unavailableReason
+  ) {
+    return false;
+  }
+  return (
+    sameJsonValue(previous.cursor ?? null, next.cursor ?? null) &&
+    sameJsonValue(previous.composer ?? null, next.composer ?? null) &&
+    sameJsonValue(previous.turns, next.turns)
+  );
+}
+
 const SEND_WARNINGS = [DESKTOP_CHAT_SEND_FAILED, DESKTOP_CHAT_OUTCOME_UNKNOWN, DESKTOP_CHAT_VIEW_ONLY];
 
 /** Mutations are never aborted: an aborted submit could still have landed. They are fenced instead. */
@@ -278,20 +320,32 @@ export function useDesktopChat({
         if (history.ok) {
           const page = history.data;
           const sameGeneration = prev.page === null || prev.page.generation === page.generation;
+          const pageUnchanged = sameHistoryPage(prev.page, page);
           const confirmed =
             prev.unknown !== null && desktopChatUserTextCount(page.turns, prev.unknown.text) > prev.unknown.baseline;
-          next = {
-            ...next,
-            page,
-            ...(sameGeneration ? {} : { older: [], olderCursor: null, olderHasMore: false, olderState: "idle" as const }),
-            pending: prev.pending.filter((echo) => desktopChatUserTextCount(page.turns, echo.text) <= echo.baseline),
-            unknown: confirmed ? null : prev.unknown,
-            warnings: next.warnings.filter(
-              (warning) => warning !== DESKTOP_CHAT_REFRESH_FAILED && !(confirmed && warning === DESKTOP_CHAT_OUTCOME_UNKNOWN),
-            ),
-          };
+          const nextPending = prev.pending.length === 0
+            ? prev.pending
+            : prev.pending.filter((echo) => desktopChatUserTextCount(page.turns, echo.text) <= echo.baseline);
+          const pendingChanged = nextPending.length !== prev.pending.length;
+          const nextWarnings = next.warnings.filter(
+            (warning) => warning !== DESKTOP_CHAT_REFRESH_FAILED && !(confirmed && warning === DESKTOP_CHAT_OUTCOME_UNKNOWN),
+          );
+          const warningsChanged = nextWarnings.length !== next.warnings.length;
+          if (!pageUnchanged || !sameGeneration || pendingChanged || confirmed || warningsChanged) {
+            next = {
+              ...next,
+              page: pageUnchanged ? prev.page : page,
+              ...(sameGeneration ? {} : { older: [], olderCursor: null, olderHasMore: false, olderState: "idle" as const }),
+              pending: pendingChanged ? nextPending : prev.pending,
+              unknown: confirmed ? null : prev.unknown,
+              warnings: warningsChanged ? nextWarnings : next.warnings,
+            };
+          }
         } else {
-          next = { ...next, warnings: withWarning(next.warnings, DESKTOP_CHAT_REFRESH_FAILED) };
+          const nextWarnings = withWarning(next.warnings, DESKTOP_CHAT_REFRESH_FAILED);
+          if (nextWarnings !== next.warnings) {
+            next = { ...next, warnings: nextWarnings };
+          }
         }
         if (promptRead !== null && promptRead.ok) {
           const { prompt, screenRevision } = promptRead.data;
@@ -300,7 +354,9 @@ export function useDesktopChat({
             : { ...prompt, answerStatus: promptRead.data.answerStatus };
           const moved = promptWithStatus?.id !== prev.prompt?.id || screenRevision !== prev.screenRevision;
           if (promptWithStatus === null || screenRevision === null) {
-            next = { ...next, prompt: null, screenRevision: null, typedAnswer: null, promptError: null };
+            if (next.prompt !== null || next.screenRevision !== null || next.typedAnswer !== null || next.promptError !== null) {
+              next = { ...next, prompt: null, screenRevision: null, typedAnswer: null, promptError: null };
+            }
           } else if (moved) {
             next = {
               ...next,
@@ -311,13 +367,16 @@ export function useDesktopChat({
             };
           }
         } else if (promptRead !== null) {
-          next = {
-            ...next,
-            prompt: null,
-            screenRevision: null,
-            typedAnswer: null,
-            warnings: withWarning(next.warnings, DESKTOP_CHAT_REFRESH_FAILED),
-          };
+          const nextWarnings = withWarning(next.warnings, DESKTOP_CHAT_REFRESH_FAILED);
+          if (next.prompt !== null || next.screenRevision !== null || next.typedAnswer !== null || nextWarnings !== next.warnings) {
+            next = {
+              ...next,
+              prompt: null,
+              screenRevision: null,
+              typedAnswer: null,
+              warnings: nextWarnings,
+            };
+          }
         }
         return next;
       });
@@ -331,10 +390,43 @@ export function useDesktopChat({
 
   useEffect(() => {
     if (!visible || targetKey === null) return;
-    void read();
-    if (exited || pollMs <= 0) return;
-    const timer = setInterval(() => void read(), pollMs);
-    return () => clearInterval(timer);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const hidden = () => typeof document !== "undefined" && document.hidden;
+    const clear = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    const schedule = () => {
+      clear();
+      if (cancelled || exited || pollMs <= 0 || hidden()) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void poll();
+      }, pollMs);
+    };
+    const poll = async (): Promise<void> => {
+      if (cancelled || hidden()) return;
+      await read();
+      schedule();
+    };
+    const onVisibilityChange = () => {
+      if (cancelled) return;
+      if (hidden()) {
+        clear();
+        return;
+      }
+      void poll();
+    };
+    if (!hidden()) void poll();
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      cancelled = true;
+      clear();
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [visible, targetKey, exited, pollMs, read]);
 
   const loadOlder = useCallback(async (): Promise<void> => {

@@ -625,18 +625,63 @@ impl MhcProfile {
         Ok(())
     }
 
+    /// Reads and parses `<mhc_pid> <owner_pid>` from [`Self::pid_path`].
+    pub fn read_pid_record(&self) -> Option<PidRecord> {
+        let text = std::fs::read_to_string(self.pid_path()).ok()?;
+        parse_pid_record(&text)
+    }
+
     /// The recorded owned child, when the record belongs to this hub process.
     pub fn owned_pid(&self) -> Option<u32> {
-        let text = std::fs::read_to_string(self.pid_path()).ok()?;
-        let mut parts = text.split_whitespace();
-        let pid = parts.next()?.parse().ok()?;
-        let owner: u32 = parts.next()?.parse().ok()?;
-        (owner == std::process::id()).then_some(pid)
+        let record = self.read_pid_record()?;
+        (record.owner_pid == std::process::id()).then_some(record.mhc_pid)
     }
 
     pub fn forget_pid(&self, pid: u32) {
         if self.owned_pid() == Some(pid) {
             let _ = std::fs::remove_file(self.pid_path());
+        }
+    }
+
+    /// Must be called under the exclusive profile lock before launching a replacement `mhc`.
+    /// If `pid_path()` records an `mhc` whose owning hub PID is no longer alive and the recorded
+    /// `mhc` PID is still a live `mhc` process (not a recycled PID), terminates its process group
+    /// and clears the stale PID file.
+    pub fn reap_stale_pid(&self) {
+        #[cfg(unix)]
+        {
+            let Some(record) = self.read_pid_record() else {
+                return;
+            };
+            let current_pid = std::process::id();
+            if record.owner_pid == current_pid {
+                return;
+            }
+            let owner_alive = process_alive(record.owner_pid);
+            let mhc_alive = !owner_alive && process_alive(record.mhc_pid);
+            let mhc_cmdline = mhc_alive.then(|| process_cmdline(record.mhc_pid)).flatten();
+            match decide_stale_pid(
+                record,
+                current_pid,
+                owner_alive,
+                mhc_alive,
+                mhc_cmdline.as_deref(),
+            ) {
+                StalePidAction::Reap(mhc_pid) => {
+                    tracing::warn!(
+                        mhc_pid,
+                        dead_owner_pid = record.owner_pid,
+                        "reaping orphaned mhc supervisor process from dead hub owner"
+                    );
+                    terminate_process_group(mhc_pid);
+                    let _ = std::fs::remove_file(self.pid_path());
+                }
+                StalePidAction::Ignore(_) => {
+                    if !owner_alive {
+                        let _ = std::fs::remove_file(self.pid_path());
+                    }
+                }
+            }
         }
     }
 
@@ -739,6 +784,144 @@ impl MhcProfile {
             command["thinkingLevel"] = json!(level);
         }
         command
+    }
+}
+
+/// Parsed `<mhc_pid> <owner_pid>` record from [`MhcProfile::pid_path`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PidRecord {
+    pub mhc_pid: u32,
+    pub owner_pid: u32,
+}
+
+/// Decision for a recorded `mhc` PID left by a previous hub process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StalePidAction {
+    /// Terminate the stale `mhc` process group before launching a replacement.
+    Reap(u32),
+    /// Leave the PID untouched (same owner, live owner, exited child, or recycled PID).
+    Ignore(&'static str),
+}
+
+/// Parses `<mhc_pid> <owner_pid>` from a PID file; rejects malformed or zero entries.
+pub fn parse_pid_record(text: &str) -> Option<PidRecord> {
+    let mut parts = text.split_whitespace();
+    let mhc_pid: u32 = parts.next()?.parse().ok()?;
+    let owner_pid: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || mhc_pid == 0 || owner_pid == 0 {
+        return None;
+    }
+    Some(PidRecord { mhc_pid, owner_pid })
+}
+
+fn is_mhc_exe(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let name = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    name == DEFAULT_MHC_BIN || name.eq_ignore_ascii_case("mhc.exe")
+}
+
+/// True when a process command line (NUL-delimited from `/proc/<pid>/cmdline` or space-delimited
+/// from `ps -o command=`) identifies an `mhc` binary rather than a recycled unrelated process.
+pub fn is_mhc_cmdline(cmdline: &str) -> bool {
+    let trimmed = cmdline.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains('\0') {
+        return trimmed.split('\0').next().is_some_and(is_mhc_exe);
+    }
+    if trimmed.split_whitespace().next().is_some_and(is_mhc_exe) {
+        return true;
+    }
+    if let Some((head, _)) = trimmed.split_once(" --mode ") {
+        if is_mhc_exe(head) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pure decision for whether a recorded `mhc` PID should be reaped as an orphan.
+pub fn decide_stale_pid(
+    record: PidRecord,
+    current_pid: u32,
+    owner_alive: bool,
+    mhc_alive: bool,
+    mhc_cmdline: Option<&str>,
+) -> StalePidAction {
+    if record.owner_pid == current_pid {
+        return StalePidAction::Ignore("same owner");
+    }
+    if owner_alive {
+        return StalePidAction::Ignore("owner alive");
+    }
+    if !mhc_alive {
+        return StalePidAction::Ignore("mhc already exited");
+    }
+    match mhc_cmdline {
+        Some(cmdline) if is_mhc_cmdline(cmdline) => StalePidAction::Reap(record.mhc_pid),
+        _ => StalePidAction::Ignore("pid recycled or not mhc"),
+    }
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 probes existence without delivering a signal.
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(target_os = "linux")]
+fn process_cmdline(pid: u32) -> Option<String> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_cmdline(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pid: u32) {
+    let Ok(pgid) = i32::try_from(pid) else {
+        return;
+    };
+    if pgid <= 0 {
+        return;
+    }
+    // SAFETY: positive pgid negated targets only that process group; fallback to direct PID
+    // only on ESRCH (e.g. an orphan launched by an older hub without process_group(0)).
+    unsafe {
+        let rc = libc::kill(-pgid, libc::SIGKILL);
+        if rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            libc::kill(pgid, libc::SIGKILL);
+        }
     }
 }
 
@@ -1145,6 +1328,68 @@ mod tests {
         assert!(
             PROFILE_INSTRUCTIONS.contains(marker),
             "the contract must teach the trailer {marker:?}"
+        );
+    }
+
+    #[test]
+    fn stale_pid_parsing_and_decision_logic() {
+        assert_eq!(
+            parse_pid_record("12345 67890\n"),
+            Some(PidRecord {
+                mhc_pid: 12345,
+                owner_pid: 67890,
+            })
+        );
+        assert_eq!(parse_pid_record(""), None);
+        assert_eq!(parse_pid_record("12345"), None);
+        assert_eq!(parse_pid_record("0 67890"), None);
+        assert_eq!(parse_pid_record("12345 0"), None);
+        assert_eq!(parse_pid_record("12345 67890 extra"), None);
+        assert_eq!(parse_pid_record("abc 67890"), None);
+
+        assert!(is_mhc_cmdline("mhc"));
+        assert!(is_mhc_cmdline("/usr/local/bin/mhc --mode rpc --multi-session"));
+        assert!(is_mhc_cmdline("/Applications/Ferryx Dev/mhc --mode rpc --multi-session"));
+        assert!(is_mhc_cmdline("/opt/bin/mhc\0--mode\0rpc\0"));
+        assert!(is_mhc_cmdline(r"C:\Program Files\Ferryx\mhc.exe --mode rpc"));
+        assert!(!is_mhc_cmdline(""));
+        assert!(!is_mhc_cmdline("/bin/zsh"));
+        assert!(!is_mhc_cmdline("python3 /tmp/script.py /path/mhc"));
+        assert!(!is_mhc_cmdline("/usr/bin/mhc-helper --mode rpc"));
+
+        let record = PidRecord {
+            mhc_pid: 4200,
+            owner_pid: 1000,
+        };
+        assert_eq!(
+            decide_stale_pid(record, 1000, false, true, Some("/usr/bin/mhc --mode rpc")),
+            StalePidAction::Ignore("same owner")
+        );
+        assert_eq!(
+            decide_stale_pid(record, 2000, true, true, Some("/usr/bin/mhc --mode rpc")),
+            StalePidAction::Ignore("owner alive")
+        );
+        assert_eq!(
+            decide_stale_pid(record, 2000, false, false, Some("/usr/bin/mhc --mode rpc")),
+            StalePidAction::Ignore("mhc already exited")
+        );
+        assert_eq!(
+            decide_stale_pid(record, 2000, false, true, Some("/bin/sleep 60")),
+            StalePidAction::Ignore("pid recycled or not mhc")
+        );
+        assert_eq!(
+            decide_stale_pid(record, 2000, false, true, None),
+            StalePidAction::Ignore("pid recycled or not mhc")
+        );
+        assert_eq!(
+            decide_stale_pid(
+                record,
+                2000,
+                false,
+                true,
+                Some("/opt/bin/mhc --mode rpc --multi-session"),
+            ),
+            StalePidAction::Reap(4200)
         );
     }
 }

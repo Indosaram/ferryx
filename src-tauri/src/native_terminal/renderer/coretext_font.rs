@@ -97,6 +97,20 @@ pub mod macos {
     const K_CF_NUMBER_SINT64_TYPE: isize = 4;
     const K_CF_NUMBER_DOUBLE_TYPE: isize = 13;
     const WGHT_TAG: i64 = 0x77676874; // 'wght' = 2003265652
+    pub const GLYPH_FONT_CACHE_MAX_ENTRIES: usize = 4096;
+    const CELL_METRICS_CACHE_MAX_ENTRIES: usize = 64;
+
+    fn sanitize_scale(scale_factor: f32) -> f32 {
+        if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        }
+    }
+
+    fn scale_cache_key(scale: f32) -> u32 {
+        (scale * 1000.0).round().clamp(1.0, u32::MAX as f32) as u32
+    }
 
     static LOGGED_ERROR: AtomicBool = AtomicBool::new(false);
 
@@ -424,7 +438,8 @@ pub mod macos {
         pub primary_italic: CFRetained<CTFont>,
         pub primary_bold_italic: CFRetained<CTFont>,
         pub configured_fallbacks: Vec<String>,
-        pub glyph_font_cache: HashMap<(char, bool, bool), Option<CFRetained<CTFont>>>,
+        pub cell_metrics_cache: HashMap<u32, CellMetrics>,
+        pub glyph_font_cache: HashMap<(char, bool, bool, u32), Option<CFRetained<CTFont>>>,
     }
 
     unsafe impl Send for CoreTextFontSystem {}
@@ -467,6 +482,7 @@ pub mod macos {
                 primary_italic,
                 primary_bold_italic,
                 configured_fallbacks,
+                cell_metrics_cache: HashMap::new(),
                 glyph_font_cache: HashMap::new(),
             }
         }
@@ -480,12 +496,12 @@ pub mod macos {
             *self = Self::new(&self.font_family, font_size);
         }
 
-        pub fn cell_metrics_for_scale(&self, scale_factor: f32) -> CellMetrics {
-            let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
-                scale_factor
-            } else {
-                1.0
-            };
+        pub fn cell_metrics_for_scale(&mut self, scale_factor: f32) -> CellMetrics {
+            let scale = sanitize_scale(scale_factor);
+            let key = scale_cache_key(scale);
+            if let Some(&cached) = self.cell_metrics_cache.get(&key) {
+                return cached;
+            }
             let effective_size = (self.font_size * scale) as f64;
 
             let font = if (scale - 1.0).abs() < 1e-4 {
@@ -519,10 +535,15 @@ pub mod macos {
                 (effective_size * 0.6).round().max(1.0) as u32
             };
 
-            CellMetrics {
+            let metrics = CellMetrics {
                 width_px,
                 height_px,
+            };
+            if self.cell_metrics_cache.len() >= CELL_METRICS_CACHE_MAX_ENTRIES {
+                self.cell_metrics_cache.clear();
             }
+            self.cell_metrics_cache.insert(key, metrics);
+            metrics
         }
 
         pub fn resolve_font_for_char(
@@ -532,13 +553,12 @@ pub mod macos {
             italic: bool,
             scale_factor: f32,
         ) -> Option<CFRetained<CTFont>> {
-            let key = (ch, bold, italic);
-            let effective_size = ((self.font_size * scale_factor).max(1.0)) as f64;
+            let scale = sanitize_scale(scale_factor);
+            let key = (ch, bold, italic, scale_cache_key(scale));
+            let effective_size = ((self.font_size * scale).max(1.0)) as f64;
 
-            if (scale_factor - 1.0).abs() < 1e-4 {
-                if let Some(cached) = self.glyph_font_cache.get(&key) {
-                    return cached.clone();
-                }
+            if let Some(cached) = self.glyph_font_cache.get(&key) {
+                return cached.clone();
             }
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -572,7 +592,7 @@ pub mod macos {
 
                 for candidate in primary_candidates {
                     if font_has_glyph(candidate, ch) {
-                        if (scale_factor - 1.0).abs() < 1e-4 {
+                        if (scale - 1.0).abs() < 1e-4 {
                             return Some(candidate.clone());
                         } else {
                             let ps_name =
@@ -635,9 +655,10 @@ pub mod macos {
                     // is no trait or no wght axis, so without this the cascade face draws at
                     // font_size while the cell is sized for font_size * scale.
                     let opt = opt.map(|font| with_point_size(&font, effective_size));
-                    if (scale_factor - 1.0).abs() < 1e-4 {
-                        self.glyph_font_cache.insert(key, opt.clone());
+                    if self.glyph_font_cache.len() >= GLYPH_FONT_CACHE_MAX_ENTRIES {
+                        self.glyph_font_cache.clear();
                     }
+                    self.glyph_font_cache.insert(key, opt.clone());
                     opt
                 }
                 Err(_) => {
@@ -742,9 +763,9 @@ pub mod macos {
 
         #[test]
         fn cell_metrics_come_from_the_resolved_primary_at_every_scale() {
-            let via_missing =
+            let mut via_missing =
                 CoreTextFontSystem::new(&format!("{MISSING_FAMILY}, monospace"), 13.0);
-            let menlo = CoreTextFontSystem::new("Menlo", 13.0);
+            let mut menlo = CoreTextFontSystem::new("Menlo", 13.0);
             for scale in [1.0_f32, 2.0] {
                 assert_eq!(
                     via_missing.cell_metrics_for_scale(scale),
@@ -753,6 +774,41 @@ pub mod macos {
             }
             // Helvetica's 'M' would give an 11px cell at 13pt; Menlo's gives 8px.
             assert_eq!(menlo.cell_metrics_for_scale(1.0).width_px, 8);
+            assert_eq!(menlo.cell_metrics_cache.len(), 2);
+            assert!(menlo.cell_metrics_cache.contains_key(&1000));
+            assert!(menlo.cell_metrics_cache.contains_key(&2000));
+        }
+
+        #[test]
+        fn retina_font_resolution_caches_by_scale_and_respects_entry_cap() {
+            let mut system = CoreTextFontSystem::new("Menlo", 13.0);
+            let first = system
+                .resolve_font_for_char('A', false, false, 2.0)
+                .expect("primary face at 2x");
+            assert_eq!(system.glyph_font_cache.len(), 1);
+            assert!(system.glyph_font_cache.contains_key(&('A', false, false, 2000)));
+            let second = system
+                .resolve_font_for_char('A', false, false, 2.0)
+                .expect("cached face at 2x");
+            assert_eq!(
+                ptr::from_ref(&*first),
+                ptr::from_ref(&*second),
+                "2x Retina lookup must return the cached CTFont instance"
+            );
+
+            // Pre-fill the cache to the exact cap and verify the next miss evicts instead of
+            // growing unboundedly.
+            system.glyph_font_cache.clear();
+            for i in 0..GLYPH_FONT_CACHE_MAX_ENTRIES {
+                let ch = char::from_u32(0xAC00 + i as u32).unwrap();
+                system
+                    .glyph_font_cache
+                    .insert((ch, false, false, 2000), None);
+            }
+            assert_eq!(system.glyph_font_cache.len(), GLYPH_FONT_CACHE_MAX_ENTRIES);
+            let _ = system.resolve_font_for_char('Z', false, false, 2.0);
+            assert_eq!(system.glyph_font_cache.len(), 1);
+            assert!(system.glyph_font_cache.contains_key(&('Z', false, false, 2000)));
         }
 
         #[test]

@@ -1553,9 +1553,63 @@ impl StateHandler {
         Self { pool }
     }
 
+    /// Settles one lane whose claim window closed, on live checks. Logged, never fatal: the
+    /// deadline stays durable, so a failure is retried by the next read of the lane row.
+    async fn settle_claim(&self, lane: &str) {
+        let cwd: Option<String> = match sqlx::query_scalar("SELECT cwd FROM lanes WHERE key = ?")
+            .bind(lane)
+            .fetch_optional(&self.pool)
+            .await
+        {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                tracing::warn!(lane, %error, "a claim's objection window was not read");
+                return;
+            }
+        };
+        let Some(cwd) = cwd else { return };
+        match crate::lanes::settle::settle_claim(
+            &self.pool,
+            crate::lanes::settle::SettleTarget { key: lane, cwd: &cwd },
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(settlement) => tracing::info!(
+                lane,
+                passed = settlement.passed(),
+                detail = %settlement.detail(),
+                "a claim's objection window closed"
+            ),
+            Err(error) => {
+                tracing::warn!(lane, %error, "a claim's objection window was not settled")
+            }
+        }
+    }
+
     async fn apply(&self, turn: &WakeTurn) -> Result<WakeAck, SupervisorError> {
         if turn.has(WakeCause::OwnerControl) || turn.has(WakeCause::OwnerCorrection) {
             return Ok(WakeAck::Done);
+        }
+        // A settlement wake is a claim's objection window closing. It is about the lane, not the
+        // goal, so it runs whatever the goal's run state is, and a turn made only of them is
+        // finished here.
+        let settlement: Vec<&str> = turn
+            .wakes
+            .iter()
+            .filter(|wake| wake.cause == WakeCause::Deadline)
+            .filter_map(|wake| crate::lanes::settle::settle_wake_lane(&wake.event_id))
+            .collect();
+        if !settlement.is_empty() {
+            for lane in &settlement {
+                self.settle_claim(lane).await;
+            }
+            if turn.wakes.iter().all(|wake| {
+                wake.cause == WakeCause::Deadline
+                    && crate::lanes::settle::settle_wake_lane(&wake.event_id).is_some()
+            }) {
+                return Ok(WakeAck::Done);
+            }
         }
         let Some(goal) = goal_of(&self.pool, &turn.goal_id).await? else {
             return Ok(WakeAck::Done);
@@ -1599,7 +1653,11 @@ impl StateHandler {
                 .iter()
                 .filter(|wake| wake.cause == WakeCause::Deadline)
                 .map(|wake| wake.event_id.as_str())
+                .filter(|event| crate::lanes::settle::settle_wake_lane(event).is_none())
                 .collect();
+            if deadlines.is_empty() {
+                return Ok(WakeAck::Done);
+            }
             let detail = truncate(&format!("{DEADLINE_PASSED}: {}", deadlines.join(", ")));
             transition_goal(
                 &self.pool,

@@ -660,20 +660,30 @@ impl NativeTerminalSession {
     }
 
     pub fn publish_frame(&self) {
-        if let (Some(layout), Some(logical_bounds)) = (self.layout, self.logical_bounds) {
-            if let Ok(input) = session_render_snapshot(self) {
-                // The frame covers exactly the output this session had already
-                // applied; that is the coverage the private QA frame evidence
-                // reports, so it is published with the frame.
-                self.snapshot_slot.publish(
-                    layout,
-                    logical_bounds,
-                    input,
-                    self.active_attach_tuple.clone(),
-                    self.last_sequence,
-                );
-            }
-        }
+        let _ = self.publish_frame_returning_snapshot();
+    }
+
+    pub(crate) fn publish_frame_returning_snapshot(&self) -> Option<Arc<RenderSnapshot>> {
+        let (layout, logical_bounds) = (self.layout?, self.logical_bounds?);
+        let input = session_render_snapshot(self).ok()?;
+        let snapshot = if self.focused
+            && self.preedit.as_deref().is_some_and(|p| !p.is_empty())
+        {
+            None
+        } else {
+            Some(Arc::clone(&input.snapshot))
+        };
+        // The frame covers exactly the output this session had already
+        // applied; that is the coverage the private QA frame evidence
+        // reports, so it is published with the frame.
+        self.snapshot_slot.publish(
+            layout,
+            logical_bounds,
+            input,
+            self.active_attach_tuple.clone(),
+            self.last_sequence,
+        );
+        snapshot
     }
 }
 
@@ -2916,6 +2926,7 @@ fn take_native_terminal_events(
     session: &mut NativeTerminalSession,
     session_id: &str,
     force_detect: bool,
+    captured_snapshot: Option<&RenderSnapshot>,
 ) -> Vec<NativeTerminalEvent> {
     let mut events = Vec::with_capacity(3);
     if session.terminal.take_title_changed() {
@@ -2965,7 +2976,18 @@ fn take_native_terminal_events(
 
     if should_detect {
         session.last_agent_detect_at = Some(std::time::Instant::now());
-        if let Ok(snapshot) = session.terminal.render_snapshot() {
+        let owned_snapshot;
+        let snapshot = match captured_snapshot {
+            Some(snapshot) => Some(snapshot),
+            None => match session.terminal.render_snapshot() {
+                Ok(snapshot) => {
+                    owned_snapshot = snapshot;
+                    Some(&owned_snapshot)
+                }
+                Err(_) => None,
+            },
+        };
+        if let Some(snapshot) = snapshot {
             let rows = (0..snapshot.rows as usize)
                 .map(|r| snapshot.row_text(r))
                 .collect();
@@ -3036,7 +3058,7 @@ fn take_native_terminal_scrollbar_event(
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionRenderInput {
-    pub(crate) snapshot: RenderSnapshot,
+    pub(crate) snapshot: Arc<RenderSnapshot>,
     pub(crate) selection: Option<SelectionSnapshot>,
     pub(crate) scrollbar_overlay: Option<ScrollbarOverlayState>,
     pub(crate) attention_frame: bool,
@@ -3077,7 +3099,7 @@ fn apply_preedit_to_snapshot(snapshot: &mut RenderSnapshot, preedit: &str) {
         }
 
         row[col] = CellSnapshot {
-            text: c.to_string(),
+            text: c.into(),
             wide: if wide {
                 CellWide::Wide
             } else {
@@ -3151,7 +3173,7 @@ fn session_render_snapshot(
         None
     };
     Ok(SessionRenderInput {
-        snapshot,
+        snapshot: Arc::new(snapshot),
         selection,
         scrollbar_overlay,
         attention_frame: session.attention_frame,
@@ -4725,6 +4747,7 @@ impl NativeTerminalSurfaceHostState {
             // full-screen or inline TUI. The PTY is usually already at the pane size, so nothing
             // sends SIGWINCH; ask the program to repaint once the grid has been rebuilt.
             let mut redraw_dims = None;
+            let mut published_snapshot = None;
             let mut session = if let Some(mut session) = existing {
                 let is_fresh_startup = self.consume_pending_startup(session_id);
                 if let Some(ref token) = token {
@@ -4876,7 +4899,7 @@ impl NativeTerminalSurfaceHostState {
                 // The re-fed history is the session's whole visible state. Cancelling the
                 // scheduled render without republishing would leave the slot holding the
                 // pre-attach frame, so the first paint after attach shows stale content.
-                session.publish_frame();
+                published_snapshot = session.publish_frame_returning_snapshot();
                 session.render_coordinator.consume_render();
                 session
             } else {
@@ -4993,7 +5016,12 @@ impl NativeTerminalSurfaceHostState {
             };
             let update_sender = session.update_sender.clone();
             let render_coordinator = Arc::clone(&session.render_coordinator);
-            let events = take_native_terminal_events(&mut session, session_id, true);
+            let events = take_native_terminal_events(
+                &mut session,
+                session_id,
+                true,
+                published_snapshot.as_deref(),
+            );
             // Captured from the SAME transaction that mutated the session. Re-reading these under
             // a fresh lock would sample state a newer attach may already own, so the pump would
             // run with a generation that never fences it.
@@ -5207,7 +5235,7 @@ impl NativeTerminalSurfaceHostState {
                             agent_detect_maybe_pending = false;
                             with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |sess| {
                                 if sess.agent_detect_pending {
-                                    (true, take_native_terminal_events(sess, &session_id_owned, true))
+                                    (true, take_native_terminal_events(sess, &session_id_owned, true, None))
                                 } else {
                                     (false, Vec::new())
                                 }
@@ -5268,8 +5296,16 @@ impl NativeTerminalSurfaceHostState {
                                 return (false, Vec::new());
                             }
                             resized_at = sess.pty_resized_at.take();
-                            sess.publish_frame();
-                            (true, take_native_terminal_events(sess, &session_id_owned, false))
+                            let published = sess.publish_frame_returning_snapshot();
+                            (
+                                true,
+                                take_native_terminal_events(
+                                    sess,
+                                    &session_id_owned,
+                                    false,
+                                    published.as_deref(),
+                                ),
+                            )
                         })
                         .unwrap_or((false, Vec::new()));
 
@@ -5437,7 +5473,7 @@ impl NativeTerminalSurfaceHostState {
                                 }
                                 (
                                     true,
-                                    take_native_terminal_events(sess, &session_id_owned, true),
+                                    take_native_terminal_events(sess, &session_id_owned, true, None),
                                 )
                             } else {
                                 (false, Vec::new())
@@ -5508,10 +5544,15 @@ impl NativeTerminalSurfaceHostState {
                                             last.max(available_from_sequence.saturating_sub(1))
                                         }),
                                 );
-                                sess.publish_frame();
+                                let published = sess.publish_frame_returning_snapshot();
                                 (
                                     true,
-                                    take_native_terminal_events(sess, &session_id_owned, true),
+                                    take_native_terminal_events(
+                                        sess,
+                                        &session_id_owned,
+                                        true,
+                                        published.as_deref(),
+                                    ),
                                 )
                             } else {
                                 (false, Vec::new())
@@ -6667,7 +6708,7 @@ impl NativeTerminalSurfaceHostState {
             return Ok(None);
         };
         let render_input = session_render_snapshot(&handle.lock())?;
-        Ok(Some(render_input.snapshot))
+        Ok(Some(Arc::unwrap_or_clone(render_input.snapshot)))
     }
 
     pub fn encode_attached_input(
@@ -6882,54 +6923,62 @@ impl NativeTerminalSurfaceHostState {
         tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         let session_id = request.session_id.clone();
-        // A pane that unmounted while its ResizeObserver callback was still in flight (rapid tab
-        // switching) sends geometry for a session the compositor has already released. Rendering it
-        // would rebuild a GPU surface for a pane nobody can see, so report the benign detached state
-        // and let the caller drop the update.
-        let mut hosts = self.lock_attached_hosts(&session_id)?;
-        if tuple.is_some()
-            && read_session(&self.sessions, &session_id, |session| {
-                session.active_attach_tuple.as_ref() == tuple
-            }) != Some(true)
-        {
-            return Err(NativeTerminalError::SessionDetached(session_id));
-        }
         let label = window.label().to_string();
-        let drives_size = is_size_driver(&hosts, &session_id, &label);
-        let host = match viewer_host(&hosts, &session_id, &label).is_some() {
-            true => viewer_host_mut(&mut hosts, &session_id, &label).expect("viewer host present"),
-            false => {
-                let host = insert_viewer_host(
-                    &mut hosts,
-                    &session_id,
-                    &label,
-                    NativeTerminalSurfaceHost::new(window, request.bounds.scale_factor)?,
-                );
-                // Every window presenting a session is one of its viewers; the first one owns it.
-                crate::window_registry::record_viewer(window.app_handle(), &session_id, &label);
-                host
+        let (scale_factor, cell_metrics, logical_bounds, layout, handle) = {
+            // A pane that unmounted while its ResizeObserver callback was still in flight (rapid tab
+            // switching) sends geometry for a session the compositor has already released. Rendering it
+            // would rebuild a GPU surface for a pane nobody can see, so report the benign detached state
+            // and let the caller drop the update.
+            let mut hosts = self.lock_attached_hosts(&session_id)?;
+            if tuple.is_some()
+                && read_session(&self.sessions, &session_id, |session| {
+                    session.active_attach_tuple.as_ref() == tuple
+                }) != Some(true)
+            {
+                return Err(NativeTerminalError::SessionDetached(session_id));
             }
-        };
-        request.bounds = host
-            .active_presentation_geometry()
-            .resolve(request.bounds)?;
-        let scale_factor = request.bounds.scale_factor;
-        let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
-        let logical_bounds = request.bounds;
-        // Only the size-driving viewer resizes the shared VT/PTY. Any other viewer keeps its own
-        // surface size and presents the shared grid inside it (padded or clipped).
-        let layout = if drives_size {
-            self.prepare_session_layout(request, cell_metrics)?
-        } else {
-            let own = request.layout(cell_metrics)?;
-            let shared = self.session_layout(&session_id).unwrap_or(own);
-            SurfaceCompositionLayout { physical_bounds: own.physical_bounds, cols: shared.cols, rows: shared.rows }
-        };
-        let render_input = {
+            let drives_size = is_size_driver(&hosts, &session_id, &label);
+            let host = match viewer_host(&hosts, &session_id, &label).is_some() {
+                true => {
+                    viewer_host_mut(&mut hosts, &session_id, &label).expect("viewer host present")
+                }
+                false => {
+                    let host = insert_viewer_host(
+                        &mut hosts,
+                        &session_id,
+                        &label,
+                        NativeTerminalSurfaceHost::new(window, request.bounds.scale_factor)?,
+                    );
+                    // Every window presenting a session is one of its viewers; the first one owns it.
+                    crate::window_registry::record_viewer(window.app_handle(), &session_id, &label);
+                    host
+                }
+            };
+            request.bounds = host
+                .active_presentation_geometry()
+                .resolve(request.bounds)?;
+            let scale_factor = request.bounds.scale_factor;
+            let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
+            let logical_bounds = request.bounds;
+            // Only the size-driving viewer resizes the shared VT/PTY. Any other viewer keeps its own
+            // surface size and presents the shared grid inside it (padded or clipped).
+            let layout = if drives_size {
+                self.prepare_session_layout(request, cell_metrics)?
+            } else {
+                let own = request.layout(cell_metrics)?;
+                let shared = self.session_layout(&session_id).unwrap_or(own);
+                SurfaceCompositionLayout {
+                    physical_bounds: own.physical_bounds,
+                    cols: shared.cols,
+                    rows: shared.rows,
+                }
+            };
             let handle = self.session(&session_id).ok_or(NativeTerminalError::NoValue)?;
-            let render_input = session_render_snapshot(&handle.lock())?;
-            render_input
+            (scale_factor, cell_metrics, logical_bounds, layout, handle)
         };
+        // Snapshot capture runs after releasing the global `hosts` mutex so unrelated panes
+        // do not block on this session's VT lock.
+        let render_input = session_render_snapshot(&handle.lock())?;
 
         let renderer_config = RendererConfig {
             cell_width_px: cell_metrics.width_px,
@@ -6941,17 +6990,24 @@ impl NativeTerminalSurfaceHostState {
             },
             theme: RendererTheme::from(cached_terminal_preferences().as_ref()),
         };
-        host.update_config(renderer_config)?;
-        host.layout = Some(layout);
-        host.logical_bounds = Some(logical_bounds);
-        host.update_viewport(Some(logical_bounds));
+        let receipt = {
+            let mut hosts = self.lock_attached_hosts(&session_id)?;
+            if tuple.is_some()
+                && read_session(&self.sessions, &session_id, |session| {
+                    session.active_attach_tuple.as_ref() == tuple
+                }) != Some(true)
+            {
+                return Err(NativeTerminalError::SessionDetached(session_id));
+            }
+            let host = viewer_host_mut(&mut hosts, &session_id, &label)
+                .ok_or_else(|| NativeTerminalError::SessionDetached(session_id.clone()))?;
+            host.update_config(renderer_config)?;
+            host.layout = Some(layout);
+            host.logical_bounds = Some(logical_bounds);
+            host.update_viewport(Some(logical_bounds));
 
-        let receipt = host.render_snapshot(
-            window,
-            layout,
-            &render_input,
-        )?;
-        drop(hosts);
+            host.render_snapshot(window, layout, &render_input)?
+        };
         if receipt.render_deferred && !render_input.synchronized_output {
             let schedule_info = self.attached_render_target(&session_id);
             if let Some((coordinator, slot)) = schedule_info {
@@ -7008,10 +7064,17 @@ impl NativeTerminalSurfaceHostState {
         focused: Option<bool>,
         tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
-        let mut hosts = self.lock_attached_hosts(session_id)?;
+        validate_session_id(session_id)?;
+        // Capture and publish the snapshot before acquiring the global `hosts` mutex so
+        // unrelated panes do not block on this session's VT lock.
         let (layout, logical_bounds, cell_metrics, render_input) = {
-            let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+            let handle = self
+                .session(session_id)
+                .ok_or_else(|| NativeTerminalError::SessionDetached(session_id.to_string()))?;
             let mut session = handle.lock();
+            if !session.surface_attached {
+                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+            }
             if tuple.is_some() && session.active_attach_tuple.as_ref() != tuple {
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
@@ -7037,6 +7100,14 @@ impl NativeTerminalSurfaceHostState {
             (layout, logical_bounds, cell_metrics, render_input)
         };
 
+        let mut hosts = self.lock_attached_hosts(session_id)?;
+        if tuple.is_some()
+            && read_session(&self.sessions, session_id, |session| {
+                session.active_attach_tuple.as_ref() == tuple
+            }) != Some(true)
+        {
+            return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+        }
         let label = window.label().to_string();
         let drives_size = is_size_driver(&hosts, session_id, &label);
         if let Some(host) = viewer_host_mut(&mut hosts, session_id, &label) {
@@ -7272,7 +7343,7 @@ impl NativeTerminalSurfaceHost {
         layout: SurfaceCompositionLayout,
         input: &SessionRenderInput,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
-        let snapshot = &input.snapshot;
+        let snapshot: &RenderSnapshot = &input.snapshot;
         #[cfg(test)]
         RENDER_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
         if input.synchronized_output {
@@ -7575,7 +7646,7 @@ impl GpuLeg {
         _session_id: &str,
         _frame_generation: u64,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
-        let snapshot = &input.snapshot;
+        let snapshot: &RenderSnapshot = &input.snapshot;
         let was_released = self.renderer.is_none() && self.renderer_released;
         let initial_config = self.initial_config;
         let surface = &self.surface;
@@ -11464,7 +11535,7 @@ mod tests {
     #[test]
     fn empty_preedit_leaves_snapshot_grid_unchanged() {
         let mut snapshot = preedit_test_snapshot(3, 1, 1, 0);
-        snapshot.grid[0][1].text = "existing".to_string();
+        snapshot.grid[0][1].text = "existing".into();
         snapshot.grid[0][1].bold = true;
         let original_grid = snapshot.grid.clone();
 
@@ -11477,7 +11548,7 @@ mod tests {
     fn preedit_fully_replaces_existing_cell_text_colors_and_attributes() {
         let mut snapshot = preedit_test_snapshot(2, 1, 0, 0);
         snapshot.grid[0][0] = CellSnapshot {
-            text: "old".to_string(),
+            text: "old".into(),
             wide: CellWide::SpacerHead,
             fg: Some(super::super::color::ColorRgb { r: 1, g: 2, b: 3 }),
             bg: Some(super::super::color::ColorRgb { r: 4, g: 5, b: 6 }),
@@ -11499,7 +11570,7 @@ mod tests {
         assert_eq!(
             snapshot.grid[0][0],
             CellSnapshot {
-                text: "x".to_string(),
+                text: "x".into(),
                 underline: true,
                 ..Default::default()
             }
@@ -13833,7 +13904,7 @@ mod qa_native_producer_tests {
                 if col >= cols as usize {
                     break;
                 }
-                grid[row][col].text = character.to_string();
+                grid[row][col].text = character.into();
             }
         }
         RenderSnapshot {
@@ -14149,7 +14220,7 @@ mod qa_native_producer_tests {
             scale_factor: 1.0,
         };
         let input = SessionRenderInput {
-            snapshot: grid_snapshot(&["$ echo"]),
+            snapshot: Arc::new(grid_snapshot(&["$ echo"])),
             selection: None,
             scrollbar_overlay: None,
             attention_frame: false,

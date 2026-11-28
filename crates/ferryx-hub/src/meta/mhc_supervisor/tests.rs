@@ -53,6 +53,11 @@ struct PeerFlags {
     garbage: AtomicBool,
     /// Work replies are acknowledged without ending the turn they were routed to.
     quiet_work_replies: AtomicBool,
+    compaction_refusals: AtomicUsize,
+    compaction_end_early: AtomicBool,
+    disconnect_on_open: AtomicBool,
+    disconnect_before_prompt_ack: AtomicBool,
+    disconnect_during_turn: AtomicBool,
 }
 
 /// A scripted engine. Its "disk" (session files and their ids) outlives one connection, so a
@@ -242,11 +247,26 @@ impl Peer {
                     .insert(handle.clone(), session_id.clone());
                 self.emit(ok(json!({"sessionId": handle, "state": {
                     "sessionId": session_id, "sessionFile": file, "cwd": frame["cwd"]}})));
+                if self.flags.disconnect_on_open.swap(false, Ordering::SeqCst) {
+                    self.disconnect();
+                }
             }
             "prompt" => {
                 let handle = session.clone().expect("a prompt is routed to a session");
                 let message = frame["message"].as_str().unwrap_or_default().to_owned();
                 self.release_late(&handle);
+                if self.flags.disconnect_before_prompt_ack.swap(false, Ordering::SeqCst) {
+                    self.disconnect();
+                    return;
+                }
+                if self.flags.compaction_refusals.try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1)).is_ok() {
+                    if self.flags.compaction_end_early.load(Ordering::SeqCst) {
+                        self.emit(json!({"type": "compaction_end", "sessionId": handle}));
+                    }
+                    self.emit(json!({"type": "response", "id": id, "command": kind,
+                        "success": false, "error": "Cannot submit a prompt while compaction is in progress"}));
+                    return;
+                }
                 if message.contains("LATE") {
                     self.late.lock().unwrap().insert(handle, id.clone());
                     return;
@@ -280,6 +300,10 @@ impl Peer {
                     return;
                 }
                 self.emit(json!({"type": "agent_start", "sessionId": handle}));
+                if self.flags.disconnect_during_turn.swap(false, Ordering::SeqCst) {
+                    self.disconnect();
+                    return;
+                }
                 if message.contains("HANG") {
                     self.hung.lock().unwrap().insert(handle);
                 } else if let Some(error) = message.strip_prefix("PROVIDER_ERROR:") {
@@ -322,6 +346,7 @@ impl Peer {
                     self.assistant(&handle, &format!("answer:{message}"));
                 }
             }
+            "get_state" => self.emit(ok(json!({"isCompacting": true}))),
             "abort" => {
                 self.emit(ok(Value::Null));
                 if let Some(handle) = &session {
@@ -949,6 +974,186 @@ async fn a_conversation_turn_inside_the_exit_backoff_waits_for_the_relaunch() {
     assert_eq!(count(&harness.peer.frames(), "prompt", "hello"), 1, "sent once, to the relaunched engine");
 }
 
+/// A conversation turn whose prompt bytes were never written to the engine before it exited
+/// is retried once on relaunch and answered.
+#[tokio::test(start_paused = true)]
+async fn a_never_written_owner_turn_is_resent_after_engine_relaunch() {
+    let harness = Harness::new("never-written-retry", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D1:1700.1".to_owned(),
+    };
+    harness
+        .peer
+        .flags
+        .disconnect_on_open
+        .store(true, Ordering::SeqCst);
+    let reply = tokio::time::timeout(WAIT + MIN_BACKOFF, supervisor.converse(&scope, "hello"))
+        .await
+        .expect("bounded")
+        .expect("turn succeeds on relaunch");
+    assert_eq!(reply, "answer:hello");
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 2, "relaunched once");
+    assert_eq!(
+        count(&harness.peer.frames(), "prompt", "hello"),
+        1,
+        "sent only to relaunched engine"
+    );
+}
+
+/// A conversation turn whose prompt bytes were written to the engine, but which exited before
+/// sending prompt acknowledgement, is reported with an interruption line and not resent.
+#[tokio::test(start_paused = true)]
+async fn a_written_unacked_turn_is_reported_not_resent() {
+    let harness = Harness::new("written-unacked", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D1:1700.1".to_owned(),
+    };
+    harness
+        .peer
+        .flags
+        .disconnect_before_prompt_ack
+        .store(true, Ordering::SeqCst);
+    let fault = tokio::time::timeout(WAIT, supervisor.converse(&scope, "hello"))
+        .await
+        .expect("bounded")
+        .unwrap_err();
+    assert_eq!(fault.code(), "MHC_ENGINE_EXITED");
+    match fault {
+        SupervisorFault::EngineExited { detail } => {
+            assert!(
+                detail.contains("엔진이 재시작되어 작업이 중단됐습니다"),
+                "detail: {detail}"
+            );
+        }
+        other => panic!("expected EngineExited, got {other:?}"),
+    }
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 1, "never resent");
+    assert_eq!(count(&harness.peer.frames(), "prompt", "hello"), 1);
+}
+
+/// A conversation turn whose prompt was acknowledged, but which exited before completion,
+/// is reported with an interruption line and not resent.
+#[tokio::test(start_paused = true)]
+async fn an_acked_unfinished_turn_is_reported_not_resent() {
+    let harness = Harness::new("acked-unfinished", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D1:1700.1".to_owned(),
+    };
+    harness
+        .peer
+        .flags
+        .disconnect_during_turn
+        .store(true, Ordering::SeqCst);
+    let fault = tokio::time::timeout(WAIT, supervisor.converse(&scope, "hello"))
+        .await
+        .expect("bounded")
+        .unwrap_err();
+    assert_eq!(fault.code(), "MHC_ENGINE_EXITED");
+    match fault {
+        SupervisorFault::EngineExited { detail } => {
+            assert!(
+                detail.contains("엔진이 재시작되어 작업이 중단됐습니다"),
+                "detail: {detail}"
+            );
+        }
+        other => panic!("expected EngineExited, got {other:?}"),
+    }
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 1, "never resent");
+    assert_eq!(count(&harness.peer.frames(), "prompt", "hello"), 1);
+}
+
+/// A fresh supervisor instance reopened over the persisted state directory reconciles
+/// pending turns left on disk: unwritten turns are classified as recoverable and can be resent,
+/// while written turns are classified as interrupted and never resent.
+#[tokio::test(start_paused = true)]
+async fn fresh_supervisor_over_persisted_state_dir_reconciles_pending_turns() {
+    let harness = Harness::new("reconcile-pending", all_capabilities());
+    let state_dir = harness.dir.path().join("data");
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D1:1700.1".to_owned(),
+    };
+
+    // 1. Create one unwritten pending turn (written == false).
+    let unwritten = pending::PendingTurn::create(&state_dir, &scope, "do unwritten work")
+        .await
+        .unwrap();
+    assert!(!unwritten.written());
+
+    // 2. Create one written pending turn (written == true).
+    let written = pending::PendingTurn::create(&state_dir, &scope, "do written work")
+        .await
+        .unwrap();
+    written.before_write().await.unwrap();
+    assert!(written.written());
+
+    // 3. Open a fresh MhcSupervisor over the same state dir.
+    let supervisor = harness.supervisor();
+    let reconciled = supervisor
+        .reconcile_pending("engine process crash")
+        .await
+        .unwrap();
+
+    assert_eq!(reconciled.len(), 2);
+    let (recoverable, interrupted): (Vec<_>, Vec<_>) = reconciled
+        .into_iter()
+        .partition(|turn| turn.is_recoverable());
+
+    assert_eq!(recoverable.len(), 1);
+    assert_eq!(recoverable[0].scope(), &scope);
+    assert_eq!(recoverable[0].message(), "do unwritten work");
+
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].scope(), &scope);
+    assert_eq!(interrupted[0].message(), "do written work");
+    match &interrupted[0] {
+        pending::ReconciledTurn::Interrupted { notice, .. } => {
+            assert!(
+                notice.contains("엔진이 재시작되어 작업이 중단됐습니다: engine process crash"),
+                "notice: {notice}"
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    // 4. Attempting to resend the interrupted turn fails without calling the engine.
+    let err = supervisor.resend_recovered(&interrupted[0]).await.unwrap_err();
+    assert_eq!(err.code(), "MHC_ENGINE_EXITED");
+    match err {
+        SupervisorFault::EngineExited { detail } => {
+            assert!(detail.contains("엔진이 재시작되어 작업이 중단됐습니다: engine process crash"));
+        }
+        other => panic!("expected EngineExited, got {other:?}"),
+    }
+    // Interrupted turn receipt is cleared:
+    assert!(!interrupted[0].path().exists());
+    assert_eq!(
+        count(&harness.peer.frames(), "prompt", "do written work"),
+        0,
+        "written == true turn was never resent"
+    );
+
+    // 5. Resending the recoverable turn succeeds on the fresh supervisor.
+    let reply = supervisor
+        .resend_recovered(&recoverable[0])
+        .await
+        .unwrap();
+    assert_eq!(reply, "answer:do unwritten work");
+    // Recoverable turn receipt is cleared:
+    assert!(!recoverable[0].path().exists());
+    assert_eq!(
+        count(&harness.peer.frames(), "prompt", "do unwritten work"),
+        1,
+        "recoverable turn was resent once"
+    );
+}
+
 /// Health alone tells the Slack gate (`chat::slack_supervisor::engine_ready`) whether an
 /// exited engine may take a turn, since it lets an exit without a fault through: an early
 /// exit keeps its fault there until the backoff ends and the supervising loop relaunches the
@@ -1030,6 +1235,8 @@ async fn work_tool_requests_reach_the_typed_handler_with_the_hub_scope() {
                 title: "ship it".to_owned(),
                 requirements: vec!["tests pass".to_owned()],
                 worker: WorkerPreference::Pty,
+                project: None,
+                cwd: None,
             }
         );
     }
@@ -1252,6 +1459,71 @@ async fn owner_ingest_is_serialized_and_idempotent_across_restarts() {
     );
     assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 1);
     assert!(restarted.ingest_owner(" ", text).await.is_err());
+}
+
+#[tokio::test]
+async fn a_compaction_refusal_waits_for_compaction_end() {
+    // Given: the import's ingest session refuses admission during compaction.
+    let harness = Harness::new("import-compaction", ingest_capabilities());
+    harness.peer.flags.compaction_refusals.store(1, Ordering::SeqCst);
+    let supervisor = harness.supervisor();
+    let task = tokio::spawn(async move {
+        crate::usage::with_cause(crate::usage::CallCause::new("omo_memory_import"),
+            supervisor.ingest_owner("import:one", "Prefer focused commits")).await
+    });
+    harness.peer.wait_for("compaction state read", |frames| frames.iter().any(|f| f["type"] == "get_state")).await;
+    assert!(!task.is_finished());
+    // When: only the matching session ends compaction.
+    let handle = harness.peer.of_type("prompt")[0]["sessionId"].clone();
+    harness.peer.emit(json!({"type": "compaction_end", "sessionId": "unrelated"}));
+    harness.peer.emit(json!({"type": "compaction_end", "sessionId": handle}));
+    // Then: the refusal resolves without recording this item as learned.
+    let result = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+    assert!(matches!(result, Err(SupervisorFault::Protocol { .. })));
+    assert_eq!(harness.peer.of_type("prompt").len(), 1);
+}
+
+#[tokio::test]
+async fn compaction_end_before_refusal_handling_is_not_missed() {
+    // Given: compaction_end is already queued before the refusal response.
+    let harness = Harness::new("import-compaction-early", ingest_capabilities());
+    harness.peer.flags.compaction_refusals.store(1, Ordering::SeqCst);
+    harness.peer.flags.compaction_end_early.store(true, Ordering::SeqCst);
+    let supervisor = harness.supervisor();
+    // When: an import attempts admission.
+    let result = tokio::time::timeout(WAIT, crate::usage::with_cause(
+        crate::usage::CallCause::new("omo_memory_import"),
+        supervisor.ingest_owner("import:early", "Prefer focused commits"))).await.unwrap();
+    // Then: the queued end resolves the refusal immediately, without waiting again.
+    assert!(matches!(result, Err(SupervisorFault::Protocol { .. })));
+    assert!(harness.peer.of_type("get_state").is_empty());
+}
+
+
+#[tokio::test(start_paused = true)]
+async fn a_compaction_wait_timeout_ends_the_pass() {
+    // Given: owner ingest receives a compaction refusal and the engine remains compacting.
+    let harness = Harness::new("import-compaction-timeout", ingest_capabilities());
+    harness.peer.flags.compaction_refusals.store(1, Ordering::SeqCst);
+    let supervisor = harness.supervisor();
+    let task = tokio::spawn({
+        let supervisor = supervisor.clone();
+        async move {
+            crate::usage::with_cause(
+                crate::usage::CallCause::new("omo_memory_import"),
+                supervisor.ingest_owner("import:timeout", "Prefer focused commits"),
+            ).await
+        }
+    });
+    harness.peer.wait_for("compaction state read", |frames| frames.iter().any(|frame| frame["type"] == "get_state")).await;
+
+    // When: the bounded compaction wait reaches its deadline.
+    tokio::time::advance(Duration::from_secs(10 * 60)).await;
+    let result = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+
+    // Then: the pass receives the typed timeout and the item is not submitted again.
+    assert!(matches!(result, Err(SupervisorFault::Timeout { operation }) if operation == "owner memory compaction"));
+    assert_eq!(harness.peer.of_type("prompt").len(), 1);
 }
 
 #[tokio::test]
@@ -2665,4 +2937,28 @@ async fn an_app_turn_reaches_submit_and_the_session_tools_through_the_engine() {
         .await
         .unwrap();
     assert_eq!(goals, 1);
+}
+
+#[test]
+fn a_submit_with_project_and_cwd_hints_is_parsed() {
+    let call = session_call(
+        "submit",
+        json!({"title": "t", "requirements": ["r"], "project": "ferryx", "cwd": "/home/owner/code/ferryx"}),
+    );
+    assert_eq!(
+        call,
+        WorkToolCall::Submit {
+            title: "t".to_owned(),
+            requirements: vec!["r".to_owned()],
+            worker: WorkerPreference::Any,
+            project: Some("ferryx".to_owned()),
+            cwd: Some("/home/owner/code/ferryx".to_owned()),
+        }
+    );
+    let rejection = parse_work_call(&json!({
+        "action": "submit",
+        "payload": {"title": "t", "requirements": ["r"], "repo": "x"}
+    }))
+    .unwrap_err();
+    assert_eq!(rejection.code, "SUPERVISOR_WORK_INVALID");
 }

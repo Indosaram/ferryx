@@ -65,7 +65,8 @@ use crate::endpoint::Endpoint;
 use crate::error::{KeeperError, KeeperErrorCode, KeeperResult};
 use crate::budget::Charge;
 use crate::keeper::{
-    base64_len, Keeper, SessionSignal, SpawnRequest, REPLY_FRAME_OVERHEAD_BYTES, REPLY_PAGE_BYTES,
+    base64_len, Keeper, OutputTapRegistration, OutputWaker, SessionSignal, SpawnRequest,
+    REPLY_FRAME_OVERHEAD_BYTES, REPLY_PAGE_BYTES,
 };
 use crate::protocol::{
     self, Frame, Kind, ATTACH_INLINE_MAX_BYTES, CHECKPOINT_FETCH_CHUNK_BYTES,
@@ -1172,18 +1173,37 @@ fn authorize(endpoint: &Endpoint, state: &ServerState, fd: std::os::fd::RawFd) -
     }
 }
 
-/// Waits until the socket has a frame to read, or the timeout expires.
+/// Readiness returned by [`wait_ready`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PollReady {
+    client: bool,
+    wake: bool,
+}
+
+/// Polls the client socket and, when a live output tap is armed, its event wakeup pipe.
 ///
-/// `false` means "nothing arrived", which an attached connection uses to take another look at the
-/// session's output; `true` means the next [`protocol::recv_frame`] will not wait for its first byte.
-fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> io::Result<bool> {
-    let mut poll_fd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+/// With a wake pipe armed, `timeout` is `None` (infinite wait in `poll(2)`), so an idle attached
+/// connection burns 0 Hz CPU instead of polling every [`OUTPUT_POLL`]. Passing `timeout =
+/// Some(Duration::ZERO)` performs a non-blocking readiness check on the client fd between
+/// streamed output chunks so incoming requests stay responsive without throttling throughput.
+fn wait_ready(
+    client_fd: RawFd,
+    wake_fd: Option<RawFd>,
+    timeout: Option<Duration>,
+) -> io::Result<PollReady> {
     let millis = match timeout {
         None => -1,
         Some(timeout) => timeout.as_millis().min(i32::MAX as u128) as libc::c_int,
     };
+    let mut poll_fds = [
+        libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: wake_fd.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+    ];
+    let nfds: libc::nfds_t = if wake_fd.is_some() { 2 } else { 1 };
     loop {
-        let ready = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+        poll_fds[0].revents = 0;
+        poll_fds[1].revents = 0;
+        let ready = unsafe { libc::poll(poll_fds.as_mut_ptr(), nfds, millis) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -1191,7 +1211,41 @@ fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> io::Result<bool> {
             }
             return Err(error);
         }
-        return Ok(ready > 0);
+        return Ok(PollReady {
+            client: poll_fds[0].revents != 0,
+            wake: nfds == 2 && poll_fds[1].revents != 0,
+        });
+    }
+}
+
+/// Keeps the connection's [`OutputTapRegistration`] aligned with its active [`Attachment`].
+fn sync_tap_registration(
+    keeper: &Keeper,
+    waker: Option<&Arc<OutputWaker>>,
+    tap: Option<&Attachment>,
+    registered_session: &mut Option<String>,
+    tap_reg: &mut Option<OutputTapRegistration>,
+) {
+    let Some(waker) = waker else {
+        return;
+    };
+    let next_session = tap.map(|att| att.session_id.as_str());
+    if registered_session.as_deref() == next_session {
+        return;
+    }
+    *tap_reg = None;
+    *registered_session = None;
+    if let Some(session_id) = next_session {
+        if let Ok(reg) = keeper.register_output_waker(session_id, waker) {
+            *tap_reg = Some(reg);
+            *registered_session = Some(session_id.to_owned());
+        }
+        // Wake once immediately so bytes already buffered (for example after a chunked or lossy
+        // attach) or a session that disappeared before registration are handled without waiting for
+        // future PTY output.
+        waker.wake();
+    } else {
+        waker.clear();
     }
 }
 
@@ -1503,31 +1557,65 @@ fn serve_connection(
     // until the process exits. The timeout only ever fires mid-frame, because the loop polls first.
     stream.set_read_timeout(Some(SEND_TIMEOUT))?;
 
+    // Per-connection non-blocking wake pipe. If fd exhaustion prevents creating it, fall back to
+    // the legacy periodic poll timeout instead of rejecting the connection.
+    let waker = OutputWaker::new().ok().map(Arc::new);
     let mut tap: Option<Attachment> = None;
+    let mut registered_session: Option<String> = None;
+    let mut tap_reg: Option<OutputTapRegistration> = None;
     let mut uploads = OpenUploads::new(&state.keeper);
     loop {
-        let ready = wait_readable(fd, tap.as_ref().map(|_| OUTPUT_POLL))?;
-        if !ready {
-            let Some(active) = tap.as_mut() else {
-                continue;
-            };
-            match output_run(&state.keeper, active) {
-                // The charge is owned by the value being written, so it is still held while the
-                // socket call blocks and is returned only once that call has finished - on success
-                // and on failure alike. `written` is dropped by `continue` in either case.
-                Ok(Some(written)) => {
-                    if written.write_to(fd).is_err() {
-                        return Ok(());
-                    }
-                }
-                Ok(None) => {}
-                // The tap is refused on its own channel -- a fenced epoch, a lost range, an
-                // unaffordable copy -- and ends, so the peer learns it must re-attach.
-                Err(error) => {
-                    let refused = error_frame(protocol::NO_REQUEST_ID, 0, error);
-                    tap = None;
-                    if write_run(fd, &[refused]).is_err() {
-                        return Ok(());
+        let (wake_fd, timeout) = match (&tap, &waker) {
+            (Some(_), Some(waker)) => (Some(waker.read_fd()), None),
+            (Some(_), None) => (None, Some(OUTPUT_POLL)),
+            (None, _) => (None, None),
+        };
+        let ready = wait_ready(fd, wake_fd, timeout)?;
+        if !ready.client {
+            if ready.wake || wake_fd.is_none() {
+                if let Some(active) = tap.as_mut() {
+                    loop {
+                        // Drain the wake pipe *before* reading the replay log so any bytes pushed
+                        // concurrently by the pump re-arm the pipe and cannot be missed.
+                        if let Some(waker) = &waker {
+                            waker.clear();
+                        }
+                        match output_run(&state.keeper, active) {
+                            // The charge is owned by the value being written, so it is still held
+                            // while the socket call blocks and is returned only once that call has
+                            // finished - on success and on failure alike.
+                            Ok(Some(written)) => {
+                                if written.write_to(fd).is_err() {
+                                    return Ok(());
+                                }
+                                // Check non-blockingly for a client request (or EOF) between chunks so
+                                // streaming throughput is uncapped while control verbs stay responsive.
+                                if wait_ready(fd, None, Some(Duration::ZERO))?.client {
+                                    if let Some(waker) = &waker {
+                                        waker.wake();
+                                    }
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            // The tap is refused on its own channel -- a fenced epoch, a lost range, an
+                            // unaffordable copy -- and ends, so the peer learns it must re-attach.
+                            Err(error) => {
+                                let refused = error_frame(protocol::NO_REQUEST_ID, 0, error);
+                                tap = None;
+                                sync_tap_registration(
+                                    &state.keeper,
+                                    waker.as_ref(),
+                                    None,
+                                    &mut registered_session,
+                                    &mut tap_reg,
+                                );
+                                if write_run(fd, &[refused]).is_err() {
+                                    return Ok(());
+                                }
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1541,6 +1629,18 @@ fn serve_connection(
         };
         let reply = dispatch(&state, &frame);
         tap = next_attachment(tap, &frame, reply.frames());
+        sync_tap_registration(
+            &state.keeper,
+            waker.as_ref(),
+            tap.as_ref(),
+            &mut registered_session,
+            &mut tap_reg,
+        );
+        if frame.kind == Kind::Attach && tap.is_some() {
+            if let Some(waker) = &waker {
+                waker.wake();
+            }
+        }
         uploads.track(&frame, &reply);
         // The reply owns its charge, so it is held for as long as the frames are being written and
         // returned by `reply`'s drop after the last socket call - whether that call succeeded or not.
@@ -3008,5 +3108,150 @@ mod tests {
             "the cursor is the end of the page the ack delivered, not the session head"
         );
         assert!(tap.sent < 900_000, "the head would have skipped the remainder");
+    }
+
+    #[test]
+    fn output_waker_wakes_poll_without_timeout_and_coalesces() {
+        use std::io::Write;
+
+        let (client, mut peer) = UnixStream::pair().expect("socketpair");
+        let waker = OutputWaker::new().expect("wake pipe");
+
+        assert_eq!(
+            wait_ready(client.as_raw_fd(), Some(waker.read_fd()), Some(Duration::ZERO))
+                .expect("idle poll"),
+            PollReady { client: false, wake: false }
+        );
+
+        waker.wake();
+        waker.wake();
+        assert_eq!(
+            wait_ready(client.as_raw_fd(), Some(waker.read_fd()), None).expect("woken poll"),
+            PollReady { client: false, wake: true }
+        );
+
+        waker.clear();
+        assert_eq!(
+            wait_ready(client.as_raw_fd(), Some(waker.read_fd()), Some(Duration::ZERO))
+                .expect("cleared poll"),
+            PollReady { client: false, wake: false }
+        );
+
+        peer.write_all(b"x").expect("write client byte");
+        assert_eq!(
+            wait_ready(client.as_raw_fd(), Some(waker.read_fd()), Some(Duration::ZERO))
+                .expect("client ready"),
+            PollReady { client: true, wake: false }
+        );
+    }
+
+    #[test]
+    fn serve_connection_streams_multi_chunk_live_output_via_event_wakeup_and_stays_responsive() {
+        let keeper = Arc::new(Keeper::with_default_budget("test-generation"));
+        let session_id = "s-live-wake".to_owned();
+        let expected_bytes = 96 * 1024;
+        keeper
+            .spawn(SpawnRequest {
+                session_id: session_id.clone(),
+                request_id: "request-s-live-wake".to_owned(),
+                argv: vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "read _go; dd if=/dev/zero bs=1024 count=96 2>/dev/null | tr '\\0' 'A'; exec cat"
+                        .to_owned(),
+                ],
+                env: Vec::new(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                epoch: 1,
+            })
+            .expect("spawn");
+
+        let state = Arc::new(ServerState::new(Arc::clone(&keeper), unsafe { libc::getuid() }));
+        let (client, server) = UnixStream::pair().expect("socketpair");
+        client.set_read_timeout(Some(Duration::from_secs(15))).expect("read timeout");
+        client.set_write_timeout(Some(Duration::from_secs(15))).expect("write timeout");
+        let conn_state = Arc::clone(&state);
+        let server_thread = std::thread::spawn(move || serve_connection(conn_state, server));
+
+        let send = |f: &Frame| {
+            let bytes = protocol::encode_frame(f).expect("encode");
+            protocol::write_frame_bytes(client.as_raw_fd(), &bytes).expect("write");
+        };
+
+        // Attach with live output enabled.
+        send(&frame(
+            Kind::Attach,
+            1,
+            serde_json::json!({ "sessionId": session_id, "epoch": 2, "liveOutput": true }),
+        ));
+        let ack = protocol::recv_frame(client.as_raw_fd()).expect("attach ack");
+        assert_eq!(ack.kind, Kind::AttachAck);
+        assert_eq!(ack.payload["liveOutput"], serde_json::json!(true));
+
+        // Trigger the 96 KiB (3x OUTPUT_CHUNK_BYTES) burst.
+        send(&frame(
+            Kind::Write,
+            2,
+            serde_json::json!({
+                "sessionId": session_id,
+                "epoch": 2,
+                "data": base64_encode(b"go\n"),
+            }),
+        ));
+
+        let mut write_acked = false;
+        let mut received_a = 0usize;
+        let mut output_frames = 0usize;
+        while !write_acked || received_a < expected_bytes {
+            let incoming = protocol::recv_frame(client.as_raw_fd()).expect("recv frame");
+            match incoming.kind {
+                Kind::Write => write_acked = true,
+                Kind::Output => {
+                    output_frames += 1;
+                    let chunk = base64_decode(
+                        incoming.payload["data"].as_str().expect("output data"),
+                    )
+                    .expect("base64");
+                    received_a += chunk.iter().filter(|&&b| b == b'A').count();
+                }
+                other => panic!("unexpected frame while streaming live output: {other:?}"),
+            }
+        }
+        assert!(output_frames >= 3, "96 KiB must span at least 3 OUTPUT_CHUNK_BYTES frames");
+        assert_eq!(received_a, expected_bytes);
+
+        // Control verbs remain responsive after streaming.
+        send(&frame(
+            Kind::Head,
+            3,
+            serde_json::json!({ "sessionId": session_id, "epoch": 2 }),
+        ));
+        loop {
+            let incoming = protocol::recv_frame(client.as_raw_fd()).expect("head ack");
+            if incoming.kind == Kind::Output {
+                continue;
+            }
+            assert_eq!(incoming.kind, Kind::HeadAck);
+            assert!(
+                incoming.payload["sequenceOffset"].as_u64().expect("offset")
+                    >= expected_bytes as u64
+            );
+            break;
+        }
+
+        send(&frame(
+            Kind::Detach,
+            4,
+            serde_json::json!({ "sessionId": session_id, "epoch": 2 }),
+        ));
+        let detach_ack = protocol::recv_frame(client.as_raw_fd()).expect("detach ack");
+        assert_eq!(detach_ack.kind, Kind::Detach);
+
+        drop(client);
+        server_thread.join().expect("server thread").expect("clean exit");
+        keeper.kill(&session_id).expect("kill");
+        assert_eq!(keeper.budget().used(), 0);
     }
 }

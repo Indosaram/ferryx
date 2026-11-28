@@ -47,6 +47,8 @@ export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
 /** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */
 export const ADVANCED_FEATURES_STORAGE_KEY = "ferryx.ui.advancedFeatures";
+/** General > "Reveal new worktrees in the sidebar": "true" or "false", absent means on. */
+export const SIDEBAR_REVEAL_ON_WORKTREE_CREATE_STORAGE_KEY = "ferryx.sidebar.revealOnWorktreeCreate";
 
 /**
  * The per-mode sidebar width key: `ferryx.sidebar.width.<mode>`.
@@ -174,6 +176,25 @@ export const RD_HOST_MACS_STORAGE_KEY = "ferryx.rd.hostMacs";
  * layout's: they are restored across opens and clamped by `mahoMiniPanePrefs.ts` on read.
  */
 export const MAHO_MINI_PANE_PREFS_STORAGE_KEY = "ferryx.maho.miniPane.prefs";
+
+/** Feature tips the user has already been shown (ids from `FEATURE_TIPS`). */
+export const FEATURE_TIPS_SEEN_IDS_STORAGE_KEY = "ferryx.tips.seenIds";
+/** Master off switch for feature tips. */
+export const FEATURE_TIPS_DISABLED_STORAGE_KEY = "ferryx.tips.disabled";
+/** Total agent spawns ever observed; the star-nag threshold is measured against this. */
+export const AGENTS_SPAWNED_TOTAL_STORAGE_KEY = "ferryx.agentsSpawnedTotal";
+/** Set once the user starred, opened the repo, or disabled the star prompt. */
+export const STAR_NAG_COMPLETED_STORAGE_KEY = "ferryx.starNag.completed";
+/** Spawns required after `starNagBaselineAgents` before the next prompt; doubles on each defer. */
+export const STAR_NAG_NEXT_THRESHOLD_STORAGE_KEY = "ferryx.starNag.nextThreshold";
+/** Spawn total captured when the threshold prompt was last deferred. */
+export const STAR_NAG_BASELINE_AGENTS_STORAGE_KEY = "ferryx.starNag.baselineAgents";
+/** Epoch ms before which the threshold prompt stays silent. */
+export const STAR_NAG_DEFERRED_UNTIL_STORAGE_KEY = "ferryx.starNag.deferredUntil";
+/** App version whose agent-value-moment was already used. */
+export const STAR_NAG_VALUE_MOMENT_APP_VERSION_STORAGE_KEY = "ferryx.starNag.valueMomentAppVersion";
+/** Master off switch for the star prompt. */
+export const STAR_NAG_DISABLED_STORAGE_KEY = "ferryx.starNag.disabled";
 
 
 

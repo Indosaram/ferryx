@@ -25,7 +25,7 @@ fn make_test_snapshot(cols: u16, rows: u16, text: &str) -> RenderSnapshot {
                 " ".to_string()
             };
             row_cells.push(CellSnapshot {
-                text: ch,
+                text: ch.into(),
                 fg: None,
                 bg: None,
                 fg_ident: None,
@@ -369,8 +369,9 @@ fn test_renderer_cursor_visual_style_preference_and_unfocused_hollow() {
     )
     .unwrap();
 
-    // Should have 10 cell background rects + 1 underline rect decoration = 11 total
-    assert_eq!(bg_focused.len(), 10 + 1);
+    // Merged 10-cell background span (index 0) + 1 underline cursor decoration (index 1) = 2 total
+    assert_eq!(bg_focused.len(), 1 + 1);
+    assert_eq!(bg_focused[0].rect, [0.0, 0.0, 100.0, 20.0]);
     let underline_dec = &bg_focused[1];
     assert_eq!(underline_dec.rect, [0.0, 18.0, 10.0, 2.0]);
     assert_eq!(underline_dec.color, [1.0, 0.0, 0.0, 1.0]);
@@ -389,8 +390,9 @@ fn test_renderer_cursor_visual_style_preference_and_unfocused_hollow() {
     )
     .unwrap();
 
-    // BlockHollow adds 4 border rects right after cell 0 (indices 1..4) + 9 other cells = 14 total
-    assert_eq!(bg_unfocused.len(), 10 + 4);
+    // Merged 10-cell background span (index 0) + 4 BlockHollow border rects (indices 1..=4) = 5 total
+    assert_eq!(bg_unfocused.len(), 1 + 4);
+    assert_eq!(bg_unfocused[0].rect, [0.0, 0.0, 100.0, 20.0]);
     assert_eq!(bg_unfocused[1].color, [1.0, 0.0, 0.0, 1.0]);
     assert_eq!(bg_unfocused[2].color, [1.0, 0.0, 0.0, 1.0]);
     assert_eq!(bg_unfocused[3].color, [1.0, 0.0, 0.0, 1.0]);

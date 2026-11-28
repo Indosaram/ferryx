@@ -8,7 +8,7 @@ pub struct ScreenInput {
     pub title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Region {
     WholeRecent,
     OscTitle,

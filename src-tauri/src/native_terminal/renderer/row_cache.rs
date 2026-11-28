@@ -11,6 +11,8 @@ use crate::native_terminal::snapshot::RenderSnapshot;
 pub struct RowCacheManager {
     entries: Vec<RowCacheEntry>,
     last_atlas_generation: u64,
+    scratch_bg: Vec<RectInstance>,
+    scratch_glyph: Vec<GlyphInstance>,
 }
 
 impl RowCacheManager {
@@ -18,7 +20,21 @@ impl RowCacheManager {
         Self {
             entries: Vec::new(),
             last_atlas_generation: 0,
+            scratch_bg: Vec::new(),
+            scratch_glyph: Vec::new(),
         }
+    }
+
+    pub fn bg_instances(&self) -> &[RectInstance] {
+        &self.scratch_bg
+    }
+
+    pub fn glyph_instances(&self) -> &[GlyphInstance] {
+        &self.scratch_glyph
+    }
+
+    pub fn glyph_instances_mut(&mut self) -> &mut [GlyphInstance] {
+        &mut self.scratch_glyph
     }
 
     pub fn update_and_flatten(
@@ -29,7 +45,7 @@ impl RowCacheManager {
         atlas: &mut GlyphAtlas,
         queue: &wgpu::Queue,
         prepared: Option<&PreparedGlyphs>,
-    ) -> Result<(Vec<RectInstance>, Vec<GlyphInstance>, u16, u16), NativeTerminalError> {
+    ) -> Result<(u16, u16), NativeTerminalError> {
         if atlas.generation != self.last_atlas_generation {
             self.entries.clear();
             self.last_atlas_generation = atlas.generation;
@@ -68,14 +84,17 @@ impl RowCacheManager {
             }
         }
 
-        let total_cells = (snapshot.cols as usize) * (snapshot.rows as usize);
-        let mut all_bg = Vec::with_capacity(total_cells + 16);
-        let mut all_glyph = Vec::new();
+        let total_bg: usize = self.entries.iter().map(|e| e.bg_instances.len()).sum();
+        let total_glyph: usize = self.entries.iter().map(|e| e.glyph_instances.len()).sum();
+        self.scratch_bg.clear();
+        self.scratch_bg.reserve(total_bg);
+        self.scratch_glyph.clear();
+        self.scratch_glyph.reserve(total_glyph);
         for entry in &self.entries {
-            all_bg.extend_from_slice(&entry.bg_instances);
-            all_glyph.extend_from_slice(&entry.glyph_instances);
+            self.scratch_bg.extend_from_slice(&entry.bg_instances);
+            self.scratch_glyph.extend_from_slice(&entry.glyph_instances);
         }
 
-        Ok((all_bg, all_glyph, rebuilt, reused))
+        Ok((rebuilt, reused))
     }
 }

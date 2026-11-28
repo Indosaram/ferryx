@@ -2317,6 +2317,9 @@ impl DaemonClient {
                             }
                         }
                         stream_line.clear();
+                        if stream_line.capacity() > 128 * 1024 {
+                            stream_line.shrink_to(64 * 1024);
+                        }
                     }
                 });
 
@@ -4743,6 +4746,9 @@ impl DaemonClient {
                             }
                         }
                         stream_line.clear();
+                        if stream_line.capacity() > 128 * 1024 {
+                            stream_line.shrink_to(64 * 1024);
+                        }
                     }
                 });
 

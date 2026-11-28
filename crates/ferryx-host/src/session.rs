@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use fxsh::frame::{Frame, FLAG_ERROR, FLAG_EVENT, FLAG_RESPONSE};
 use fxsh::messages::*;
 use fxsh::types::*;
-use fxsh::{state_digest, Codec, Uuid};
+use fxsh::{Codec, Digest, Uuid};
 use portable_pty::{MasterPty, PtySize};
 use session_core::budget::RequestKey;
 use session_core::input::{InputLedger, WriteError, MAX_CHUNK, MAX_UNWRITTEN_EPOCHS};
@@ -205,8 +205,10 @@ pub struct Session {
     write_inflight: bool,
     exit: Option<ExitInfo>,
     pending_exit: Option<ExitInfo>,
-    flush_scheduled: bool,
+    flush_deadline: Option<tokio::time::Instant>,
+    compress_deadline: Option<tokio::time::Instant>,
     compress: CompressTimer,
+    cached_digest: Option<(u64, Digest)>,
 }
 
 pub fn start(parts: SessionParts) {
@@ -271,8 +273,10 @@ pub fn start(parts: SessionParts) {
         write_inflight: false,
         exit: None,
         pending_exit: None,
-        flush_scheduled: false,
+        flush_deadline: None,
+        compress_deadline: None,
         compress: CompressTimer::default(),
+        cached_digest: None,
     };
     tokio::spawn(session.run(rx));
 }
@@ -312,8 +316,44 @@ fn empty_delta() -> Delta {
 impl Session {
     async fn run(mut self, mut rx: UnboundedReceiver<Event>) {
         self.host.register_alive(self.id);
-        while let Some(ev) = rx.recv().await {
-            self.on_event(ev);
+        let flush_sleep = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(flush_sleep);
+        let mut flush_armed: Option<tokio::time::Instant> = None;
+
+        let compress_sleep = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(compress_sleep);
+        let mut compress_armed: Option<tokio::time::Instant> = None;
+
+        loop {
+            if self.flush_deadline != flush_armed {
+                if let Some(deadline) = self.flush_deadline {
+                    flush_sleep.as_mut().reset(deadline);
+                }
+                flush_armed = self.flush_deadline;
+            }
+            if self.compress_deadline != compress_armed {
+                if let Some(deadline) = self.compress_deadline {
+                    compress_sleep.as_mut().reset(deadline);
+                }
+                compress_armed = self.compress_deadline;
+            }
+
+            tokio::select! {
+                ev = rx.recv() => match ev {
+                    Some(ev) => self.on_event(ev),
+                    None => break,
+                },
+                () = &mut flush_sleep, if self.flush_deadline.is_some() => {
+                    self.flush_deadline = None;
+                    flush_armed = None;
+                    self.flush_deltas();
+                }
+                () = &mut compress_sleep, if self.compress_deadline.is_some() => {
+                    self.compress_deadline = None;
+                    compress_armed = None;
+                    self.on_compress_tick();
+                }
+            }
         }
         self.gate.close();
     }
@@ -386,28 +426,43 @@ impl Session {
                 }
             }
             Event::Flush => {
-                self.flush_scheduled = false;
+                self.flush_deadline = None;
                 self.flush_deltas();
             }
-            Event::Compress => match self.compress.fire(Instant::now()) {
-                CompressFire::Step => {
-                    let step = self.term.compress_step();
-                    let next = self.compress.after_step(step);
-                    self.start_compress_timer(next);
-                }
-                CompressFire::Wait(remaining) => self.start_compress_timer(Some(remaining)),
-                CompressFire::Idle => {}
-            },
+            Event::Compress => {
+                self.compress_deadline = None;
+                self.on_compress_tick();
+            }
         }
     }
 
-    fn start_compress_timer(&self, delay: Option<Duration>) {
-        let Some(delay) = delay else { return };
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let _ = tx.send(Event::Compress);
-        });
+    fn on_compress_tick(&mut self) {
+        match self.compress.fire(Instant::now()) {
+            CompressFire::Step => {
+                let step = self.term.compress_step();
+                let next = self.compress.after_step(step);
+                self.start_compress_timer(next);
+            }
+            CompressFire::Wait(remaining) => self.start_compress_timer(Some(remaining)),
+            CompressFire::Idle => {}
+        }
+    }
+
+    fn start_compress_timer(&mut self, delay: Option<Duration>) {
+        if let Some(delay) = delay {
+            self.compress_deadline = Some(tokio::time::Instant::now() + delay);
+        }
+    }
+
+    fn state_digest(&mut self) -> Digest {
+        if let Some((rev, digest)) = self.cached_digest {
+            if rev == self.revision {
+                return digest;
+            }
+        }
+        let digest = self.term.replica.state_digest();
+        self.cached_digest = Some((self.revision, digest));
+        digest
     }
 
     fn frame(&self, request_id: u64, flags: u16, message: Message) -> Vec<u8> {
@@ -499,15 +554,10 @@ impl Session {
     }
 
     fn schedule_flush(&mut self) {
-        if self.flush_scheduled {
+        if self.flush_deadline.is_some() {
             return;
         }
-        self.flush_scheduled = true;
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(FLUSH_INTERVAL).await;
-            let _ = tx.send(Event::Flush);
-        });
+        self.flush_deadline = Some(tokio::time::Instant::now() + FLUSH_INTERVAL);
     }
 
     fn flush_deltas(&mut self) {
@@ -627,8 +677,8 @@ impl Session {
     }
 
     fn build_snapshot(&mut self, sub_id: u64, snapshot_id: u64, reservation_id: u64) {
+        let digest = self.state_digest();
         let state = self.term.replica.to_body();
-        let digest = state_digest(&state);
         let next = self.term.next_ui_event_id();
         let revision = self.revision;
         let incarnation = self.incarnation;
@@ -689,7 +739,7 @@ impl Session {
                 self.apply(u.subscription_id, fx, None);
             }
             Message::GetSessionState => {
-                let body = self.term.replica.to_body();
+                let digest = self.state_digest();
                 let (epoch, accepted, committed) = {
                     let e = self.ledger.current_epoch();
                     let (a, c, _, _) = self.ledger.epoch_state(e).unwrap_or((0, 0, 0, false));
@@ -698,7 +748,7 @@ impl Session {
                 let state = SessionState {
                     session_incarnation: self.incarnation,
                     state_revision: self.revision,
-                    state_digest: state_digest(&body),
+                    state_digest: digest,
                     input_epoch: epoch,
                     input_accepted: accepted,
                     input_committed: committed,

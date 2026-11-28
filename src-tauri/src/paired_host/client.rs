@@ -1435,6 +1435,83 @@ fn gateway_path(segments: &[String], query: &[(String, String)]) -> Result<Strin
     })
 }
 
+const CAPABILITIES_CACHE_TTL: Duration = Duration::from_secs(30);
+const CAPABILITIES_CACHE_MAX_ENTRIES: usize = 128;
+
+type CapabilitiesCacheKey = (String, String, u64);
+
+static SHARED_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static SUPERVISOR_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static CAPABILITIES_CACHE: std::sync::LazyLock<
+    parking_lot::Mutex<
+        std::collections::HashMap<CapabilitiesCacheKey, (m::Capabilities, std::time::Instant)>,
+    >,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn shared_http() -> reqwest::Client {
+    SHARED_HTTP
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(65))
+                .build()
+                .expect("native machine HTTP")
+        })
+        .clone()
+}
+
+fn supervisor_http() -> reqwest::Client {
+    SUPERVISOR_HTTP
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(120))
+                .build()
+                .expect("native supervisor HTTP")
+        })
+        .clone()
+}
+
+fn capabilities_cache_key(host: &HostView) -> CapabilitiesCacheKey {
+    let endpoint = super::direct_client::request_base(host)
+        .map(|base| base.url.to_string())
+        .unwrap_or_else(|_| host.host_id.clone());
+    (endpoint, host.host_id.clone(), host.generation.0)
+}
+
+fn cached_capabilities(key: &CapabilitiesCacheKey) -> Option<m::Capabilities> {
+    let mut cache = CAPABILITIES_CACHE.lock();
+    if let Some((caps, fetched_at)) = cache.get(key) {
+        if fetched_at.elapsed() < CAPABILITIES_CACHE_TTL {
+            return Some(caps.clone());
+        }
+        cache.remove(key);
+    }
+    None
+}
+
+fn store_cached_capabilities(key: CapabilitiesCacheKey, caps: m::Capabilities) {
+    let mut cache = CAPABILITIES_CACHE.lock();
+    if cache.len() >= CAPABILITIES_CACHE_MAX_ENTRIES && !cache.contains_key(&key) {
+        cache.retain(|_, (_, fetched_at)| fetched_at.elapsed() < CAPABILITIES_CACHE_TTL);
+        if cache.len() >= CAPABILITIES_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+    }
+    cache.insert(key, (caps, std::time::Instant::now()));
+}
+
+fn evict_capabilities_for_host(host_id: &str, generation: Epoch) {
+    let mut cache = CAPABILITIES_CACHE.lock();
+    cache.retain(|(_, cached_host_id, cached_gen), _| {
+        !(cached_host_id == host_id && *cached_gen == generation.0)
+    });
+}
+
 #[derive(Clone)]
 pub struct MachineClient {
     http: reqwest::Client,
@@ -1447,13 +1524,7 @@ impl Default for MachineClient {
 impl MachineClient {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(65))
-                .build()
-                .expect("native machine HTTP"),
+            http: shared_http(),
         }
     }
     /// Reattach never creates a session. Authorization and target validation use
@@ -2108,6 +2179,17 @@ impl MachineClient {
         };
         let result = self.capabilities_round_trip(service, &host, &lease).await;
         drop(lease);
+        // Keep the short-TTL capabilities cache in sync with probe outcomes.
+        match &result {
+            Ok(caps)
+                if caps.machine_id == host.machine_id
+                    && caps.access_scope == m::AccessScope::Machine
+                    && caps.permission == m::Permission::Control =>
+            {
+                store_cached_capabilities(capabilities_cache_key(&host), caps.clone());
+            }
+            _ => evict_capabilities_for_host(&host.host_id, host.generation),
+        }
         // A host that moved re-advertises on every successful round-trip, so the probe loop is
         // what keeps its routing hints current between pairings. The host's current list
         // replaces the stored one; origins it stopped naming expire on their own.
@@ -2159,6 +2241,7 @@ impl MachineClient {
         drop(lease);
         match probe_outcome(&result, &host) {
             ProbeOutcome::Unauthorized => {
+                evict_capabilities_for_host(&host_id, generation);
                 let code = result.err().map(|error| error.code).unwrap_or_default();
                 service
                     .revoke_confirmed_auth_failure(host_id, generation, &code)
@@ -2200,44 +2283,60 @@ impl MachineClient {
         let (host, lease) = service
             .capture_operation(request.host_id.clone(), request.generation)
             .await?;
-        let caps = match self
-            .http_rotating(&host, &lease, &Operation::Capabilities.route()?)
-            .await
+        let cache_key = capabilities_cache_key(&host);
+        let bypass_cache = matches!(request.operation, Operation::Capabilities);
+        let (caps, from_cache) = match (!bypass_cache)
+            .then(|| cached_capabilities(&cache_key))
+            .flatten()
         {
-            Ok((bytes, rotated)) => {
-                adopt_rotation(service, &lease, rotated).await;
-                decode::<m::Capabilities>(&bytes)?
-            }
-            Err(error) => {
-                // Only a "cannot reach the host" answer says anything about reachability.
-                if probe_outcome(&Err(error.clone()), &host) == ProbeOutcome::Unreachable {
-                    service
-                        .record_reachability(
-                            request.host_id.clone(),
-                            request.generation,
-                            ReachabilityState::Offline,
-                            None,
-                        )
-                        .await;
+            Some(cached) => (cached, true),
+            None => match self
+                .http_rotating(&host, &lease, &Operation::Capabilities.route()?)
+                .await
+            {
+                Ok((bytes, rotated)) => {
+                    adopt_rotation(service, &lease, rotated).await;
+                    (decode::<m::Capabilities>(&bytes)?, false)
                 }
-                return Err(error);
-            }
+                Err(error) => {
+                    evict_capabilities_for_host(&request.host_id, request.generation);
+                    // Only a "cannot reach the host" answer says anything about reachability.
+                    if probe_outcome(&Err(error.clone()), &host) == ProbeOutcome::Unreachable {
+                        service
+                            .record_reachability(
+                                request.host_id.clone(),
+                                request.generation,
+                                ReachabilityState::Offline,
+                                None,
+                            )
+                            .await;
+                    }
+                    return Err(error);
+                }
+            },
         };
         if caps.machine_id != host.machine_id {
+            evict_capabilities_for_host(&request.host_id, request.generation);
             return Err(ClientError::local("PAIRED_HOST_WRONG_MACHINE"));
         }
-        // The operation path just reached the host itself.
-        service
-            .record_reachability(
-                request.host_id.clone(),
-                request.generation,
-                ReachabilityState::Online,
-                None,
-            )
-            .await;
+        if !from_cache {
+            // The operation path just reached the host itself.
+            service
+                .record_reachability(
+                    request.host_id.clone(),
+                    request.generation,
+                    ReachabilityState::Online,
+                    None,
+                )
+                .await;
+        }
         if caps.access_scope != m::AccessScope::Machine || caps.permission != m::Permission::Control
         {
+            evict_capabilities_for_host(&request.host_id, request.generation);
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
+        }
+        if !from_cache {
+            store_cached_capabilities(cache_key, caps.clone());
         }
         // Identity and scope are confirmed: negotiate the direct path in the background.
         super::direct_client::kick(&self.http, &host, &lease);
@@ -2312,6 +2411,12 @@ impl MachineClient {
             {
                 Ok(bytes) => bytes,
                 Err(mut e) => {
+                    if matches!(
+                        e.code.as_str(),
+                        "HOST_UNAVAILABLE" | "TIMEOUT" | "UNAUTHORIZED" | "TOKEN_EXPIRED"
+                    ) {
+                        evict_capabilities_for_host(&request.host_id, request.generation);
+                    }
                     if let Some(id) = &route.request_id {
                         e.relabel_transport_uncertainty(id);
                     } else if let Some(id) = request.operation.agent_control_mutation_id() {
@@ -2708,13 +2813,7 @@ pub async fn supervisor_secure_request(
         headers.push(("Content-Type", "application/json".to_owned()));
     }
     let relay_origin = crate::remote::relay_client::live_relay_url(&host.relay_origin);
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|_| ClientError::local("INTERNAL_ERROR"))?;
+    let http = supervisor_http();
     let target = super::secure_http::SecureTarget {
         http: &http,
         host_id: &host.host_id,
@@ -2758,5 +2857,53 @@ mod rd_dgram_header_tests {
         assert_eq!(rd_dgram_channel_id(&with("")), None);
         assert_eq!(rd_dgram_channel_id(&with("1ffffffffffffffff")), None, "overflows u64");
         assert_eq!(rd_dgram_channel_id(&HeaderMap::new()), None);
+    }
+}
+
+#[cfg(test)]
+mod capabilities_cache_tests {
+    use super::*;
+
+    fn sample_caps(machine_id: &str) -> m::Capabilities {
+        m::Capabilities {
+            api_version: 1,
+            machine_id: machine_id.into(),
+            daemon_epoch: Epoch(1),
+            platform: m::Platform::Linux,
+            access_scope: m::AccessScope::Machine,
+            permission: m::Permission::Control,
+            capabilities: vec!["machineWorkspaceV1".into()],
+            limits: m::Limits {
+                directory_entries: 1000,
+                terminal_sessions: 64,
+            },
+            published_origins: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn capabilities_cache_hits_and_isolates_by_endpoint_host_and_generation() {
+        let key_a = (
+            "http://127.0.0.1:41001".to_owned(),
+            "http://127.0.0.1:41001/host/cache-test".to_owned(),
+            1u64,
+        );
+        let key_b = (
+            "http://127.0.0.1:41002".to_owned(),
+            "http://127.0.0.1:41001/host/cache-test".to_owned(),
+            1u64,
+        );
+        let key_gen2 = (
+            "http://127.0.0.1:41001".to_owned(),
+            "http://127.0.0.1:41001/host/cache-test".to_owned(),
+            2u64,
+        );
+        let caps = sample_caps("cache-test");
+        store_cached_capabilities(key_a.clone(), caps.clone());
+        assert_eq!(cached_capabilities(&key_a), Some(caps));
+        assert_eq!(cached_capabilities(&key_b), None);
+        assert_eq!(cached_capabilities(&key_gen2), None);
+        evict_capabilities_for_host(&key_a.1, Epoch(1));
+        assert_eq!(cached_capabilities(&key_a), None);
     }
 }

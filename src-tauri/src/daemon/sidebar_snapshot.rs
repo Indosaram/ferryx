@@ -8,7 +8,10 @@
 //! never restored from disk; the structure (projects, order, collapsed set) persists.
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub const SIDEBAR_MODEL_MAX_BYTES: usize = 512 * 1024;
 const SIDEBAR_SCHEMA_VERSION: u64 = 1;
@@ -45,10 +48,17 @@ impl SidebarRejection {
 #[cfg(test)]
 type LifecycleProbe = Arc<dyn Fn(&str) -> std::io::Result<()> + Send + Sync>;
 
+#[derive(Default)]
+struct WriterState {
+    /// Last model written to disk, used to skip redundant atomic writes when only `signals`
+    /// (and the daemon-assigned `revision`) changed.
+    last_persisted: Option<Arc<Value>>,
+}
+
 pub struct SidebarSnapshotStore {
     path: PathBuf,
     /// Serializes revision assignment and the disk write; readers never wait on disk I/O.
-    writer: Mutex<()>,
+    writer: Mutex<WriterState>,
     current: RwLock<Option<Arc<Value>>>,
     /// Never held over persistence. Closing takes writer before presence; opening only presence.
     presence: Mutex<DesktopPresence>,
@@ -91,7 +101,9 @@ impl SidebarSnapshotStore {
         };
         Self {
             path,
-            writer: Mutex::new(()),
+            writer: Mutex::new(WriterState {
+                last_persisted: current.clone(),
+            }),
             current: RwLock::new(current),
             presence: Mutex::new(DesktopPresence::default()),
             desktop_stream_count: tokio::sync::watch::channel(0).0,
@@ -117,7 +129,7 @@ impl SidebarSnapshotStore {
         if !accepts(&model) {
             return Err(SidebarRejection::UnsupportedSchema);
         }
-        let _writer = self.writer.lock();
+        let mut writer = self.writer.lock();
         let presence = self.presence.lock();
         if presence.epoch != admitted_epoch {
             return Err(SidebarRejection::StaleLifetime);
@@ -126,13 +138,6 @@ impl SidebarSnapshotStore {
             strip_live(&mut model);
         }
         drop(presence);
-        if serde_json::to_vec(&model)
-            .map_err(std::io::Error::from)?
-            .len()
-            > SIDEBAR_MODEL_MAX_BYTES
-        {
-            return Err(SidebarRejection::TooLarge);
-        }
         let previous = self
             .model()
             .and_then(|current| current["revision"].as_u64())
@@ -141,15 +146,34 @@ impl SidebarSnapshotStore {
             .checked_add(1)
             .ok_or(SidebarRejection::RevisionExhausted)?;
         model["revision"] = Value::from(revision);
-        #[cfg(test)]
-        self.probe("publishPersist")?;
-        crate::remote::auth::write_private_json(&self.path, &model)?;
+        // Serialize once for both the size bound and the disk payload.
+        let serialized = serde_json::to_vec(&model).map_err(std::io::Error::from)?;
+        if serialized.len() > SIDEBAR_MODEL_MAX_BYTES {
+            return Err(SidebarRejection::TooLarge);
+        }
+        let needs_persist = !writer
+            .last_persisted
+            .as_deref()
+            .is_some_and(|prior| same_structure(prior, &model));
+        if needs_persist {
+            #[cfg(test)]
+            self.probe("publishPersist")?;
+            write_private_bytes(&self.path, &serialized)?;
+        }
         // Open must not wait on writer/disk. Fence its invalidation again at memory commit.
         let presence = self.presence.lock();
         if presence.epoch != admitted_epoch {
+            if needs_persist {
+                // Disk now holds a fenced write; force the next valid publish to rewrite it.
+                writer.last_persisted = None;
+            }
             return Err(SidebarRejection::StaleLifetime);
         }
-        *self.current.write() = Some(Arc::new(model));
+        let model = Arc::new(model);
+        if needs_persist {
+            writer.last_persisted = Some(Arc::clone(&model));
+        }
+        *self.current.write() = Some(model);
         announce(events, revision);
         drop(presence);
         Ok(revision)
@@ -185,7 +209,7 @@ impl SidebarSnapshotStore {
         &self,
         events: &crate::remote::machine_events::MachineEvents,
     ) -> Result<(), SidebarRejection> {
-        let _writer = self.writer.lock();
+        let mut writer = self.writer.lock();
         let mut presence = self.presence.lock();
         presence.streams = presence.streams.saturating_sub(1);
         presence.epoch = presence.epoch.wrapping_add(1);
@@ -196,7 +220,9 @@ impl SidebarSnapshotStore {
             if let Some(model) = invalidated? {
                 #[cfg(test)]
                 self.probe("dropLivePersist")?;
-                crate::remote::auth::write_private_json(&self.path, &*model)?;
+                let serialized = serde_json::to_vec(&*model).map_err(std::io::Error::from)?;
+                write_private_bytes(&self.path, &serialized)?;
+                writer.last_persisted = Some(model);
             }
             Ok(())
         })();
@@ -253,6 +279,124 @@ fn accepts(model: &Value) -> bool {
     model.get("schemaVersion").and_then(Value::as_u64) == Some(SIDEBAR_SCHEMA_VERSION)
 }
 
+/// True when two sidebar models carry identical durable structure (every top-level member except
+/// the ephemeral `signals` object and the daemon-assigned `revision`).
+fn same_structure(a: &Value, b: &Value) -> bool {
+    let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else {
+        return false;
+    };
+    let is_durable = |key: &str| key != LIVE_SIGNALS_KEY && key != "revision";
+    let a_count = a.keys().filter(|key| is_durable(key)).count();
+    let b_count = b.keys().filter(|key| is_durable(key)).count();
+    if a_count != b_count {
+        return false;
+    }
+    a.iter()
+        .filter(|(key, _)| is_durable(key))
+        .all(|(key, value)| b.get(key) == Some(value))
+}
+
+/// Atomically writes already-serialized JSON bytes with the same cross-process flock, owner-only
+/// permissions, temp-file fsync, atomic rename, and parent-directory fsync semantics as
+/// `crate::remote::auth::write_private_json`.
+fn write_private_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    let _lock = {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options.open(path.with_extension("lock"))?;
+        file.lock()?;
+        file
+    };
+    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write as _;
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&temp, path)?;
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "sidebar_snapshot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod persist_dedup_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn store_skips_disk_rewrite_when_only_live_signals_change() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data/desktop-sidebar.v1.json");
+        let store = SidebarSnapshotStore::load(path.clone());
+        let events = crate::remote::machine_events::MachineEvents::default();
+        store.desktop_stream_opened(&events);
+
+        let persist_calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&persist_calls);
+        *store.lifecycle_probe.write() = Some(Arc::new(move |stage| {
+            if stage == "publishPersist" {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }));
+
+        let base = |unread: bool, label: &str| {
+            serde_json::json!({
+                "schemaVersion": 1,
+                "revision": 0,
+                "projects": [{"groupId": "g1", "label": label}],
+                "signals": {"unread": unread}
+            })
+        };
+
+        // First publish writes disk.
+        assert_eq!(store.store(base(false, "proj-a"), &events).unwrap(), 1);
+        assert_eq!(persist_calls.load(Ordering::Relaxed), 1);
+
+        // Signal-only change updates in-memory model & revision, without touching disk.
+        assert_eq!(store.store(base(true, "proj-a"), &events).unwrap(), 2);
+        assert_eq!(persist_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(store.model().unwrap()["signals"]["unread"], true);
+        assert_eq!(store.model().unwrap()["revision"], 2);
+
+        // Structural change writes disk again.
+        assert_eq!(store.store(base(true, "proj-b"), &events).unwrap(), 3);
+        assert_eq!(persist_calls.load(Ordering::Relaxed), 2);
+        let reloaded = SidebarSnapshotStore::load(path);
+        assert_eq!(reloaded.model().unwrap()["projects"][0]["label"], "proj-b");
+    }
+}

@@ -175,4 +175,41 @@ describe("BrowserPane native webview lifecycle", () => {
       HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
     }
   });
+
+  it("skips ResizeObserver when hidden and avoids duplicate setBrowserBounds IPC on identical rects", async () => {
+    const observeSpy = vi.fn();
+    let observerCallback: ResizeObserverCallback | null = null;
+    class TrackingResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        observerCallback = cb;
+      }
+      observe = observeSpy;
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    vi.stubGlobal("ResizeObserver", TrackingResizeObserver);
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 1;
+    });
+    try {
+      const { rerender } = render(
+        <BrowserPane tab={tab} visible={false} onNavigate={() => undefined} onReload={() => undefined} />,
+      );
+      await waitFor(() => expect(browserMocks.setBrowserVisible).toHaveBeenCalledWith("browser-1", false));
+      expect(observeSpy).not.toHaveBeenCalled();
+
+      rerender(<BrowserPane tab={tab} visible={true} onNavigate={() => undefined} onReload={() => undefined} />);
+      await waitFor(() => expect(browserMocks.setBrowserBounds).toHaveBeenCalledTimes(1));
+      expect(observeSpy).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        observerCallback?.([], {} as ResizeObserver);
+      });
+      expect(browserMocks.setBrowserBounds).toHaveBeenCalledTimes(1);
+    } finally {
+      rafSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
 });

@@ -1,5 +1,5 @@
 import { PanelLeftClose, Plus } from "lucide-react";
-import { Fragment, type ReactNode } from "react";
+import { createContext, Fragment, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
 import { IconButton } from "../ui/IconButton";
@@ -13,6 +13,13 @@ import { SidebarViewTabs, type SidebarViewId } from "./SidebarViewTabs";
 import { SidebarEmptyStatus, SidebarWorktreeRow, SidebarWorktreesEmpty, type SidebarDensity } from "./SidebarWorktreeRow";
 
 const IDLE_ROW: SidebarRowLive = { active: false, slot: null, supervisorTyping: false };
+
+/**
+ * Lets a mounted supervisor panel inside `SidebarView` know whether the Supervisor tab is active
+ * without coupling `SidebarView` to desktop-only host components. Defaults to `true` so standalone
+ * renders (tests, mobile home) behave as visible.
+ */
+export const SidebarSupervisorVisibilityContext = createContext(true);
 
 /** Every action is optional except selection and collapse; an undefined action hides its control. */
 export type SidebarViewActions = {
@@ -162,7 +169,9 @@ export function SidebarView({
           hidden={activeView !== "supervisor" || undefined}
           className={cn("min-h-0 flex-1 flex-col", activeView === "supervisor" ? "flex" : "hidden")}
         >
-          {supervisor.content}
+          <SidebarSupervisorVisibilityContext.Provider value={activeView === "supervisor"}>
+            {supervisor.content}
+          </SidebarSupervisorVisibilityContext.Provider>
         </div>
       ) : null}
 

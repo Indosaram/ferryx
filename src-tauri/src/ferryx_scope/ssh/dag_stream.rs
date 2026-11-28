@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, Weak},
     time::Duration,
 };
 
@@ -92,7 +92,7 @@ struct Subscription {
 }
 
 pub struct DagStreams {
-    subscriptions: Mutex<HashMap<String, Arc<Subscription>>>,
+    subscriptions: Arc<Mutex<HashMap<String, Arc<Subscription>>>>,
 }
 
 struct Probe {
@@ -137,16 +137,16 @@ fn build_frame(
     })
 }
 
-fn frame_size_valid(
-    id: &str,
-    sequence: u64,
-    runs: &[Value],
-    dropped: &[Value],
-    resync: bool,
-    more: bool,
-) -> bool {
-    let frame = build_frame(id, sequence, runs, dropped, resync, more);
-    serde_json::to_vec(&frame).map(|b| b.len() <= MAX_BATCH_BYTES).unwrap_or(false)
+#[inline]
+fn incremental_addition(item_bytes: usize, existing_count: usize) -> usize {
+    item_bytes + usize::from(existing_count > 0)
+}
+
+#[inline]
+fn json_byte_len(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|b| b.len())
+        .unwrap_or(MAX_BATCH_BYTES)
 }
 
 // Content hashing (not mtime) is what makes a same-timestamp rewrite visible.
@@ -188,7 +188,7 @@ fn is_checkpoint(path: &Path) -> bool {
 impl DagStreams {
     pub fn new() -> Self {
         Self {
-            subscriptions: Mutex::new(HashMap::new()),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -234,7 +234,9 @@ impl DagStreams {
         }
 
         let watched = subscription.clone();
-        std::thread::spawn(move || watch(watched));
+        let watched_id = id.clone();
+        let registry = Arc::downgrade(&self.subscriptions);
+        std::thread::spawn(move || watch(watched, watched_id, registry));
 
         deliver(&subscription, &id)
     }
@@ -280,11 +282,13 @@ impl DagStreams {
     }
 
     pub fn unsubscribe(&self, id: &str) -> Result<Value, String> {
-        let removed = self
-            .subscriptions
-            .lock()
-            .map_err(|e| e.to_string())?
-            .remove(id);
+        let removed = {
+            let mut subscriptions = self.subscriptions.lock().map_err(|e| e.to_string())?;
+            subscriptions.retain(|key, s| {
+                key == id || !s.state.lock().map(|st| st.closed).unwrap_or(true)
+            });
+            subscriptions.remove(id)
+        };
         let subscription = removed.ok_or_else(|| "NOT_FOUND".to_string())?;
         close(&subscription);
         Ok(json!({ "subscriptionId": id, "closed": true }))
@@ -418,6 +422,15 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
 
     let mut runs: Vec<Value> = Vec::new();
     let mut dropped: Vec<Value> = Vec::new();
+    let base_seq = subscription
+        .state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .sequence
+        + 1;
+    // Track exact JSON byte size incrementally from the empty-frame envelope
+    // ("more":false is 1 byte longer than "more":true, so this bounds both).
+    let mut frame_bytes = json_byte_len(&build_frame(id, base_seq, &[], &[], resync, false));
 
     loop {
         let name = {
@@ -451,13 +464,6 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
             }
         }
 
-        let next_seq = subscription
-            .state
-            .lock()
-            .map_err(|e| e.to_string())?
-            .sequence
-            + 1;
-
         let Some(content) = probed.content else {
             if dropped.len() >= MAX_DROPPED_PER_FRAME {
                 let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
@@ -469,14 +475,13 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
                 "error": "SNAPSHOT_TOO_LARGE",
                 "bytes": probed.len,
             });
-            let mut candidate_dropped = dropped.clone();
-            candidate_dropped.push(drop_entry.clone());
-            if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true)
-                && (!runs.is_empty() || !dropped.is_empty()) {
-                    let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
-                    state.pending.insert(name);
-                    break;
-                }
+            let added = incremental_addition(json_byte_len(&drop_entry), dropped.len());
+            if frame_bytes + added > MAX_BATCH_BYTES && (!runs.is_empty() || !dropped.is_empty()) {
+                let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                state.pending.insert(name);
+                break;
+            }
+            frame_bytes += added;
             dropped.push(drop_entry);
             let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
             state.known.insert(name, probed.hash);
@@ -496,23 +501,23 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
                         "error": "SNAPSHOT_TOO_LARGE",
                         "bytes": projected_bytes as u64,
                     });
-                    let mut candidate_dropped = dropped.clone();
-                    candidate_dropped.push(drop_entry.clone());
-                    if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true)
-                        && (!runs.is_empty() || !dropped.is_empty()) {
-                            let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
-                            state.pending.insert(name);
-                            break;
-                        }
+                    let added = incremental_addition(json_byte_len(&drop_entry), dropped.len());
+                    if frame_bytes + added > MAX_BATCH_BYTES
+                        && (!runs.is_empty() || !dropped.is_empty())
+                    {
+                        let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                        state.pending.insert(name);
+                        break;
+                    }
+                    frame_bytes += added;
                     dropped.push(drop_entry);
                     let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
                     state.known.insert(name, probed.hash);
                     continue;
                 }
 
-                let mut candidate_runs = runs.clone();
-                candidate_runs.push(projected_val.clone());
-                if !frame_size_valid(id, next_seq, &candidate_runs, &dropped, resync, true) {
+                let added = incremental_addition(projected_bytes, runs.len());
+                if frame_bytes + added > MAX_BATCH_BYTES {
                     if !runs.is_empty() || !dropped.is_empty() {
                         // Batched: defer to subsequent frame so current frame stays within 512KiB
                         let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
@@ -525,16 +530,19 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
                         state.pending.insert(name);
                         break;
                     }
-                    dropped.push(json!({
+                    let drop_entry = json!({
                         "file": name.clone(),
                         "error": "SNAPSHOT_TOO_LARGE",
                         "bytes": projected_bytes as u64,
-                    }));
+                    });
+                    frame_bytes += incremental_addition(json_byte_len(&drop_entry), dropped.len());
+                    dropped.push(drop_entry);
                     let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
                     state.known.insert(name, probed.hash);
                     continue;
                 }
 
+                frame_bytes += added;
                 runs.push(projected_val);
             }
             Err(error) => {
@@ -549,14 +557,15 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
                     "bytes": probed.len,
                     "detail": error,
                 });
-                let mut candidate_dropped = dropped.clone();
-                candidate_dropped.push(drop_entry.clone());
-                if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true)
-                    && (!runs.is_empty() || !dropped.is_empty()) {
-                        let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
-                        state.pending.insert(name);
-                        break;
-                    }
+                let added = incremental_addition(json_byte_len(&drop_entry), dropped.len());
+                if frame_bytes + added > MAX_BATCH_BYTES
+                    && (!runs.is_empty() || !dropped.is_empty())
+                {
+                    let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+                    state.pending.insert(name);
+                    break;
+                }
+                frame_bytes += added;
                 dropped.push(drop_entry);
             }
         }
@@ -564,16 +573,38 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
         state.known.insert(name, probed.hash);
     }
 
-    let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
-    state.sequence += 1;
-    state.last_activity = std::time::Instant::now();
-    let more = !state.pending.is_empty() || state.resync;
-    Ok(build_frame(id, state.sequence, &runs, &dropped, resync, more))
+    let frame = {
+        let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
+        state.sequence += 1;
+        state.last_activity = std::time::Instant::now();
+        let more = !state.pending.is_empty() || state.resync;
+        build_frame(id, state.sequence, &runs, &dropped, resync, more)
+    };
+    debug_assert!(
+        serde_json::to_vec(&frame).is_ok_and(|b| b.len() <= MAX_BATCH_BYTES)
+            || (runs.is_empty() && dropped.len() <= 1),
+        "incremental dag_stream frame size exceeded MAX_BATCH_BYTES"
+    );
+    Ok(frame)
 }
 
-fn watch(subscription: Arc<Subscription>) {
+fn watch(
+    subscription: Arc<Subscription>,
+    id: String,
+    registry: Weak<Mutex<HashMap<String, Arc<Subscription>>>>,
+) {
+    watch_with_ttl(subscription, id, registry, IDLE_TTL);
+}
+
+fn watch_with_ttl(
+    subscription: Arc<Subscription>,
+    id: String,
+    registry: Weak<Mutex<HashMap<String, Arc<Subscription>>>>,
+    idle_ttl: Duration,
+) {
     let mut stamps: HashMap<String, Stamp> = HashMap::new();
     let mut last_sweep = std::time::Instant::now();
+    let watch_interval = WATCH_INTERVAL.min(idle_ttl.max(Duration::from_millis(1)));
     loop {
         {
             let Ok(state) = subscription.state.lock() else {
@@ -625,11 +656,19 @@ fn watch(subscription: Arc<Subscription>) {
             if state.closed {
                 return;
             }
-            if state.waiters == 0 && state.last_activity.elapsed() >= IDLE_TTL {
-                // Abandoned subscription: release the watcher rather than scan
-                // a directory nobody is reading.
+            if state.waiters == 0 && state.last_activity.elapsed() >= idle_ttl {
+                // Abandoned subscription: release the watcher and remove the expired
+                // entry from the registry rather than leaking it until another call.
                 state.closed = true;
                 subscription.signal.notify_all();
+                drop(state);
+                if let Some(subscriptions) = registry.upgrade() {
+                    if let Ok(mut map) = subscriptions.lock() {
+                        if map.get(&id).is_some_and(|cur| Arc::ptr_eq(cur, &subscription)) {
+                            map.remove(&id);
+                        }
+                    }
+                }
                 return;
             }
             let mut changed = false;
@@ -658,11 +697,82 @@ fn watch(subscription: Arc<Subscription>) {
         };
         if subscription
             .signal
-            .wait_timeout_while(state, WATCH_INTERVAL, |s| !s.closed)
+            .wait_timeout_while(state, watch_interval, |s| !s.closed)
             .map(|(s, _)| s.closed)
             .unwrap_or(true)
         {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_and_ttl_tests {
+    use super::*;
+
+    #[test]
+    fn incremental_frame_size_matches_exact_serialized_length() {
+        let id = "sub-123";
+        let seq = 42;
+        let mut runs = Vec::new();
+        let mut dropped = Vec::new();
+        let mut tracked = json_byte_len(&build_frame(id, seq, &[], &[], false, false));
+
+        for i in 0..5 {
+            let run = json!({ "runId": format!("r-{i}"), "status": "running" });
+            tracked += incremental_addition(json_byte_len(&run), runs.len());
+            runs.push(run);
+            assert_eq!(
+                tracked,
+                json_byte_len(&build_frame(id, seq, &runs, &dropped, false, false))
+            );
+        }
+        for i in 0..3 {
+            let drop = json!({ "file": format!("bad-{i}.json"), "error": "INVALID_CHECKPOINT_JSON" });
+            tracked += incremental_addition(json_byte_len(&drop), dropped.len());
+            dropped.push(drop);
+            assert_eq!(
+                tracked,
+                json_byte_len(&build_frame(id, seq, &runs, &dropped, false, false))
+            );
+        }
+    }
+
+    #[test]
+    fn watch_removes_expired_subscription_from_registry_on_idle_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let streams = DagStreams::new();
+        let id = "sub-expire".to_string();
+        let subscription = Arc::new(Subscription {
+            runs_dir: dir.path().to_path_buf(),
+            owner: DETACHED_CONNECTION,
+            state: Mutex::new(State {
+                known: HashMap::new(),
+                pending: BTreeSet::new(),
+                resync: false,
+                resync_cursor: None,
+                sequence: 1,
+                closed: false,
+                waiters: 0,
+                last_activity: std::time::Instant::now() - Duration::from_secs(5),
+            }),
+            signal: Condvar::new(),
+        });
+        streams
+            .subscriptions
+            .lock()
+            .unwrap()
+            .insert(id.clone(), subscription.clone());
+        assert_eq!(streams.subscription_count(), 1);
+
+        let registry = Arc::downgrade(&streams.subscriptions);
+        watch_with_ttl(subscription.clone(), id, registry, Duration::from_millis(1));
+
+        assert!(subscription.state.lock().unwrap().closed);
+        assert_eq!(
+            streams.subscription_count(),
+            0,
+            "expired subscription must be removed from DagStreams.subscriptions"
+        );
     }
 }

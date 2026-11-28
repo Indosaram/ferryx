@@ -34,7 +34,7 @@ fn test_renderer_dirty_update_sequence_and_bounded_glyph_atlas_cache() {
     // Sequence of dirty updates mutating cursor position and cells across repeated frames
     for i in 0..50 {
         snapshot.cursor.x = (i % 80) as u16;
-        snapshot.grid[0][0].text = format!("{}", (i % 10));
+        snapshot.grid[0][0].text = format!("{}", (i % 10)).into();
 
         let frame = renderer
             .render_snapshot(&snapshot, None)

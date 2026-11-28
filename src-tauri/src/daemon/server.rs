@@ -4250,6 +4250,104 @@ pub(crate) struct SequencedStream {
     pub(crate) hub: Arc<TerminalOutputHub>,
 }
 
+/// Optional status watch stream interleaved directly inside `pump_sequenced_stream_inner`,
+/// avoiding an intermediate `tokio::io::duplex` + `BufReader::lines()` wrapper per subscriber.
+enum StreamStatusSource {
+    Paired {
+        updates: tokio::sync::watch::Receiver<crate::terminal::paired_runtime::PairedRecoveryOutcome>,
+        descriptor: crate::terminal::paired_daemon::Descriptor,
+        initial: crate::terminal::paired_runtime::PairedRecoveryOutcome,
+    },
+    Remote {
+        updates: tokio::sync::watch::Receiver<crate::terminal::remote::RemoteSessionDetails>,
+    },
+}
+
+impl StreamStatusSource {
+    async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        match self {
+            Self::Paired { updates, .. } => updates.changed().await,
+            Self::Remote { updates } => updates.changed().await,
+        }
+    }
+
+    fn write_current_frame(&mut self, session_id: &str, buf: &mut Vec<u8>) -> bool {
+        buf.clear();
+        match self {
+            Self::Paired {
+                updates,
+                descriptor,
+                initial,
+            } => {
+                let outcome = updates.borrow_and_update().clone();
+                if outcome.backend_session_id != initial.backend_session_id
+                    || outcome.daemon_epoch != initial.daemon_epoch
+                    || outcome.incarnation != initial.incarnation
+                {
+                    return false;
+                }
+                let state = match outcome.state.as_str() {
+                    "proxy_attached" => crate::terminal::remote::RemoteConnectionState::Connected,
+                    "affirmative_exit" => crate::terminal::remote::RemoteConnectionState::Expired,
+                    "blocked" => crate::terminal::remote::RemoteConnectionState::Disconnected,
+                    _ => crate::terminal::remote::RemoteConnectionState::Reconnecting,
+                };
+                if state == crate::terminal::remote::RemoteConnectionState::Connected
+                    && outcome.generation.is_none()
+                {
+                    return false;
+                }
+                let failure = outcome
+                    .blocked_reason
+                    .as_ref()
+                    .map(|reason| crate::terminal::remote::RemoteFailure {
+                        kind: crate::terminal::remote::RemoteFailureKind::Disconnected,
+                        message: reason.clone(),
+                    })
+                    .or_else(|| {
+                        (outcome.state == "blocked").then(|| crate::terminal::remote::RemoteFailure {
+                            kind: crate::terminal::remote::RemoteFailureKind::Disconnected,
+                            message: "blocked".to_string(),
+                        })
+                    });
+                let status = DaemonStreamMessage::RemoteStatus {
+                    session_id: Cow::Borrowed(session_id),
+                    state,
+                    generation: outcome.generation.unwrap_or(0),
+                    failure,
+                    replay_gap: None,
+                    descriptor: Some(serde_json::json!({
+                        "backendSessionId": outcome.backend_session_id,
+                        "hostId": descriptor.host_id,
+                        "target": descriptor.target,
+                        "incarnation": outcome.incarnation,
+                        "daemonEpoch": outcome.daemon_epoch,
+                    })),
+                };
+                if serde_json::to_writer(&mut *buf, &status).is_err() {
+                    return false;
+                }
+            }
+            Self::Remote { updates } => {
+                let details = updates.borrow_and_update().clone();
+                let status = DaemonStreamMessage::RemoteStatus {
+                    session_id: Cow::Borrowed(session_id),
+                    state: details.state,
+                    generation: details.generation,
+                    failure: details.failure,
+                    replay_gap: details.replay_gap,
+                    descriptor: Some(serde_json::json!(details.descriptor)),
+                };
+                if serde_json::to_writer(&mut *buf, &status).is_err() {
+                    return false;
+                }
+            }
+        }
+        buf.push(b'\n');
+        true
+    }
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -4393,6 +4491,7 @@ impl DaemonServer {
             size_drivers: Arc::new(Mutex::new(HashMap::new())),
             layouts: Arc::new(Mutex::new(HashMap::new())),
             layout_generation: tokio::sync::watch::channel(0).0,
+            lineage_generation: tokio::sync::watch::channel(0).0,
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
@@ -4464,6 +4563,7 @@ impl DaemonServer {
         );
         session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
         remote_state.start_panel_push_dispatch();
+        remote_state.start_goal_report_push();
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -4524,14 +4624,28 @@ impl DaemonServer {
             // straight to the desktop, not the owner channel, which machine sockets also forward.
             // The gateway is held weakly so this relay never keeps it alive.
             let panel_state = Arc::downgrade(&remote_state);
+            let prune_sessions = Arc::downgrade(&session_service);
             let session_tx = remote_event_tx.clone();
             runtime.spawn(async move {
                 let mut filter = crate::agent_control::events::PromptChangeFilter::default();
                 let mut shown = std::collections::HashMap::<String, Option<String>>::new();
                 let mut panel = crate::remote::machine_events::PanelTransitions::default();
+                let mut observations_seen: u64 = 0;
                 loop {
                     match observations.recv().await {
                         Ok(observation) => {
+                            observations_seen = observations_seen.wrapping_add(1);
+                            if observations_seen % 64 == 0 && !shown.is_empty() {
+                                if let Some(sessions) = prune_sessions.upgrade() {
+                                    let current = observation.session_id.as_str();
+                                    shown.retain(|session_id, _| {
+                                        session_id.as_str() == current
+                                            || sessions.session_is_live(session_id)
+                                    });
+                                } else {
+                                    break;
+                                }
+                            }
                             if panel.moved(&observation) {
                                 if let Some(state) = panel_state.upgrade() {
                                     tokio::spawn(relay_panel_session(
@@ -4552,7 +4666,10 @@ impl DaemonServer {
                             }
                         }
                         // Lost pushes: the next reading of every session is a transition again.
-                        Err(broadcast::error::RecvError::Lagged(_)) => panel.clear(),
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            panel.clear();
+                            shown.clear();
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -5765,6 +5882,8 @@ impl DaemonServer {
             // listing. An idle pane's foreground cannot change without this marker changing,
             // so the full listing only runs on a change, a due probe, or the slow refresh.
             let mut sampled_markers = HashMap::<String, Option<u32>>::new();
+            let mut markers = HashMap::<String, Option<u32>>::new();
+            let mut requested_revisions = HashMap::<String, u64>::new();
             let mut last_snapshot_at: Option<tokio::time::Instant> = None;
             // Re-explore-4 G2: per-pane discovery of the provider session an agent that reports
             // nothing holds. Probes run off the tick and post back whether to stop.
@@ -5791,12 +5910,16 @@ impl DaemonServer {
                             .map(|session| (id, session))
                     })
                     .collect();
-                transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
-                keyboard_modes.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
-                probes.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
-                server
-                    .protocol_reporters
-                    .retain(|id| sessions.iter().any(|(live, _)| live == id));
+                {
+                    let live_ids: std::collections::HashSet<&str> =
+                        sessions.iter().map(|(id, _)| id.as_str()).collect();
+                    transitions.retain(|id, _| live_ids.contains(id.as_str()));
+                    keyboard_modes.retain(|id, _| live_ids.contains(id.as_str()));
+                    probes.retain(|id, _| live_ids.contains(id.as_str()));
+                    server
+                        .protocol_reporters
+                        .retain(|id| live_ids.contains(id));
+                }
                 while let Ok((id, agent_pid, finished)) = probe_done.try_recv() {
                     if let Some(probe) = probes.get_mut(&id).filter(|p| p.agent_pid == agent_pid) {
                         probe.in_flight = false;
@@ -5806,16 +5929,17 @@ impl DaemonServer {
                 // No live session means nothing to classify: skip the process listing.
                 if sessions.is_empty() {
                     sampled_markers.clear();
+                    markers.clear();
+                    requested_revisions.clear();
                     continue;
                 }
-                let markers: HashMap<String, Option<u32>> = sessions
-                    .iter()
-                    .map(|(id, session)| (id.clone(), foreground_marker(session)))
-                    .collect();
-                // Every tick's group, listing or not: a child group sampled before an OSC 7501
-                // report attributed to the shell's group marks that report as the child's.
-                for (id, marker) in &markers {
-                    server.protocol_reporters.sampled(id, *marker);
+                markers.clear();
+                for (id, session) in &sessions {
+                    let marker = foreground_marker(session);
+                    // Every tick's group, listing or not: a child group sampled before an OSC 7501
+                    // report attributed to the shell's group marks that report as the child's.
+                    server.protocol_reporters.sampled(id, marker);
+                    markers.insert(id.clone(), marker);
                 }
                 let now = tokio::time::Instant::now();
                 let probe_due = probes
@@ -5827,21 +5951,19 @@ impl DaemonServer {
                 if markers == sampled_markers && !probe_due && !refresh_due {
                     continue;
                 }
-                sampled_markers = markers;
+                std::mem::swap(&mut sampled_markers, &mut markers);
                 last_snapshot_at = Some(now);
                 // Each session's newest OSC 7501 revision, read before the listing is requested:
                 // a report applied by then was written by a process that already existed, so a
                 // listing without any such process proves it gone. A report applied later is
                 // never released by this listing. The mirror's own revision also covers records
                 // that changed no summary and so never reached the reporters.
-                let requested_revisions: HashMap<String, u64> = sessions
-                    .iter()
-                    .map(|(id, _)| {
-                        let mirror =
-                            server.terminal_service.output_hub().program_status_revision(id);
-                        (id.clone(), server.protocol_reporters.newest(id).max(mirror))
-                    })
-                    .collect();
+                requested_revisions.clear();
+                for (id, _) in &sessions {
+                    let mirror = server.terminal_service.output_hub().program_status_revision(id);
+                    requested_revisions
+                        .insert(id.clone(), server.protocol_reporters.newest(id).max(mirror));
+                }
                 let capture = Arc::clone(&capture);
                 let observations = crate::ipc::run_blocking(move || {
                     // One process listing per tick. On Windows that listing is a full
@@ -9197,8 +9319,8 @@ impl DaemonServer {
                         },
                     }
                 }
-                Ok(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id }) => {
-                    let input = ferryx_hub::supervisor::transcript::ConverseInput { text, mentions, request_id };
+                Ok(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id, question_id }) => {
+                    let input = ferryx_hub::supervisor::transcript::ConverseInput { text, mentions, request_id, question_id };
                     match crate::hub_runtime::supervisor_converse(
                         self.remote_state(),
                         crate::hub_runtime::SupervisorCaller::Desktop,
@@ -10766,147 +10888,93 @@ impl DaemonServer {
             .get_session(&session_id)
             .and_then(|session| session.incarnation().map(str::to_owned));
         let paired = self.terminal_service.paired();
-        if let Some(mut updates) = paired.subscribe_recovery_outcome(&session_id) {
-            let Some(descriptor) = paired.descriptor(&session_id) else { return; };
+        let status_source = if let Some(updates) = paired.subscribe_recovery_outcome(&session_id) {
+            let Some(descriptor) = paired.descriptor(&session_id) else {
+                return;
+            };
             let initial = updates.borrow().clone();
-            if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch { return; }
-            let (input, output) = tokio::io::duplex(64 * 1024);
-            let pump = Self::pump_sequenced_stream_with_agent_state(
-                SequencedStream { session_id: session_id.clone(), rx, hub },
-                output, agent_rx, client_reader, incarnation, exit_status,
-            );
-            tokio::pin!(pump);
-            let mut lines = BufReader::new(input).lines();
-            let mut writer = BufWriter::new(writer);
-            loop {
-                let outcome = updates.borrow_and_update().clone();
-                if outcome.backend_session_id != initial.backend_session_id
-                    || outcome.daemon_epoch != initial.daemon_epoch
-                    || outcome.incarnation != initial.incarnation { return; }
-                let state = match outcome.state.as_str() {
-                    "proxy_attached" => crate::terminal::remote::RemoteConnectionState::Connected,
-                    "affirmative_exit" => crate::terminal::remote::RemoteConnectionState::Expired,
-                    "blocked" => crate::terminal::remote::RemoteConnectionState::Disconnected,
-                    _ => crate::terminal::remote::RemoteConnectionState::Reconnecting,
-                };
-                if state == crate::terminal::remote::RemoteConnectionState::Connected && outcome.generation.is_none() {
-                    return;
-                }
-                let failure = outcome
-                    .blocked_reason
-                    .as_ref()
-                    .map(|reason| crate::terminal::remote::RemoteFailure {
-                        kind: crate::terminal::remote::RemoteFailureKind::Disconnected,
-                        message: reason.clone(),
-                    })
-                    .or_else(|| {
-                        (outcome.state == "blocked").then(|| crate::terminal::remote::RemoteFailure {
-                            kind: crate::terminal::remote::RemoteFailureKind::Disconnected,
-                            message: "blocked".to_string(),
-                        })
-                    });
-                let status = DaemonStreamMessage::RemoteStatus {
-                    session_id: Cow::Borrowed(&session_id),
-                    state,
-                    generation: outcome.generation.unwrap_or(0),
-                    failure,
-                    replay_gap: None,
-                    descriptor: Some(serde_json::json!({
-                        "backendSessionId": outcome.backend_session_id,
-                        "hostId": descriptor.host_id,
-                        "target": descriptor.target,
-                        "incarnation": outcome.incarnation,
-                        "daemonEpoch": outcome.daemon_epoch,
-                    })),
-                };
-                let Ok(frame) = crate::daemon::protocol::encode_daemon_stream_frame(&status) else { return; };
-                if writer.write_all(frame.as_bytes()).await.is_err() || writer.flush().await.is_err() { return; }
-                loop {
-                    tokio::select! {
-                        _ = &mut pump => { let _ = writer.flush().await; return; },
-                        changed = updates.changed() => { if changed.is_err() { let _ = writer.flush().await; return; } break; },
-                        line = lines.next_line() => {
-                            let Ok(Some(mut line)) = line else { let _ = writer.flush().await; return; };
-                            line.push('\n');
-                            if writer.write_all(line.as_bytes()).await.is_err() { return; }
-                            // Flush once no further complete line is already buffered from the
-                            // pump, so a burst goes out in one write and nothing waits unflushed.
-                            if !lines.get_ref().buffer().contains(&b'\n') && writer.flush().await.is_err() { return; }
-                        }
-                    }
-                }
+            if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch {
+                return;
             }
-        }
-        let Ok(mut updates) = self.terminal_service.remote().subscribe(&session_id) else {
-            Self::pump_sequenced_stream_with_agent_state(
-                SequencedStream { session_id, rx, hub },
-                writer,
-                agent_rx,
-                client_reader,
-                incarnation,
-                exit_status,
-            )
-            .await;
-            return;
+            Some(StreamStatusSource::Paired {
+                updates,
+                descriptor,
+                initial,
+            })
+        } else if let Ok(updates) = self.terminal_service.remote().subscribe(&session_id) {
+            Some(StreamStatusSource::Remote { updates })
+        } else {
+            None
         };
-        let (input, output) = tokio::io::duplex(64 * 1024);
-        let pump = Self::pump_sequenced_stream_with_agent_state(
-            SequencedStream { session_id: session_id.clone(), rx, hub },
-            output,
+        Self::pump_sequenced_stream_inner(
+            SequencedStream { session_id, rx, hub },
+            writer,
             agent_rx,
             client_reader,
             incarnation,
             exit_status,
-        );
-        tokio::pin!(pump);
-        let mut lines = BufReader::new(input).lines();
-        let mut writer = BufWriter::new(writer);
-        loop {
-            let details = updates.borrow_and_update().clone();
-            let status = DaemonStreamMessage::RemoteStatus {
-                session_id: Cow::Borrowed(&session_id),
-                state: details.state,
-                generation: details.generation,
-                failure: details.failure,
-                replay_gap: details.replay_gap,
-                descriptor: Some(serde_json::json!(details.descriptor)),
-            };
-            let Ok(frame) = crate::daemon::protocol::encode_daemon_stream_frame(&status) else {
-                break;
-            };
-            if writer.write_all(frame.as_bytes()).await.is_err() || writer.flush().await.is_err() {
-                break;
-            }
-            loop {
-                tokio::select! {
-                    _ = &mut pump => { let _ = writer.flush().await; return; },
-                    changed = updates.changed() => { if changed.is_err() { let _ = writer.flush().await; return; } break; },
-                    line = lines.next_line() => {
-                        let Ok(Some(mut line)) = line else { let _ = writer.flush().await; return; };
-                        line.push('\n');
-                        if writer.write_all(line.as_bytes()).await.is_err() { return; }
-                        // Flush once no further complete line is already buffered from the
-                        // pump, so a burst goes out in one write and nothing waits unflushed.
-                        if !lines.get_ref().buffer().contains(&b'\n') && writer.flush().await.is_err() { return; }
-                    }
-                }
-            }
-        }
+            status_source,
+        )
+        .await;
     }
 
     pub(crate) async fn pump_sequenced_stream_with_agent_state<W, R>(
         stream: SequencedStream,
         writer: W,
-        mut agent_state_rx: Option<AgentStateSubscription>,
-        mut client_reader: Option<R>,
+        agent_state_rx: Option<AgentStateSubscription>,
+        client_reader: Option<R>,
         incarnation: Option<String>,
         exit_status: Option<crate::terminal::output_hub::ExitStatusSlot>,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        Self::pump_sequenced_stream_inner(
+            stream,
+            writer,
+            agent_state_rx,
+            client_reader,
+            incarnation,
+            exit_status,
+            None,
+        )
+        .await
+    }
+
+    async fn pump_sequenced_stream_inner<W, R>(
+        stream: SequencedStream,
+        writer: W,
+        mut agent_state_rx: Option<AgentStateSubscription>,
+        mut client_reader: Option<R>,
+        incarnation: Option<String>,
+        exit_status: Option<crate::terminal::output_hub::ExitStatusSlot>,
+        mut status_source: Option<StreamStatusSource>,
+    ) where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+        R: tokio::io::AsyncRead + Unpin + Send,
+    {
         let SequencedStream { session_id, mut rx, hub } = stream;
         let mut writer = BufWriter::new(writer);
+        // Reused serialization buffer: one allocation serves the whole stream instead of a
+        // fresh String per frame (audit H2: optimized payload encoding). Shrink back after a
+        // large burst or lag-snapshot frame so one spike cannot pin megabytes per subscriber.
+        let mut frame_buf = Vec::with_capacity(8 * 1024);
+        #[inline]
+        fn reset_frame_buf(buf: &mut Vec<u8>) {
+            buf.clear();
+            if buf.capacity() > 128 * 1024 {
+                buf.shrink_to(64 * 1024);
+            }
+        }
+        if let Some(source) = status_source.as_mut() {
+            if !source.write_current_frame(&session_id, &mut frame_buf) {
+                return;
+            }
+            if writer.write_all(&frame_buf).await.is_err() || writer.flush().await.is_err() {
+                return;
+            }
+            reset_frame_buf(&mut frame_buf);
+        }
         if let Some(snapshot) = agent_state_rx
             .as_ref()
             .and_then(|subscription| subscription.snapshot.as_ref())
@@ -10931,9 +10999,6 @@ impl DaemonServer {
             }
         }
         let mut last_seen_sequence: Option<u64> = None;
-        // Reused serialization buffer: one allocation serves the whole stream instead of a
-        // fresh String per frame (audit H2: optimized payload encoding).
-        let mut frame_buf = Vec::with_capacity(8 * 1024);
         // A signal drained from `rx` (lag or close) that must be processed by the main
         // loop on the next iteration instead of inside the batch drain.
         let mut pending: Option<
@@ -10966,6 +11031,34 @@ impl DaemonServer {
                                 }
                             }
                         }
+                        status_changed = async {
+                            match status_source.as_mut() {
+                                Some(source) => source.changed().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            match status_changed {
+                                Ok(()) => {
+                                    let Some(source) = status_source.as_mut() else {
+                                        break;
+                                    };
+                                    if !source.write_current_frame(&session_id, &mut frame_buf) {
+                                        break;
+                                    }
+                                    if writer.write_all(&frame_buf).await.is_err()
+                                        || writer.flush().await.is_err()
+                                    {
+                                        break;
+                                    }
+                                    reset_frame_buf(&mut frame_buf);
+                                }
+                                Err(_) => {
+                                    let _ = writer.flush().await;
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
                         report = async {
                             match agent_state_rx.as_mut() {
                                 Some(subscription) => subscription.receiver.recv().await,
@@ -10997,6 +11090,7 @@ impl DaemonServer {
                                     if writer.flush().await.is_err() {
                                         break;
                                     }
+                                    reset_frame_buf(&mut frame_buf);
                                 }
                                 Ok(_) => {}
                                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -11018,6 +11112,7 @@ impl DaemonServer {
                                             if serde_json::to_writer(&mut frame_buf, &msg).is_err() { break; }
                                             frame_buf.push(b'\n');
                                             if writer.write_all(&frame_buf).await.is_err() || writer.flush().await.is_err() { break; }
+                                            reset_frame_buf(&mut frame_buf);
                                         }
                                     }
                                 }
@@ -11124,6 +11219,7 @@ impl DaemonServer {
                     if writer.flush().await.is_err() {
                         break;
                     }
+                    reset_frame_buf(&mut frame_buf);
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // Re-subscribe with sequence after last_seen_sequence to recover replay gap
@@ -11179,6 +11275,7 @@ impl DaemonServer {
                         if writer.flush().await.is_err() {
                             break;
                         }
+                        reset_frame_buf(&mut frame_buf);
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
@@ -11210,7 +11307,7 @@ mod ssh_survival_tests;
 #[path = "handover_accounting_tests.rs"]
 mod handover_accounting_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
 
@@ -16252,6 +16349,24 @@ mod instance_lock_deadline_tests {
                 assert!(descriptor.is_some());
             }
             other => panic!("expected RemoteStatus, got: {other:?}"),
+        }
+        // Verify sequenced Output frames flow directly through the same pump without a duplex wrapper.
+        server
+            .terminal_service
+            .output_hub()
+            .publish(&session_id, b"hello-paired".to_vec());
+        let output_frame = tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
+            .await
+            .expect("timeout reading output frame")
+            .expect("read error")
+            .expect("eof");
+        let output_msg: DaemonStreamMessage =
+            serde_json::from_str(&output_frame).expect("valid output frame");
+        match output_msg {
+            DaemonStreamMessage::Output { data, .. } => {
+                assert_eq!(data.as_ref(), b"hello-paired");
+            }
+            other => panic!("expected Output after RemoteStatus, got: {other:?}"),
         }
         pump_task.abort();
     }

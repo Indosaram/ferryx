@@ -16,7 +16,7 @@ use async_trait::async_trait;
 
 use super::autonomy::DecisionGate;
 use super::panel_contract::{
-    ActionLog, Escalation, HealthClassifier, RuleStore, SessionControl, SessionRef,
+    ActionLog, Escalation, FleetSession, HealthClassifier, RuleStore, SessionControl, SessionRef,
 };
 use crate::error::Result;
 use crate::meta::mhc_supervisor::FleetSource;
@@ -50,12 +50,24 @@ impl Clock for SystemClock {
 pub trait PauseGate: Send + Sync {
     /// `true` while paused. A pause flag that cannot be read counts as paused.
     async fn paused(&self) -> bool;
+    async fn session_paused(&self, _session: &SessionRef) -> bool { self.paused().await }
+    async fn lane_paused(&self, _lane: &str) -> bool { self.paused().await }
+    async fn observe_held(&self, _session: &FleetSession) -> bool { false }
 }
 
 #[async_trait]
 impl PauseGate for DecisionGate {
     async fn paused(&self) -> bool {
         DecisionGate::paused(self).await
+    }
+    async fn session_paused(&self, session: &SessionRef) -> bool {
+        DecisionGate::session_paused(self, session).await
+    }
+    async fn lane_paused(&self, lane: &str) -> bool {
+        self.paused().await || super::hold::lane_held(self.pool(), lane).await.unwrap_or(true)
+    }
+    async fn observe_held(&self, session: &FleetSession) -> bool {
+        super::hold::observe(self.pool(), session).await.unwrap_or(false)
     }
 }
 

@@ -68,6 +68,9 @@ impl RecoveryScheduler {
             if !self.go().await {
                 return;
             }
+            if self.deps.pause.lane_paused(&lane).await {
+                continue;
+            }
             let claimed = {
                 let mut goals = self.goals.lock().unwrap_or_else(PoisonError::into_inner);
                 match goals.get_mut(&lane) {

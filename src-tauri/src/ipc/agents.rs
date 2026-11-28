@@ -4,11 +4,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 #[cfg(feature = "desktop")]
 use tauri::Manager;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 #[path = "agents_reset_event_tests.rs"]
 mod reset_event_tests;
 
@@ -155,7 +156,7 @@ pub fn prove_pane_owner(pty_pid: u32) -> crate::agent_detect::OwnerProof {
 }
 
 #[cfg(not(windows))]
-fn process_table_entries() -> Option<Vec<(u32, u32, String)>> {
+fn process_table_entries_uncached() -> Option<Vec<(u32, u32, String)>> {
     let ps = resolve_tool("ps")?;
     let stdout = probe_stdout(
         "ps",
@@ -164,6 +165,45 @@ fn process_table_entries() -> Option<Vec<(u32, u32, String)>> {
     String::from_utf8(stdout)
         .ok()
         .map(|stdout| parse_ps_entries(&stdout))
+}
+
+/// How long one `ps` / `powershell` sample answers later callers. `prove_pane_owner` and
+/// `discover_agent_session` run back to back for the same pane, and each cold sample costs a
+/// process spawn plus a full table parse.
+const PROCESS_TABLE_CACHE_TTL: Duration = Duration::from_millis(500);
+
+type ProcessTable = Vec<(u32, u32, String)>;
+static PROCESS_TABLE_CACHE: Mutex<Option<(Instant, Arc<ProcessTable>)>> = Mutex::new(None);
+
+/// A shared, briefly cached process table. The returned `Arc` lets every caller in a burst share
+/// one sample without cloning the whole table.
+fn process_table_entries() -> Option<Arc<ProcessTable>> {
+    // Tests assert on exact `ps` / PowerShell behavior (and mutate the environment between
+    // cases), so they always take a fresh sample instead of inheriting a sibling test's table.
+    if cfg!(test) {
+        return process_table_entries_uncached().map(Arc::new);
+    }
+    // Scoped so the guard is released before the sample below re-locks it: `std::sync::Mutex` is
+    // not reentrant, and a guard living across the refresh would deadlock the first caller.
+    let cached = {
+        let guard = PROCESS_TABLE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.as_ref().map(|(sampled_at, entries)| (*sampled_at, Arc::clone(entries)))
+    };
+    if let Some((sampled_at, entries)) = cached {
+        if sampled_at.elapsed() < PROCESS_TABLE_CACHE_TTL {
+            return Some(entries);
+        }
+    }
+    let entries = Arc::new(process_table_entries_uncached()?);
+    {
+        let mut guard = PROCESS_TABLE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some((Instant::now(), Arc::clone(&entries)));
+    }
+    Some(entries)
 }
 
 // Only the unix arm reads `ps`, so this parser is unix-only outside tests.
@@ -189,7 +229,7 @@ fn parse_ps_entries(stdout: &str) -> Vec<(u32, u32, String)> {
 // CommandLine (protected or elevated processes) becomes an empty string so every
 // entry keeps the tuple shape the tree walk expects.
 #[cfg(windows)]
-fn process_table_entries() -> Option<Vec<(u32, u32, String)>> {
+fn process_table_entries_uncached() -> Option<Vec<(u32, u32, String)>> {
     let powershell = resolve_tool("powershell")?;
     let stdout = probe_stdout(
         "powershell",
@@ -523,8 +563,11 @@ fn omo_conversation_owner_by_open_files(provider_id: &str, sessions: &[(String, 
     let pids = owner_by_pid.keys().map(u32::to_string).collect::<Vec<_>>().join(",");
     let lsof = resolve_tool("lsof")?;
     // lsof exits non-zero when any listed pid is gone, so its stdout is read regardless.
+    // `-n -P` keep lsof from resolving host names and port service names. Without them every
+    // probe pays reverse DNS plus `/etc/services` lookups: measured 200 ms to 5 s of the spawn's
+    // wall time for a local handle walk that needs neither.
     let output = crate::util::no_window_command(lsof)
-        .args(["-a", "-p", &pids, "-Fpn"])
+        .args(["-n", "-P", "-a", "-p", &pids, "-Fpn"])
         .output()
         .ok()?;
     omo_conversation_owner_in_lsof(&String::from_utf8_lossy(&output.stdout), provider_id, &owner_by_pid)
@@ -686,7 +729,8 @@ fn lsof_session_id(pid: u32, agent_type: &str) -> Option<String> {
     let lsof = resolve_tool("lsof")?;
     let stdout = probe_stdout(
         "lsof",
-        crate::util::no_window_command(lsof).args(["-a", "-p", &pid.to_string(), "-Fn"]),
+        // `-n -P` skip reverse DNS and service-name resolution for paths we only parse.
+        crate::util::no_window_command(lsof).args(["-n", "-P", "-a", "-p", &pid.to_string(), "-Fn"]),
     )?;
     String::from_utf8(stdout)
         .ok()?
@@ -1150,7 +1194,7 @@ pub fn detect_agents(names: &[String]) -> Vec<AgentDetection> {
         .map(|name| name.trim())
         .filter(|name| !name.is_empty())
         .map(|name| {
-            let path = resolve_binary(name, &search_paths);
+            let path = resolve_binary(name, search_paths);
             AgentDetection {
                 name: name.to_string(),
                 available: path.is_some(),
@@ -1160,7 +1204,7 @@ pub fn detect_agents(names: &[String]) -> Vec<AgentDetection> {
         .collect()
 }
 
-pub(crate) fn search_paths() -> Vec<PathBuf> {
+pub(crate) fn search_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS
         .get_or_init(|| {
@@ -1182,7 +1226,7 @@ pub(crate) fn search_paths() -> Vec<PathBuf> {
             append_bundle_fallback_dirs(&mut dirs, &platform_bundle_fallback_candidates());
             dirs
         })
-        .clone()
+        .as_slice()
 }
 
 /// Appends app-bundle bin directories to `dirs` when the probe binary inside them is executable.
@@ -1424,7 +1468,7 @@ fn is_executable_file(path: &std::path::Path) -> bool {
 // every platform (PATHEXT covers npm .cmd shims on Windows); a missing tool
 // yields None instead of a failed spawn.
 fn resolve_tool(name: &str) -> Option<PathBuf> {
-    let resolved = resolve_binary(name, &search_paths());
+    let resolved = resolve_binary(name, search_paths());
     if resolved.is_none() {
         tracing::debug!(tool = name, "agent session discovery: tool missing from PATH");
     }

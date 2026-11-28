@@ -40,7 +40,7 @@ mod snapshot_source_tests;
 pub mod state_cookies;
 // Downloads, print, find, zoom, file chooser and page notifications (both engines).
 pub mod system;
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 pub mod tests;
 pub mod vault;
 #[cfg(feature = "desktop")]

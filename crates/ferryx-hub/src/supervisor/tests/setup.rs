@@ -388,7 +388,12 @@ mod status {
         assert!(value["owner"].is_null() && value["engineFault"].is_null());
         assert_eq!(value["supervisorHealthy"], true);
         assert_eq!(value["intake"], serde_json::json!({"unifiedOpen": true, "legacy": "idle", "origin": "fresh", "legacyHistory": false}));
-        assert_eq!(value["memoryImport"], serde_json::json!({"enabled": false, "sessions": 0, "turns": 0, "lastAt": null}));
+        let mut memory = value["memoryImport"].clone();
+        let daily = memory.as_object_mut().unwrap().remove("dailyTokens").unwrap();
+        assert_eq!(memory, serde_json::json!({"enabled": false, "sessions": 0, "turns": 0, "lastAt": null, "lastPass": null}));
+        let mut daily_keys: Vec<&str> = daily.as_object().unwrap().keys().map(String::as_str).collect();
+        daily_keys.sort_unstable();
+        assert_eq!(daily_keys, ["cap", "day", "inputTokens", "reached", "unknownCalls"]);
     }
 
     /// One recorded engine turn of this installation, `minutes_ago` minutes old.

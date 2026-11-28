@@ -460,34 +460,40 @@ export function requestLocalRecoveryAdmission(workspaceId: string, frontendSessi
 
 function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void): void {
   if (reconcilingLocalRecovery) return;
+  if (!persistLocalRecovery && localRecoveryOwners.size === 0 && localRecoveryReceipts.size === 0) return;
   reconcilingLocalRecovery = true;
   try {
-    for (const [workspaceId, receipts] of localRecoveryReceipts) {
-      const sessions = getWorkspaceSnapshot(workspaceId)?.sessions;
-      for (const [sessionId, receipt] of receipts) {
-        if (!matchesLocalRecoveryReceipt(sessions?.[sessionId], receipt)) receipts.delete(sessionId);
+    if (localRecoveryReceipts.size > 0) {
+      for (const [workspaceId, receipts] of localRecoveryReceipts) {
+        const sessions = getWorkspaceSnapshot(workspaceId)?.sessions;
+        for (const [sessionId, receipt] of receipts) {
+          if (!matchesLocalRecoveryReceipt(sessions?.[sessionId], receipt)) receipts.delete(sessionId);
+        }
+        if (!receipts.size) localRecoveryReceipts.delete(workspaceId);
       }
-      if (!receipts.size) localRecoveryReceipts.delete(workspaceId);
     }
-    for (const [key, owner] of localRecoveryOwners) {
-      const current = getWorkspaceSnapshot(owner.workspaceId)?.sessions[owner.sessionId];
-      if (owner.admitting) continue;
-      if (!current || current.backendSessionId !== owner.captured.backendSessionId ||
-          current.incarnation !== owner.captured.incarnation || current.daemonEpoch !== owner.captured.daemonEpoch ||
-          current.recoveryKey !== owner.captured.recoveryKey || current.recoveryToken !== owner.captured.recoveryToken ||
-          current.lifecycle === "exited") {
-        for (const requester of [...owner.requesters]) requester(current?.lifecycle === "exited" ? { kind: "exited" } : { kind: "cancelled" });
-        owner.scheduler.dispose();
-        localRecoveryOwners.delete(key);
+    if (localRecoveryOwners.size > 0) {
+      for (const [key, owner] of localRecoveryOwners) {
+        const current = getWorkspaceSnapshot(owner.workspaceId)?.sessions[owner.sessionId];
+        if (owner.admitting) continue;
+        if (!current || current.backendSessionId !== owner.captured.backendSessionId ||
+            current.incarnation !== owner.captured.incarnation || current.daemonEpoch !== owner.captured.daemonEpoch ||
+            current.recoveryKey !== owner.captured.recoveryKey || current.recoveryToken !== owner.captured.recoveryToken ||
+            current.lifecycle === "exited") {
+          for (const requester of [...owner.requesters]) requester(current?.lifecycle === "exited" ? { kind: "exited" } : { kind: "cancelled" });
+          owner.scheduler.dispose();
+          localRecoveryOwners.delete(key);
+        }
       }
     }
     if (!persistLocalRecovery) return;
     for (const [workspaceId, state] of listWorkspaceSnapshots()) {
       if (isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)) continue;
-      for (const session of Object.values(state.sessions)) {
+      for (const sessionId in state.sessions) {
+        const session = state.sessions[sessionId];
+        if (!session || (session.remoteConnectionState !== "reconnecting" && session.remoteConnectionState !== "disconnected")) continue;
         if (!session.backendSessionId || hasPendingLocalSplit(session) || session.lifecycle === "exited" ||
-            session.backendUnavailableReason === "identity_conflict" || session.reconnectError?.code === "IDENTITY_CONFLICT" ||
-            (session.remoteConnectionState !== "reconnecting" && session.remoteConnectionState !== "disconnected")) continue;
+            session.backendUnavailableReason === "identity_conflict" || session.reconnectError?.code === "IDENTITY_CONFLICT") continue;
         const identity = { kind: "local" as const, frontendSessionId: session.id,
           backendSessionId: session.backendSessionId, expectedIncarnation: session.incarnation };
         const key = JSON.stringify([workspaceId, formatRecoveryKey(identity)]);
@@ -3623,12 +3629,14 @@ export async function reconcileSessionFromDescribe(
 
 export function selectAgents(state: WorkspaceState): ActiveAgent[] {
   const allTabs = getAllTabs(state);
+  const worktreesByPath = new Map<string, Worktree>();
+  for (const worktree of state.worktrees) worktreesByPath.set(worktree.path, worktree);
   return allTabs.flatMap((tab) => {
     if (!isTerminalTab(tab)) return [];
     const session = state.sessions[tab.sessionId];
     if (!session) return [];
     const worktreePath = sessionWorktreePath(session);
-    const worktree = state.worktrees.find((candidate) => candidate.path === worktreePath);
+    const worktree = worktreesByPath.get(worktreePath);
     const activity = state.activityBySessionId?.[session.id];
     const parsed = activity ? parseAgentTitle(activity.title) : null;
     return [

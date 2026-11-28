@@ -51,7 +51,7 @@ use super::wakes::{StateHandler, WakeAck, WakeHandler, WakeTurn, STALE_SETTLE};
 use super::{
     check_revision, execution_binding_of, goal_of, insert_dispatch, require_binding, require_goal,
     transition_goal, transition_goal_in, wakes, ExecutionBinding, RunState, SupervisorError,
-    SupervisorGoal,
+    SupervisorGoal, WakeCause,
 };
 use crate::agent_control::{AgentControl, AgentOp};
 use crate::goals::contract::{self, Contract};
@@ -78,6 +78,9 @@ pub const REVISION_CONFLICT: &str = "REVISION_CONFLICT";
 pub const PANE_NOT_IDLE: &str = "PANE_NOT_IDLE";
 /// Skip code of a degraded goal whose judge retry is not due yet.
 pub const RETRY_NOT_DUE: &str = "RETRY_NOT_DUE";
+/// State-detail prefix of a goal whose convergence the settlement gate refused: the model's
+/// grading is advisory, and the lane went `not_done` naming the reasons.
+pub const SETTLE_REFUSED: &str = "SETTLE_REFUSED";
 /// Hold code: a requirement's verifier is not a check Ferryx can run, so only the owner can
 /// accept it (waive it, or give a runnable verifier).
 pub const VERIFIER_NOT_RUNNABLE: &str = "VERIFIER_NOT_RUNNABLE";
@@ -785,6 +788,32 @@ impl CompletionDriver {
             .bind(&goal.lane_key)
             .fetch_optional(&self.pool)
             .await?;
+        // The settlement gate, before the goal is marked completed: no unsent work, every done
+        // check passing now, no undelivered accepted message. A refusal is an automatic
+        // objection, so a goal the model graded as complete is never verified done on grading
+        // alone. The gate records the close intent when it passes, before anything closes.
+        let verifiers: Vec<String> = contract
+            .requirements
+            .iter()
+            .filter(|requirement| requirement.status != RequirementStatus::Waived)
+            .map(|requirement| requirement.verifier.clone())
+            .collect();
+        let reasons = crate::lanes::settle::verify_before_close(
+            &self.pool,
+            crate::lanes::settle::SettleTarget {
+                key: &goal.lane_key,
+                cwd: cwd.as_deref().unwrap_or(""),
+            },
+            &verifiers,
+        )
+        .await
+        .map_err(|error| SupervisorError::Invalid(error.to_string()))?;
+        if !reasons.is_empty() {
+            let detail = format!("{SETTLE_REFUSED}: {}", reasons.join("; "));
+            return self.hold(goal, RunState::AwaitingOwner, detail).await;
+        }
+        // The gate passed: the close is decided. Its intent is recorded in the completion's own
+        // transaction below, so a skip writes nothing and a crash resumes the same close.
         let source_revision = match cwd {
             Some(cwd) if binding.host_id == self.local_host_id => {
                 evidence::source_revision(&cwd).await
@@ -859,6 +888,22 @@ impl CompletionDriver {
             RunState::Completed,
             Some(&detail),
         )
+        .await?;
+        // The close intent commits with the completion: one transaction decides both, so a
+        // crash after this commit resumes the close instead of re-running the checks.
+        let intent = crate::lanes::settle::close_intent_json_for(
+            &mut tx,
+            &goal.lane_key,
+            "goal converged",
+            chrono::Utc::now(),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE lanes SET close_intent_json = ?, claim_objection_until = NULL WHERE key = ?",
+        )
+        .bind(intent)
+        .bind(&goal.lane_key)
+        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         super::after_settle(&self.pool, &goal.goal_id, RunState::Completed).await;
@@ -1027,6 +1072,19 @@ impl CompletionHandler {
             driver,
         }
     }
+
+    /// True when this turn's only work is a claim's objection window closing. The state handler
+    /// already settled that lane; grading its goal again would re-decide a closed settlement.
+    fn settlement_turn(turn: &WakeTurn) -> bool {
+        turn.wakes
+            .iter()
+            .filter(|wake| wake.cause == WakeCause::Deadline)
+            .all(|wake| crate::lanes::settle::settle_wake_lane(&wake.event_id).is_some())
+            && turn
+                .wakes
+                .iter()
+                .any(|wake| crate::lanes::settle::settle_wake_lane(&wake.event_id).is_some())
+    }
 }
 
 #[async_trait]
@@ -1034,6 +1092,9 @@ impl WakeHandler for CompletionHandler {
     async fn handle(&self, turn: &WakeTurn) -> WakeAck {
         let ack = self.state.handle(turn).await;
         if ack != WakeAck::Done {
+            return ack;
+        }
+        if Self::settlement_turn(turn) {
             return ack;
         }
         match self.driver.verify(&turn.goal_id).await {

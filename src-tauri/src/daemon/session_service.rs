@@ -236,7 +236,7 @@ pub(super) struct SpawnCacheEntry {
     fingerprint: SpawnRequestFingerprint,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct StoredSessionMeta {
     #[serde(default)]
     pub(super) machine_session: Option<crate::remote::machine_protocol::Session>,
@@ -477,7 +477,7 @@ impl From<String> for SpawnError {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(PartialEq, serde::Serialize, serde::Deserialize)]
 struct DurableRemoteSession {
     descriptor: crate::terminal::remote::RemoteSessionDescriptor,
     metadata: Option<StoredSessionMeta>,
@@ -701,6 +701,9 @@ pub struct DaemonSessionService {
     /// Ticked by every accepted layout write (including eviction); layout long-polls park on this
     /// shared channel, so no per-bucket notifier survives an evicted/forgotten document.
     pub(super) layout_generation: tokio::sync::watch::Sender<u64>,
+    /// Ticked whenever a child session with spawn lineage is recorded; `parent_notice` parks on
+    /// it while no watched children exist instead of waking every 2s.
+    pub(super) lineage_generation: tokio::sync::watch::Sender<u64>,
     pub(super) agent_states: Arc<AgentStateHub>,
     /// Installed once the gateway's observer exists. Sessions spawned before that are caught by
     /// `watch_live` at install time.
@@ -1332,6 +1335,20 @@ impl DaemonSessionService {
         self.session_metadata.read().get(session_id)?.lineage.clone()
     }
 
+    /// Subscribes to child-lineage registrations so `parent_notice` can park with zero timer
+    /// wakeups when no spawned child panes exist and exit immediately on service drop.
+    pub(super) fn subscribe_lineage(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.lineage_generation.subscribe()
+    }
+
+    /// True when at least one session in metadata carries spawn lineage.
+    pub(super) fn has_lineage_children(&self) -> bool {
+        self.session_metadata
+            .read()
+            .values()
+            .any(|meta| meta.lineage.is_some())
+    }
+
     /// How many live panes name `parent` as their spawn parent.
     pub(crate) fn live_spawned_children(&self, parent: &str) -> usize {
         let children: Vec<String> = self
@@ -1406,6 +1423,8 @@ impl DaemonSessionService {
             meta.spawned_agent.get_or_insert_with(|| agent.to_string());
             if let Some(lineage) = lineage {
                 meta.lineage.get_or_insert(lineage);
+                self.lineage_generation
+                    .send_modify(|generation| *generation = generation.wrapping_add(1));
             }
         }
         Ok(session_id)
@@ -2803,6 +2822,7 @@ impl DaemonSessionService {
         #[cfg(test)]
         let barrier = SETTLEMENT_TEST_BARRIER.try_with(Arc::clone).ok();
         let mut record_removable = false;
+        let mut last_checkpointed: Option<DurableRemoteSession> = None;
         tokio::spawn(async move {
             loop {
                 let details = rx.borrow_and_update().clone();
@@ -2900,19 +2920,31 @@ impl DaemonSessionService {
                 }
                 // Checkpoints share the same additive merge implementation as
                 // explicit saves; a local-only snapshot here would erase durable
-                // descriptors owned by other daemon generations.
+                // descriptors owned by other daemon generations. Skip rewriting
+                // disk when durable persisted fields did not change from the last
+                // successful checkpoint (e.g. transient reconnect/state flaps).
                 let Some(runtime_arc) = runtime.upgrade() else {
                     break;
                 };
-                if let Err(error) = Self::checkpoint_remote_sessions(
-                    path.clone(),
-                    Arc::clone(&lock),
-                    runtime_arc,
-                    Arc::clone(&metadata),
-                )
-                .await
-                {
-                    tracing::error!(%error, "Remote session checkpoint persistence failed");
+                let durable = DurableRemoteSession {
+                    descriptor: details.descriptor.clone(),
+                    metadata: metadata.read().get(&cleanup_session_id).cloned(),
+                    terminal: false,
+                };
+                if last_checkpointed.as_ref() != Some(&durable) {
+                    match Self::checkpoint_remote_sessions(
+                        path.clone(),
+                        Arc::clone(&lock),
+                        runtime_arc,
+                        Arc::clone(&metadata),
+                    )
+                    .await
+                    {
+                        Ok(()) => last_checkpointed = Some(durable),
+                        Err(error) => {
+                            tracing::error!(%error, "Remote session checkpoint persistence failed");
+                        }
+                    }
                 }
                 let _ = tx.send(DaemonRemoteEvent { event: "terminal_remote_status".into(), payload: serde_json::json!({"sessionId":details.descriptor.backend_session_id,"state":details.state,"generation":details.generation,"failure":details.failure,"replayGap":details.replay_gap}) });
                 if details.state == crate::terminal::remote::RemoteConnectionState::Disconnected {

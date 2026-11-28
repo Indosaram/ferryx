@@ -15,6 +15,8 @@ use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Automatic sounds fired closer together than this collapse into one.
@@ -23,22 +25,48 @@ use std::time::{Duration, Instant};
 /// double alert. Settings preview bypasses this with `force`.
 pub const DEDUPE_WINDOW: Duration = Duration::from_millis(400);
 
+/// How long the OS audio output sink remains open after the last notification
+/// playback completes. Dropping the idle sink lets OS audio hardware sleep
+/// instead of waking at ~86 Hz indefinitely after one alert.
+pub const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(10);
+
 /// Lazily-initialized audio output plus playback state.
 ///
-/// The output stream is kept alive for the process lifetime; dropping it after
-/// starting playback would cut the sound off immediately. Initialization is
-/// deferred so a machine with no audio output device can still launch rorca.
+/// Initialization is deferred so a machine with no audio output device can
+/// still launch rorca, and the sink is released after [`IDLE_CLOSE_GRACE`] of
+/// silence and reopened lazily on the next [`play`](Self::play).
 pub struct NotificationAudioPlayer {
-    output: Mutex<OutputState>,
+    output: Arc<Mutex<OutputState>>,
+    generation: Arc<AtomicU64>,
+    active_playbacks: Arc<AtomicUsize>,
     last_played_at: Mutex<Option<Instant>>,
+    idle_grace: Duration,
 }
 
-enum OutputState {
-    /// No attempt made yet.
+enum OutputState<S = MixerDeviceSink> {
+    /// No attempt made yet, or released after idle grace; next `play()` reopens lazily.
     Uninitialized,
-    Ready(MixerDeviceSink),
+    Ready(S),
     /// A previous attempt failed; do not retry on every notification.
     Unavailable,
+}
+
+fn maybe_close_idle_sink<S>(
+    output: &Mutex<OutputState<S>>,
+    generation: &AtomicU64,
+    active_playbacks: &AtomicUsize,
+    expected_gen: u64,
+) -> bool {
+    let mut guard = output.lock();
+    if generation.load(Ordering::Acquire) == expected_gen
+        && active_playbacks.load(Ordering::Acquire) == 0
+        && matches!(*guard, OutputState::Ready(_))
+    {
+        *guard = OutputState::Uninitialized;
+        true
+    } else {
+        false
+    }
 }
 
 impl Default for NotificationAudioPlayer {
@@ -50,8 +78,11 @@ impl Default for NotificationAudioPlayer {
 impl NotificationAudioPlayer {
     pub fn new() -> Self {
         Self {
-            output: Mutex::new(OutputState::Uninitialized),
+            output: Arc::new(Mutex::new(OutputState::Uninitialized)),
+            generation: Arc::new(AtomicU64::new(0)),
+            active_playbacks: Arc::new(AtomicUsize::new(0)),
             last_played_at: Mutex::new(None),
+            idle_grace: IDLE_CLOSE_GRACE,
         }
     }
 
@@ -121,10 +152,51 @@ impl NotificationAudioPlayer {
         let player = Player::connect_new(sink.mixer());
         player.set_volume(volume);
         player.append(decoder);
-        // Detach so playback continues after this call returns; the mixer owned
-        // by the managed output stream keeps rendering it.
-        player.detach();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.active_playbacks.fetch_add(1, Ordering::AcqRel);
         drop(output);
+
+        // Wait for playback to finish off the caller's thread, then drop the
+        // idle sink after `idle_grace` unless another playback superseded it.
+        let output_weak = Arc::downgrade(&self.output);
+        let generation_arc = Arc::clone(&self.generation);
+        let active_arc = Arc::clone(&self.active_playbacks);
+        let idle_grace = self.idle_grace;
+        let player_slot = Arc::new(Mutex::new(Some(player)));
+        let thread_player_slot = Arc::clone(&player_slot);
+        if std::thread::Builder::new()
+            .name("ferryx-audio-reaper".into())
+            .spawn(move || {
+                if let Some(player) = thread_player_slot.lock().take() {
+                    player.sleep_until_end();
+                    drop(player);
+                }
+                let end_gen = {
+                    let Some(output_arc) = output_weak.upgrade() else {
+                        active_arc.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    };
+                    let _guard = output_arc.lock();
+                    let remaining = active_arc.fetch_sub(1, Ordering::AcqRel) - 1;
+                    if remaining > 0 {
+                        return;
+                    }
+                    generation_arc.fetch_add(1, Ordering::AcqRel) + 1
+                };
+                std::thread::sleep(idle_grace);
+                if let Some(output_arc) = output_weak.upgrade() {
+                    maybe_close_idle_sink(&output_arc, &generation_arc, &active_arc, end_gen);
+                }
+            })
+            .is_err()
+        {
+            if let Some(player) = player_slot.lock().take() {
+                player.detach();
+            }
+            let _guard = self.output.lock();
+            self.active_playbacks.fetch_sub(1, Ordering::AcqRel);
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
 
         self.mark_played();
         PlaySoundResult::played()
@@ -292,5 +364,48 @@ mod tests {
 
         assert_eq!(picked.display_name, "ding.wav");
         assert_eq!(picked.path, PathBuf::from("/Users/someone/Music/ding.wav"));
+    }
+
+    struct DropSentinel(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropSentinel {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn idle_close_drops_sink_when_generation_matches_and_no_active_playback() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output = Mutex::new(OutputState::Ready(DropSentinel(Arc::clone(&dropped))));
+        let generation = AtomicU64::new(4);
+        let active = AtomicUsize::new(0);
+
+        assert!(maybe_close_idle_sink(&output, &generation, &active, 4));
+        assert!(dropped.load(Ordering::Acquire), "idle sink must be dropped");
+        assert!(matches!(*output.lock(), OutputState::Uninitialized));
+    }
+
+    #[test]
+    fn idle_close_skips_when_superseded_active_or_unavailable() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output = Mutex::new(OutputState::Ready(DropSentinel(Arc::clone(&dropped))));
+        let generation = AtomicU64::new(5);
+        let active = AtomicUsize::new(0);
+
+        // Superseded by a newer playback generation.
+        assert!(!maybe_close_idle_sink(&output, &generation, &active, 4));
+        assert!(!dropped.load(Ordering::Acquire));
+
+        // Still actively playing.
+        active.store(1, Ordering::Release);
+        assert!(!maybe_close_idle_sink(&output, &generation, &active, 5));
+        assert!(!dropped.load(Ordering::Acquire));
+
+        // Unavailable state stays unavailable (does not reset to Uninitialized).
+        let unavailable: Mutex<OutputState<()>> = Mutex::new(OutputState::Unavailable);
+        let zero = AtomicUsize::new(0);
+        assert!(!maybe_close_idle_sink(&unavailable, &generation, &zero, 5));
+        assert!(matches!(*unavailable.lock(), OutputState::Unavailable));
     }
 }

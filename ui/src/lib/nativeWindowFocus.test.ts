@@ -187,4 +187,103 @@ describe("nativeWindowFocus", () => {
     expect(getNativeWindowFocused()).toBeNull();
     expect(isFocusedMock).not.toHaveBeenCalled();
   });
+
+  it("stops focus tracking, invokes unlisten, clears report timer, and allows restarting", async () => {
+    vi.useFakeTimers();
+    try {
+      const unlistenFirst = vi.fn();
+      const unlistenSecond = vi.fn();
+      const firstQueryStarted = deferred<void>();
+      const firstSnapshot = deferred<boolean>();
+      onFocusChangedMock
+        .mockResolvedValueOnce(unlistenFirst)
+        .mockResolvedValueOnce(unlistenSecond);
+      isFocusedMock
+        .mockImplementationOnce(() => {
+          firstQueryStarted.resolve();
+          return firstSnapshot.promise;
+        })
+        .mockResolvedValueOnce(false);
+
+      const { startNativeWindowFocusTracking, stopNativeWindowFocusTracking } = await import("./nativeWindowFocus");
+      const { reportDesktopWindowFocus } = await import("./tauri");
+
+      startNativeWindowFocusTracking();
+      await firstQueryStarted.promise;
+      firstSnapshot.resolve(true);
+      await firstSnapshot.promise;
+      await Promise.resolve();
+
+      expect(reportDesktopWindowFocus).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(60_000);
+      expect(reportDesktopWindowFocus).toHaveBeenCalledTimes(2);
+
+      stopNativeWindowFocusTracking();
+      expect(unlistenFirst).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(120_000);
+      expect(reportDesktopWindowFocus).toHaveBeenCalledTimes(2);
+
+      // Can restart cleanly after stopping.
+      startNativeWindowFocusTracking();
+      expect(onFocusChangedMock).toHaveBeenCalledTimes(2);
+      stopNativeWindowFocusTracking();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("guards against leaks when stopped before onFocusChanged resolves", async () => {
+    const registration = deferred<() => void>();
+    const unlisten = vi.fn();
+    onFocusChangedMock.mockReturnValue(registration.promise);
+
+    const { startNativeWindowFocusTracking, stopNativeWindowFocusTracking } = await import("./nativeWindowFocus");
+    startNativeWindowFocusTracking();
+    stopNativeWindowFocusTracking();
+
+    registration.resolve(unlisten);
+    await registration.promise;
+    await Promise.resolve();
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    expect(isFocusedMock).not.toHaveBeenCalled();
+  });
+
+  it("guards against leaks when stopped while isFocused is pending", async () => {
+    vi.useFakeTimers();
+    try {
+      const unlisten = vi.fn();
+      const queryStarted = deferred<void>();
+      const snapshot = deferred<boolean>();
+      onFocusChangedMock.mockResolvedValue(unlisten);
+      isFocusedMock.mockImplementation(() => {
+        queryStarted.resolve();
+        return snapshot.promise;
+      });
+
+      const {
+        startNativeWindowFocusTracking,
+        stopNativeWindowFocusTracking,
+        getNativeWindowFocused,
+      } = await import("./nativeWindowFocus");
+      const { reportDesktopWindowFocus } = await import("./tauri");
+
+      startNativeWindowFocusTracking();
+      await queryStarted.promise;
+      stopNativeWindowFocusTracking();
+      expect(unlisten).toHaveBeenCalledTimes(1);
+
+      snapshot.resolve(true);
+      await snapshot.promise;
+      await Promise.resolve();
+
+      expect(getNativeWindowFocused()).toBeNull();
+      expect(reportDesktopWindowFocus).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(60_000);
+      expect(reportDesktopWindowFocus).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -239,6 +239,12 @@ impl ScrollbackBudget {
 
     /// Records what the session's retained history currently holds.
     pub fn note_retained(&mut self, session_id: &str, retained_bytes: usize) {
+        // The steady-state path: a session already tracked only updates its byte count, with one
+        // map lookup and no id clone.
+        if let Some(allotment) = self.sessions.get_mut(session_id) {
+            allotment.retained_bytes = retained_bytes;
+            return;
+        }
         self.track(session_id);
         if let Some(allotment) = self.sessions.get_mut(session_id) {
             allotment.retained_bytes = retained_bytes;
@@ -287,6 +293,20 @@ impl ScrollbackBudget {
         skip: &std::collections::HashSet<String>,
     ) -> Option<Trim> {
         let ceiling = self.ceiling_bytes();
+        // Fast path: every session the caller can still trim is inside its ceiling and the
+        // aggregate is inside the budget, so no trim exists. One pass, no allocation: the
+        // eviction order is only built when there is actually something to evict.
+        let mut total = 0usize;
+        let mut trimmable_over_ceiling = false;
+        for (session_id, allotment) in &self.sessions {
+            total = total.saturating_add(allotment.retained_bytes);
+            if allotment.retained_bytes > ceiling && !skip.contains(session_id) {
+                trimmable_over_ceiling = true;
+            }
+        }
+        if !trimmable_over_ceiling && total <= self.budget_bytes {
+            return None;
+        }
         let order: Vec<String> = self
             .eviction_order()
             .into_iter()
@@ -468,5 +488,28 @@ mod tests {
         // Re-admitting the same id is idempotent: a retried spawn must not double-count.
         budget.admit("a").expect("idempotent");
         assert_eq!(budget.live_sessions(), 1);
+    }
+
+    #[test]
+    fn next_trim_fast_path_respects_ceiling_and_aggregate_bounds() {
+        let mut budget = ScrollbackBudget::new_with_floor(4 * 1024 * 1024, 1024 * 1024);
+        budget.admit("a").expect("admit a");
+        budget.admit("b").expect("admit b");
+        // Ceiling is 2 MiB each. Under both ceiling and aggregate: fast path returns None.
+        budget.note_retained("a", 1024 * 1024);
+        budget.note_retained("b", 1024 * 1024);
+        assert_eq!(budget.next_trim(), None);
+
+        // One session over ceiling while aggregate is still <= 4 MiB must NOT short-circuit.
+        budget.note_retained("a", 2 * 1024 * 1024 + 1);
+        budget.note_retained("b", 0);
+        let trim = budget.next_trim().expect("over-ceiling session must be trimmed");
+        assert_eq!(trim.session_id, "a");
+        assert_eq!(trim.target_bytes, 2 * 1024 * 1024);
+
+        // Skipping the only over-ceiling session while aggregate <= budget returns None.
+        let mut skip = std::collections::HashSet::new();
+        skip.insert("a".to_string());
+        assert_eq!(budget.next_trim_excluding(&skip), None);
     }
 }

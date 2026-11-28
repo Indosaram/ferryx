@@ -1250,6 +1250,7 @@ async fn setup_test_daemon_with_remote_paths(
     (dir, client, server, server_task)
 }
 
+#[cfg(feature = "desktop")]
 #[tokio::test]
 async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
     use tauri::Manager;

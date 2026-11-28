@@ -11,7 +11,9 @@ import {
 } from "lucide-react";
 
 import {
+  loadRevealOnWorktreeCreate,
   loadSidebarOpenStartup,
+  saveRevealOnWorktreeCreate,
   saveSidebarOpenStartup,
   useGeneralSettings,
 } from "../../lib/generalSettings";
@@ -40,6 +42,7 @@ import {
 } from "../../lib/tauri";
 import { classifyNavigatorPlatform } from "../../lib/platform";
 import { saveAdvancedFeatures, useAdvancedFeatures } from "../../lib/advancedFeatures";
+import { applyStarNagEnabled } from "../../lib/starNag";
 import type { CliLauncherStatus } from "../../lib/types";
 
 import { SettingRow, SettingsHeading } from "./primitives";
@@ -399,6 +402,7 @@ export function GeneralSection() {
   const { settings, updateSettings } = useGeneralSettings();
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
+  const [revealOnWorktreeCreate, setRevealOnWorktreeCreate] = useState<boolean>(() => loadRevealOnWorktreeCreate());
   const advancedFeatures = useAdvancedFeatures();
   const [supervisor, setSupervisor] = useState<{ supported: boolean; enabled: boolean } | null>(null);
   const [supervisorBusy, setSupervisorBusy] = useState(false);
@@ -482,6 +486,20 @@ export function GeneralSection() {
             />
           </SettingRow>
           <SettingRow
+            label="Reveal new worktrees in the sidebar"
+            description="Open the sidebar and expand the project when a worktree is created, so the new row is visible right away. Turn this off to keep the sidebar as it is."
+          >
+            <Switch
+              id="general-reveal-worktree-create"
+              aria-label="Reveal new worktrees in the sidebar"
+              checked={revealOnWorktreeCreate}
+              onCheckedChange={(checked) => {
+                setRevealOnWorktreeCreate(checked);
+                saveRevealOnWorktreeCreate(checked);
+              }}
+            />
+          </SettingRow>
+          <SettingRow
             label="Session Restore Policy"
             description="Choose when plain terminal shells are restarted after Ferryx restarts. Lazy is recommended for lower memory use. Agent conversations in every project always resume automatically."
           >
@@ -508,6 +526,31 @@ export function GeneralSection() {
               aria-label="Advanced features"
               checked={advancedFeatures}
               onCheckedChange={(checked) => saveAdvancedFeatures(checked)}
+            />
+          </SettingRow>
+          <SettingRow
+            label="Feature tips"
+            description="Show a short tip about one Ferryx feature when the app opens. Each tip appears once."
+          >
+            <Switch
+              id="general-feature-tips"
+              aria-label="Feature tips"
+              checked={settings.featureTipsEnabled}
+              onCheckedChange={(checked) => updateSettings({ featureTipsEnabled: checked })}
+            />
+          </SettingRow>
+          <SettingRow
+            label="Star prompt"
+            description="Occasionally ask for a GitHub star once Ferryx has done real work for you. Turning this off stops the prompt for good."
+          >
+            <Switch
+              id="general-star-prompt"
+              aria-label="Star prompt"
+              checked={settings.starNagEnabled}
+              onCheckedChange={(checked) => {
+                updateSettings({ starNagEnabled: checked });
+                applyStarNagEnabled(checked);
+              }}
             />
           </SettingRow>
           {supervisor?.supported ? (

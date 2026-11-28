@@ -193,7 +193,7 @@ pub async fn collect<C: AgentControl + ?Sized>(
 
 /// The lane worktree's git state on this machine: `git:clean`, `git:dirty` or `git:unknown`.
 async fn git_item(pool: &SqlitePool, lane_key: &str, cwd: &str) -> EvidenceItem {
-    match crate::lanes::settle::worktree_reasons(pool, lane_key, cwd).await {
+    match crate::lanes::settle_worktree::worktree_reasons(pool, lane_key, cwd).await {
         Ok(reasons) if reasons.is_empty() => EvidenceItem {
             reference: "git:clean".into(),
             source: EvidenceSource::FerryxGit,

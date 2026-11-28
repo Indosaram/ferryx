@@ -41,7 +41,14 @@ export function listShortcutWorktrees({
     }
   };
 
-  for (const group of groupProjects(projects)) {
+  const groups = groupProjects(projects);
+  // Digits 1..9 are one fixed budget shared by every project. Without a per-project cap a single
+  // project with enough worktrees took all nine slots, and no other project could be reached from
+  // the keyboard at all. Each project keeps an equal share of the ladder so its first rows stay
+  // reachable; rows past the ninth are still listed in the sidebar.
+  const perProjectCap = Math.max(1, Math.floor(9 / Math.max(1, groups.length)));
+
+  for (const group of groups) {
     const project = group.primaryProject;
     const owned = activeWorktrees.filter(
       (worktree) => resolveWorktreeOwnerId(worktree, projects, activeProjectId) === project.workspaceId,
@@ -80,7 +87,7 @@ export function listShortcutWorktrees({
       }
     }
 
-    push(rows);
+    push(rows.slice(0, perProjectCap));
   }
 
   return ladder;

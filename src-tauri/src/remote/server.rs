@@ -3913,17 +3913,43 @@ pub(crate) fn terminal_outcome_message(
     }).to_string().into())
 }
 
-fn enqueue_grid_operation<E>(
+const GRID_OUTBOUND_CAPACITY: usize = 64;
+const GRID_OUTBOUND_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+const PENDING_BYTES_SHRINK_THRESHOLD: usize = 256 * 1024;
+const PENDING_BYTES_RETAIN_CAPACITY: usize = 64 * 1024;
+
+fn reset_pending_bytes(buf: &mut Vec<u8>) {
+    buf.clear();
+    if buf.capacity() > PENDING_BYTES_SHRINK_THRESHOLD {
+        buf.shrink_to(PENDING_BYTES_RETAIN_CAPACITY);
+    }
+}
+
+async fn send_bounded_grid_message(outbound_tx: &mpsc::Sender<Message>, message: Message) -> bool {
+    match outbound_tx.try_send(message) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Err(mpsc::error::TrySendError::Full(message)) => {
+            tokio::time::timeout(GRID_OUTBOUND_SEND_TIMEOUT, outbound_tx.send(message))
+                .await
+                .is_ok_and(|res| res.is_ok())
+        }
+    }
+}
+
+async fn enqueue_grid_operation<E>(
     mirror: &Arc<parking_lot::Mutex<RemoteTerminalMirror>>,
-    outbound_tx: &mpsc::UnboundedSender<Message>,
+    outbound_tx: &mpsc::Sender<Message>,
     operation: impl FnOnce(&mut RemoteTerminalMirror) -> Result<RemoteGridFrame, E>,
 ) -> bool {
-    let mut mirror = mirror.lock();
-    let frame = match operation(&mut mirror) {
-        Ok(frame) => frame,
-        Err(_) => return false,
+    let message = {
+        let mut mirror = mirror.lock();
+        match operation(&mut mirror) {
+            Ok(frame) => grid_text_message(frame),
+            Err(_) => return false,
+        }
     };
-    outbound_tx.send(grid_text_message(frame)).is_ok()
+    send_bounded_grid_message(outbound_tx, message).await
 }
 
 async fn handle_terminal_grid_socket(
@@ -3980,7 +4006,13 @@ async fn handle_terminal_grid_socket(
     if sender.send(grid_text_message(initial_frame)).await.is_err() {
         return;
     }
-    if let Ok(Some(outcome)) = state.session_backend.paired_recovery_outcome(&session_id).await {
+    let initial_outcome = state
+        .session_backend
+        .paired_recovery_outcome(&session_id)
+        .await
+        .ok()
+        .flatten();
+    if let Some(outcome) = initial_outcome.clone() {
         if outcome.backend_session_id == session_id
             && !outcome.incarnation.is_empty()
             && !outcome.daemon_epoch.is_empty()
@@ -3991,23 +4023,45 @@ async fn handle_terminal_grid_socket(
     }
     let mut last_emitted_sequence = snapshot.history_end_sequence;
 
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(GRID_OUTBOUND_CAPACITY);
     let outcome_backend = Arc::clone(&state.session_backend);
     let outcome_session_id = session_id.clone();
     let outcome_tx = outbound_tx.clone();
     let mut outcome_task = std::pin::pin!(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(100));
-        let mut previous = None;
+        // Local and SSH sessions never produce a paired recovery outcome: skip
+        // the polling loop altogether instead of waking at 10 Hz per socket.
+        if initial_outcome.is_none() {
+            std::future::pending::<()>().await;
+            return;
+        }
+        let mut previous = initial_outcome;
+        let mut poll_delay = Duration::from_millis(100);
+        const MAX_POLL_DELAY: Duration = Duration::from_secs(1);
         loop {
-            tick.tick().await;
-            let current = outcome_backend.paired_recovery_outcome(&outcome_session_id).await.ok().flatten();
-            if current == previous { continue; }
+            tokio::time::sleep(poll_delay).await;
+            let current = outcome_backend
+                .paired_recovery_outcome(&outcome_session_id)
+                .await
+                .ok()
+                .flatten();
+            if current == previous {
+                poll_delay = (poll_delay * 2).min(MAX_POLL_DELAY);
+                continue;
+            }
+            poll_delay = Duration::from_millis(100);
             previous = current.clone();
             if let Some(outcome) = current {
                 if outcome.backend_session_id == outcome_session_id
-                    && !outcome.daemon_epoch.is_empty() && !outcome.incarnation.is_empty()
-                    && outcome_tx.send(terminal_outcome_message(&outcome_session_id, outcome)).is_err()
-                { break; }
+                    && !outcome.daemon_epoch.is_empty()
+                    && !outcome.incarnation.is_empty()
+                    && !send_bounded_grid_message(
+                        &outcome_tx,
+                        terminal_outcome_message(&outcome_session_id, outcome),
+                    )
+                    .await
+                {
+                    break;
+                }
             }
         }
     });
@@ -4016,7 +4070,7 @@ async fn handle_terminal_grid_socket(
     let mut status_task = std::pin::pin!(async move {
         while let Some(status) = next_recovery(&mut recovery).await {
             *status_recovery_state.write() = Some(status.clone());
-            if status_tx.send(recovery_message(status)).is_err() {
+            if !send_bounded_grid_message(&status_tx, recovery_message(status)).await {
                 break;
             }
         }
@@ -4043,10 +4097,12 @@ async fn handle_terminal_grid_socket(
             if !pending_bytes.is_empty() && tokio::time::Instant::now() >= next_emit {
                 if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| {
                     mirror.feed(&pending_bytes)
-                }) {
+                })
+                .await
+                {
                     break;
                 }
-                pending_bytes.clear();
+                reset_pending_bytes(&mut pending_bytes);
                 last_emitted_sequence = pending_end_sequence.take();
                 next_emit = tokio::time::Instant::now() + frame_interval;
                 continue;
@@ -4069,7 +4125,7 @@ async fn handle_terminal_grid_socket(
                     let latest_sequence = pending_end_sequence.or(last_emitted_sequence);
                     if chunk.replay_gap.is_some() {
                         // A gap invalidates even bytes waiting for the next grid tick.
-                        pending_bytes.clear();
+                        reset_pending_bytes(&mut pending_bytes);
                         pending_end_sequence = None;
                         let recovered = match recover_remote_terminal_attachment(
                             &session_backend,
@@ -4125,17 +4181,17 @@ async fn handle_terminal_grid_socket(
                         }
                         let frame = match replacement.full_frame() { Ok(frame) => frame, Err(_) => break };
                         *send_mirror.lock() = replacement;
-                        if send_tx.send(grid_text_message(frame)).is_err() { break; }
+                        if !send_bounded_grid_message(&send_tx, grid_text_message(frame)).await { break; }
                         if post_gap_snapshot
                             && !snapshot.history.is_empty()
-                            && !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&snapshot.history))
+                            && !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&snapshot.history)).await
                         {
                             break;
                         }
                         last_emitted_sequence = Some(snapshot.history_end_sequence.unwrap_or(chunk.sequence).max(chunk.sequence));
                         if let Some(resumed_chunk) = resumed_chunk {
                             if resumed_chunk.sequence > last_emitted_sequence.unwrap_or(0) {
-                                if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&resumed_chunk.bytes)) {
+                                if !enqueue_grid_operation(&send_mirror, &send_tx, |mirror| mirror.feed(&resumed_chunk.bytes)).await {
                                     break;
                                 }
                                 last_emitted_sequence = Some(resumed_chunk.sequence);
@@ -4152,7 +4208,7 @@ async fn handle_terminal_grid_socket(
                     pending_end_sequence = Some(chunk.sequence);
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    pending_bytes.clear();
+                    reset_pending_bytes(&mut pending_bytes);
                     pending_end_sequence = None;
                     let recovered = match recover_remote_terminal_attachment(
                         &session_backend,
@@ -4175,9 +4231,9 @@ async fn handle_terminal_grid_socket(
                             Err(_) => break,
                         };
 
-                    let sent = {
+                    let frame = {
                         let mut mirror = send_mirror.lock();
-                        let frame = if snapshot.gap.is_some() {
+                        if snapshot.gap.is_some() {
                             let mut replacement = match RemoteTerminalMirror::new(cols, rows) {
                                 Ok(mirror) => mirror,
                                 Err(_) => break,
@@ -4224,10 +4280,9 @@ async fn handle_terminal_grid_socket(
                                 Ok(frame) => frame,
                                 Err(_) => break,
                             }
-                        };
-                        send_tx.send(grid_text_message(frame)).is_ok()
+                        }
                     };
-                    if !sent {
+                    if !send_bounded_grid_message(&send_tx, grid_text_message(frame)).await {
                         break;
                     }
                     if let Some(end_sequence) = snapshot.history_end_sequence {
@@ -4298,7 +4353,9 @@ async fn handle_terminal_grid_socket(
                                             &recv_mirror,
                                             &recv_tx,
                                             |mirror| mirror.resize(cols, rows),
-                                        ) {
+                                        )
+                                        .await
+                                        {
                                             break;
                                         }
                                     }
@@ -4344,7 +4401,9 @@ async fn handle_terminal_grid_socket(
                                     }
                                     if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| {
                                         mirror.resize(cols, rows)
-                                    }) {
+                                    })
+                                    .await
+                                    {
                                         break;
                                     }
                                 }
@@ -4365,6 +4424,7 @@ async fn handle_terminal_grid_socket(
                                         &recv_tx,
                                         move |mirror| mirror.scroll(clamped_rows),
                                     )
+                                    .await
                                 {
                                     break;
                                 }
@@ -6645,10 +6705,11 @@ async fn run_browser_ws_session(
     let mut capture_rx = admission.subscribe_capture();
     let mut selection_rx = state.active_selection_watch_rx();
     let mut ack_check_interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    ack_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // R4-6: attachment stays passive. The frame receiver is acquired only once this
     // socket owns an accepted viewer subscription, so no synthetic viewer consumes a
     // slot and no producer is pinned by a merely-connected client.
-    let mut frame_rx_opt: Option<tokio::sync::broadcast::Receiver<Vec<u8>>> = None;
+    let mut frame_rx_opt: Option<crate::remote::browser_backend::FrameStreamReceiver> = None;
     let mut attached_subscription: Option<String> = None;
 
     loop {
@@ -6675,7 +6736,7 @@ async fn run_browser_ws_session(
         if session.subscription_id != attached_subscription {
             match session.subscription_id.clone() {
                 Some(sub_id) => {
-                    frame_rx_opt = backend.subscribe_frames(&browser_id).await.ok();
+                    frame_rx_opt = backend.subscribe_shared_frames(&browser_id).await.ok();
                     attached_subscription = Some(sub_id.clone());
                     if let Some(service_sub) = &session.backend_subscription_id {
                         admission.register_service_subscription(&sub_id, service_sub);
@@ -6710,7 +6771,7 @@ async fn run_browser_ws_session(
                     break;
                 }
             }
-            _ = ack_check_interval.tick() => {
+            _ = ack_check_interval.tick(), if session.subscription_id.is_some() => {
                 let now = Instant::now();
                 if let Some(sub_id) = &session.subscription_id {
                     let stalled = session.queue.as_ref().is_some_and(|q| q.is_ack_stalled(now));
@@ -6725,7 +6786,7 @@ async fn run_browser_ws_session(
                         if !capturing {
                             frame_rx_opt = None;
                         } else if session.subscription_id.is_some() && frame_rx_opt.is_none() {
-                            frame_rx_opt = backend.subscribe_frames(&browser_id).await.ok();
+                            frame_rx_opt = backend.subscribe_shared_frames(&browser_id).await.ok();
                         }
                     }
                 }
@@ -6752,7 +6813,9 @@ async fn run_browser_ws_session(
                 match frame_res {
                     Ok(frame_bytes) => {
                         if session.subscription_id.is_some() {
-                            if let Some(admitted) = session.enqueue_frame(frame_bytes, Instant::now()) {
+                            if let Some(admitted) =
+                                session.enqueue_frame(frame_bytes.to_vec(), Instant::now())
+                            {
                                 let _ = raw_msg_tx.send(Message::Binary(admitted.into())).await;
                             }
                         }

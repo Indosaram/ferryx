@@ -239,4 +239,35 @@ describe("SupervisorPanelHost", () => {
     await waitFor(() => expect(listWorktrees).toHaveBeenCalledWith("ssh:remote"));
     listWorktrees.mockRestore();
   });
+
+  it("defers worktree and transcript refreshes while hidden and flushes once when revealed", async () => {
+    const loadPrs = vi.fn(async () => PR_LANE);
+    const loadWorktrees = vi.fn(async () => []);
+    const loadTranscript = vi.fn(async (cursor: number) => ({ messages: [], nextCursor: cursor, hasMore: false }));
+    const load = vi.fn(() => Promise.resolve(panelSnapshotFixture));
+    const subscribe = vi.fn(() => Promise.resolve(() => undefined));
+    const panel = (visible: boolean) => (
+      <SupervisorPanelHost
+        onFocusSession={vi.fn()}
+        load={load}
+        subscribe={subscribe}
+        actionsFor={vi.fn(() => actionsMock())}
+        loadPrs={loadPrs}
+        loadWorktrees={loadWorktrees}
+        loadTranscript={loadTranscript}
+        workspaceId="ws-1"
+        registeredWorkspaceId="ws-1"
+        visible={visible}
+      />
+    );
+
+    const view = render(panel(false));
+    await waitFor(() => expect(loadPrs).toHaveBeenCalled());
+    expect(loadWorktrees).not.toHaveBeenCalled();
+    expect(loadTranscript).not.toHaveBeenCalled();
+
+    view.rerender(panel(true));
+    await waitFor(() => expect(loadWorktrees).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(loadTranscript).toHaveBeenCalledTimes(1));
+  });
 });

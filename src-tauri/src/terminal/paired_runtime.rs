@@ -209,9 +209,198 @@ struct Owner {
     completed: tokio::sync::watch::Receiver<bool>,
 }
 
-struct ActorPersistGuard {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PersistPhase {
+    Idle,
+    Scheduled,
+    Running,
+    Rerun,
+}
+
+struct PersistState {
+    phase: PersistPhase,
+    immediate: bool,
+}
+
+/// Store-level debounced writer state machine (`IDLE -> SCHEDULED -> RUNNING -> RERUN`).
+/// Guarantees at most one blocking persist task runs per store at a time, coalescing bursty
+/// descriptor updates across all proxy actors without piling up blocking threads on `PERSIST_MUTEX`.
+struct DescriptorPersister {
     descriptors: Arc<Mutex<HashMap<String, super::paired_daemon::Descriptor>>>,
     store_path: Arc<Mutex<Option<PathBuf>>>,
+    state: Mutex<PersistState>,
+    wake: tokio::sync::Notify,
+    #[cfg(test)]
+    idle_notify: tokio::sync::Notify,
+}
+
+struct DriverResetGuard {
+    persister: Arc<DescriptorPersister>,
+    disarmed: bool,
+}
+
+impl Drop for DriverResetGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let mut st = self.persister.state.lock();
+            st.phase = PersistPhase::Idle;
+            st.immediate = false;
+        }
+    }
+}
+
+impl DescriptorPersister {
+    fn new(
+        descriptors: Arc<Mutex<HashMap<String, super::paired_daemon::Descriptor>>>,
+        store_path: Arc<Mutex<Option<PathBuf>>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            descriptors,
+            store_path,
+            state: Mutex::new(PersistState {
+                phase: PersistPhase::Idle,
+                immediate: false,
+            }),
+            wake: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            idle_notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn schedule_debounced(self: &Arc<Self>) {
+        if self.store_path.lock().is_none() {
+            return;
+        }
+        let spawn = {
+            let mut st = self.state.lock();
+            match st.phase {
+                PersistPhase::Idle => {
+                    st.phase = PersistPhase::Scheduled;
+                    st.immediate = false;
+                    true
+                }
+                PersistPhase::Scheduled | PersistPhase::Rerun => false,
+                PersistPhase::Running => {
+                    st.phase = PersistPhase::Rerun;
+                    false
+                }
+            }
+        };
+        if spawn {
+            self.spawn_driver();
+        }
+    }
+
+    fn schedule_immediate(self: &Arc<Self>) {
+        if self.store_path.lock().is_none() {
+            return;
+        }
+        let (spawn, notify) = {
+            let mut st = self.state.lock();
+            match st.phase {
+                PersistPhase::Idle => {
+                    st.phase = PersistPhase::Scheduled;
+                    st.immediate = true;
+                    (true, false)
+                }
+                PersistPhase::Scheduled => {
+                    st.immediate = true;
+                    (false, true)
+                }
+                PersistPhase::Running => {
+                    st.phase = PersistPhase::Rerun;
+                    st.immediate = true;
+                    (false, false)
+                }
+                PersistPhase::Rerun => {
+                    st.immediate = true;
+                    (false, false)
+                }
+            }
+        };
+        if notify {
+            self.wake.notify_one();
+        } else if spawn {
+            self.spawn_driver();
+        }
+    }
+
+    fn spawn_driver(self: &Arc<Self>) {
+        let persister = Arc::clone(self);
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            let run = {
+                let mut st = persister.state.lock();
+                st.phase = PersistPhase::Idle;
+                let imm = st.immediate;
+                st.immediate = false;
+                imm
+            };
+            if run {
+                persist_snapshot(&persister.descriptors, &persister.store_path);
+            }
+            return;
+        };
+        handle.spawn(async move {
+            let mut reset_guard = DriverResetGuard {
+                persister: Arc::clone(&persister),
+                disarmed: false,
+            };
+            loop {
+                let immediate = {
+                    let mut st = persister.state.lock();
+                    if st.immediate {
+                        st.phase = PersistPhase::Running;
+                        st.immediate = false;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !immediate {
+                    let notified = persister.wake.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if !persister.state.lock().immediate {
+                        tokio::select! {
+                            biased;
+                            _ = notified => {}
+                            _ = tokio::time::sleep(PERSIST_MIN_INTERVAL) => {}
+                        }
+                    }
+                    let mut st = persister.state.lock();
+                    st.phase = PersistPhase::Running;
+                    st.immediate = false;
+                }
+
+                let descriptors = Arc::clone(&persister.descriptors);
+                let store_path = Arc::clone(&persister.store_path);
+                let _ = tokio::task::spawn_blocking(move || {
+                    persist_snapshot(&descriptors, &store_path);
+                })
+                .await;
+
+                let mut st = persister.state.lock();
+                match st.phase {
+                    PersistPhase::Rerun => {
+                        st.phase = PersistPhase::Scheduled;
+                    }
+                    _ => {
+                        st.phase = PersistPhase::Idle;
+                        st.immediate = false;
+                        reset_guard.disarmed = true;
+                        drop(st);
+                        #[cfg(test)]
+                        persister.idle_notify.notify_waiters();
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+struct ActorPersistGuard {
+    persister: Arc<DescriptorPersister>,
     dirty: Arc<AtomicBool>,
 }
 
@@ -220,36 +409,8 @@ impl Drop for ActorPersistGuard {
         if !self.dirty.load(Ordering::Acquire) {
             return;
         }
-        let descriptors = self.descriptors.clone();
-        let store_path = self.store_path.clone();
-        schedule_persist(descriptors, store_path);
+        self.persister.schedule_immediate();
     }
-}
-
-/// Stores that already have a persist queued on the blocking pool, keyed by the store's `Arc`.
-/// Every proxy actor marks its descriptor dirty on each output batch; without coalescing, dozens
-/// of live proxies queue hundreds of full-file fsync writes a second behind `PERSIST_MUTEX` and
-/// starve the blocking pool, which wedges the daemon (its handshake stops answering).
-static PERSIST_QUEUED: parking_lot::Mutex<Vec<usize>> = parking_lot::Mutex::new(Vec::new());
-
-/// Queues one snapshot write for this store unless one is already queued. The flag is cleared
-/// before the snapshot is taken, so a change made after that point queues another write.
-fn schedule_persist(
-    descriptors: Arc<Mutex<HashMap<String, super::paired_daemon::Descriptor>>>,
-    store_path: Arc<Mutex<Option<PathBuf>>>,
-) {
-    let key = Arc::as_ptr(&store_path) as usize;
-    {
-        let mut queued = PERSIST_QUEUED.lock();
-        if queued.contains(&key) {
-            return;
-        }
-        queued.push(key);
-    }
-    tokio::task::spawn_blocking(move || {
-        PERSIST_QUEUED.lock().retain(|queued| *queued != key);
-        persist_snapshot(&descriptors, &store_path);
-    });
 }
 
 fn persist_snapshot(
@@ -311,6 +472,7 @@ pub struct Runtime {
     owners: Arc<Mutex<HashMap<String, Owner>>>,
     descriptors: Arc<Mutex<HashMap<String, super::paired_daemon::Descriptor>>>,
     store_path: Arc<Mutex<Option<PathBuf>>>,
+    persister: Arc<DescriptorPersister>,
     agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn crate::terminal::remote::AgentStateSink>>>>,
     installation: Mutex<()>,
     #[cfg(any(test, feature = "local-split-qa"))]
@@ -418,10 +580,14 @@ impl Runtime {
             (HashMap::new(), None)
         };
         drop(_persist_guard);
+        let descriptors = Arc::new(Mutex::new(descriptors));
+        let store_path = Arc::new(Mutex::new(effective_store_path));
+        let persister = DescriptorPersister::new(Arc::clone(&descriptors), Arc::clone(&store_path));
         Self {
             owners: Arc::new(Mutex::new(HashMap::new())),
-            descriptors: Arc::new(Mutex::new(descriptors)),
-            store_path: Arc::new(Mutex::new(effective_store_path)),
+            descriptors,
+            store_path,
+            persister,
             agent_sink: Arc::new(parking_lot::RwLock::new(None)),
             installation: Mutex::new(()),
             #[cfg(any(test, feature = "local-split-qa"))]
@@ -683,9 +849,7 @@ impl Runtime {
     }
     pub fn remove_descriptor(&self, id: &str) {
         self.descriptors.lock().remove(id);
-        let descriptors = self.descriptors.clone();
-        let path = self.store_path.clone();
-        schedule_persist(descriptors, path);
+        self.persister.schedule_immediate();
     }
     async fn flush_descriptors(&self) -> Result<(), String> {
         let descriptors = self.descriptors.clone();
@@ -710,9 +874,7 @@ impl Runtime {
         owners.remove(&id);
 
         self.descriptors.lock().insert(id.clone(), descriptor);
-        let persist_descriptors = self.descriptors.clone();
-        let persist_path = self.store_path.clone();
-        schedule_persist(persist_descriptors, persist_path);
+        self.persister.schedule_immediate();
 
         let (sender, receiver) = mpsc::channel(32);
         let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
@@ -745,7 +907,7 @@ impl Runtime {
             completed: completed_tx,
         };
         let descriptors = self.descriptors.clone();
-        let store_path = self.store_path.clone();
+        let persister = Arc::clone(&self.persister);
         let task_id = id.clone();
         let live = Arc::new(Mutex::new(proxy.live_state()));
         let task_live = live.clone();
@@ -753,8 +915,7 @@ impl Runtime {
             let _reap = reap;
             let dirty = Arc::new(AtomicBool::new(false));
             let _persist_drop_guard = ActorPersistGuard {
-                descriptors: descriptors.clone(),
-                store_path: store_path.clone(),
+                persister: Arc::clone(&persister),
                 dirty: dirty.clone(),
             };
             // Drop the proxy and receiver before publishing completion/removing
@@ -789,12 +950,6 @@ impl Runtime {
             let mut recovery_attempts = 0;
             #[cfg(feature = "local-split-qa")]
             let mut recovery_receipts: Vec<PairedRecoveryAttemptReceipt> = Vec::new();
-            // Seed one interval in the past so the first change persists immediately:
-            // a change arriving inside the first debounce window could otherwise be
-            // lost when the actor is dropped before the window elapses.
-            let mut last_persisted = tokio::time::Instant::now()
-                .checked_sub(PERSIST_MIN_INTERVAL)
-                .unwrap_or_else(tokio::time::Instant::now);
             loop {
                 if std::mem::take(&mut route_recheck) {
                     if let Some((_, epoch)) = crate::paired_host::direct_route::GLOBAL_DIRECT_ROUTES.direct_for(&route_host) {
@@ -854,7 +1009,9 @@ impl Runtime {
                         Some(Command::Write(g, data, reply)) => {
                             let gen = if g == 0 { proxy.controller().unwrap_or(Epoch(0)) } else { Epoch(g) };
                             let result = proxy.write(gen, &data).await;
-                            if let Err(ref failure) = result {
+                            if result.is_ok() {
+                                keepalive.reset();
+                            } else if let Err(ref failure) = result {
                                 if proxy.controller().is_none() && failure.code != "PAIRED_NOT_SENT" { proxy.recovery_failed(failure); }
                             }
                             let _ = reply.send(result.map_err(|e| e.code));
@@ -960,13 +1117,6 @@ impl Runtime {
                             return;
                         }
                     },
-                    _ = tokio::time::sleep_until(last_persisted + PERSIST_MIN_INTERVAL), if dirty.load(Ordering::Acquire) => {
-                        let descs = descriptors.clone();
-                        let path = store_path.clone();
-                        schedule_persist(descs, path);
-                        last_persisted = tokio::time::Instant::now();
-                        dirty.store(false, Ordering::Release);
-                    }
                     _ = keepalive.tick(), if proxy.controller().is_some() => {
                         if let Some(g) = proxy.controller() {
                             if let Err(failure) = proxy.ping(g).await {
@@ -1131,10 +1281,15 @@ impl Runtime {
                         }
                     }
                 result = proxy.receive(), if proxy.controller().is_some() => {
-                        if let Err(failure) = result {
-                            proxy.recovery_failed(&failure);
-                            #[cfg(test)]
-                            let _ = recovery_events.send(RecoveryTestEvent::Completed { failed: true });
+                        match result {
+                            Ok(_) => {
+                                keepalive.reset();
+                            }
+                            Err(failure) => {
+                                proxy.recovery_failed(&failure);
+                                #[cfg(test)]
+                                let _ = recovery_events.send(RecoveryTestEvent::Completed { failed: true });
+                            }
                         }
                         let seq = proxy.descriptor().after_sequence;
                         let changed = {
@@ -1153,6 +1308,7 @@ impl Runtime {
                         };
                         if changed {
                             dirty.store(true, Ordering::Release);
+                            persister.schedule_debounced();
                         }
                     }
                 }
@@ -2962,5 +3118,51 @@ mod tests {
             task.await.unwrap().unwrap();
             runtime.detach(&id).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn descriptor_persister_coalesces_debounced_updates_and_handles_rerun() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors_state_machine.json");
+        let runtime = Runtime::new(Some(store_path.clone()));
+        let base_count = test_persist_count_path(&store_path);
+
+        // Rapid burst of debounced schedules coalesces into a single scheduled run.
+        for seq in 1..=20u64 {
+            runtime.descriptors.lock().insert(
+                "daemon-session:coalesce".into(),
+                Descriptor {
+                    host_id: "https://relay.example.com".into(),
+                    generation: Epoch(1),
+                    target: RemoteTerminalTarget {
+                        machine_id: "m".into(),
+                        daemon_epoch: Epoch(1),
+                        session_id: "s".into(),
+                    },
+                    after_sequence: Some(Epoch(seq)),
+                },
+            );
+            runtime.persister.schedule_debounced();
+        }
+        assert_eq!(runtime.persister.state.lock().phase, PersistPhase::Scheduled);
+
+        // Waking with immediate flushes without waiting for the 100ms debounce window.
+        let idle = runtime.persister.idle_notify.notified();
+        tokio::pin!(idle);
+        idle.as_mut().enable();
+        runtime.persister.schedule_immediate();
+        if runtime.persister.state.lock().phase != PersistPhase::Idle {
+            tokio::time::timeout(Duration::from_secs(2), idle)
+                .await
+                .expect("persister returns to Idle after immediate flush");
+        }
+
+        let persists = test_persist_count_path(&store_path) - base_count;
+        assert_eq!(persists, 1, "burst of 20 updates must coalesce into 1 write, got {persists}");
+        let loaded = load_descriptors(&store_path).unwrap();
+        assert_eq!(
+            loaded.get("daemon-session:coalesce").and_then(|d| d.after_sequence),
+            Some(Epoch(20))
+        );
     }
 }

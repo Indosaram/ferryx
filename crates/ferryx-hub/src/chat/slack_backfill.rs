@@ -232,8 +232,7 @@ async fn backfill_target(
             "authorizations": [{"user_id": bot.user_id}],
             "event": event,
         });
-        let known = super::slack_turn::known_thread(pool, &payload).await;
-        if let Some(admitted) = super::slack_turn::admit(config, &payload, &bot.user_id, known) {
+        if let Some(admitted) = super::slack_turn::admit_for_hub(pool, config, &payload).await {
             if super::slack_turn::handle(config, pool, admitted).await {
                 routed += 1;
             }

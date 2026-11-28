@@ -14,6 +14,13 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, watch};
+use super::mhc_supervisor::pending::PendingTurn;
+
+struct Outbound {
+    text: String,
+    pending: Option<Arc<PendingTurn>>,
+    delivered: oneshot::Sender<()>,
+}
 
 /// Extension RPC event a conversation session's typed work tool emits.
 pub const WORK_REQUEST_EVENT: &str = "supervisor.work_request";
@@ -68,7 +75,7 @@ struct Shared {
     /// Records dispatched so far, in engine output order.
     received: AtomicU64,
     /// The writer queue, held weakly so [`StdioClient::close`] still shuts the engine's stdin.
-    outbound: mpsc::WeakUnboundedSender<String>,
+    outbound: mpsc::WeakUnboundedSender<Outbound>,
     gone: watch::Sender<Option<String>>,
 }
 
@@ -132,7 +139,7 @@ impl Shared {
         let sent = self
             .outbound
             .upgrade()
-            .is_some_and(|sender| sender.send(line).is_ok());
+            .is_some_and(|sender| sender.send(Outbound { text: line, pending: None, delivered: oneshot::channel().0 }).is_ok());
         tracing::warn!(
             sent,
             "a supervisor work request was refused: the work queue is full"
@@ -203,7 +210,7 @@ impl Shared {
 pub struct StdioClient {
     shared: Arc<Shared>,
     /// `None` after [`Self::close`]: the writer then shuts the engine's stdin.
-    outbound: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    outbound: Mutex<Option<mpsc::UnboundedSender<Outbound>>>,
     next_id: AtomicU64,
 }
 
@@ -264,7 +271,7 @@ impl StdioClient {
     ) -> (Arc<Self>, mpsc::Receiver<Value>) {
         let (work_tx, work_rx) = mpsc::channel(WORK_QUEUE);
         let (gone, _) = watch::channel(None);
-        let (outbound, mut lines) = mpsc::unbounded_channel::<String>();
+        let (outbound, mut lines) = mpsc::unbounded_channel::<Outbound>();
         let shared = Arc::new(Shared {
             routes: Mutex::new(Some(Routes {
                 work: Some(work_tx),
@@ -279,15 +286,32 @@ impl StdioClient {
         let writer_shared = shared.clone();
         tokio::spawn(async move {
             let mut writer = writer;
-            while let Some(line) = lines.recv().await {
-                let written = match writer.write_all(line.as_bytes()).await {
-                    Ok(()) => writer.flush().await,
-                    Err(error) => Err(error),
+            let mut gone = writer_shared.gone.subscribe();
+            loop {
+                let line = tokio::select! {
+                    biased;
+                    _ = gone.wait_for(Option::is_some) => return,
+                    line = lines.recv() => match line { Some(line) => line, None => break },
+                };
+                if let Some(pending) = &line.pending {
+                    if let Err(error) = pending.before_write().await {
+                        writer_shared.mark_gone(&format!("pending prompt receipt failed: {error}"));
+                        return;
+                    }
+                }
+                let written = tokio::select! {
+                    biased;
+                    _ = gone.wait_for(Option::is_some) => return,
+                    written = async {
+                        writer.write_all(line.text.as_bytes()).await?;
+                        writer.flush().await
+                    } => written,
                 };
                 if let Err(error) = written {
                     writer_shared.mark_gone(&format!("engine stdin closed: {error}"));
                     return;
                 }
+                let _ = line.delivered.send(());
             }
             // Every client handle is gone: closing stdin ends the engine's stdio host.
             let _ = writer.shutdown().await;
@@ -377,6 +401,11 @@ impl StdioClient {
     /// Queues one command line without waiting for a response. serde_json escapes control
     /// characters, so a command is always exactly one line whatever text it carries.
     pub fn send(&self, command: &Value) -> Result<(), RequestError> {
+        self.send_tracked(command, None).map(|_| ())
+    }
+
+    fn send_tracked(&self, command: &Value, pending: Option<Arc<PendingTurn>>) -> Result<oneshot::Receiver<()>, RequestError> {
+        let (delivered, receiver) = oneshot::channel();
         if self.is_gone() {
             return Err(self.gone_error());
         }
@@ -384,11 +413,12 @@ impl StdioClient {
         line.push('\n');
         let outbound = self.outbound.lock().unwrap_or_else(PoisonError::into_inner);
         match outbound.as_ref() {
-            Some(sender) => sender.send(line).map_err(|_| self.gone_error()),
-            None => Err(RequestError::Gone(
+            Some(sender) => sender.send(Outbound { text: line, pending, delivered }).map_err(|_| self.gone_error())?,
+            None => return Err(RequestError::Gone(
                 "the supervisor closed the engine transport".to_owned(),
             )),
         }
+        Ok(receiver)
     }
 
     /// Sends one command with a fresh id and waits up to `deadline` for its response.
@@ -406,6 +436,15 @@ impl StdioClient {
         command: Value,
         deadline: Duration,
     ) -> Result<(Value, u64), RequestError> {
+        self.request_at_tracked(command, deadline, None).await
+    }
+
+    pub(crate) async fn request_at_tracked(
+        &self,
+        command: Value,
+        deadline: Duration,
+        pending: Option<Arc<PendingTurn>>,
+    ) -> Result<(Value, u64), RequestError> {
         let mut command = command;
         let id = format!("fx-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         command["id"] = json!(id);
@@ -422,11 +461,14 @@ impl StdioClient {
             };
             routes.pending.insert(id.clone(), sender);
         }
-        if let Err(error) = self.send(&command) {
-            self.forget_pending(&id);
-            return Err(error);
-        }
-        match tokio::time::timeout(deadline, receiver).await {
+        let delivered = match self.send_tracked(&command, pending) {
+            Ok(delivered) => delivered,
+            Err(error) => {
+                self.forget_pending(&id);
+                return Err(error);
+            }
+        };
+        let outcome = match tokio::time::timeout(deadline, receiver).await {
             Err(_) => {
                 self.forget_pending(&id);
                 Err(RequestError::Timeout)
@@ -454,7 +496,12 @@ impl StdioClient {
                     })
                 }
             }
+        };
+        // Fence the retired writer before deciding whether an owner prompt can be retried.
+        if matches!(&outcome, Err(RequestError::Gone(_))) {
+            let _ = delivered.await;
         }
+        outcome
     }
 
     fn forget_pending(&self, id: &str) {

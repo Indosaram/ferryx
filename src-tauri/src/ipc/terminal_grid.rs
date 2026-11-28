@@ -27,11 +27,16 @@ enum GridCommand {
 struct GridStream {
     commands: mpsc::UnboundedSender<GridCommand>,
     task: tokio::task::JoinHandle<()>,
+    /// Set by the task just before it prunes its own entry, so `Drop` does not abort a task that
+    /// is already unwinding its way out.
+    exited: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drop for GridStream {
     fn drop(&mut self) {
-        self.task.abort();
+        if !self.exited.load(std::sync::atomic::Ordering::Acquire) {
+            self.task.abort();
+        }
     }
 }
 
@@ -94,6 +99,12 @@ pub async fn cmd_terminal_grid_attach(
     let stream_id = uuid::Uuid::new_v4().to_string();
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let mut messages = attachment.messages;
+    // The task prunes its own entry on the way out: without this, every exited session's stream
+    // (and its command sender) stays in the map until an explicit detach that may never come.
+    let registry = Arc::clone(&streams.streams);
+    let owned_stream_id = stream_id.clone();
+    let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_exited = Arc::clone(&exited);
     let task = tokio::spawn(async move {
         let _upstream = upstream;
         // Idle scrollback compression of the mirror: output restarts the idle delay and a
@@ -169,11 +180,22 @@ pub async fn cmd_terminal_grid_attach(
                 break;
             }
         }
+        task_exited.store(true, std::sync::atomic::Ordering::Release);
+        registry.lock().remove(&owned_stream_id);
     });
-    streams
-        .streams
-        .lock()
-        .insert(stream_id.clone(), GridStream { commands: command_tx, task });
+    {
+        let mut map = streams.streams.lock();
+        map.insert(
+            stream_id.clone(),
+            GridStream { commands: command_tx, task, exited: Arc::clone(&exited) },
+        );
+        // The task can finish (immediately failed send, instant exit) before this insert runs; its
+        // own prune then found nothing to remove, so the freshly inserted dead entry is dropped
+        // here instead of lingering forever.
+        if exited.load(std::sync::atomic::Ordering::Acquire) {
+            map.remove(&stream_id);
+        }
+    }
     Ok(stream_id)
 }
 

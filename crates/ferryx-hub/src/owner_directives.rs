@@ -5,7 +5,7 @@
 //! with their dates, superseded pairwise (newest wins, a boundary beats an agreement of the same
 //! date), and rendered as one fenced block of at most 40 lines. The block is stored by content
 //! hash in `owner_directive_projection`, so a cron run can name the directives it saw.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -546,10 +546,44 @@ fn share_keywords(a: &Directive, b: &Directive) -> bool {
     keywords(&b.text).iter().any(|word| left.contains(word))
 }
 
+const MAX_VERDICT_CACHE_ENTRIES: usize = 2048;
+
+#[derive(Default)]
+struct VerdictCache {
+    map: HashMap<(String, String), bool>,
+    order: VecDeque<(String, String)>,
+}
+
+impl VerdictCache {
+    fn get(&self, key: &(String, String)) -> Option<bool> {
+        self.map.get(key).copied()
+    }
+
+    fn insert(&mut self, key: (String, String), value: bool) {
+        if let Some(existing) = self.map.get_mut(&key) {
+            *existing = value;
+            return;
+        }
+        while self.map.len() >= MAX_VERDICT_CACHE_ENTRIES {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.map.remove(&oldest);
+                }
+                None => {
+                    self.map.clear();
+                    break;
+                }
+            }
+        }
+        self.order.push_back(key.clone());
+        self.map.insert(key, value);
+    }
+}
+
 /// Judge answers per (older, newer) pair, so a rebuild does not ask the same question twice.
-fn verdicts() -> &'static Mutex<HashMap<(String, String), bool>> {
-    static VERDICTS: OnceLock<Mutex<HashMap<(String, String), bool>>> = OnceLock::new();
-    VERDICTS.get_or_init(|| Mutex::new(HashMap::new()))
+fn verdicts() -> &'static Mutex<VerdictCache> {
+    static VERDICTS: OnceLock<Mutex<VerdictCache>> = OnceLock::new();
+    VERDICTS.get_or_init(|| Mutex::new(VerdictCache::default()))
 }
 
 fn pair_key(older: &Directive, newer: &Directive) -> (String, String) {
@@ -578,8 +612,7 @@ pub async fn build_and_store(
             let cached = verdicts()
                 .lock()
                 .map_err(|_| HubError::message("owner directive verdict cache poisoned"))?
-                .get(&key)
-                .copied();
+                .get(&key);
             let verdict = match cached {
                 Some(verdict) => verdict,
                 None => {
@@ -1042,5 +1075,25 @@ INSTRUCTION: Never handle credit card details directly.\n";
         assert!(!prompt.contains("올리거나 보내지 마세요"));
         assert!(prompt.contains(crate::cron_exec::CRON_HINT));
         assert!(prompt.find(HEADER) < prompt.find("daily digest"));
+    }
+
+    #[test]
+    fn verdict_cache_is_bounded_and_evicts_oldest() {
+        let mut cache = VerdictCache::default();
+        for i in 0..(MAX_VERDICT_CACHE_ENTRIES + 10) {
+            cache.insert((format!("old-{i}"), format!("new-{i}")), i % 2 == 0);
+        }
+        assert_eq!(cache.map.len(), MAX_VERDICT_CACHE_ENTRIES);
+        assert_eq!(cache.get(&("old-0".to_owned(), "new-0".to_owned())), None);
+        assert_eq!(cache.get(&("old-9".to_owned(), "new-9".to_owned())), None);
+        assert_eq!(
+            cache.get(&("old-10".to_owned(), "new-10".to_owned())),
+            Some(true)
+        );
+        let last = MAX_VERDICT_CACHE_ENTRIES + 9;
+        assert_eq!(
+            cache.get(&(format!("old-{last}"), format!("new-{last}"))),
+            Some(last % 2 == 0)
+        );
     }
 }

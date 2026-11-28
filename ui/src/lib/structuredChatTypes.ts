@@ -670,14 +670,39 @@ export function structuredPartsAfter(parts: readonly StructuredPart[], seq: numb
  * `seq` wins (a later read can complete a part an earlier long-poll caught mid-write), and the
  * result is ascending. A replayed or overlapping page therefore never duplicates a row.
  */
+/** `seq` strictly increasing: the shape both a journal read and a merge result have. */
+function strictlyAscending(parts: readonly StructuredPart[]): boolean {
+  for (let index = 1; index < parts.length; index += 1) {
+    if (parts[index].seq <= parts[index - 1].seq) return false;
+  }
+  return true;
+}
+
 export function mergeStructuredParts(
   current: readonly StructuredPart[],
   incoming: readonly StructuredPart[],
 ): readonly StructuredPart[] {
   if (incoming.length === 0) return current;
+  // Append-only fast path: an `after=cursor` poll carries only seqs above everything held, so the
+  // merge is one array copy instead of a Map build plus a full sort on every poll.
+  if (
+    strictlyAscending(current) &&
+    strictlyAscending(incoming) &&
+    (current.length === 0 || incoming[0].seq > current[current.length - 1].seq)
+  ) {
+    return current.length === 0 ? incoming : [...current, ...incoming];
+  }
   const bySeq = new Map<number, StructuredPart>();
   for (const part of current) bySeq.set(part.seq, part);
-  for (const part of incoming) bySeq.set(part.seq, part);
+  // A replayed page that carries the very objects already held changes nothing: hand back the
+  // reference the caller's memo already compares against instead of a rebuilt array.
+  let changed = false;
+  for (const part of incoming) {
+    if (bySeq.get(part.seq) === part) continue;
+    bySeq.set(part.seq, part);
+    changed = true;
+  }
+  if (!changed) return current;
   return [...bySeq.values()].sort((left, right) => left.seq - right.seq);
 }
 

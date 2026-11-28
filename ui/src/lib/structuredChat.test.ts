@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import {
   STRUCTURED_CHAT_QUEUED_FAILED,
   STRUCTURED_CHAT_REVERT_FILES_UNSUPPORTED,
   STRUCTURED_CHAT_SEND_FAILED,
   STRUCTURED_CHAT_SESSION_ENDED,
+  structuredMediaCachePut,
   useStructuredChat,
   structuredUserTextCount,
 } from "./structuredChat";
@@ -920,5 +921,39 @@ describe("useStructuredChat gap lane", () => {
     expect(
       supported.calls.filter((call) => call.op === "rollback").map((call) => call.body),
     ).toEqual([{ turns: 1, revertFiles: true }]);
+  });
+
+  it("bounds media cache by LRU and revokes any evicted objectUrl", () => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    try {
+      const blobWithUrl = {
+        mimeType: "image/png",
+        dataBase64: "AA==",
+        objectUrl: "blob:evicted-1",
+      } as unknown as { readonly mimeType: string; readonly dataBase64: string };
+      let cache = structuredMediaCachePut({}, "k1", blobWithUrl, 2);
+      cache = structuredMediaCachePut(cache, "k2", { mimeType: "image/png", dataBase64: "BB==" }, 2);
+      cache = structuredMediaCachePut(cache, "k3", { mimeType: "image/png", dataBase64: "CC==" }, 2);
+      expect(Object.keys(cache)).toEqual(["k2", "k3"]);
+      expect(revoke).toHaveBeenCalledWith("blob:evicted-1");
+    } finally {
+      revoke.mockRestore();
+    }
+  });
+
+  it("skips history and events polling while visible is false", async () => {
+    const fake = fakeTransport({
+      parts: [at(1, { turnId: "t1", type: "userMessage", text: "hidden" })],
+    });
+    const { rerender } = renderHook(
+      ({ visible }: { visible: boolean }) =>
+        useStructuredChat({ transport: fake.transport, sessionId: "s1", visible, pollMs: 500 }),
+      { initialProps: { visible: false } },
+    );
+    await waitFor(() => expect(fake.calls.some((call) => call.op === "capabilities")).toBe(true));
+    expect(fake.calls.filter((call) => call.op === "history" || call.op === "events")).toHaveLength(0);
+
+    rerender({ visible: true });
+    await waitFor(() => expect(fake.calls.some((call) => call.op === "history")).toBe(true));
   });
 });

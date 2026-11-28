@@ -117,6 +117,9 @@ impl RecoveryScheduler {
         st.present = fleet.iter().map(|s| s.session_ref.clone()).collect();
         let mut obs: HashMap<SessionRef, Obs> = HashMap::new();
         for session in fleet {
+            if self.deps.pause.observe_held(&session).await {
+                continue;
+            }
             if session.stale {
                 continue;
             }
@@ -388,7 +391,7 @@ impl RecoveryScheduler {
         stopped: &mut bool,
         now: i64,
     ) -> bool {
-        if !self.go().await {
+        if !self.go().await || self.deps.pause.session_paused(&o.session.session_ref).await {
             return false;
         }
         let Some(text) = resume_text_for(rules, &o.session.agent) else {

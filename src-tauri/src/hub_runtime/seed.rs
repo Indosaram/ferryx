@@ -232,6 +232,9 @@ pub(crate) async fn seed_with_roots(
         duplicates: from_files.duplicates + from_sessions.duplicates,
         skipped: from_files.skipped + from_sessions.skipped,
         failed: from_files.failed + from_sessions.failed,
+        refusals: from_files.refusals + from_sessions.refusals,
+        wait_timeouts: from_files.wait_timeouts + from_sessions.wait_timeouts,
+        stop_reason: from_files.stop_reason.or(from_sessions.stop_reason),
     };
     tracing::info!(
         sessions = report.sessions,

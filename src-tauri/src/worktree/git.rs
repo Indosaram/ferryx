@@ -920,15 +920,6 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
     if let Some(observer) = GIT_OBSERVER.with(|slot| slot.borrow().clone()) {
         observer(&normalized_cwd, &arg_strs);
     }
-    let command_str = format!(
-        "git {}",
-        arg_strs
-            .iter()
-            .map(|arg| escape_git_arg_for_log(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-
     let budget = GIT_BUDGET.with(|slot| slot.borrow().clone());
     let output = if let Some(budget) = budget {
         bounded_output(&normalized_cwd, &arg_strs, budget)?
@@ -943,14 +934,21 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
             .map_err(WorktreeError::Io)?
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
+    // Decode and format lazily: these allocations only feed the error branch, so
+    // a successful command must not pay extra full-buffer copies.
     if !output.status.success() {
+        let command_str = format!(
+            "git {}",
+            arg_strs
+                .iter()
+                .map(|arg| escape_git_arg_for_log(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         return Err(WorktreeError::GitError {
             command: command_str,
-            stderr: stderr.trim().to_string(),
-            stdout: stdout.trim().to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
             code: output.status.code(),
         });
     }

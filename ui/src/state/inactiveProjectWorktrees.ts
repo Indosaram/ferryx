@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import {
   listWorktrees as defaultListWorktrees,
@@ -80,14 +80,41 @@ export function useInactiveProjectWorktrees(
   }, [activeProjectId, activeWorktrees]);
 
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const pairedRefreshKey = JSON.stringify(projects.filter(project => project.target?.kind === "pairedDaemon").map(project => {
-    const host = project.target?.kind === "pairedDaemon" ? remoteState.hosts[project.target.hostId] : undefined;
-    return [project.workspaceId, host?.generation, host?.online, host?.authStatus, remoteState.nativeStatus, remoteState.machineFeaturesEnabled];
-  }));
-  const inactiveTargets = projects.filter((project) => project.workspaceId !== activeProjectId || project.target?.kind === "pairedDaemon");
-  const inactiveKey = JSON.stringify(inactiveTargets.map(({ workspaceId, repoRoot, gitRoot, target }) => ({
-    workspaceId, repoRoot, gitRoot, target,
-  })));
+  const pairedRefreshKey = useMemo(
+    () =>
+      JSON.stringify(
+        projects
+          .filter((project) => project.target?.kind === "pairedDaemon")
+          .map((project) => {
+            const host = project.target?.kind === "pairedDaemon" ? remoteState.hosts[project.target.hostId] : undefined;
+            return [
+              project.workspaceId,
+              host?.generation,
+              host?.online,
+              host?.authStatus,
+              remoteState.nativeStatus,
+              remoteState.machineFeaturesEnabled,
+            ];
+          }),
+      ),
+    [projects, remoteState.hosts, remoteState.machineFeaturesEnabled, remoteState.nativeStatus],
+  );
+  const inactiveTargets = useMemo(
+    () => projects.filter((project) => project.workspaceId !== activeProjectId || project.target?.kind === "pairedDaemon"),
+    [projects, activeProjectId],
+  );
+  const inactiveKey = useMemo(
+    () =>
+      JSON.stringify(
+        inactiveTargets.map(({ workspaceId, repoRoot, gitRoot, target }) => ({
+          workspaceId,
+          repoRoot,
+          gitRoot,
+          target,
+        })),
+      ),
+    [inactiveTargets],
+  );
   const onRegisteredRef = useRef(onRegistered);
   onRegisteredRef.current = onRegistered;
 

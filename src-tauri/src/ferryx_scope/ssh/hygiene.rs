@@ -348,26 +348,86 @@ fn process_owned_by_uid(pid: u32, uid: u32) -> bool {
         == Some(uid)
 }
 
+fn kill_and_reap(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pgid) = i32::try_from(child.id()) {
+        if pgid > 0 {
+            // SAFETY: child runs in its own process group (`process_group(0)`),
+            // so negating its PID signals only that process group.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_command(program: &str, args: &[String], timeout: Duration) -> Result<CommandOutput, String> {
-    let child = std::process::Command::new(program)
-        .args(args)
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("HYGIENE_SPAWN_FAILED: {program}: {e}"))?;
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
     let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(child.wait_with_output());
+    let io_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let stderr_thread = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(ref mut pipe) = stderr {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        });
+        let mut out_buf = Vec::new();
+        if let Some(ref mut pipe) = stdout {
+            let _ = pipe.read_to_end(&mut out_buf);
+        }
+        let err_buf = stderr_thread.join().unwrap_or_default();
+        let _ = sender.send((out_buf, err_buf));
     });
+
+    let deadline = std::time::Instant::now() + timeout;
     match receiver.recv_timeout(timeout) {
-        Ok(Ok(output)) => Ok(CommandOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }),
-        Ok(Err(error)) => Err(format!("HYGIENE_COMMAND_FAILED: {program}: {error}")),
-        Err(_) => Err(format!("HYGIENE_COMMAND_TIMEOUT: {program}")),
+        Ok((stdout_bytes, stderr_bytes)) => {
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            kill_and_reap(&mut child);
+                            let _ = io_thread.join();
+                            return Err(format!("HYGIENE_COMMAND_TIMEOUT: {program}"));
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => {
+                        kill_and_reap(&mut child);
+                        let _ = io_thread.join();
+                        return Err(format!("HYGIENE_COMMAND_FAILED: {program}: {error}"));
+                    }
+                }
+            };
+            let _ = io_thread.join();
+            Ok(CommandOutput {
+                success: status.success(),
+                stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+            })
+        }
+        Err(_) => {
+            kill_and_reap(&mut child);
+            let _ = io_thread.join();
+            Err(format!("HYGIENE_COMMAND_TIMEOUT: {program}"))
+        }
     }
 }
 
@@ -546,6 +606,32 @@ mod tests {
                 ("c17".to_string(), "SIGTERM".to_string()),
                 ("c17".to_string(), "SIGKILL".to_string()),
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hygiene_run_command_succeeds_and_reaps_hung_command_on_timeout() {
+        let ok = run_command(
+            "/bin/sh",
+            &["-c".to_string(), "printf ok".to_string()],
+            Duration::from_secs(5),
+        )
+        .expect("fast command succeeds");
+        assert!(ok.success);
+        assert_eq!(ok.stdout, "ok");
+
+        let started = std::time::Instant::now();
+        let err = run_command(
+            "/bin/sh",
+            &["-c".to_string(), "exec sleep 30".to_string()],
+            Duration::from_millis(50),
+        )
+        .expect_err("hung command must time out");
+        assert_eq!(err, "HYGIENE_COMMAND_TIMEOUT: /bin/sh");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout must kill and reap promptly instead of waiting for sleep 30"
         );
     }
 }

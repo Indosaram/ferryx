@@ -414,6 +414,52 @@ async fn lane_event(pool: &SqlitePool, key: &str, kind: &str, body: &str) -> Res
     Ok(())
 }
 
+/// Removes a settled lane's worktrees without forcing and without changing its status: the
+/// settlement gate has already moved it to `verified_done`, and a tree that refuses (dirty, or a
+/// lane the supervisor owns) stays in place with the refusal logged. Returns the trees it kept.
+pub async fn remove_settled(pool: &SqlitePool, key: &str) -> Result<Vec<String>> {
+    let mut kept = Vec::new();
+    for (path, state, repo, branch, start) in owned(pool, key).await? {
+        let repo = PathBuf::from(repo);
+        if state == "removed" {
+            continue;
+        }
+        if !claim_removal(pool, key, &path).await? {
+            kept.push(path);
+            continue;
+        }
+        let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+        let removed = if exists || registered(&repo, &path).await? {
+            // No --force: a dirty tree refuses, and the owner's work stays put.
+            git(&repo, &["worktree", "remove", &path]).await.map(drop)
+        } else {
+            Ok(())
+        };
+        match removed {
+            Ok(()) => {
+                set_state(pool, key, &path, "removed").await?;
+                if let Some(note) = unmerged(&repo, &branch, start.as_deref()).await? {
+                    lane_event(
+                        pool,
+                        key,
+                        "unmerged_branch",
+                        &format!(
+                            "lane work is on unmerged branch {note}; nothing was merged into the repository HEAD"
+                        ),
+                    )
+                    .await?;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(key, path = %path, %error, "a settled lane's worktree was not removed");
+                set_state(pool, key, &path, "registered").await?;
+                kept.push(path);
+            }
+        }
+    }
+    Ok(kept)
+}
+
 /// Closes a lane as omo's close intent does: remove its worktrees, report unmerged work,
 /// then move it to closed. `reason` is the transition reason (`forced: …` for a lane that
 /// is not verified). A failure leaves the lane in its status and tells the lead.

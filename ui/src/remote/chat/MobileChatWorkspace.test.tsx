@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
-import { MobileChatWorkspace, chatStarterPrompts } from "./MobileChatWorkspace";
+import { MobileChatWorkspace, applyToolCallVisibility, chatStarterPrompts } from "./MobileChatWorkspace";
 import type { MobileChatMessageProps } from "./MobileChatMessage";
 
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -791,6 +791,14 @@ describe("MobileChatWorkspace", () => {
       <MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} toolCallVisibility="zen" />,
     );
     expect(screen.getByText("INTERIM_MARKER")).toBeInTheDocument();
+  });
+
+  it("applyToolCallVisibility preserves original array reference when unchanged", () => {
+    const calls = [{ kind: "tool" as const, toolName: "shell", status: "success" as const }];
+    expect(applyToolCallVisibility("all", calls)).toBe(calls);
+    const failedOnly = [{ kind: "tool" as const, toolName: "shell", status: "error" as const }];
+    expect(applyToolCallVisibility("hide-all", failedOnly)).toBe(failedOnly);
+    expect(applyToolCallVisibility("hide-successful", failedOnly)).toBe(failedOnly);
   });
 });
 

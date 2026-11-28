@@ -14,7 +14,8 @@
 //!   not, e.g. `idle_evicted` or `host_shutdown`) is resumed on its next use.
 //! - Faults are typed and secret-redacted. There is no model fallback: a provider failure is
 //!   reported, never answered by another model, and an engine-side model fallback is refused.
-//! - An in-flight turn is never retransmitted after the engine exits.
+//! - Only owner turns whose prompt bytes were never written can survive an engine relaunch.
+//!   Written turns have unknown outcomes and are reported, never retransmitted.
 //! - One process owns the profile at a time: the exclusive OS lock `<data>/mhc-supervisor.lock`
 //!   is taken before the launch and released only once the owned child is reaped. A successor
 //!   (a handover's new daemon) waits a bounded time for it, then reports
@@ -24,6 +25,9 @@
 //!   [`SHUTDOWN_GRACE`] to exit, then it is killed and reaped; no call relaunches it until the
 //!   next generation supervises again. A process that never owned the engine (the MCP server)
 //!   reports [`SupervisorFault::NotRunning`] instead of using another model.
+mod compaction;
+pub mod pending;
+
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -85,6 +89,12 @@ const DIALOG_METHODS: [&str; 6] = [
 
 /// Resolves when the owned engine process exits; `Some(true)` for a clean exit.
 pub type ExitFuture = Pin<Box<dyn Future<Output = Option<bool>> + Send>>;
+
+struct TurnLink<'a> {
+    cancel: &'a mut watch::Receiver<u64>,
+    epoch: u64,
+    caller: &'a mut oneshot::Sender<TurnResult>,
+}
 
 /// A started engine: its stdout and stdin, and the owned process identity when there is one.
 /// `exited` resolves once the owned process is reaped; sending on (or dropping) `kill` kills
@@ -182,6 +192,22 @@ impl EngineLauncher for ProcessLauncher {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(target_os = "linux")]
+        {
+            let parent_pid = unsafe { libc::getpid() };
+            // SAFETY: runs after fork() and calls only async-signal-safe syscalls.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                    if libc::getppid() != parent_pid {
+                        libc::raise(libc::SIGKILL);
+                    }
+                    Ok(())
+                });
+            }
+        }
         match profile.open_log() {
             Some(log) => command.stderr(log),
             None => command.stderr(Stdio::null()),
@@ -215,8 +241,16 @@ impl EngineLauncher for ProcessLauncher {
             };
             let status = match waited {
                 Some(status) => status,
-                // Asked to stop, or every handle on the engine is gone: kill, then reap.
+                // Asked to stop, or every handle on the engine is gone: kill the whole
+                // process group (created by `process_group(0)`) so grandchild tool processes
+                // do not survive as orphans, then kill and reap the direct child.
                 None => {
+                    #[cfg(unix)]
+                    if let Some(pgid) = pid.and_then(|p| i32::try_from(p).ok()).filter(|&p| p > 0) {
+                        unsafe {
+                            libc::kill(-pgid, libc::SIGKILL);
+                        }
+                    }
                     let _ = child.kill().await;
                     child.wait().await
                 }
@@ -348,6 +382,11 @@ pub enum WorkToolCall {
         title: String,
         requirements: Vec<String>,
         worker: WorkerPreference,
+        /// The model's hint at the project (name or repository basename); a hint naming no
+        /// single project is ignored, never guessed.
+        project: Option<String>,
+        /// The model's hint at the working directory; it only counts inside a project checkout.
+        cwd: Option<String>,
     },
     Status {
         goal_id: Option<String>,
@@ -427,6 +466,10 @@ struct SubmitPayload {
     requirements: Vec<String>,
     #[serde(default)]
     worker: Option<WorkerPreference>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -484,6 +527,8 @@ pub(crate) fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolReje
                 title: payload.title,
                 requirements: payload.requirements,
                 worker: payload.worker.unwrap_or(WorkerPreference::Any),
+                project: payload.project,
+                cwd: payload.cwd,
             })
         }
         Some("status") => {
@@ -1339,8 +1384,30 @@ impl Inner {
                 "the supervisor engine stopped with the hub",
             ));
         }
+        // Under the profile lock, reap any orphaned `mhc` left behind by a dead previous hub
+        // before launching the replacement.
+        if self
+            .profile
+            .read_pid_record()
+            .is_some_and(|record| record.owner_pid != std::process::id())
+        {
+            let profile = self.profile.clone();
+            let _ = tokio::task::spawn_blocking(move || profile.reap_stale_pid()).await;
+        }
         // Another supervisor process may have written the store while it owned the profile.
         self.store().reload();
+        let pending_store = pending::PendingStore::new(self.profile.state_dir());
+        if let Ok(reconciled) = pending_store.reconcile_on_start("engine launch").await {
+            if !reconciled.is_empty() {
+                let (recoverable, interrupted): (Vec<_>, Vec<_>) =
+                    reconciled.iter().partition(|turn| turn.is_recoverable());
+                tracing::info!(
+                    recoverable = recoverable.len(),
+                    interrupted = interrupted.len(),
+                    "reconciled pending turns on engine launch"
+                );
+            }
+        }
         let Launched {
             reader,
             writer,
@@ -1445,7 +1512,7 @@ impl Inner {
             .client
             .gone_reason()
             .unwrap_or_else(|| "engine transport ended".to_owned());
-        tracing::warn!(generation = engine.generation, pid = ?engine.pid, reason = %redact(&reason), "mhc supervisor engine exited; in-flight turns are not resent");
+        tracing::warn!(generation = engine.generation, pid = ?engine.pid, reason = %redact(&reason), "mhc supervisor engine exited; only unwritten owner turns are resent");
         if let Some(pid) = engine.pid {
             self.profile.forget_pid(pid);
         }
@@ -1608,6 +1675,13 @@ impl Inner {
         epoch: u64,
     ) -> TurnResult {
         let spec = self.profile.role_spec(&role);
+        let pending = match &role {
+            SessionRole::Conversation(scope) => match pending::PendingTurn::create(self.profile.state_dir(), scope, &message).await {
+                Ok(pending) => Some(pending),
+                Err(fault) => return Err(fault),
+            },
+            SessionRole::OwnerIngest | SessionRole::Decision(_) | SessionRole::Convergence => None,
+        };
         let (sender, receiver) = oneshot::channel();
         let cause = crate::usage::current_cause();
         tokio::spawn(async move {
@@ -1615,15 +1689,60 @@ impl Inner {
             let mut cancel = cancel;
             let mut call = crate::usage::ModelCall::start(spec.role, &message, cause);
             let started = std::time::Instant::now();
-            let (outcome, after) = self
-                .execute(&spec, &message, &mut cancel, epoch, &mut sender, &mut call)
-                .await;
+            let mut retried = false;
+            let (mut outcome, after) = loop {
+                let (outcome, after) = self
+                    .execute(&spec, &message, TurnLink { cancel: &mut cancel, epoch, caller: &mut sender }, &mut call, pending.as_ref())
+                    .await;
+                let retry = !retried
+                    && matches!(&outcome, Err(SupervisorFault::EngineExited { .. }))
+                    && pending.as_ref().is_some_and(|turn| !turn.written())
+                    && !self.is_stopped();
+                if !retry {
+                    break (outcome, after);
+                }
+                retried = true;
+                if let Some(after) = after {
+                    let old_engine = after.engine.clone();
+                    self.finish(&spec, after).await;
+                    self.engine_gone(&old_engine).await;
+                } else {
+                    let current = self.engine.lock().await.current.clone();
+                    if let Some(engine) = current {
+                        self.engine_gone(&engine).await;
+                    }
+                }
+            };
+            if let Some(pending) = &pending {
+                if let Err(SupervisorFault::EngineExited { detail }) = &outcome {
+                    if pending.written() {
+                        outcome = Err(SupervisorFault::engine_exited(&format!(
+                            "엔진이 재시작되어 작업이 중단됐습니다: {detail}"
+                        )));
+                    }
+                }
+                if let Err(error) = pending.complete().await {
+                    tracing::warn!(%error, "owner turn delivery receipt was not retired");
+                }
+            }
+            if matches!(&outcome, Err(SupervisorFault::EngineExited { .. })) {
+                let current = self.engine.lock().await.current.clone();
+                if let Some(engine) = current {
+                    self.engine_gone(&engine).await;
+                }
+            }
             call.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             call.outcome = match &outcome {
                 Ok(_) => "ok".to_owned(),
                 Err(fault) => fault.code().to_owned(),
             };
-            self.meter(call);
+            if call.cause.cause == crate::supervisor::memory_import::OMO_MEMORY_CAUSE {
+                if let Err(fault) = self.meter_import(call).await {
+                    outcome = Err(fault);
+                }
+            } else {
+                self.meter(call);
+            }
             match after {
                 None => {
                     drop(lease);
@@ -1643,11 +1762,11 @@ impl Inner {
         self: &Arc<Self>,
         spec: &RoleSpec,
         message: &str,
-        cancel: &mut watch::Receiver<u64>,
-        epoch: u64,
-        caller: &mut oneshot::Sender<TurnResult>,
+        link: TurnLink<'_>,
         call: &mut crate::usage::ModelCall,
+        pending: Option<&Arc<pending::PendingTurn>>,
     ) -> (TurnResult, Option<Cleanup>) {
+        let TurnLink { cancel, epoch, caller } = link;
         if spec.cancellable && *cancel.borrow() != epoch {
             return (Err(SupervisorFault::Cancelled), None);
         }
@@ -1695,9 +1814,10 @@ impl Inner {
             live.since = Some(engine.client.position());
         }
         let client = engine.client.clone();
-        let prompt = client.request_at(
+        let prompt = client.request_at_tracked(
             json!({"type": "prompt", "sessionId": handle, "message": escape_command(message)}),
             self.profile.config.timeouts.request,
+            pending.cloned(),
         );
         let accepted = tokio::select! {
             accepted = prompt => accepted,
@@ -1727,9 +1847,22 @@ impl Inner {
                 if unknown {
                     engine.forget(&spec.key);
                 }
+                let fault = if call.cause.cause == crate::supervisor::memory_import::OMO_MEMORY_CAUSE
+                    && spec.role == "owner_ingest" && compaction::refused(&error)
+                {
+                    // Admission was refused: no provider turn ran, so its spend is known zero.
+                    call.usage.input = None;
+                    call.usage.output = None;
+                    match compaction::wait(&engine, &handle, &mut events, self.profile.config.timeouts.request).await {
+                        Ok(()) => request_fault("prompt", error),
+                        Err(fault) => fault,
+                    }
+                } else {
+                    request_fault("prompt", error)
+                };
                 engine.client.unsubscribe(&handle);
                 return (
-                    Err(request_fault("prompt", error)),
+                    Err(fault),
                     cleanup(engine, handle, events, false, close, false),
                 );
             }
@@ -2168,6 +2301,34 @@ impl MhcSupervisor {
         self.inner.engine().await.map(|_| ())
     }
 
+    /// Reconciles persisted pending conversation turns left from an earlier process or exit.
+    pub async fn reconcile_pending(
+        &self,
+        reason: &str,
+    ) -> Result<Vec<pending::ReconciledTurn>, SupervisorFault> {
+        let store = pending::PendingStore::new(self.inner.profile.state_dir());
+        store.reconcile_on_start(reason).await
+    }
+
+    /// Resends a recoverable turn on the relaunched supervisor and clears its receipt.
+    /// Interrupted turns are never resent to the engine.
+    pub async fn resend_recovered(
+        &self,
+        turn: &pending::ReconciledTurn,
+    ) -> Result<String, SupervisorFault> {
+        match turn {
+            pending::ReconciledTurn::Recoverable { scope, message, .. } => {
+                let outcome = self.converse(scope, message).await;
+                let _ = turn.clear().await;
+                outcome
+            }
+            pending::ReconciledTurn::Interrupted { notice, .. } => {
+                let _ = turn.clear().await;
+                Err(SupervisorFault::engine_exited(notice))
+            }
+        }
+    }
+
     async fn decision_turn(&self, prompt: &str, fresh: bool) -> TurnResult {
         let inner = &self.inner;
         let mut cancel = inner.cancel.subscribe();
@@ -2373,6 +2534,20 @@ impl MhcSupervisor {
         self.inner.cancel.send_modify(|epoch| *epoch += 1);
     }
 
+    /// Marks the supervisor stopped and cancels in-flight decisions without waiting on the
+    /// engine lock. Call before aborting a [`Self::supervise`] task when the caller will
+    /// explicitly await [`Self::stop_engine`], avoiding a redundant detached `StopOnDrop`.
+    pub fn begin_stop(&self) {
+        self.inner.run_state.store(STOPPED, Ordering::SeqCst);
+        self.cancel_decisions();
+    }
+
+    /// Stops the retained engine explicitly so callers (such as hub generation teardown) can
+    /// await shutdown with a bounded timeout instead of relying on detached `StopOnDrop`.
+    pub async fn stop_engine(&self) {
+        self.shutdown().await;
+    }
+
     /// Stops the engine with the hub: decisions are cancelled, stdin is closed, the process
     /// gets [`SHUTDOWN_GRACE`] and is then killed. Nothing relaunches it until
     /// [`Self::supervise`] runs again.
@@ -2390,8 +2565,9 @@ impl MhcSupervisor {
     }
 
     /// Keeps the engine supervised: launches it, watches the owned process, retries failed
-    /// launches with a 5s..300s backoff. A turn in flight when the engine exits is never resent;
-    /// after an exit the engine relaunches on its next use, and after an early exit
+    /// launches with a 5s..300s backoff. Only an unwritten owner turn in flight when the engine exits
+    /// is resent after relaunch; written turns are interrupted with an unknown outcome.
+    /// After an exit the engine relaunches on its next use, and after an early exit
     /// ([`STABLE_UPTIME`]) also once its backoff ends.
     ///
     /// Calling it re-enables a stopped runtime at once (before the future is polled), so the

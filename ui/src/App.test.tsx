@@ -144,6 +144,8 @@ const native = {
     activeExecutable: "/Applications/Ferryx.app/Contents/MacOS/ferryx",
     isSupported: true,
   })),
+  getGitHubStarStatus: vi.fn(async () => ({ starred: true, reason: null })),
+  starFerryxRepository: vi.fn(async () => undefined),
 };
 
 const updater = {
@@ -247,6 +249,8 @@ vi.mock("./lib/tauri", () => ({
   getCliLauncherStatus: native.getCliLauncherStatus,
   getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" as const })),
   installCliLauncher: native.installCliLauncher,
+  getGitHubStarStatus: native.getGitHubStarStatus,
+  starFerryxRepository: native.starFerryxRepository,
   listProjectRefs: native.listProjectRefs,
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,

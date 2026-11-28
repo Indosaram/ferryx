@@ -186,6 +186,21 @@ pub(crate) fn tool_list() -> Vec<Value> {
             schema(json!({"key": {"type": "string"}}), &["key"]),
         ),
         (
+            "lane_report",
+            "Report on your own lane (worker panes only). kind is progress|stuck|waiting|stopped|finished. Progress is counted only from new evidence: files (paths relative to the lane cwd) whose bytes were not reported before in this run, or receipts ({commit: sha} pushed to origin, {pr: url}) the hub verifies on the remote. Report text alone, and tool-call ids, never count. A step record is a report with receipts for its remote effect.",
+            schema(
+                json!({"key": {"type": "string"}, "kind": {"type": "string", "enum": ["progress", "stuck", "waiting", "stopped", "finished"]},
+                "text": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}},
+                "receipts": {"type": "array", "items": {"type": "object"}}}),
+                &["key", "kind", "text"],
+            ),
+        ),
+        (
+            "lane_status",
+            "A lane's oversight status: backend, active or observe-only, last progress, next deadline and ceilings (unknown usage is shown as unknown).",
+            schema(json!({"key": {"type": "string"}}), &["key"]),
+        ),
+        (
             "tracker.issues",
             "List tracker issues, or create one when title is given.",
             schema(
@@ -510,6 +525,15 @@ async fn call_tool(
                 .map_err(|error| error.to_string())?;
             Ok(json!({"sessionId": report.session_id, "status": report.status.as_str()}))
         }
+        "lane_report" => lane_report(context, args).await,
+        "lane_status" => {
+            let key = required(args, "key")?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let status = crate::lanes::oversight::status(&context.pool, &key, now)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({"key": key, "oversight": status}))
+        }
         "lane_goal_show" => {
             let key = required(args, "key")?;
             let view = crate::lanes::supervised::goal_view(&context.pool, &key)
@@ -701,6 +725,44 @@ async fn call_tool(
         }
         other => Err(format!("unknown tool {other}")),
     }
+}
+
+/// `lane_report`: the reporter is this MCP process's own pane (`FERRYX_SESSION_ID`, fixed for
+/// the connection), never an argument, so a worker can report only for the lane its pane runs.
+async fn lane_report(context: &McpContext, args: &Value) -> std::result::Result<Value, String> {
+    use crate::lanes::evidence::{self, GitRemote, Receipt, ReportInput, ReportKind, Reporter};
+    let key = required(args, "key")?;
+    let kind = ReportKind::parse(&required(args, "kind")?)
+        .ok_or_else(|| "INVALID_REQUEST: kind must be progress|stuck|waiting|stopped|finished".to_owned())?;
+    let text = required(args, "text")?;
+    let strings = |field: &str| -> std::result::Result<Vec<String>, String> {
+        match args.get(field) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned).ok_or_else(|| format!("INVALID_REQUEST: {field} must be strings")))
+                .collect(),
+            Some(_) => Err(format!("INVALID_REQUEST: {field} must be an array")),
+        }
+    };
+    let files = strings("files")?;
+    let receipts = match args.get("receipts") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(Receipt::parse)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?,
+        Some(_) => return Err("INVALID_REQUEST: receipts must be an array".into()),
+    };
+    let session_id = std::env::var("FERRYX_SESSION_ID").unwrap_or_default();
+    let reporter = Reporter { host_id: crate::agent_control::LOCAL_HOST_ID.to_owned(), session_id };
+    let input = ReportInput { lane_key: &key, kind, text: &text, files: &files, receipts: &receipts };
+    let now = chrono::Utc::now().timestamp_millis();
+    let outcome = evidence::report(&context.pool, &reporter, &GitRemote, &input, now)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(json!({"key": key, "report": outcome}))
 }
 
 fn required(args: &Value, key: &str) -> std::result::Result<String, String> {
@@ -943,7 +1005,7 @@ mod tests {
             owner_route: None,
         };
         let tools = tool_list();
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 21);
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
             let response = dispatch(

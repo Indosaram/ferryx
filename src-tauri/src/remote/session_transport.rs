@@ -93,29 +93,37 @@ where
     let (mut gateway_rx, mut gateway_tx) = tokio::io::split(gateway);
     let transport = std::sync::Arc::new(std::sync::Mutex::new(secure.transport));
 
+    const SCRATCH_RETAIN_BYTES: usize = 64 * 1024;
     let t_rx = transport.clone();
     // The peer closing its tunnel between frames is the normal end of a session (every
     // relay request or attach ends that way). It used to surface as ATTACH_STREAM_CLOSED and
     // was logged as a failed data channel once per session (2026-10-28: 927 warnings, one per
     // distinct session).
     let to_gateway = async move {
+        let mut plaintext = Vec::with_capacity(16 * 1024);
         while let Some(frame) = crate::remote::attach_crypto::read_frame_or_end(
             &mut stream_rx,
             crate::remote::attach_crypto::MAX_ATTACH_FRAME + 16,
         )
         .await?
         {
-            let mut plaintext = vec![0u8; frame.len().max(1)];
+            let needed = frame.len().max(1);
+            if plaintext.len() < needed {
+                plaintext.resize(needed, 0);
+            }
             let read = {
                 let mut t = t_rx.lock().unwrap();
-                t.read_message(&frame, &mut plaintext)
+                t.read_message(&frame, &mut plaintext[..needed])
                     .map_err(|e| AttachError::DecryptFailed(e.to_string()))?
             };
-            plaintext.truncate(read);
             gateway_tx
-                .write_all(&plaintext)
+                .write_all(&plaintext[..read])
                 .await
                 .map_err(|_| AttachError::StreamClosed)?;
+            if plaintext.capacity() > SCRATCH_RETAIN_BYTES {
+                plaintext.clear();
+                plaintext.shrink_to(SCRATCH_RETAIN_BYTES);
+            }
         }
         Ok::<(), AttachError>(())
     };
@@ -123,6 +131,7 @@ where
     let t_tx = transport;
     let from_gateway = async move {
         let mut buffer = vec![0u8; 16 * 1024];
+        let mut cipher = vec![0u8; 16 * 1024 + 16];
         loop {
             let n = gateway_rx
                 .read(&mut buffer)
@@ -132,13 +141,20 @@ where
                 break;
             }
             let plaintext = &buffer[..n];
-            let mut cipher = vec![0u8; plaintext.len() + 16];
+            let needed = plaintext.len() + 16;
+            if cipher.len() < needed {
+                cipher.resize(needed, 0);
+            }
             let written = {
                 let mut t = t_tx.lock().unwrap();
-                t.write_message(plaintext, &mut cipher)
+                t.write_message(plaintext, &mut cipher[..needed])
                     .map_err(|e| AttachError::DecryptFailed(e.to_string()))?
             };
             crate::remote::attach_crypto::write_frame(&mut stream_tx, &cipher[..written]).await?;
+            if cipher.capacity() > SCRATCH_RETAIN_BYTES {
+                cipher.clear();
+                cipher.shrink_to(SCRATCH_RETAIN_BYTES);
+            }
         }
         Ok::<(), AttachError>(())
     };

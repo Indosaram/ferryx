@@ -35,8 +35,8 @@ use crate::supervisor::answers::{
 };
 use crate::supervisor::completion::{
     CompletionDriver, CompletionHandler, Verification, GRANT_EXCEEDED, JUDGE_UNAVAILABLE,
-    PANE_NOT_IDLE, REMOTE_CHECK_UNAVAILABLE, RETRY_NOT_DUE, REVISION_CONFLICT, VERIFIED,
-    VERIFIER_FAILED, VERIFIER_NOT_RUNNABLE,
+    PANE_NOT_IDLE, REMOTE_CHECK_UNAVAILABLE, RETRY_NOT_DUE, REVISION_CONFLICT, SETTLE_REFUSED,
+    VERIFIED, VERIFIER_FAILED, VERIFIER_NOT_RUNNABLE,
 };
 use crate::supervisor::delivery::check_before_typing;
 use crate::supervisor::dispatcher::{DispatchResult, Dispatcher, LANE_PAUSED, TURN_LIMIT};
@@ -233,6 +233,54 @@ fn clean_repo(result: &str) -> (TempRepo, String) {
 /// the dispatcher's auto worktree records it). Keep the returned guard alive for the test.
 async fn use_clean_repo(pool: &SqlitePool, lane: &str, result: &str) -> TempRepo {
     let (repo, head) = clean_repo(result);
+    let path = repo.0.to_string_lossy().into_owned();
+    sqlx::query("UPDATE lanes SET cwd = ? WHERE key = ?")
+        .bind(&path)
+        .bind(lane)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO lane_owned_worktrees(lane_key, path, state, repo, branch, start_commit, origin_cwd)
+         VALUES (?, ?, 'registered', ?, ?, ?, ?)",
+    )
+    .bind(lane)
+    .bind(&path)
+    .bind(&path)
+    .bind(format!("lane/{lane}"))
+    .bind(&head)
+    .bind(&path)
+    .execute(pool)
+    .await
+    .unwrap();
+    repo
+}
+
+/// A clean git repository whose committed verifier `verify.sh` passes while `poisoned` is
+/// absent and fails once it exists, with an untracked `result.txt` holding `result`. Evidence
+/// collection passes; a test that writes `poisoned` after grading started makes the settlement
+/// gate's live re-check fail. Its counter file is untracked, so it is not unsent work.
+fn poison_repo(result: &str) -> (TempRepo, String) {
+    let root = std::env::temp_dir().join(format!("ferryx-hub-poison-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let repo = TempRepo(root.clone());
+    git(&root, &["init", "-q"]);
+    std::fs::write(
+        root.join("verify.sh"),
+        "test ! -f poisoned && test \"$(cat result.txt)\" = READY\n",
+    )
+    .unwrap();
+    git(&root, &["add", "verify.sh"]);
+    git(&root, &["commit", "-q", "-m", "verifier"]);
+    git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    std::fs::write(root.join("result.txt"), result).unwrap();
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    (repo, head)
+}
+
+/// [`use_clean_repo`] for [`poison_repo`].
+async fn use_poison_repo(pool: &SqlitePool, lane: &str, result: &str) -> TempRepo {
+    let (repo, head) = poison_repo(result);
     let path = repo.0.to_string_lossy().into_owned();
     sqlx::query("UPDATE lanes SET cwd = ? WHERE key = ?")
         .bind(&path)
@@ -862,10 +910,11 @@ async fn reports_of(pool: &SqlitePool, goal_id: &str) -> Vec<String> {
     use crate::supervisor::goal_report::report_key;
     let states = [RunState::Completed, RunState::Degraded, RunState::AwaitingOwner];
     let mut texts = Vec::new();
+    let revision = crate::supervisor::goal_of(pool, goal_id).await.unwrap().unwrap().revision;
     for state in states {
         let text: Option<String> =
             sqlx::query_scalar("SELECT text FROM supervisor_app_transcript WHERE request_id = ?")
-                .bind(report_key(goal_id, state))
+                .bind(report_key(goal_id, revision, state))
                 .fetch_optional(pool)
                 .await
                 .unwrap();
@@ -2004,6 +2053,56 @@ async fn assert_settling_turn_outcome(completed: bool) {
 #[tokio::test]
 async fn completed_goal_credits_last_turn_and_closes_earlier_turn_neutral() {
     assert_settling_turn_outcome(true).await;
+}
+
+/// The blind convergence verdict is advisory. A goal the model calls complete, whose own check
+/// passed while evidence was collected, is not verified done when the live re-check at the
+/// settlement gate fails: the goal is held and the lane is not `verified_done`.
+#[tokio::test]
+async fn a_converged_goal_with_a_failing_check_is_not_verified_done() {
+    let pool = owner_pool().await;
+    let (goal, lane) = admit(&pool, "m-1", None).await;
+    let control = idle_control();
+    dispatcher(&pool, control.clone(), PANE).drain().await;
+    // The committed verifier passes while `poisoned` is absent, so the check Ferryx runs while
+    // collecting evidence passes; the gate's live re-check is the one after the poison lands.
+    let repo = use_poison_repo(&pool, &lane, "READY").await;
+    settle(&pool, PANE, 1_000).await;
+
+    // The first grading turn is the barrier: evidence is already collected by then, so writing
+    // the poison here is invisible to the model and visible to the gate.
+    let (entered, mut entered_rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::with(
+        &[ASSESS_COMPLETE, CONVERGED],
+        Some((entered, gate.clone())),
+    ));
+    let scheduler = completion_scheduler(&pool, model, control);
+    let ticking = tokio::spawn(async move { scheduler.tick(epoch()).await });
+    timeout(DEADLINE, entered_rx.recv())
+        .await
+        .expect("the grading turn starts")
+        .expect("the grading turn reports itself");
+    std::fs::write(repo.0.join("poisoned"), "now failing").unwrap();
+    gate.notify_one();
+    timeout(DEADLINE, ticking)
+        .await
+        .expect("the tick finishes")
+        .expect("the tick does not fail")
+        .unwrap();
+    let (state, detail) = goal_state(&pool, &goal).await;
+    assert_eq!(state, RunState::AwaitingOwner, "{detail}");
+    assert!(detail.starts_with(SETTLE_REFUSED), "{detail}");
+    assert!(
+        detail.contains("done signal failed now"),
+        "the failing live check is named: {detail}"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
+        .bind(&lane)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(status, "verified_done");
 }
 
 #[tokio::test]

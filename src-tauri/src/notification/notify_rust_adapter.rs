@@ -44,6 +44,96 @@ fn linux_registry() -> &'static waiter_registry::WaiterRegistry {
     REGISTRY.get_or_init(waiter_registry::WaiterRegistry::new)
 }
 
+#[cfg(target_os = "linux")]
+struct LinuxClickWaiterJob {
+    handle: notify_rust::NotificationHandle,
+    key: (String, String),
+    token: u64,
+    cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    target: NotificationTarget,
+    activations: Arc<NotificationActivations>,
+}
+
+/// Shared, lazily-initialized current-thread Tokio runtime for all Linux
+/// notification click waiters, avoiding spawning a fresh OS thread and runtime
+/// per live notification.
+#[cfg(target_os = "linux")]
+fn linux_waiter_sender(
+) -> Result<&'static tokio::sync::mpsc::UnboundedSender<LinuxClickWaiterJob>, String> {
+    static SENDER: OnceLock<Result<tokio::sync::mpsc::UnboundedSender<LinuxClickWaiterJob>, String>> =
+        OnceLock::new();
+    SENDER
+        .get_or_init(|| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LinuxClickWaiterJob>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+            std::thread::Builder::new()
+                .name("ferryx-notify-click".into())
+                .spawn(move || {
+                    let runtime = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => {
+                            let _ = ready_tx.send(Ok(()));
+                            runtime
+                        }
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
+                    let local = tokio::task::LocalSet::new();
+                    runtime.block_on(local.run_until(async move {
+                        while let Some(job) = rx.recv().await {
+                            tokio::task::spawn_local(async move {
+                                // Both futures hold a shared borrow of the handle rather than the
+                                // handle itself: the platform wait only needs `&self`, and the
+                                // response is borrowed for its callback only, so the classified
+                                // action is copied out and never outlives the reference.
+                                let wait_handle = &job.handle;
+                                let close_handle = &job.handle;
+                                let wait_fut = async move {
+                                    let mut captured = None;
+                                    wait_handle
+                                        .wait_for_action_async(|response| {
+                                            captured = Some(classify_action(response));
+                                        })
+                                        .await;
+                                    captured
+                                };
+                                let close_fut = move || async move {
+                                    close_handle.close_async().await;
+                                };
+                                let outcome = waiter_registry::drive_cancellable_waiter(
+                                    linux_registry(),
+                                    job.key.clone(),
+                                    job.token,
+                                    wait_fut,
+                                    close_fut,
+                                    job.cancel_rx,
+                                )
+                                .await;
+                                // A withdrawn waiter has already closed its own banner and routes
+                                // nothing; only a surviving default activation is routable.
+                                if let waiter_registry::WaiterOutcome::Action(Some(action)) =
+                                    outcome
+                                {
+                                    route_action(action, &job.target, job.activations.as_ref());
+                                }
+                            });
+                        }
+                    }));
+                })
+                .map_err(|error| error.to_string())?;
+            ready_rx
+                .recv()
+                .map_err(|_| "notification click waiter thread exited before starting".to_string())??;
+            Ok(tx)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// Sound name that asks Windows for the platform default alert.
 ///
 /// `tauri-winrt-notification` parses it into `Sound::Default`, which leaves the
@@ -202,84 +292,65 @@ pub fn submit_with_click_routing(
     };
 
     #[cfg(target_os = "linux")]
-    let Some((key, token, mut cancel_rx)) = registration else {
-        return Ok(());
-    };
+    {
+        let Some((key, token, mut cancel_rx)) = registration else {
+            return Ok(());
+        };
 
-    // A withdrawal that landed while `show()` was in flight already fired the
-    // cancel: close the fresh banner now and route nothing.
-    #[cfg(target_os = "linux")]
-    if !matches!(
-        cancel_rx.try_recv(),
-        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-    ) {
-        handle.close();
-        linux_registry().finish_token(&key, token);
-        return Ok(());
+        // A withdrawal that landed while `show()` was in flight already fired the
+        // cancel: close the fresh banner now and route nothing.
+        if !matches!(
+            cancel_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ) {
+            handle.close();
+            linux_registry().finish_token(&key, token);
+            return Ok(());
+        }
+
+        let sender = match linux_waiter_sender() {
+            Ok(sender) => sender,
+            Err(error) => {
+                // Nothing can wait without a runtime; release the slot so a
+                // later withdrawal is not a no-op on a dead registration.
+                linux_registry().finish_token(&key, token);
+                tracing::error!("notification click waiter runtime failed: {error}");
+                return Err(error);
+            }
+        };
+        if sender
+            .send(LinuxClickWaiterJob {
+                handle,
+                key: key.clone(),
+                token,
+                cancel_rx,
+                target,
+                activations,
+            })
+            .is_err()
+        {
+            linux_registry().finish_token(&key, token);
+            let error = "notification click waiter channel closed".to_string();
+            tracing::error!("{error}");
+            return Err(error);
+        }
+        Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    let spawned = std::thread::Builder::new()
-        .name("ferryx-notify-click".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    // Nothing can wait without a runtime; release the slot so a
-                    // later withdrawal is not a no-op on a dead registration.
-                    linux_registry().finish_token(&key, token);
-                    tracing::error!("notification click waiter runtime failed: {error}");
-                    return;
-                }
-            };
-            // Both futures hold a shared borrow of the handle rather than the
-            // handle itself: the platform wait only needs `&self`, and the
-            // response is borrowed for its callback only, so the classified
-            // action is copied out and never outlives the reference.
-            let wait_handle = &handle;
-            let close_handle = &handle;
-            let wait_fut = async move {
-                let mut captured = None;
-                wait_handle
-                    .wait_for_action_async(|response| {
-                        captured = Some(classify_action(response));
-                    })
-                    .await;
-                captured
-            };
-            let close_fut = move || async move {
-                close_handle.close_async().await;
-            };
-            let outcome = runtime.block_on(waiter_registry::drive_cancellable_waiter(
-                linux_registry(),
-                key.clone(),
-                token,
-                wait_fut,
-                close_fut,
-                cancel_rx,
-            ));
-            // A withdrawn waiter has already closed its own banner and routes
-            // nothing; only a surviving default activation is routable.
-            if let waiter_registry::WaiterOutcome::Action(Some(action)) = outcome {
-                route_action(action, &target, activations.as_ref());
-            }
-        });
-
     #[cfg(target_os = "windows")]
-    let spawned = std::thread::Builder::new()
-        .name("ferryx-notify-click".into())
-        .spawn(move || {
-            if let Err(error) = handle.wait_for_response(move |response: &NotificationResponse| {
-                route_action(classify_action(response), &target, activations.as_ref());
-            }) {
-                tracing::error!("notification click response failed: {error}");
-            }
-        });
+    {
+        let spawned = std::thread::Builder::new()
+            .name("ferryx-notify-click".into())
+            .spawn(move || {
+                if let Err(error) = handle.wait_for_response(move |response: &NotificationResponse| {
+                    route_action(classify_action(response), &target, activations.as_ref());
+                }) {
+                    tracing::error!("notification click response failed: {error}");
+                }
+            });
 
-    spawned.map(|_| ()).map_err(|error| error.to_string())
+        spawned.map(|_| ()).map_err(|error| error.to_string())
+    }
 }
 
 /// Withdraw the routed notification banner for `target`, if one is live.
@@ -428,5 +499,13 @@ mod tests {
         assert!(!is_dev_output_dir(std::path::Path::new(
             r"C:\Users\dev\AppData\Local\Ferryx"
         )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_click_waiter_reuses_single_shared_runtime_sender() {
+        let first = linux_waiter_sender().expect("shared waiter runtime initializes");
+        let second = linux_waiter_sender().expect("shared waiter runtime reuses singleton");
+        assert!(std::ptr::eq(first, second));
     }
 }
