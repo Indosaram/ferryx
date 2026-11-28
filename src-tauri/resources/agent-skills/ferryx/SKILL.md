@@ -22,6 +22,23 @@ This file is installed and updated by Ferryx. To keep your own edits, delete the
 
 Prefer these over guessing flags.
 
+## Reach another machine: `ferryx-cli <host> <group>`
+
+The paired host is the first token, ahead of the group:
+
+```
+ferryx-cli <host> agents list
+ferryx-cli <host> capabilities
+ferryx-cli <host> browser snapshot --browser-id <id>
+```
+
+`ferryx-cli <host> capabilities` prints the host's own capability document; read it before
+asking a host for something it may not have. A group that cannot reach a host is refused with
+`{"ok":false,"code":"TARGET_UNSUPPORTED"}` and exit 4 instead of running against this machine
+under a host's name. `--host <id>` still works and means the same thing.
+
+`file` names its host inside the path instead: `ferryx-cli file cp <host>:<path> <path>`.
+
 ## Supervise agent panes: `ferryx-cli agents`
 
 Every command prints exactly one JSON value on stdout. Success is `{"ok":true,...}`; failure is
@@ -97,6 +114,26 @@ the input may be typed twice.
 | 3 | not found: no such session, an expired target, or no Ferryx daemon running (`NOT_FOUND`, `TARGET_EXPIRED`) |
 | 4 | refused (`UNAUTHORIZED`, `FORBIDDEN`, `CONTROL_CONFLICT`, `REQUEST_CONFLICT`, `PROVIDER_OWNED`, `UNSUPPORTED`, `CAPTURE_UNSUPPORTED`, `SPAWN_LIMIT`) |
 | 5 | anything else, including an unknown outcome (`OPERATION_OUTCOME_UNKNOWN`, `TIMEOUT`, `INTERNAL`) |
+
+## Drive a browser: `ferryx-cli browser`
+
+```
+ferryx-cli browser snapshot --browser-id <id>
+ferryx-cli <host> browser snapshot --browser-id <id>
+```
+
+Against this machine every subcommand works. Against a paired host only the set the host
+accepts is forwarded: `navigate`, `back`, `forward`, `reload`, `click`, `fill`, `keypress`,
+`wait`, `snapshot` and `getState` (behind `url` and `title`). Anything else is refused before
+it travels, with `BROWSER_UNSUPPORTED_ON_HOST`.
+
+`eval` is refused on a host with `BROWSER_EVAL_REQUIRES_LOCAL_APPROVAL`: a forwarded command
+never carries an approval, so the host would refuse it anyway. Use `snapshot` and then
+`click`/`fill`.
+
+A host that changes pages needs the driver lease: a command that changes the page is refused
+with `BROWSER_FORBIDDEN` unless this client holds control of that browser. A lost answer is
+`OPERATION_OUTCOME_UNKNOWN` and is never retried, because the command may have applied.
 
 ## Report your own status: OSC 7501
 
