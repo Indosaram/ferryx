@@ -279,6 +279,8 @@ describe("RemoteDesktopPane", () => {
     act(() => channels[0].onmessage(statusFrame("connected")));
 
     fireEvent.click(screen.getByTestId("rd-disconnect-btn"));
+    expect(invoke).not.toHaveBeenCalledWith("cmd_rd_disconnect", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "End session" }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_disconnect", { rdSessionId: "rd-1" }));
     await waitFor(() => expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-state", "idle"));
@@ -445,6 +447,28 @@ describe("RemoteDesktopPane", () => {
     }));
   });
 
+  it("shows first-frame progress after connection and allows explicit cancellation", async () => {
+    surfaceBackend("wgpu");
+    render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
+    await waitFor(() => expect(remoteDesktopStore.getSession("host-1")?.rdSessionId).toBe("rd-1"));
+    expect(screen.getByRole("list", { name: "Connection progress" })).toBeInTheDocument();
+    act(() => channels[0].onmessage(statusFrame("connected")));
+    expect(screen.getByRole("list", { name: "Connection progress" }).lastElementChild).toHaveAttribute("aria-current", "step");
+    fireEvent.click(screen.getByTestId("rd-cancel-connect"));
+    expect(remoteDesktopStore.getSession("host-1")?.status).toBe("idle");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_disconnect", { rdSessionId: "rd-1" }));
+  });
+
+  it("clears first-frame progress only when the native presenter reports a frame", async () => {
+    surfaceBackend("wgpu");
+    render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
+    await waitFor(() => expect(remoteDesktopStore.getSession("host-1")?.rdSessionId).toBe("rd-1"));
+    act(() => channels[0].onmessage(statusFrame("connected")));
+    expect(screen.getByTestId("remote-desktop-overlay")).toBeInTheDocument();
+    act(() => channels[0].onmessage(nativePresentedFrame(1920, 1080)));
+    expect(screen.queryByTestId("remote-desktop-overlay")).toBeNull();
+  });
+
   it("renders the overlay without a scrim while no frame has arrived", async () => {
     render(<RemoteDesktopPane hostId="host-1" label="Studio" visible />);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_connect", expect.anything()));
@@ -471,11 +495,11 @@ describe("RemoteDesktopPane", () => {
     act(() => channels[0].onmessage(statusFrame("reconnecting")));
     const overlay = screen.getByTestId("remote-desktop-overlay");
     expect(overlay).toHaveAttribute("data-scrim", "true");
-    expect(overlay).toHaveClass("bg-black/75");
+    expect(overlay).toHaveClass("bg-background/95");
     const status = screen.getByTestId("remote-desktop-status");
     expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-state", "connecting");
     expect(status).toHaveAttribute("role", "status");
-    expect(status).toHaveClass("text-white");
+    expect(status).toHaveClass("text-foreground");
   });
 
   it("keeps the scrim and high-contrast error text when a reconnect fails over a frozen frame", async () => {
@@ -506,7 +530,7 @@ describe("RemoteDesktopPane", () => {
     // The toolbar notice also carries role="alert", so target the status line itself.
     const alert = await screen.findByTestId("remote-desktop-status");
     expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-state", "error");
-    expect(alert).toHaveClass("text-red-300");
+    expect(alert).toHaveClass("text-destructive");
     expect(screen.getByTestId("remote-desktop-overlay")).toHaveAttribute("data-scrim", "true");
     expect(screen.getByTestId("remote-desktop-canvas")).toHaveStyle({ visibility: "visible" });
   });
@@ -766,7 +790,7 @@ describe("RemoteDesktopPane", () => {
     // Scale 1:1 & quality preset & keyframe refresh
     fireEvent.click(screen.getByTestId("rd-quality-trigger"));
     fireEvent.click(screen.getByTestId("rd-scale-actual"));
-    expect(canvas).toHaveAttribute("data-rd-fit-mode", "actual");
+    await waitFor(() => expect(canvas).toHaveAttribute("data-rd-fit-mode", "actual"));
 
     fireEvent.click(screen.getByTestId("rd-quality-trigger"));
     fireEvent.click(screen.getByTestId("rd-quality-fast"));
@@ -778,6 +802,10 @@ describe("RemoteDesktopPane", () => {
     );
 
     fireEvent.click(screen.getByTestId("rd-quality-trigger"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Stream frame rate" }), { target: { value: "120" } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_set_stream_options", { rdSessionId: "rd-1", options: { fps: 120 } }));
+    fireEvent.click(screen.getByRole("button", { name: "50 Mbps" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_set_stream_options", { rdSessionId: "rd-1", options: { bitrate: 50_000_000 } }));
     fireEvent.click(screen.getByTestId("rd-request-keyframe"));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("cmd_rd_request_keyframe", { rdSessionId: "rd-1" }),
@@ -812,8 +840,9 @@ describe("RemoteDesktopPane", () => {
     fireEvent.click(screen.getByTestId("rd-fullscreen-toggle"));
     expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-fullscreen", "false");
 
-    // Manual disconnect transitions to idle and invokes cmd_rd_disconnect
+    // Manual disconnect requires confirmation before invoking cmd_rd_disconnect.
     fireEvent.click(screen.getByTestId("rd-disconnect-btn"));
+    fireEvent.click(screen.getByRole("button", { name: "End session" }));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("cmd_rd_disconnect", { rdSessionId: "rd-1" }),
     );
@@ -831,6 +860,7 @@ async function connectPane() {
   vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(paneRect(400, 400));
   act(() => channels[0].onmessage(statusFrame("connected")));
   await waitFor(() => expect(screen.getByTestId("remote-desktop-pane")).toHaveAttribute("data-rd-interactive", "true"));
+  fireEvent.click(screen.getByTestId("rd-session-details-toggle"));
   await waitFor(() => expect(screen.getByRole("button", { name: "Toggle pointer lock" })).toBeEnabled());
   return { view, canvas };
 }
@@ -1032,6 +1062,21 @@ describe("RemoteDesktopPane modal yielding", () => {
 });
 
 describe("RemoteDesktopPane toolbar and stats HUD wiring", () => {
+  it("applies cursor, scroll, codec and clipboard session controls", async () => {
+    const { canvas } = await connectPane();
+    act(() => channels[0].onmessage(metaFrame()));
+    fireEvent.change(screen.getByRole("combobox", { name: "Cursor presentation" }), { target: { value: "hidden" } });
+    expect(canvas).toHaveStyle({ cursor: "none" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Scroll sensitivity" }), { target: { value: "2" } });
+    fireEvent.wheel(canvas, { deltaX: 3, deltaY: 5, deltaMode: 0 });
+    await waitFor(() => expect(sentInputEvents()).toContainEqual({ kind: "wheel", dx: 6, dy: 10 }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Stream codec" }), { target: { value: "h264" } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_set_options", { rdSessionId: "rd-1", options: { codec: "h264" } }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Share clipboard" }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Share clipboard" })).not.toBeChecked());
+    expect(invoke).toHaveBeenCalledWith("cmd_rd_set_options", { rdSessionId: "rd-1", options: { clipboardEnabled: false } });
+  });
+
   it("toggles the stats HUD from Ctrl+Shift+Alt+S without forwarding the chord", async () => {
     const { canvas } = await connectPane();
 
@@ -1068,5 +1113,28 @@ describe("RemoteDesktopPane toolbar and stats HUD wiring", () => {
       volume: 1,
     }));
     await waitFor(() => expect(window.localStorage.getItem(RD_AUDIO_MUTED_STORAGE_KEY)).toBe("true"));
+  });
+
+  it("lists audio output devices when Session details open and switches output device", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_rd_connect") return { rdSessionId: "rd-1" };
+      if (command === "cmd_rd_list_audio_devices") {
+        return [
+          { name: "MacBook Speakers", isDefault: true },
+          { name: "Studio Headphones", isDefault: false },
+        ];
+      }
+      if (command === "cmd_rd_set_audio_device") return undefined;
+      return undefined;
+    });
+    await connectPane();
+    fireEvent.click(screen.getByRole("button", { name: "More session controls" }));
+    const select = await screen.findByLabelText("Audio output device");
+    await waitFor(() => expect(select).not.toBeDisabled());
+    fireEvent.change(select, { target: { value: "Studio Headphones" } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_set_audio_device", {
+      rdSessionId: "rd-1",
+      deviceName: "Studio Headphones",
+    }));
   });
 });

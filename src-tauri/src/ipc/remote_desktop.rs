@@ -1092,6 +1092,9 @@ pub mod viewer {
         pub max_present_fps: Arc<AtomicU32>,
         /// True once the host sent PCM, so the meta reports audio as available.
         pub audio_available: Arc<AtomicBool>,
+        /// DOM presentation modes use JPEG frames rather than the native aspect-fit surface.
+        pub canvas_presentation: Arc<AtomicBool>,
+        pub retry_renderer: Arc<AtomicBool>,
         /// Last decoded frame size, which outruns the control channel's stream state.
         pub last_frame_size: Arc<Mutex<(u32, u32)>>,
     }
@@ -1119,6 +1122,8 @@ pub mod viewer {
                 jpeg_quality: Arc::new(AtomicU32::new(DEFAULT_JPEG_QUALITY)),
                 max_present_fps: Arc::new(AtomicU32::new(DEFAULT_MAX_PRESENT_FPS)),
                 audio_available: Arc::new(AtomicBool::new(false)),
+                canvas_presentation: Arc::new(AtomicBool::new(false)),
+                retry_renderer: Arc::new(AtomicBool::new(false)),
                 last_frame_size: Arc::new(Mutex::new((0, 0))),
             }
         }
@@ -1510,11 +1515,7 @@ pub mod viewer {
     }
 
     fn apply_remote_clipboard(session: &ClientSession, shared: &ViewerShared, text: &str) {
-        let allow = session
-            .stream_state()
-            .ok()
-            .and_then(|state| state.policy)
-            .is_some_and(|policy| policy.allow_clipboard);
+        let allow = session.clipboard_allowed().unwrap_or(false);
         if !allow {
             return;
         }
@@ -1817,7 +1818,7 @@ pub mod viewer {
         let mut last_jpeg: Option<Instant> = None;
 
         while let Some((queue, (frame, received))) = shared.frame_queue.next_frame() {
-            if signals.reset_decoder.swap(false, Ordering::SeqCst) {
+            if signals.reset_decoder.swap(false, Ordering::SeqCst) || shared.retry_renderer.swap(false, Ordering::SeqCst) {
                 decoder = None;
             }
             let codec_changed = frame.header.is_key_frame
@@ -1884,7 +1885,7 @@ pub mod viewer {
 
             let present_started = Instant::now();
             let mut presented = None;
-            match present_native(&shared, &picture) {
+            match if shared.canvas_presentation.load(Ordering::SeqCst) { NativeOutcome::NotAttached } else { present_native(&shared, &picture) } {
                 NativeOutcome::Presented(announce) => {
                     if !native_backend {
                         native_backend = true;
@@ -2242,6 +2243,9 @@ pub mod commands {
         pub viewport_height: Option<u32>,
         /// `"auto" | "hevc" | "h264"`.
         pub codec: Option<String>,
+        pub clipboard_enabled: Option<bool>,
+        pub canvas_presentation: Option<bool>,
+        pub retry_renderer: Option<bool>,
     }
 
     /// The renderer's `RdLogicalBounds` (`LogicalBounds` itself has no serde shape).
@@ -2656,6 +2660,12 @@ pub mod commands {
         let entry = session_or_not_found(&rd_session_id)?;
         let codec = options.codec.as_deref().map(parse_codec).transpose()?;
         let shared = &entry.shared;
+        if options.retry_renderer == Some(true) {
+            shared.retry_renderer.store(true, Ordering::SeqCst);
+        }
+        if let Some(canvas) = options.canvas_presentation {
+            shared.canvas_presentation.store(canvas, Ordering::SeqCst);
+        }
         if let Some(mode) = options.playout_mode {
             shared.set_playout_mode(mode);
         }
@@ -2674,6 +2684,13 @@ pub mod commands {
             if let Some(codec) = codec {
                 stream.set_codec(codec);
             }
+        }
+        if let Some(enabled) = options.clipboard_enabled {
+            let session = entry.session.clone();
+            crate::ipc::run_blocking(move || {
+                session.set_clipboard_enabled(enabled)
+                    .map_err(|error| rd_error(RD_CONNECT_FAILED, error.to_string()))
+            }).await?;
         }
         // Unchanged settings produce no request; changed ones get the next request id.
         renegotiate(shared, false).await
@@ -2698,6 +2715,84 @@ pub mod commands {
             .set_audio_stats(active, underruns, drops);
         entry.runtime.emit_meta(&entry.session);
         Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_list_audio_devices() -> Result<Vec<crate::ipc::remote_desktop_media::RdAudioDeviceInfo>, IpcError> {
+        crate::ipc::run_blocking(|| {
+            crate::ipc::remote_desktop_media::list_audio_output_devices()
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, error.to_string()))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_set_audio_device(
+        rd_session_id: String,
+        device_name: Option<String>,
+    ) -> Result<(), IpcError> {
+        let entry = session_or_not_found(&rd_session_id)?;
+        crate::ipc::run_blocking(move || {
+            let mut audio = entry.shared.audio.lock();
+            audio
+                .set_output_device(device_name)
+                .map_err(|error| rd_error(RD_INVALID_OPTIONS, error.to_string()))
+        })
+        .await
+    }
+
+    pub(crate) fn parse_mac_address(mac: &str) -> Result<[u8; 6], IpcError> {
+        let hex: String = mac
+            .trim()
+            .chars()
+            .filter(|ch| *ch != ':' && *ch != '-' && *ch != '.')
+            .collect();
+        if hex.len() != 12 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(rd_error(
+                RD_INVALID_OPTIONS,
+                "Enter a valid 6-byte MAC address (for example AA:BB:CC:DD:EE:FF)",
+            ));
+        }
+        let mut out = [0u8; 6];
+        for i in 0..6 {
+            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                .map_err(|_| rd_error(RD_INVALID_OPTIONS, "Invalid MAC address"))?;
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn build_wol_magic_packet(mac: [u8; 6]) -> [u8; 102] {
+        let mut packet = [0u8; 102];
+        packet[..6].fill(0xFF);
+        for i in 0..16 {
+            packet[6 + i * 6..6 + (i + 1) * 6].copy_from_slice(&mac);
+        }
+        packet
+    }
+
+    #[tauri::command]
+    pub async fn cmd_rd_wake_on_lan(
+        mac_address: String,
+        broadcast_addr: Option<String>,
+    ) -> Result<(), IpcError> {
+        let mac = parse_mac_address(&mac_address)?;
+        let target = broadcast_addr
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "255.255.255.255:9".to_owned());
+        let packet = build_wol_magic_packet(mac);
+        crate::ipc::run_blocking(move || {
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, format!("Wake-on-LAN socket bind failed: {error}")))?;
+            socket
+                .set_broadcast(true)
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, format!("Wake-on-LAN broadcast failed: {error}")))?;
+            socket
+                .send_to(&packet, &target)
+                .map_err(|error| rd_error(RD_CONNECT_FAILED, format!("Wake-on-LAN send failed: {error}")))?;
+            Ok(())
+        })
+        .await
     }
 
     #[tauri::command]
@@ -3012,6 +3107,33 @@ pub mod commands {
 
         const MISSING: &str = "missing-rd-session";
 
+        #[test]
+        fn client_clipboard_toggle_is_optional_and_codec_is_validated() {
+            let unchanged: RdStreamOptionsUpdate = serde_json::from_str("{}").unwrap();
+            assert_eq!(unchanged.clipboard_enabled, None);
+            let disabled: RdStreamOptionsUpdate = serde_json::from_str(r#"{"clipboardEnabled":false}"#).unwrap();
+            assert_eq!(disabled.clipboard_enabled, Some(false));
+            assert_eq!(parse_codec("h264").unwrap(), StreamCodecPreference::H264);
+            assert_eq!(parse_codec("invalid").unwrap_err().code,
+                crate::ipc::error::IpcErrorCode::Custom(RD_INVALID_OPTIONS.into()));
+        }
+
+        #[test]
+        fn wol_mac_parsing_and_magic_packet_layout() {
+            let mac = parse_mac_address("aa:bb:cc:dd:ee:ff").unwrap();
+            assert_eq!(mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+            assert_eq!(parse_mac_address("AA-BB-CC-DD-EE-FF").unwrap(), mac);
+            assert_eq!(
+                parse_mac_address("not-a-mac").unwrap_err().code,
+                crate::ipc::error::IpcErrorCode::Custom(RD_INVALID_OPTIONS.into())
+            );
+            let packet = build_wol_magic_packet(mac);
+            assert_eq!(&packet[..6], &[0xFF; 6]);
+            for i in 0..16 {
+                assert_eq!(&packet[6 + i * 6..6 + (i + 1) * 6], &mac);
+            }
+        }
+
         #[tokio::test]
         async fn unknown_sessions_report_rd_not_found() {
             assert_not_found(cmd_rd_stats(MISSING.into()).await.unwrap_err());
@@ -3021,6 +3143,11 @@ pub mod commands {
                     .unwrap_err(),
             );
             assert_not_found(cmd_rd_set_audio(MISSING.into(), true, 0.5).await.unwrap_err());
+            assert_not_found(
+                cmd_rd_set_audio_device(MISSING.into(), Some("Built-in".into()))
+                    .await
+                    .unwrap_err(),
+            );
             assert_not_found(
                 cmd_rd_clipboard_send(MISSING.into(), "x".into()).await.unwrap_err(),
             );

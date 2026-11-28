@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type Poin
 import {
   Check,
   Clipboard,
+  ChevronDown,
   Keyboard,
+  LoaderCircle,
   Maximize2,
   Minimize2,
   Monitor,
@@ -24,8 +26,10 @@ import {
   rdErrorMessage,
   rdMouseButton,
   rdRequestKeyframe,
+  rdListAudioDevices,
   rdSendClipboard,
   rdSetAudio,
+  rdSetAudioDevice,
   rdSetAudioMuted,
   rdSetOptions,
   rdSetStreamOptions,
@@ -36,6 +40,7 @@ import {
   registerRemoteDesktopShortcutCapture,
   wheelDeltaPixels,
   type RdConnectionState,
+  type RdAudioDeviceInfo,
   type RdCursorFrame,
   type RdFitMode,
   type RdFrameMessage,
@@ -47,6 +52,7 @@ import {
   type RdSessionMeta,
   type RdSpecialKeyAction,
   type RdSurfaceAttachResponse,
+  type RdStreamOptions,
   type RdVideoFrame,
 } from "../lib/remoteDesktop";
 import {
@@ -59,6 +65,7 @@ import { RemoteDesktopStatsOverlay } from "./RemoteDesktopStatsOverlay";
 import { readRdPreferences, RemoteDesktopToolbar, writeRdPreference } from "./RemoteDesktopToolbar";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "./ui/dialog";
 
 export type RemoteDesktopPaneProps = {
   hostId: string;
@@ -301,6 +308,16 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     rdSessionId ? (lastMetaBySessionId.get(rdSessionId) ?? null) : null,
   );
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [launcherVisible, setLauncherVisible] = useState(true);
+  const [launcherPinned, setLauncherPinned] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [cursorMode, setCursorMode] = useState<"local" | "remote" | "hidden">("remote");
+  const [scrollSensitivity, setScrollSensitivity] = useState(1);
+  const [clipboardEnabled, setClipboardEnabled] = useState(true);
+  const [audioDevices, setAudioDevices] = useState<RdAudioDeviceInfo[]>([]);
+  const [selectedAudioDevice, setSelectedAudioDevice] = useState("");
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [fitMode, setFitMode] = useState<RdFitMode>("fit");
   const [qualityPreset, setQualityPreset] = useState<RdQualityPresetId>("balanced");
   const [captureShortcuts, setCaptureShortcuts] = useState(true);
@@ -328,12 +345,12 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   const visibilityState = useNativeTerminalVisibilityState();
   const isMac = isMacShortcutPlatform();
   /** False while the tab is hidden, a drop covers the pane, or a modal owns input. */
-  const paneInteractive = visible && !occluded && visibilityState.interactive;
+  const paneInteractive = visible && !occluded && visibilityState.interactive && !openMenu;
   /**
    * macOS keeps the native view beneath the transparent WKWebView, so a modal paints over it and
    * the surface may stay up. Elsewhere the child window sits above the WebView and must hide.
    */
-  const surfaceVisible = visible && !occluded && (isMac || visibilityState.visible);
+  const surfaceVisible = visible && !occluded && (isMac || (status === "connected" && visibilityState.visible && !openMenu));
 
   useEffect(() => {
     connectOptionsRef.current = { playoutMode, scaleMode, audioMuted, audioVolume };
@@ -394,7 +411,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   // Attach to the host's session. Reusing an existing connected session is what keeps the
   // connection alive across mounts; nothing here may disconnect.
   useEffect(() => {
-    void remoteDesktopStore.connect(hostId, label);
+    if (!remoteDesktopStore.getSession(hostId)) void remoteDesktopStore.connect(hostId, label);
   }, [hostId, label]);
 
   /**
@@ -491,7 +508,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
    */
   const drawPendingFrame = useCallback(() => {
     rafIdRef.current = null;
-    if (presentBackendRef.current !== "canvas2d" || !visibleRef.current) return;
+    if (!visibleRef.current) return;
     // A decode in flight re-schedules from its own completion; the newest frame still wins.
     if (decodingRef.current) return;
     const frame = pendingFrameRef.current;
@@ -513,11 +530,12 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
             setFrameSize({ width: frame.width, height: frame.height });
           }
           setHasFrame(true);
+          setRenderError(null);
         }
         bitmap.close();
       })
       .catch((error: unknown) => {
-        console.warn("Remote desktop frame decode failed", error);
+        setRenderError(rdErrorMessage(toIpcError(error)));
       })
       .finally(() => {
         decodingRef.current = false;
@@ -527,7 +545,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
 
   const scheduleFrameDraw = useCallback(() => {
     if (rafIdRef.current !== null) return;
-    if (presentBackendRef.current !== "canvas2d" || !visibleRef.current) return;
+    if (!visibleRef.current) return;
     rafIdRef.current = requestAnimationFrame(() => drawPendingFrame());
   }, [drawPendingFrame]);
 
@@ -693,7 +711,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
 
   // Zero idle rAF burn: nothing may stay armed while frames are not being drawn.
   useEffect(() => {
-    if (presentBackend === "canvas2d" && visible) return;
+    if (visible) return;
     cancelPendingFrame();
     if (presentBackend === "wgpu") pendingFrameRef.current = null;
   }, [presentBackend, visible, cancelPendingFrame]);
@@ -908,13 +926,13 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
       const page = canvas.clientHeight || 800;
       send({
         kind: "wheel",
-        dx: wheelDeltaPixels(event.deltaX, event.deltaMode, page),
-        dy: wheelDeltaPixels(event.deltaY, event.deltaMode, page),
+        dx: wheelDeltaPixels(event.deltaX, event.deltaMode, page) * scrollSensitivity,
+        dy: wheelDeltaPixels(event.deltaY, event.deltaMode, page) * scrollSensitivity,
       });
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
-  }, [inputEnabled, send]);
+  }, [inputEnabled, send, scrollSensitivity]);
 
   const handlePointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.focus({ preventScroll: true });
@@ -959,6 +977,14 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
         send({ kind: "relativeMove", dx, dy });
       }
       return;
+    }
+    if (fitMode === "actual" && containerRef.current) {
+      const viewport = containerRef.current;
+      const rect = viewport.getBoundingClientRect();
+      const edge = 40;
+      const pan = (position: number, size: number) => position < edge ? position - edge : position > size - edge ? position - size + edge : 0;
+      viewport.scrollLeft += pan(event.clientX - rect.left, rect.width);
+      viewport.scrollTop += pan(event.clientY - rect.top, rect.height);
     }
     sendPointerPosition(event.clientX, event.clientY);
   };
@@ -1028,14 +1054,26 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   const handleSelectQuality = (presetId: RdQualityPresetId) => {
     const preset = RD_QUALITY_PRESETS.find((item) => item.id === presetId);
     if (!preset) return;
-    setQualityPreset(presetId);
     const sid = sessionIdRef.current;
     if (!sid) return;
     void rdSetStreamOptions(sid, preset.options).then(
       (updated) => {
         lastMetaBySessionId.set(sid, updated);
         setMeta(updated);
+        setQualityPreset(presetId);
         showNotice("info", `Quality: ${preset.label}`);
+      },
+      (error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))),
+    );
+  };
+
+  const changeStreamSetting = (options: RdStreamOptions) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    void rdSetStreamOptions(sid, options).then(
+      (updated) => {
+        lastMetaBySessionId.set(sid, updated);
+        setMeta(updated);
       },
       (error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))),
     );
@@ -1157,7 +1195,8 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
     void remoteDesktopStore.connect(hostId, label);
   };
 
-  const statusText = status === "error"
+  const waitingForVideo = status === "connected" && !hasFrame && !nativePresented;
+  const statusText = waitingForVideo ? "Waiting for video" : status === "error"
     ? rdErrorMessage(session?.error ?? { code: "UNKNOWN", message: "Remote desktop failed." })
     : status === "idle" && !wireState
       ? "Disconnected"
@@ -1171,14 +1210,12 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   // "Connected" placeholder that only exists because no JPEG frame was ever decoded.
   const showOverlay = status !== "connected" || (!hasFrame && !nativePresented);
   // A frozen frame is arbitrary image content, so the overlay needs its own opaque scrim for
-  // readable status text; without a frame the pane is already black and needs none.
-  const scrim = hasFrame;
-  const statusColor = status === "error"
-    ? scrim ? "text-red-300" : "text-destructive"
-    : scrim ? "text-white" : "text-muted-foreground";
+  // readable status text. The panel uses semantic colors in both themes.
+  const scrim = hasFrame || nativePresented;
+  const statusColor = status === "error" ? "text-destructive" : "text-foreground";
   const isConnected = status === "connected";
   const displays = meta?.displays ?? [];
-  const clipboardAllowed = meta?.clipboardAllowed ?? true;
+  const clipboardAllowed = clipboardEnabled && (meta?.clipboardAllowed ?? true);
   const telemetry = formatTelemetry(meta, frameSize);
   // The interactive canvas stays hit-testable from the moment the session connects: in wgpu
   // mode it is a transparent event surface over the native view and never gets a bitmap.
@@ -1186,6 +1223,38 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
   // macOS places the native view beneath a transparent WKWebView, so an opaque pane background
   // would hide it; index.css paints var(--terminal) instead until the surface presents.
   const nativeSurfaceOwnsPixels = presentBackend === "wgpu" && nativePresented;
+
+  const changePresentation = (mode: RdFitMode) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    void rdSetOptions(sid, { canvasPresentation: mode !== "fit" }).then(() => {
+      setFitMode(mode);
+      setOpenMenu(null);
+    }, (error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))));
+  };
+
+  useEffect(() => {
+    if (!detailsOpen) return;
+    let cancelled = false;
+    void rdListAudioDevices().then(
+      (devices) => {
+        if (!cancelled) setAudioDevices(Array.isArray(devices) ? devices : []);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [detailsOpen]);
+
+  useEffect(() => {
+    if (detailsOpen || openMenu || launcherPinned || showOverlay || confirmDisconnect) {
+      setLauncherVisible(true);
+      return;
+    }
+    const timer = setTimeout(() => setLauncherVisible(false), 2500);
+    return () => clearTimeout(timer);
+  }, [detailsOpen, openMenu, launcherPinned, showOverlay, confirmDisconnect, launcherVisible]);
 
   const toolbarBtn = (active = false) =>
     `inline-flex h-6 items-center gap-1 rounded px-1.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-45 ${
@@ -1212,6 +1281,21 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
       data-rd-pointer-locked={pointerLocked ? "true" : "false"}
       data-rd-cursor={remoteCursor}
     >
+      <Dialog open={confirmDisconnect} onOpenChange={setConfirmDisconnect}>
+        <DialogContent>
+          <DialogTitle>End this session?</DialogTitle>
+          <DialogDescription>Disconnect from {label} and return to Computers.</DialogDescription>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => setConfirmDisconnect(false)}>Cancel</Button>
+            <Button type="button" variant="destructive" onClick={() => { setConfirmDisconnect(false); handleDisconnect(); }}>End session</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <div className="pointer-events-none absolute inset-x-3 top-3 z-30 mx-auto max-w-4xl" onMouseEnter={() => { setLauncherPinned(true); setLauncherVisible(true); }} onMouseLeave={() => setLauncherPinned(false)} onFocusCapture={() => setLauncherPinned(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setLauncherPinned(false); }}>
+      {!launcherVisible ? <Button type="button" size="sm" variant="secondary" className="pointer-events-auto mx-auto block" onClick={() => setLauncherVisible(true)}>Session controls</Button> : null}
+      <div hidden={!launcherVisible} className="pointer-events-auto overflow-visible rounded-xl border border-border bg-card shadow-elevation-2">
+      <div hidden={!detailsOpen} data-testid="rd-session-details" className="relative z-30 shrink-0 border-b border-border bg-card p-2">
+      <h2 className="mb-2 text-[13px] font-semibold text-foreground">Session details</h2>
       <RemoteDesktopToolbar
         rdSessionId={rdSessionId}
         connected={isConnected}
@@ -1228,10 +1312,42 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
         onToggleStats={toggleStats}
         onTogglePointerLock={togglePointerLock}
       />
+      <div className="mt-3 flex flex-wrap gap-3 text-[12px] text-foreground">
+        <label>Cursor <select aria-label="Cursor presentation" value={cursorMode} onChange={(event) => setCursorMode(event.target.value as typeof cursorMode)} className="rounded border border-border bg-background p-1">
+          <option value="local">Local</option><option value="remote">Remote</option><option value="hidden">Hidden</option>
+        </select></label>
+        <label>Scroll <select aria-label="Scroll sensitivity" value={scrollSensitivity} onChange={(event) => setScrollSensitivity(Number(event.target.value))} className="rounded border border-border bg-background p-1">
+          {[0.25, 0.5, 1, 2, 4].map((value) => <option key={value} value={value}>{value}x</option>)}
+        </select></label>
+        <label>Codec <select aria-label="Stream codec" disabled={!isConnected || !meta?.supportsStreamOptions} defaultValue="auto" onChange={(event) => {
+          if (!rdSessionId) return;
+          void rdSetOptions(rdSessionId, { codec: event.target.value as "auto" | "h264" | "hevc" }).catch((error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))));
+        }} className="rounded border border-border bg-background p-1">
+          <option value="auto">Auto</option><option value="h264">H.264</option><option value="hevc">HEVC</option>
+        </select></label>
+        <label className="flex items-center gap-2"><input type="checkbox" aria-label="Share clipboard" checked={clipboardEnabled} disabled={!isConnected} onChange={(event) => {
+          const enabled = event.target.checked;
+          if (!rdSessionId) return;
+          void rdSetOptions(rdSessionId, { clipboardEnabled: enabled }).then(() => setClipboardEnabled(enabled), (error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))));
+        }} />Share clipboard</label>
+        <label>Audio output <select aria-label="Audio output device" value={selectedAudioDevice} disabled={!isConnected || audioDevices.length === 0} onChange={(event) => {
+          const nextDevice = event.target.value;
+          if (!rdSessionId) return;
+          void rdSetAudioDevice(rdSessionId, nextDevice || null).then(() => setSelectedAudioDevice(nextDevice), (error: unknown) => showNotice("error", rdErrorMessage(toIpcError(error))));
+        }} className="rounded border border-border bg-background p-1">
+          <option value="">System default</option>
+          {audioDevices.map((device) => (
+            <option key={device.name} value={device.name}>{device.isDefault ? `${device.name} (Default)` : device.name}</option>
+          ))}
+        </select></label>
+      </div>
+      </div>
       <div
         ref={toolbarRef}
         data-testid="remote-desktop-stream-toolbar"
-        className="relative z-30 flex h-[34px] shrink-0 items-center justify-between gap-2 border-b border-border bg-card px-2.5 text-[11px]"
+        role="group"
+        aria-label="Session controls"
+        className="relative z-30 flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-card px-3 py-2 text-[12px]"
       >
         <div className="flex min-w-0 items-center gap-2">
           <span
@@ -1240,6 +1356,9 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
           />
           <span className="truncate font-medium text-foreground">
             {meta?.hostName || label}
+          </span>
+          <span data-testid="rd-connection-state" className="shrink-0 text-[11px] text-muted-foreground">
+            {wireState ? STATUS_LABEL[wireState] : status === "error" ? "Failed" : status === "idle" ? "Disconnected" : "Connecting…"}
           </span>
           {meta?.route ? (
             <span
@@ -1273,6 +1392,10 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
+          <button type="button" data-testid="rd-session-details-toggle" aria-label="More session controls" aria-expanded={detailsOpen} className={toolbarBtn(detailsOpen)} onClick={() => setDetailsOpen((open) => !open)}>
+            <ChevronDown aria-hidden="true" className={cn("size-4", detailsOpen && "rotate-180")} />
+            <span className="hidden md:inline">Details</span>
+          </button>
           <div className="relative">
             <button
               type="button"
@@ -1405,8 +1528,7 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
                   data-testid="rd-scale-fit"
                   className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-left text-[12px] text-foreground hover:bg-surface-hover"
                   onClick={() => {
-                    setFitMode("fit");
-                    setOpenMenu(null);
+                    changePresentation("fit");
                   }}
                 >
                   <span>Fit to pane</span>
@@ -1417,13 +1539,13 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
                   data-testid="rd-scale-actual"
                   className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-left text-[12px] text-foreground hover:bg-surface-hover"
                   onClick={() => {
-                    setFitMode("actual");
-                    setOpenMenu(null);
+                    changePresentation("actual");
                   }}
                 >
                   <span>1:1 Actual size</span>
                   {fitMode === "actual" ? <Check className="h-3.5 w-3.5" aria-hidden /> : null}
                 </button>
+                <button type="button" data-testid="rd-scale-stretch" className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-left text-[12px] text-foreground hover:bg-surface-hover" onClick={() => changePresentation("stretch")}>Stretch {fitMode === "stretch" ? <Check aria-hidden="true" className="size-3" /> : null}</button>
                 <div className="my-1 h-px bg-border" />
                 <div className="px-2 py-1 text-[11px] font-medium text-muted-foreground">Stream quality</div>
                 {RD_QUALITY_PRESETS.map((preset) => (
@@ -1431,7 +1553,9 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
                     key={preset.id}
                     type="button"
                     data-testid={`rd-quality-${preset.id}`}
-                    className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-[12px] text-foreground hover:bg-surface-hover"
+                    disabled={!meta?.supportsStreamOptions}
+                    title={!meta?.supportsStreamOptions ? "This host does not support stream quality changes" : undefined}
+                    className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-[12px] text-foreground hover:bg-surface-hover disabled:opacity-50"
                     onClick={() => {
                       handleSelectQuality(preset.id);
                       setOpenMenu(null);
@@ -1444,6 +1568,20 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
                     {qualityPreset === preset.id ? <Check className="h-3.5 w-3.5 shrink-0" aria-hidden /> : null}
                   </button>
                 ))}
+                <div className="my-1 h-px bg-border" />
+                <fieldset disabled={!meta?.supportsStreamOptions} className="space-y-2 px-2 py-1 text-[12px] disabled:opacity-50">
+                  <legend className="text-[11px] font-medium text-muted-foreground">Stream settings</legend>
+                  <label className="flex items-center justify-between gap-2">Frame rate
+                    <select aria-label="Stream frame rate" className="rounded border border-border bg-background p-1 text-foreground" value={meta?.targetFps ?? 60} onChange={(event) => changeStreamSetting({ fps: Number(event.target.value) })}>
+                      {[30, 60, 120].map((fps) => <option key={fps} value={fps}>{fps} fps</option>)}
+                      {meta?.targetFps && ![30, 60, 120].includes(meta.targetFps) ? <option value={meta.targetFps}>{meta.targetFps} fps</option> : null}
+                    </select>
+                  </label>
+                  <div role="group" aria-label="Bitrate ceiling" className="space-y-1">
+                    <p className="text-muted-foreground">Bitrate ceiling</p>
+                    <div className="flex flex-wrap gap-1">{[8, 25, 50, 100].map((mbps) => <Button key={mbps} type="button" size="sm" variant="outline" onClick={() => changeStreamSetting({ bitrate: mbps * 1_000_000 })}>{mbps} Mbps</Button>)}</div>
+                  </div>
+                </fieldset>
                 <div className="my-1 h-px bg-border" />
                 <button
                   type="button"
@@ -1603,14 +1741,20 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
               aria-label="Disconnect remote desktop"
               title="Disconnect"
               className="inline-flex h-6 items-center rounded px-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              onClick={handleDisconnect}
+              onClick={() => {
+                if (isConnected) { releasePressedKeys(); exitPointerLock(); setConfirmDisconnect(true); }
+                else handleDisconnect();
+              }}
             >
               <Power className="h-3.5 w-3.5" aria-hidden />
+              <span className="ml-1">Disconnect</span>
             </button>
           ) : null}
         </div>
       </div>
 
+      </div>
+      </div>
       <div
         ref={containerRef}
         className={
@@ -1630,12 +1774,12 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
           className={
             fitMode === "actual"
               ? "shrink-0 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
-              : "h-full w-full object-contain outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+              : cn("h-full w-full outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring", fitMode === "stretch" ? "object-fill" : "object-contain")
           }
           style={{
             pointerEvents: occluded || !visible ? "none" : undefined,
             visibility: canvasVisible ? "visible" : "hidden",
-            cursor: pointerLocked ? undefined : remoteCursor,
+            cursor: pointerLocked ? undefined : cursorMode === "hidden" ? "none" : cursorMode === "local" ? "default" : remoteCursor,
             ...(fitMode === "actual" && frameSize
               ? { width: `${frameSize.width}px`, height: `${frameSize.height}px` }
               : {}),
@@ -1649,33 +1793,44 @@ export function RemoteDesktopPane({ hostId, label, visible, occluded = false }: 
           onBlur={releasePressedKeys}
         />
         <RemoteDesktopStatsOverlay rdSessionId={rdSessionId} open={statsOpen} visible={surfaceVisible} />
+        {renderError ? <div role="alert" className="absolute bottom-4 left-4 z-20 rounded-lg border border-border bg-background p-3 text-[13px] text-destructive">
+          <p>{renderError}</p>
+          <Button type="button" size="sm" variant="outline" onClick={() => { setRenderError(null); handleRefreshFrame(); }}>Retry video</Button>
+        </div> : null}
         {showOverlay ? (
           <div
             data-testid="remote-desktop-overlay"
             data-scrim={scrim ? "true" : "false"}
             className={cn(
-              "pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center",
-              scrim && "bg-black/75 text-white backdrop-blur-sm",
+              "absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 p-6 text-center bg-background/95",
+              scrim && "bg-background/95 backdrop-blur-sm",
             )}
           >
+            {canRetry ? <Monitor aria-hidden="true" className="size-8 text-muted-foreground" /> : <LoaderCircle aria-hidden="true" className="size-8 animate-spin text-primary motion-reduce:animate-none" />}
+            <p className="text-[13px] font-medium text-foreground">{label}</p>
             <p
               role={status === "error" ? "alert" : "status"}
               data-testid="remote-desktop-status"
-              className={cn("text-[12px]", statusColor)}
+              className={cn("max-w-sm text-[15px] font-semibold", statusColor)}
             >
               {statusText}
             </p>
+            {!canRetry ? (
+              <>
+                <p className="text-[13px] text-muted-foreground">{waitingForVideo ? "Connected. Waiting for the first frame." : "Establishing a secure session"}</p>
+                <ol aria-label="Connection progress" className="flex gap-2 text-[12px] text-muted-foreground">
+                  <li aria-current={!waitingForVideo ? "step" : undefined} className={cn("rounded-full border border-border px-3 py-1", waitingForVideo && "text-status-success")}>{waitingForVideo ? <Check aria-hidden="true" className="mr-1 inline size-3" /> : null}Connect</li>
+                  <li aria-current={waitingForVideo ? "step" : undefined} className="rounded-full border border-border px-3 py-1">First frame</li>
+                </ol>
+                <Button type="button" size="sm" variant="outline" data-testid="rd-cancel-connect" onClick={handleDisconnect}>Cancel</Button>
+              </>
+            ) : null}
             {canRetry ? (
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                className={cn(
-                  "pointer-events-auto",
-                  // The outline variant paints bg-background, which is white in the light theme; over a
-                  // dark scrim that leaves white-on-white text, so pin the scrim palette explicitly.
-                  scrim && "border-white/40 bg-black/60 text-white hover:bg-black/80 hover:text-white",
-                )}
+                className="pointer-events-auto"
                 onClick={handleReconnect}
               >
                 Reconnect

@@ -166,6 +166,7 @@ export const EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY = "ferryx.worktrees.external
 export const EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY = "ferryx.worktrees.externalPromptMuted";
 /** Supervisor setup next-action kinds whose banner the user dismissed ("Not now"). */
 export const SUPERVISOR_SETUP_BANNER_DISMISSED_STORAGE_KEY = "ferryx.supervisor.setupBannerDismissed";
+export const RD_HOST_MACS_STORAGE_KEY = "ferryx.rd.hostMacs";
 
 
 

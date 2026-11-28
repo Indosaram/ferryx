@@ -2376,6 +2376,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 | "cmd_rd_display_refresh"
                 | "cmd_rd_set_options"
                 | "cmd_rd_set_audio"
+                | "cmd_rd_list_audio_devices"
+                | "cmd_rd_set_audio_device"
+                | "cmd_rd_wake_on_lan"
                 | "cmd_rd_clipboard_send"
                 | "cmd_rd_surface_attach"
                 | "cmd_rd_surface_update_bounds"
@@ -2394,6 +2397,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 crate::ipc::remote_desktop::commands::cmd_rd_display_refresh,
                 crate::ipc::remote_desktop::commands::cmd_rd_set_options,
                 crate::ipc::remote_desktop::commands::cmd_rd_set_audio,
+                crate::ipc::remote_desktop::commands::cmd_rd_list_audio_devices,
+                crate::ipc::remote_desktop::commands::cmd_rd_set_audio_device,
+                crate::ipc::remote_desktop::commands::cmd_rd_wake_on_lan,
                 crate::ipc::remote_desktop::commands::cmd_rd_clipboard_send,
                 crate::ipc::remote_desktop::commands::cmd_rd_surface_attach,
                 crate::ipc::remote_desktop::commands::cmd_rd_surface_update_bounds,

@@ -13,9 +13,31 @@ use serde::{Deserialize, Serialize};
 pub struct RdAudioPlayer {
     queue: AudioQueue,
     output: Option<CpalAudioOutput>,
+    device_name: Option<String>,
     unavailable: bool,
     muted: bool,
     volume: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RdAudioDeviceInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
+pub fn list_audio_output_devices() -> Result<Vec<RdAudioDeviceInfo>, AudioError> {
+    let default_name = CpalAudioOutput::default_output_device()
+        .ok()
+        .and_then(|device| device.name().ok());
+    let mut devices = Vec::new();
+    for device in CpalAudioOutput::output_devices()? {
+        if let Ok(name) = device.name() {
+            let is_default = default_name.as_deref() == Some(name.as_str());
+            devices.push(RdAudioDeviceInfo { name, is_default });
+        }
+    }
+    Ok(devices)
 }
 
 impl Default for RdAudioPlayer {
@@ -23,6 +45,7 @@ impl Default for RdAudioPlayer {
         Self {
             queue: AudioQueue::default(),
             output: None,
+            device_name: None,
             unavailable: false,
             muted: false,
             volume: 1.0,
@@ -42,7 +65,21 @@ impl RdAudioPlayer {
     }
 
     pub fn push_pcm(&mut self, pcm_f32_le: &[u8]) {
-        self.push_pcm_with_start(pcm_f32_le, CpalAudioOutput::start);
+        let selected = self.device_name.clone();
+        self.push_pcm_with_start(pcm_f32_le, move |queue| {
+            start_output_by_name(queue, selected.as_deref())
+        });
+    }
+
+    pub fn set_output_device(&mut self, device_name: Option<String>) -> Result<(), AudioError> {
+        let normalized = device_name
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        let next = start_output_by_name(self.queue.clone(), normalized.as_deref())?;
+        self.device_name = normalized;
+        self.output = Some(next);
+        self.unavailable = false;
+        Ok(())
     }
 
     // The injected starter lets tests exercise the real failure path without
@@ -104,6 +141,20 @@ impl RdAudioPlayer {
         let _ = self.queue.clear();
         self.output = None;
     }
+}
+
+fn start_output_by_name(
+    queue: AudioQueue,
+    device_name: Option<&str>,
+) -> Result<CpalAudioOutput, AudioError> {
+    let Some(target) = device_name else {
+        return CpalAudioOutput::start(queue);
+    };
+    let device = CpalAudioOutput::output_devices()?
+        .into_iter()
+        .find(|candidate| candidate.name().ok().as_deref() == Some(target))
+        .ok_or_else(|| AudioError::Device(format!("Audio output device not found: {target}")))?;
+    CpalAudioOutput::start_on_device(queue, Some(&device))
 }
 
 /// `0x06` on the frame channel; `0x03`-`0x05` belong to the meta, audio and clipboard
