@@ -118,7 +118,7 @@ describe("Space creation and switching", () => {
     fireEvent.click(screen.getByRole("button", { name: "Choose space icon" }));
     fireEvent.click(screen.getByRole("button", { name: "Palette" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Choose profile" }), { target: { value: "default" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/ }));
     const space = store.getState().spaces[store.getState().activeSpaceId];
     expect(space).toMatchObject({ name: "Studio", icon: "Palette", profileId: "default" });
     expect(container.querySelector(".maho-space-header .maho-space-identity")).not.toBeNull();
@@ -139,7 +139,7 @@ describe("Space creation and switching", () => {
     fireEvent.click(screen.getByRole("button", { name: "Choose space icon" }));
     fireEvent.click(screen.getByRole("button", { name: "Palette" }));
     fireEvent.click(within(screen.getByRole("group", { name: "Space color" })).getByRole("button", { name: "Rose" }));
-    fireEvent.click(screen.getByRole("button", { name: "Create", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/ }));
 
     expect(createSpace).toHaveBeenCalledTimes(1);
     expect(createSpace.mock.calls[0][0]).toEqual({
