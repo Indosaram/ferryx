@@ -12,7 +12,7 @@
 
 import { DndContext, PointerSensor, KeyboardSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
-import { useCallback, useMemo, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
 import {
   browserStore,
@@ -21,13 +21,15 @@ import {
   useBrowserStore,
   type BrowserStore,
 } from "../../../state/browserStore";
+import { isMacHost } from "../../../lib/platform";
+import { MAC_TRAFFIC_LIGHT_OVERHANG } from "../../activity/DesktopActivityBar";
+import { MahoCreateSpace } from "./MahoCreateSpace";
 import { MahoActionRow } from "./MahoActionRow";
 import { MahoFavoritesGrid } from "./MahoFavoritesGrid";
-import { MahoPinnedSection } from "./MahoPinnedSection";
+import { MahoPinnedSection, MahoSpaceHeader } from "./MahoPinnedSection";
 import { MahoSidebarFooter } from "./MahoSidebarFooter";
 import { MahoSidebarTopBar } from "./MahoSidebarTopBar";
 import { MahoTodayList } from "./MahoTodayList";
-import { MahoUrlPill } from "./MahoUrlPill";
 import { applyMahoDrop, parseMahoDragId } from "./mahoBrowserTabActions";
 import { spacePaletteStyle, type MahoScheme } from "./mahoSpacePalette";
 import "./maho.css";
@@ -75,10 +77,8 @@ export function MahoBrowserSidebar({
   onForward,
   onReload,
   onActivateTab,
-  onOpenCommandBar,
   onNewTab,
   onTidy,
-  onCopyUrl,
   controlActivity,
   agentSection,
   nowPlayingSlot,
@@ -86,6 +86,7 @@ export function MahoBrowserSidebar({
   libraryOpen = false,
   onToggleLibrary,
 }: MahoBrowserSidebarProps) {
+  const [creatingSpace, setCreatingSpace] = useState(false);
   const state = useBrowserStore((snapshot) => snapshot, store);
   const spaces = useMemo(() => selectSpaceList(state), [state]);
   const space = useMemo(
@@ -93,7 +94,6 @@ export function MahoBrowserSidebar({
     [spaceId, spaces, state.activeSpaceId],
   );
   const selectedBrowserId = activeBrowserId ?? selectActiveBrowserId(state, space?.id);
-  const activeTab = selectedBrowserId ? state.tabs[selectedBrowserId] ?? null : null;
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -124,9 +124,11 @@ export function MahoBrowserSidebar({
         data-collapsed={collapsed ? "true" : undefined}
         data-maho-space={space.id}
         data-maho-scheme={scheme}
-        style={paletteStyle as unknown as CSSProperties}
+        data-creating-space={creatingSpace ? "true" : undefined}
+        style={{ ...paletteStyle, "--maho-traffic-light-clearance": `${isMacHost() ? MAC_TRAFFIC_LIGHT_OVERHANG : 0}px` } as CSSProperties}
       >
         <MahoSidebarTopBar
+          showNavigation={false}
           collapsed={collapsed}
           onToggleSidebar={onToggleSidebar}
           canGoBack={canGoBack}
@@ -136,9 +138,6 @@ export function MahoBrowserSidebar({
           onReload={onReload}
           controlActivity={controlActivity}
         />
-        <div className="maho-sidebar__header">
-          <MahoUrlPill tab={activeTab} onOpenCommandBar={onOpenCommandBar} onCopyUrl={onCopyUrl} />
-        </div>
         {libraryOpen && libraryContent ? (
           <div className="maho-sidebar__library">{libraryContent}</div>
         ) : (
@@ -148,13 +147,17 @@ export function MahoBrowserSidebar({
               activeBrowserId={selectedBrowserId}
               onActivateTab={onActivateTab}
             />
+            <MahoSpaceHeader store={store} space={space} />
+            {agentSection ? <div className="maho-sidebar__agents">{agentSection}</div> : null}
             <div className="maho-sidebar__body">
               <MahoPinnedSection
                 store={store}
                 spaceId={space.id}
+                showSpaceHeader={false}
                 activeBrowserId={selectedBrowserId}
                 onActivateTab={onActivateTab}
               />
+              <div className="maho-sidebar__separator" aria-hidden="true" />
               <MahoActionRow store={store} spaceId={space.id} onNewTab={onNewTab} onTidy={onTidy} />
               <MahoTodayList
                 store={store}
@@ -165,9 +168,9 @@ export function MahoBrowserSidebar({
             </div>
           </>
         )}
-        {agentSection ? <div className="maho-sidebar__agents">{agentSection}</div> : null}
         {nowPlayingSlot ? <div className="maho-sidebar__now-playing">{nowPlayingSlot}</div> : null}
-        <MahoSidebarFooter store={store} libraryOpen={libraryOpen} onToggleLibrary={onToggleLibrary} />
+        <MahoSidebarFooter store={store} libraryOpen={libraryOpen} onToggleLibrary={onToggleLibrary} onCreateSpace={() => setCreatingSpace(true)} />
+        {creatingSpace ? <MahoCreateSpace store={store} onDone={() => setCreatingSpace(false)} /> : null}
       </aside>
     </DndContext>
   );

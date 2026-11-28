@@ -108,6 +108,34 @@ describe("browserStore", () => {
     vi.restoreAllMocks();
   });
 
+  describe("Space identities and unloaded tabs", () => {
+    it("persists an allowlisted identity and profile while safely ignoring unknown icons", () => {
+      const result = store.createSpace({ name: "Work", icon: "Briefcase", profileId: "default" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const restored = createTestStore(storage);
+      expect(restored.getState().spaces[result.value.id]).toMatchObject({ icon: "Briefcase", profileId: "default" });
+      restored.setSpaceIcon(result.value.id, "not-an-icon");
+      expect(createTestStore(storage).getState().spaces[result.value.id].icon).toBeUndefined();
+      const raw = JSON.parse(storage.getItem(BROWSER_STORE_STORAGE_KEY)!);
+      raw.spaces[0].icon = { invalid: true };
+      storage.setItem(BROWSER_STORE_STORAGE_KEY, JSON.stringify(raw));
+      expect(createTestStore(storage).getState().spaces[raw.spaces[0].id].icon).toBeUndefined();
+    });
+
+    it("unloads without archiving or losing metadata and clears active ownership", () => {
+      store.upsertTab({ browserId: "pinned", url: "https://example.test", title: "Saved", faviconUrl: "https://example.test/icon", section: "pinned" });
+      store.touch("pinned");
+      store.setSuspended("pinned", true);
+      expect(store.getState().tabs.pinned).toMatchObject({ suspended: true, title: "Saved", url: "https://example.test", faviconUrl: "https://example.test/icon" });
+      expect(store.getState().activeBrowserIdBySpace[DEFAULT_SPACE_ID]).toBeNull();
+      expect(store.getState().archive).toHaveLength(0);
+      expect(createTestStore(storage).getState().tabs.pinned.suspended).toBe(true);
+      store.setSuspended("pinned", false);
+      expect(store.getState().tabs.pinned.suspended).toBe(false);
+    });
+  });
+
   describe("sections", () => {
     it("creates tabs into Today, then keeps favorite, pinned and folder groups ordered independently", () => {
       const today = store.upsertTab({ browserId: "b-today", url: "https://a.test", title: "A" });

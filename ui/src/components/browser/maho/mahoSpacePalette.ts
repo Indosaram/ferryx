@@ -44,6 +44,9 @@ export type MahoSpacePalette = Readonly<{
   surface: string;
   /** Resting hover/selection backing over `surface`. */
   surfaceHover: string;
+  rowActive: string;
+  rowSelected: string;
+  neutralGlyph: string;
   /** Primary readable text: >= 4.5:1 against every surface above. */
   foreground: string;
   /** Secondary/muted text: >= 4.5:1 against every surface above. */
@@ -68,13 +71,11 @@ export type MahoSpacePreset = Readonly<{
  * `maho-chromium/browser/ui/views/sidebar/maho_sidebar_create_space_view.cc`
  * as (hue, saturation, brightness). Hex is the 1x conversion of that triple.
  *
- * Maho ships nine swatches; its first one (`0.10 / 0.15 / 0.95`, a warm
- * near-neutral) is the "Paper" anchor rather than a Space color, so this port
- * keeps the eight chromatic swatches in Maho's order. Maho's default selection is
- * kColorPresets index 7 (blue), which is `sky` here — see
- * `DEFAULT_SPACE_PRESET_ID`.
+ * Maho ships nine swatches in this order, including the near-neutral Paper
+ * anchor. Its default selection is index 7 (blue), which is `sky` here.
  */
 export const SPACE_PRESETS: readonly MahoSpacePreset[] = [
+  { id: "paper", label: "Paper", hex: "#f2e4ce", hue: 0.10, saturation: 0.15, brightness: 0.95 },
   { id: "rose", label: "Rose", hex: "#e62e86", hue: 0.92, saturation: 0.8, brightness: 0.9 },
   { id: "grape", label: "Grape", hex: "#8a2ee6", hue: 0.75, saturation: 0.8, brightness: 0.9 },
   { id: "cherry", label: "Cherry", hex: "#e62e2e", hue: 0.0, saturation: 0.8, brightness: 0.9 },
@@ -85,7 +86,7 @@ export const SPACE_PRESETS: readonly MahoSpacePreset[] = [
   { id: "slate", label: "Slate", hex: "#626e8c", hue: 0.62, saturation: 0.3, brightness: 0.55 },
 ];
 
-/** The eight preset Space colors as plain hex strings (`#rrggbb`). */
+/** The preset Space colors as plain hex strings (`#rrggbb`). */
 export const SPACE_PRESET_COLORS: readonly string[] = SPACE_PRESETS.map((preset) => preset.hex);
 
 /** Maho's default swatch (blue, `kColorPresets` index 7), mapped onto this list. */
@@ -261,13 +262,19 @@ function buildPalette(
   const gradientTo = quantize(raw.gradientTo);
   const surface = quantize(raw.surface);
   const surfaceHover = quantize(raw.surfaceHover);
-  const all = [gradientFrom, gradientTo, surface, surfaceHover];
+  const overlay = hoverOverlay(scheme);
+  const rowActive = quantize(mixRgb(surface, overlay, (scheme === "dark" ? 51 : 38) / 255));
+  const rowSelected = quantize(mixRgb(surface, overlay, (scheme === "dark" ? 38 : 25) / 255));
+  const all = [gradientFrom, gradientTo, surface, surfaceHover, rowActive, rowSelected];
 
   return {
     gradientFrom: rgbToHex(gradientFrom),
     gradientTo: rgbToHex(gradientTo),
     surface: rgbToHex(surface),
     surfaceHover: rgbToHex(surfaceHover),
+    rowActive: rgbToHex(rowActive),
+    rowSelected: rgbToHex(rowSelected),
+    neutralGlyph: rgbToHex(resolveForContrast(SECONDARY_CANDIDATE[scheme], all, endpoint, scheme === "dark" ? MIN_VISIBLE_CONTRAST : MIN_READABLE_CONTRAST)),
     foreground: rgbToHex(resolveForContrast(PRIMARY_CANDIDATE[scheme], all, endpoint, MIN_READABLE_CONTRAST)),
     mutedForeground: rgbToHex(resolveForContrast(SECONDARY_CANDIDATE[scheme], all, endpoint, MIN_READABLE_CONTRAST)),
     accent: rgbToHex(resolveForContrast(quantize(raw.accentCandidate), [surface, surfaceHover], endpoint, MIN_VISIBLE_CONTRAST)),
@@ -333,6 +340,10 @@ export function spacePaletteCssVars(palette: MahoSpacePalette): Record<string, s
     "--maho-space-gradient-to": palette.gradientTo,
     "--maho-space-surface": palette.surface,
     "--maho-space-surface-hover": palette.surfaceHover,
+    "--maho-space-row-active": palette.rowActive,
+    "--maho-space-row-selected": palette.rowSelected,
+    "--maho-space-neutral-glyph": palette.neutralGlyph,
+    "--maho-space-outline": palette.neutralGlyph,
     "--maho-space-foreground": palette.foreground,
     "--maho-space-muted-foreground": palette.mutedForeground,
     "--maho-space-accent": palette.accent,

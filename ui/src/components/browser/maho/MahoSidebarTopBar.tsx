@@ -4,7 +4,7 @@
 // decides whether a click drives `browserTabNavigation` or a caller-owned engine,
 // and Todo 14's ControlActivity chip drops into `controlActivity` unchanged.
 
-import { ArrowLeft, ArrowRight, PanelLeft, RotateCw } from "lucide-react";
+import { ChevronLeft, ChevronRight, PanelLeft, RotateCw } from "lucide-react";
 import type { ReactNode } from "react";
 
 export type MahoSidebarTopBarProps = {
@@ -16,6 +16,7 @@ export type MahoSidebarTopBarProps = {
   onBack?: () => void;
   onForward?: () => void;
   onReload?: () => void;
+  showNavigation?: boolean;
   /** Slot for Todo 14's agent ControlActivity chip. */
   controlActivity?: ReactNode;
 };
@@ -28,6 +29,7 @@ export function MahoSidebarTopBar({
   onBack,
   onForward,
   onReload,
+  showNavigation = true,
   controlActivity,
 }: MahoSidebarTopBarProps) {
   return (
@@ -41,27 +43,32 @@ export function MahoSidebarTopBar({
       >
         <PanelLeft aria-hidden="true" />
       </button>
-      <button
-        type="button"
-        className="maho-top-bar__button"
-        aria-label="Back"
-        disabled={!canGoBack}
-        onClick={onBack}
-      >
-        <ArrowLeft aria-hidden="true" />
-      </button>
-      <button
-        type="button"
-        className="maho-top-bar__button"
-        aria-label="Forward"
-        disabled={!canGoForward}
-        onClick={onForward}
-      >
-        <ArrowRight aria-hidden="true" />
-      </button>
-      <button type="button" className="maho-top-bar__button" aria-label="Reload" onClick={onReload}>
-        <RotateCw aria-hidden="true" />
-      </button>
+      <span className="maho-top-bar__spacer" aria-hidden="true" />
+      {showNavigation ? (
+        <>
+          <button
+            type="button"
+            className="maho-top-bar__button"
+            aria-label="Back"
+            disabled={!canGoBack}
+            onClick={onBack}
+          >
+            <ChevronLeft aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="maho-top-bar__button"
+            aria-label="Forward"
+            disabled={!canGoForward}
+            onClick={onForward}
+          >
+            <ChevronRight aria-hidden="true" />
+          </button>
+          <button type="button" className="maho-top-bar__button" aria-label="Reload" onClick={onReload}>
+            <RotateCw aria-hidden="true" />
+          </button>
+        </>
+      ) : null}
       {controlActivity ? <div className="maho-top-bar__chip">{controlActivity}</div> : null}
     </div>
   );

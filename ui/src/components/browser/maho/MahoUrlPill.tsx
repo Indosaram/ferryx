@@ -2,7 +2,7 @@
 // copy-URL quick action. It never edits the URL itself - Maho routes every edit
 // through the Command Bar so the omnibox has exactly one owner.
 
-import { Copy, Search } from "lucide-react";
+import { Link, Lock, LockOpen } from "lucide-react";
 import { useCallback } from "react";
 import { toast } from "sonner";
 
@@ -46,7 +46,7 @@ export function MahoUrlPill({ tab, onOpenCommandBar, onCopyUrl }: MahoUrlPillPro
         title={displayUrl(url)}
         onClick={onOpenCommandBar}
       >
-        <Search aria-hidden="true" />
+        {url.startsWith("https://") ? <Lock aria-hidden="true" /> : url.startsWith("http://") ? <LockOpen aria-hidden="true" /> : null}
         <span className="maho-url-pill__label">{host}</span>
       </button>
       <button
@@ -55,8 +55,9 @@ export function MahoUrlPill({ tab, onOpenCommandBar, onCopyUrl }: MahoUrlPillPro
         aria-label="Copy URL"
         title="Copy URL"
         onClick={handleCopy}
+        disabled={url === "about:blank"}
       >
-        <Copy aria-hidden="true" />
+        <Link aria-hidden="true" />
       </button>
     </div>
   );
