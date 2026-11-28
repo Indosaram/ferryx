@@ -6500,11 +6500,15 @@ async fn browser_command(
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
     // A command acts on one browser inside the desktop's published scope, so an absent scope
-    // is refused rather than defaulted: no scope means nothing is shared right now.
-    let scope = derive_desktop_scope(&state).ok_or((
-        StatusCode::CONFLICT,
-        "BROWSER_NO_ACTIVE_SCOPE: no workspace is shared by the desktop".to_string(),
-    ))?;
+    // is refused rather than defaulted: no scope means nothing is shared right now. The scope
+    // value itself is not passed on: the backend re-derives the desktop epoch and the driver
+    // lease, which are the gates that actually guard a mutation.
+    if derive_desktop_scope(&state).is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            "BROWSER_NO_ACTIVE_SCOPE: no workspace is shared by the desktop".to_string(),
+        ));
+    }
     if body.browser_id.trim().is_empty() || body.command.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
