@@ -75,6 +75,7 @@ import { MahoLibraryMode } from "./MahoLibraryMode";
 import { MahoMiniPane } from "./MahoMiniPane";
 import { MahoNowPlayingCard } from "./MahoNowPlayingCard";
 import { MahoTabSwitcher, type MahoTabSwitcherDirection } from "./MahoTabSwitcher";
+import { activateMahoTab } from "./mahoBrowserTabActions";
 import { useBrowserAutoArchive } from "./mahoAutoArchive";
 import { useAppearanceSettings, useResolvedTheme } from "../../../lib/appearanceSettings";
 import { spacePaletteStyle, type MahoScheme } from "./mahoSpacePalette";
@@ -286,11 +287,19 @@ export function useMahoBrowserShell({
     saveSidebarWidthForMode("browser", nextWidth);
   };
 
-  /** Landing on a tab is a use: it becomes the Space's active tab and the head of the MRU. */
+  /**
+   * Landing on a tab is a use: it becomes the Space's active tab and the head of the MRU.
+   * A suspended tab is recreated (invisible) on its own browserId before it is activated,
+   * because the native session behind an unloaded row no longer exists.
+   */
   const activateTab = useCallback(
     (browserId: string) => {
       const tab = store.getState().tabs[browserId];
       if (!tab) return;
+      if (tab.suspended) {
+        void activateMahoTab(store, browserId).catch(() => toast.error("Could not restore tab"));
+        return;
+      }
       store.touch(browserId);
       store.setActiveSpace(tab.spaceId);
     },
@@ -299,10 +308,17 @@ export function useMahoBrowserShell({
 
   const revealTab = useCallback(
     (browserId: string) => {
+      // A promoted/revealed tab must have a live session before the canvas is asked for it.
+      if (store.getState().tabs[browserId]?.suspended) {
+        void activateMahoTab(store, browserId)
+          .then(() => onRevealBrowser?.(browserId))
+          .catch(() => toast.error("Could not restore tab"));
+        return;
+      }
       activateTab(browserId);
       onRevealBrowser?.(browserId);
     },
-    [activateTab, onRevealBrowser],
+    [activateTab, onRevealBrowser, store],
   );
 
   const openCommandBar = useCallback((mode: MahoCommandBarMode) => {

@@ -125,6 +125,32 @@ describe("Space creation and switching", () => {
     expect(screen.getByRole("button", { name: "Switch to Space Studio" })).toHaveAttribute("data-has-icon", "true");
   });
 
+  it("submits the footer Create Space pane as one createSpace call with name, color and icon", () => {
+    const store = makeStore();
+    const createSpace = vi.spyOn(store, "createSpace");
+    sidebar(store);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Space" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Create Space" })).getByRole("button", { name: "Cancel" }));
+    expect(createSpace).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Space" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Space name" }), { target: { value: "Studio" } });
+    fireEvent.click(screen.getByRole("button", { name: "Choose space icon" }));
+    fireEvent.click(screen.getByRole("button", { name: "Palette" }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Space color" })).getByRole("button", { name: "Rose" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create", exact: true }));
+
+    expect(createSpace).toHaveBeenCalledTimes(1);
+    expect(createSpace.mock.calls[0][0]).toEqual({
+      name: "Studio",
+      icon: "Palette",
+      color: SPACE_PRESETS.find((preset) => preset.id === "rose")?.hex,
+      profileId: expect.any(String),
+    });
+    expect(screen.queryByRole("dialog", { name: "Create Space" })).toBeNull();
+  });
+
   it("refuses an empty Space name", () => {
     const store = makeStore();
     sidebar(store);
@@ -272,15 +298,35 @@ describe("Pinned and folders", () => {
     const store = makeStore();
     addTab(store, "saved", { title: "Saved", section: "pinned" });
     const { container } = withDnd(<MahoPinnedSection store={store} />);
+    const row = () => container.querySelector(".maho-tab-row") as HTMLElement;
     expect(container.querySelectorAll(".maho-tab-row__actions button")).toHaveLength(1);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Unload Saved" })); });
     expect(lifecycleMock.close).toHaveBeenCalledWith("saved");
     expect(store.getState().tabs.saved.suspended).toBe(true);
+    expect(row().getAttribute("data-suspended")).toBe("true");
     expect(screen.getByRole("button", { name: "Close Saved" })).toBeInTheDocument();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pinned: Saved" })); });
-    expect(lifecycleMock.create).toHaveBeenCalledWith(expect.objectContaining({ browserId: "saved", url: "https://saved.example.com/" }));
+    expect(lifecycleMock.create).toHaveBeenCalledWith(expect.objectContaining({ browserId: "saved", url: "https://saved.example.com/", visible: false }));
     expect(store.getState().tabs.saved.suspended).toBe(false);
+    expect(row().getAttribute("data-suspended")).toBeNull();
     expect(screen.getByRole("button", { name: "Unload Saved" })).toBeInTheDocument();
+  });
+
+  it("renders the Space icon in the footer dots and the Space header, and retints it from the popover", () => {
+    const store = makeStore();
+    store.setSpaceIcon(DEFAULT_SPACE_ID, "Rocket");
+    const { container } = sidebar(store);
+
+    const headerIcon = () => container.querySelector(".maho-space-header .maho-space-identity");
+    const dotIcon = () => container.querySelector(".maho-space-dot .maho-space-identity");
+    expect(headerIcon()).not.toBeNull();
+    expect(dotIcon()).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Switch to Space Personal" })).toHaveAttribute("data-has-icon", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Space" }));
+    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    expect(store.getState().spaces[DEFAULT_SPACE_ID].icon).toBe("Code");
+    expect(headerIcon()).not.toBeNull();
   });
 
   it("pins a Today tab and unpins it back", () => {

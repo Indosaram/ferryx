@@ -1200,9 +1200,10 @@
 .maho-footer__dots .maho-space-dot[data-active="true"]:hover .maho-space-dot__indicator { width: 12px; height: 12px; opacity: 0.941; }
 
 .maho-sidebar { position: relative; }
-/* The Activity Bar consumes 48px of the native 72px traffic-light span. */
+/* The Activity Bar consumes 48px of the native 72px traffic-light span, so the top region
+   indents by the overhang the rail's owner measured (0 off macOS). */
 .maho-sidebar > .maho-top-bar { padding-left: var(--maho-traffic-light-clearance, 0px); }
-.maho-tab-row[data-suspended="true"] .maho-tab-row__main { opacity: 0.5; }
+.maho-tab-row[data-suspended="true"] .maho-tab-row__main { opacity: 0.55; }
 .maho-tab-row:hover .maho-tab-row__title,
 .maho-tab-row:focus-within .maho-tab-row__title { padding-right: 0; }
 .maho-space-identity { width: 17px; height: 17px; flex-shrink: 0; }

@@ -109,6 +109,13 @@ describe("browserStore", () => {
   });
 
   describe("Space identities and unloaded tabs", () => {
+    it("persists a Space icon set after creation through the store action", () => {
+      const work = store.createSpace({ name: "Work" });
+      if (!work.ok) throw new Error("space create failed");
+      expect(store.setSpaceIcon(work.value.id, "Rocket").ok).toBe(true);
+      expect(createTestStore(storage).getState().spaces[work.value.id].icon).toBe("Rocket");
+    });
+
     it("persists an allowlisted identity and profile while safely ignoring unknown icons", () => {
       const result = store.createSpace({ name: "Work", icon: "Briefcase", profileId: "default" });
       expect(result.ok).toBe(true);

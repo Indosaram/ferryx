@@ -169,7 +169,7 @@ export function MahoBrowserSidebar({
           </>
         )}
         {nowPlayingSlot ? <div className="maho-sidebar__now-playing">{nowPlayingSlot}</div> : null}
-        <MahoSidebarFooter store={store} libraryOpen={libraryOpen} onToggleLibrary={onToggleLibrary} onCreateSpace={() => setCreatingSpace(true)} />
+        <MahoSidebarFooter store={store} libraryOpen={libraryOpen} onToggleLibrary={onToggleLibrary} creating={creatingSpace} onCreateSpace={() => setCreatingSpace((current) => !current)} />
         {creatingSpace ? <MahoCreateSpace store={store} onDone={() => setCreatingSpace(false)} /> : null}
       </aside>
     </DndContext>
