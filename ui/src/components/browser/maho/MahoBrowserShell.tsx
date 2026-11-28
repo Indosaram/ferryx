@@ -76,6 +76,8 @@ import { MahoMiniPane } from "./MahoMiniPane";
 import { MahoNowPlayingCard } from "./MahoNowPlayingCard";
 import { MahoTabSwitcher, type MahoTabSwitcherDirection } from "./MahoTabSwitcher";
 import { useBrowserAutoArchive } from "./mahoAutoArchive";
+import { useAppearanceSettings, useResolvedTheme } from "../../../lib/appearanceSettings";
+import { spacePaletteStyle, type MahoScheme } from "./mahoSpacePalette";
 import { tidyTodayTabs } from "./mahoTabTidy";
 
 /**
@@ -218,6 +220,9 @@ export function useMahoBrowserShell({
   const activeTab = activeBrowserId ? state.tabs[activeBrowserId] ?? null : null;
   const mruTabs = useMemo(() => selectMruTabs(state), [state]);
   const miniBrowserId = state.miniBrowserId;
+  const { settings: appearance } = useAppearanceSettings();
+  const scheme: MahoScheme = useResolvedTheme(appearance.theme) === "light" ? "light" : "dark";
+  const spaceColor = state.spaces[state.activeSpaceId]?.color;
 
   const [width, setWidth] = useState(() => loadSidebarWidthForMode("browser"));
   const widthRef = useRef(width);
@@ -434,13 +439,21 @@ export function useMahoBrowserShell({
   const drawer = active && drawerOpen ? (
     <aside
       data-testid="activity-drawer-browser"
-      className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-worktree-sidebar text-worktree-sidebar-foreground"
-      style={{ width: `${width}px`, minWidth: `${RANGE.min}px`, maxWidth: `${RANGE.max}px` }}
+      data-maho-space={state.activeSpaceId}
+      data-maho-scheme={scheme}
+      className="maho-drawer relative flex h-full shrink-0 flex-col overflow-hidden"
+      style={{
+        ...(spaceColor ? spacePaletteStyle(spaceColor, scheme) : {}),
+        width: `${width}px`,
+        minWidth: `${RANGE.min}px`,
+        maxWidth: `${RANGE.max}px`,
+      }}
     >
       <div data-tauri-drag-region className="h-titlebar shrink-0" />
       <div className="flex min-h-0 flex-1 flex-col">
         <MahoBrowserSidebar
           store={store}
+          scheme={scheme}
           activeBrowserId={activeBrowserId}
           canGoBack={activeTab?.canGoBack === true}
           canGoForward={activeTab?.canGoForward === true}
@@ -514,6 +527,14 @@ export function useMahoBrowserShell({
         onNavigate={handleCanvasNavigate}
         onReload={handleCanvasReload}
         onNewTab={handleNewTab}
+        onBack={(browserId) => void goBackInBrowserTab(browserId).catch(() => undefined)}
+        onForward={(browserId) => void goForwardInBrowserTab(browserId).catch(() => undefined)}
+        onOpenAddress={(browserId) => {
+          if (browserId) activateTab(browserId);
+          openCommandBar(browserId ? "navigate" : "new-tab");
+        }}
+        onCopyUrl={copyUrl}
+        scheme={scheme}
       />
     </section>
   ) : null;

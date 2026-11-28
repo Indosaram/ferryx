@@ -28,7 +28,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { ArrowLeftRight, Columns2, GripVertical, Plus, X } from "lucide-react";
+import { ArrowLeftRight, Columns2, GripVertical, Search, X } from "lucide-react";
 
 import {
   browserStore,
@@ -41,6 +41,9 @@ import { BROWSER_SPLIT_RATIO_STORAGE_KEY } from "../../../lib/storageKeys";
 import type { BrowserReloadOptions } from "../../../lib/browserTauri";
 import type { BrowserTab } from "../../../lib/types";
 import { BrowserPane } from "../../BrowserPane";
+import { MahoContentsHeader, MAHO_SEARCH_PLACEHOLDER } from "./MahoContentsHeader";
+import { spacePaletteStyle, type MahoScheme } from "./mahoSpacePalette";
+import "./maho.css";
 
 /** Divider limits: neither pane may shrink below a quarter of the canvas. */
 export const MIN_SPLIT_RATIO = 0.25;
@@ -135,6 +138,11 @@ export type BrowserModeCanvasProps = {
   onNavigate?: (browserId: string, url: string) => void;
   onReload?: (browserId: string, options?: BrowserReloadOptions) => void;
   onNewTab?: () => void;
+  onBack?: (browserId: string) => void;
+  onForward?: (browserId: string) => void;
+  onOpenAddress?: (browserId: string | null) => void;
+  onCopyUrl?: (url: string) => void;
+  scheme?: MahoScheme;
 };
 
 type CanvasPane = {
@@ -151,6 +159,11 @@ export function BrowserModeCanvas({
   onNavigate,
   onReload,
   onNewTab,
+  onBack,
+  onForward,
+  onOpenAddress,
+  onCopyUrl,
+  scheme = "dark",
 }: BrowserModeCanvasProps) {
   const state = useBrowserStore((snapshot) => snapshot, store);
   const targetSpaceId = spaceId ?? state.activeSpaceId;
@@ -161,6 +174,11 @@ export function BrowserModeCanvas({
     [state.tabs, targetSpaceId],
   );
   const mruTabs = useMemo(() => tabsInMruOrder(state, targetSpaceId), [state, targetSpaceId]);
+  const spaceColor = state.spaces[targetSpaceId]?.color;
+  const paletteStyle = useMemo(
+    () => (spaceColor ? (spacePaletteStyle(spaceColor, scheme) as CSSProperties) : undefined),
+    [scheme, spaceColor],
+  );
 
   const [secondaryBrowserId, setSecondaryBrowserId] = useState<string | null>(null);
   const [ratio, setRatio] = useState<number>(() => readStoredSplitRatio());
@@ -273,26 +291,29 @@ export function BrowserModeCanvas({
         data-empty="true"
         data-active="true"
         aria-label="Browser"
-        className="flex h-full min-h-0 w-full flex-col bg-background"
+        data-maho-space={targetSpaceId}
+        data-maho-scheme={scheme}
+        style={paletteStyle}
+        className="maho-canvas"
       >
         {banner}
         <div className="flex min-h-0 flex-1">
-          <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-sm font-medium text-foreground">No tabs in this Space</p>
-            <p className="max-w-xs text-xs text-muted-foreground">
-              Open a tab to start browsing. Your Spaces keep their own tabs and history.
-            </p>
-            <button
-              type="button"
-              onClick={onNewTab}
-              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <Plus className="size-3.5" aria-hidden="true" />
-              New Tab
-            </button>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <MahoContentsHeader tab={null} active onOpenAddress={() => onOpenAddress?.(null)} />
+            <div className="maho-canvas__empty">
+              <button
+                type="button"
+                className="maho-search-pill maho-canvas__empty-pill"
+                aria-label="New Tab"
+                onClick={onNewTab}
+              >
+                <Search aria-hidden="true" />
+                <span>{MAHO_SEARCH_PLACEHOLDER}</span>
+              </button>
+            </div>
           </div>
           {rightOverlayPane ? (
-            <div className="flex min-h-0 w-80 shrink-0 flex-col border-l border-border" data-testid="browser-canvas-right-overlay">
+            <div className="maho-canvas__overlay" data-testid="browser-canvas-right-overlay">
               {rightOverlayPane}
             </div>
           ) : null}
@@ -316,58 +337,12 @@ export function BrowserModeCanvas({
       data-active="true"
       data-split={secondaryPane ? "true" : "false"}
       aria-label="Browser"
-      className="flex h-full min-h-0 w-full flex-col bg-background"
+      data-maho-space={targetSpaceId}
+      data-maho-scheme={scheme}
+      style={paletteStyle}
+      className="maho-canvas"
     >
       {banner}
-      <div
-        className="flex shrink-0 items-center justify-end gap-1 border-b border-border bg-card px-2 py-1"
-        data-testid="browser-canvas-controls"
-        role="toolbar"
-        aria-label="Browser canvas"
-      >
-        <button
-          type="button"
-          onClick={onNewTab}
-          aria-label="New Tab"
-          title="New Tab"
-          className="rounded p-1 hover:bg-accent"
-        >
-          <Plus className="size-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          onClick={startSplit}
-          disabled={!splitCandidate}
-          aria-label="Split view"
-          title={splitCandidate ? "Split view" : "Open another tab to split"}
-          aria-pressed={secondaryPane ? "true" : "false"}
-          className="rounded p-1 hover:bg-accent disabled:opacity-40"
-        >
-          <Columns2 className="size-3.5" aria-hidden="true" />
-        </button>
-        {secondaryPane ? (
-          <>
-            <button
-              type="button"
-              onClick={swapPanes}
-              aria-label="Swap split panes"
-              title="Swap panes"
-              className="rounded p-1 hover:bg-accent"
-            >
-              <ArrowLeftRight className="size-3.5" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setSecondaryBrowserId(null)}
-              aria-label="Close split pane"
-              title="Close split pane"
-              className="rounded p-1 hover:bg-accent"
-            >
-              <X className="size-3.5" aria-hidden="true" />
-            </button>
-          </>
-        ) : null}
-      </div>
       <div className="flex min-h-0 flex-1">
         <div ref={splitRowRef} className="flex min-h-0 min-w-0 flex-1" data-testid="browser-canvas-panes">
           {panes.map((pane, index) => (
@@ -384,14 +359,66 @@ export function BrowserModeCanvas({
               className="flex h-full min-h-0 min-w-0 flex-col"
               style={paneStyle(index)}
             >
-              <BrowserPane
-                tab={toBrowserPaneTab(pane.tab)}
-                visible
-                chromeMode="maho-minimal"
-                surfacePriority={pane.role === "primary" ? 1 : 0}
-                onNavigate={(url) => onNavigate?.(pane.tab.browserId, url)}
-                onReload={(options) => onReload?.(pane.tab.browserId, options)}
+              <MahoContentsHeader
+                tab={pane.tab}
+                active={pane.role === "primary"}
+                onBack={() => onBack?.(pane.tab.browserId)}
+                onForward={() => onForward?.(pane.tab.browserId)}
+                onReload={() => onReload?.(pane.tab.browserId)}
+                onOpenAddress={() => onOpenAddress?.(pane.tab.browserId)}
+                onCopyUrl={onCopyUrl}
+                trailing={
+                  pane.role === "primary"
+                    ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={startSplit}
+                          disabled={!splitCandidate}
+                          aria-label="Split view"
+                          title={splitCandidate ? "Split view" : "Open another tab to split"}
+                          aria-pressed={secondaryPane ? "true" : "false"}
+                          className="maho-contents-header__button"
+                        >
+                          <Columns2 aria-hidden="true" />
+                        </button>
+                        {secondaryPane ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={swapPanes}
+                              aria-label="Swap split panes"
+                              title="Swap panes"
+                              className="maho-contents-header__button"
+                            >
+                              <ArrowLeftRight aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSecondaryBrowserId(null)}
+                              aria-label="Close split pane"
+                              title="Close split pane"
+                              className="maho-contents-header__button"
+                            >
+                              <X aria-hidden="true" />
+                            </button>
+                          </>
+                        ) : null}
+                      </>
+                    )
+                    : null
+                }
               />
+              <div className="maho-canvas__page">
+                <BrowserPane
+                  tab={toBrowserPaneTab(pane.tab)}
+                  visible
+                  chromeMode="maho-minimal"
+                  surfacePriority={pane.role === "primary" ? 1 : 0}
+                  onNavigate={(url) => onNavigate?.(pane.tab.browserId, url)}
+                  onReload={(options) => onReload?.(pane.tab.browserId, options)}
+                />
+              </div>
             </div>
           ))}
           {panes.length === 2 ? (
@@ -404,19 +431,19 @@ export function BrowserModeCanvas({
               aria-valuenow={Math.round(ratio * 100)}
               tabIndex={0}
               data-testid="browser-canvas-divider"
-              className="group relative flex w-1.5 shrink-0 cursor-col-resize items-center justify-center bg-border hover:bg-primary/60 focus-visible:bg-primary/60 focus-visible:outline-none"
+              className="maho-canvas__divider group"
               onPointerDown={handleDividerPointerDown}
               onPointerMove={handleDividerPointerMove}
               onPointerUp={endDividerDrag}
               onPointerCancel={endDividerDrag}
               onKeyDown={handleDividerKeyDown}
             >
-              <GripVertical className="size-3 text-muted-foreground opacity-0 group-hover:opacity-100" aria-hidden="true" />
+              <GripVertical className="size-3 opacity-0 group-hover:opacity-100" aria-hidden="true" />
             </div>
           ) : null}
         </div>
         {rightOverlayPane ? (
-          <div className="flex min-h-0 w-80 shrink-0 flex-col border-l border-border" data-testid="browser-canvas-right-overlay">
+          <div className="maho-canvas__overlay" data-testid="browser-canvas-right-overlay">
             {rightOverlayPane}
           </div>
         ) : null}

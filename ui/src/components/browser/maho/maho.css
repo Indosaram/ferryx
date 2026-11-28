@@ -904,6 +904,160 @@
   height: 11px;
 }
 
+/* ---- Browser canvas ---------------------------------------------------- */
+
+/* Maho's Arc layout (browser_view_tabbed_layout_impl.cc): the contents pane is edge to
+   edge with no margin, square at the sidebar seam and rounded 12dp on the far side. */
+/* The docked rail and the canvas paint one gradient anchored to the window, so the
+   diagonal is continuous across the rail/content boundary (MahoContentsHeaderView). */
+.maho-drawer,
+.maho-canvas {
+  color: var(--maho-space-foreground);
+  background-color: var(--maho-space-surface);
+  background-image: var(--maho-space-gradient);
+  background-size: 100vw 100vh;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+.maho-drawer .maho-sidebar {
+  width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  border-radius: 0;
+  background: transparent;
+}
+
+.maho-canvas {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 0 var(--maho-section-radius) var(--maho-section-radius) 0;
+}
+
+/* Maho's per-pane contents header: kMahoContentsHeaderHeightDp 24, kHeaderButtonSizeDp 22,
+   kHeaderIconSizeDp 16, kHeaderHorizontalInsetDp 6, kHeaderChildSpacingDp 2,
+   kHostLeadingGapDp 4. */
+.maho-contents-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 24px;
+  padding: 0 6px;
+  gap: 2px;
+  color: var(--maho-space-foreground);
+}
+
+.maho-contents-header[data-active="false"] {
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-contents-header__button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--maho-top-bar-button-radius);
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-contents-header__button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.maho-contents-header__button:hover:not(:disabled) {
+  background-color: var(--maho-space-surface-hover);
+  color: var(--maho-space-foreground);
+}
+
+.maho-contents-header__button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.maho-contents-header[data-active="false"] .maho-contents-header__button {
+  opacity: 0.6;
+}
+
+.maho-contents-header__host {
+  min-width: 0;
+  margin-left: 4px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.maho-contents-header__spacer {
+  flex: 1 1 auto;
+}
+
+.maho-canvas__page {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background-color: var(--background);
+}
+
+.maho-canvas__empty {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  background-color: var(--maho-space-surface-hover);
+}
+
+.maho-canvas__empty-pill {
+  width: min(420px, 80%);
+  gap: 8px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.maho-canvas__empty-pill svg {
+  width: 16px;
+  height: 16px;
+}
+
+.maho-canvas__divider {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--maho-rail-inset-right);
+  cursor: col-resize;
+  color: var(--maho-space-muted-foreground);
+}
+
+.maho-canvas__divider:hover,
+.maho-canvas__divider:focus-visible {
+  outline: none;
+  background-color: var(--maho-space-surface-hover);
+}
+
+.maho-canvas__overlay {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  width: 320px;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--maho-space-surface-hover);
+}
+
 /* Reduced motion: Maho's sidebar reveal/hover animations go to zero duration
    rather than a shorter one. */
 @media (prefers-reduced-motion: reduce) {

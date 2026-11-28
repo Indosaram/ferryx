@@ -159,7 +159,40 @@ describe("BrowserModeCanvas chrome", () => {
     expect(paneProps.calls.length).toBeGreaterThan(0);
     expect(paneProps.calls[0]).toMatchObject({ browserId: "github", chromeMode: "maho-minimal", visible: true });
     expect(screen.queryByTestId("ferryx-toolbar")).toBeNull();
-    expect(screen.getByRole("toolbar", { name: "Browser canvas" })).toBeInTheDocument();
+    const header = screen.getByRole("toolbar", { name: "Page" });
+    expect(header).toHaveAttribute("data-active", "true");
+    expect(header).toHaveTextContent("github.example.com");
+  });
+
+  it("paints the canvas with the Space palette so the rail and the page frame share one surface", () => {
+    const store = makeStore();
+    addTab(store, "github");
+    store.touch("github");
+
+    render(canvas(store, { scheme: "light" }));
+
+    const section = screen.getByTestId("browser-mode-canvas");
+    expect(section).toHaveAttribute("data-maho-space", store.getState().activeSpaceId);
+    expect(section).toHaveAttribute("data-maho-scheme", "light");
+    expect(section.style.getPropertyValue("--maho-space-surface")).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it("routes the contents header to the pane's tab", () => {
+    const store = makeStore();
+    addTab(store, "github");
+    store.touch("github");
+    const onReload = vi.fn();
+    const onOpenAddress = vi.fn();
+    const onCopyUrl = vi.fn();
+
+    render(canvas(store, { onReload, onOpenAddress, onCopyUrl }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Address: github\.example\.com/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy URL" }));
+    expect(onReload).toHaveBeenCalledWith("github");
+    expect(onOpenAddress).toHaveBeenCalledWith("github");
+    expect(onCopyUrl).toHaveBeenCalledWith("https://github.example.com/");
   });
 
   it("keeps a Chromium tab on its own engine chrome and passes the engine through", () => {
@@ -290,7 +323,8 @@ describe("BrowserModeCanvas tab ownership", () => {
     render(canvas(store, { onNewTab }));
 
     expect(screen.getByTestId("browser-mode-canvas")).toHaveAttribute("data-empty", "true");
-    expect(screen.getByText("No tabs in this Space")).toBeInTheDocument();
+    expect(screen.getByRole("toolbar", { name: "Page" })).toHaveTextContent("Search or Enter URL...");
+    expect(screen.queryByText("No tabs in this Space")).toBeNull();
     expect(paneProps.calls).toEqual([]);
 
     fireEvent.click(screen.getByRole("button", { name: "New Tab" }));
