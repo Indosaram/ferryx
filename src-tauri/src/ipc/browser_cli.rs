@@ -434,8 +434,11 @@ where
 
 /// Closed remote browser operations permitted over framed remote transport.
 ///
-/// Disallows legacy CLI commands (List, Open, Close, Focus, Screenshot, Cookies, Storage, Act, Snapshot, RemoteAttach)
-/// to maintain strict boundary isolation between local CLI driver and remote control sessions.
+/// Excludes the lifecycle and capture commands (List, Open, Close, Focus, Screenshot, Cookies,
+/// Storage, RemoteAttach): those belong to the local CLI driver, not to a remote control
+/// session. Input commands (click, fill, keypress) are permitted because the remote backend
+/// guards every one of them with the driver lease, desktop epoch, instance id and document
+/// generation, so a remote session can only act while it holds control.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "camelCase")]
 pub enum RemoteBrowserOperation {

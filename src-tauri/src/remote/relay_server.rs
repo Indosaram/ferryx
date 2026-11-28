@@ -6139,6 +6139,19 @@ mod tests {
     }
 
     #[test]
+    fn test_allowed_http_route_admits_browser_command_post_only() {
+        // The host runs a browser command behind its own whitelist and lease guard, so the
+        // relay only has to admit the route: refusing it here would make every
+        // `ferryx <host> browser ...` fail as a bodyless 403.
+        assert!(allowed_http_route(&Method::POST, "browser/command"));
+        assert!(!allowed_http_route(&Method::GET, "browser/command"));
+        assert!(!allowed_http_route(&Method::DELETE, "browser/command"));
+        assert!(!allowed_http_route(&Method::POST, "browser/command/extra"));
+        assert!(!allowed_http_route(&Method::POST, "browser"));
+        assert!(!allowed_http_route(&Method::POST, "browser/../command"));
+    }
+
+    #[test]
     fn test_allowed_http_route_admits_paired_file_read_and_paste_upload() {
         // Desktop paired clients reach these machine routes through the relay when no
         // direct adapter is up; a refusal here surfaces as a bodyless 403.

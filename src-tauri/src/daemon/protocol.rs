@@ -2943,6 +2943,36 @@ impl LiveSessionInfo {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_browser_request_round_trips_with_and_without_a_host() {
+        let local = DaemonRequest::Browser {
+            browser_id: "b1".into(),
+            command: "navigate".into(),
+            params: Some(serde_json::json!({ "url": "https://example.com" })),
+            host_id: None,
+            document_generation: None,
+            browser_instance_id: None,
+            desktop_epoch: None,
+            lease_epoch: None,
+            device_id: None,
+            connection_id: None,
+        };
+        let line = serde_json::to_string(&local).unwrap();
+        assert!(line.contains("\"hostId\":null"), "{line}");
+        assert!(line.contains("\"browserId\":\"b1\""), "{line}");
+        assert!(line.contains("\"command\":\"navigate\""), "{line}");
+        let back: DaemonRequest = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, local);
+
+        let remote = DaemonRequest::Browser {
+            host_id: Some("air".into()),
+            ..local
+        };
+        let line = serde_json::to_string(&remote).unwrap();
+        assert!(line.contains("\"hostId\":\"air\""), "{line}");
+        assert_eq!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), remote);
+    }
+
     // Re-explore-4 G2: a discovered provider session names the conversation only. If it claimed
     // the activity, a kimi/copilot/gjc machine pane would lose screen inference the moment its id
     // was found, and those agents report no state of their own.

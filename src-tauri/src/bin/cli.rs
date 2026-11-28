@@ -113,12 +113,22 @@ fn main() {
         // `ferryx <host> browser ...` arrives here with `--host <id>` right after `browser`.
         // A browser command on a host goes through the daemon, not the local browser socket.
         let mut browser_args = args.clone();
-        let host = ferryx_lib::cli::host_ref::take_host_flag(&mut browser_args);
-        let outcome = if let Some(host) = host {
-            parse_browser_cli(&browser_args).and_then(|command| {
-                ferryx_lib::cli::run_browser_cli_on_host(&host, command)
-            })
-        } else if let Some(parsed) = ferryx_lib::cli::parse_browser_controllers_cli(&args) {
+        if let Some(host) = ferryx_lib::cli::host_ref::take_host_flag(&mut browser_args) {
+            match parse_browser_cli(&browser_args)
+                .map_err(|message| ferryx_lib::cli::host_ref::HostRefusal {
+                    code: "BROWSER_CLI_INVALID",
+                    message,
+                })
+                .and_then(|command| ferryx_lib::cli::run_browser_cli_on_host(&host, command))
+            {
+                Ok(()) => return,
+                Err(refusal) => {
+                    ferryx_lib::cli::print_browser_cli_error(refusal.code, refusal.message);
+                    std::process::exit(ferryx_lib::cli::host_ref::EXIT_REFUSED);
+                }
+            }
+        }
+        let outcome = if let Some(parsed) = ferryx_lib::cli::parse_browser_controllers_cli(&args) {
             parsed.and_then(ferryx_lib::cli::run_browser_controllers_cli)
         } else if let Some(parsed) = ferryx_lib::cli::parse_browser_adapter_cli(&args) {
             parsed.and_then(ferryx_lib::cli::run_browser_adapter_cli)

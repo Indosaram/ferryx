@@ -5,7 +5,9 @@ pub mod agent_hook;
 pub mod api_catalog;
 pub mod crash_report;
 pub mod file_cp;
+
 pub mod host_ref;
+use host_ref::HostRefusal;
 pub mod billing;
 pub mod direct_trust;
 pub mod join_link;
@@ -1791,7 +1793,7 @@ pub fn build_dom_find_script(subselector: &BrowserFindSubselector) -> String {
 /// forwarded operation never carries an approval, so the host would refuse it anyway.
 fn browser_remote_command(
     command: &BrowserCliCommand,
-) -> Result<(String, Option<serde_json::Value>), String> {
+) -> Result<(String, Option<serde_json::Value>), HostRefusal> {
     let value = |pairs: Vec<(&str, serde_json::Value)>| {
         Some(serde_json::Value::Object(
             pairs
@@ -1861,17 +1863,21 @@ fn browser_remote_command(
                 ),
             ]),
         )),
-        BrowserCliCommand::Eval { .. } => Err(
-            "BROWSER_EVAL_REQUIRES_LOCAL_APPROVAL: `eval` needs an approval this side cannot \
-             give, so a paired host refuses it; use snapshot + click/fill instead"
+        BrowserCliCommand::Eval { .. } => Err(HostRefusal {
+            code: "BROWSER_EVAL_REQUIRES_LOCAL_APPROVAL",
+            message: "`eval` needs an approval this side cannot give, so a paired host \
+                      refuses it; use snapshot + click/fill instead"
                 .into(),
-        ),
-        other => Err(format!(
-            "BROWSER_UNSUPPORTED_ON_HOST: `{}` runs only against this machine's browser; \
-             a paired host accepts navigate, back, forward, reload, click, fill, keypress, \
-             wait, snapshot and getState",
-            browser_cli_verb(other)
-        )),
+        }),
+        other => Err(HostRefusal {
+            code: "BROWSER_UNSUPPORTED_ON_HOST",
+            message: format!(
+                "`{}` runs only against this machine's browser; a paired host accepts \
+                 navigate, back, forward, reload, click, fill, keypress, wait, snapshot and \
+                 getState",
+                browser_cli_verb(other)
+            ),
+        }),
     }
 }
 
@@ -4613,20 +4619,52 @@ fn browser_command_id(command: &BrowserCliCommand) -> Option<&str> {
 pub fn run_browser_cli_on_host(
     host: &str,
     command: BrowserCliCommand,
-) -> Result<(), String> {
+) -> Result<(), HostRefusal> {
     let browser_id = browser_command_id(&command)
-        .ok_or_else(|| format!("`{}` needs a browser on the host", browser_cli_verb(&command)))?
+        .ok_or_else(|| HostRefusal {
+            code: "BROWSER_HOST_NEEDS_BROWSER_ID",
+            message: format!(
+                "`{}` names no browser; open one on `{host}` first and pass its id",
+                browser_cli_verb(&command)
+            ),
+        })?
         .to_string();
     let (command_name, params) = browser_remote_command(&command)?;
-    let runtime = browser_cli_runtime()?;
-    let response = runtime.block_on(crate::daemon::browser_command::request_browser_daemon(
-        browser_id,
-        command_name,
-        params,
-        Some(host.to_string()),
-    ))?;
+    let runtime = browser_cli_runtime().map_err(|message| HostRefusal {
+        code: "BROWSER_CLI_UNAVAILABLE",
+        message,
+    })?;
+    let response = runtime
+        .block_on(crate::daemon::browser_command::request_browser_daemon(
+            browser_id,
+            command_name,
+            params,
+            Some(host.to_string()),
+        ))
+        .map_err(daemon_refusal)?;
     println!("{response}");
     Ok(())
+}
+
+/// A daemon answer already carries its own `code`; keep it instead of inventing a new one.
+fn daemon_refusal(answer: String) -> HostRefusal {
+    let parsed: serde_json::Value = serde_json::from_str(&answer).unwrap_or_default();
+    let code = parsed
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("BROWSER_CLI_FAILED");
+    let message = parsed
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&answer)
+        .to_string();
+    let code = match code {
+        "TARGET_UNSUPPORTED" => "TARGET_UNSUPPORTED",
+        "BROWSER_FORBIDDEN" => "BROWSER_FORBIDDEN",
+        "BROWSER_EVAL_APPROVAL_REQUIRED" => "BROWSER_EVAL_REQUIRES_LOCAL_APPROVAL",
+        _ => "BROWSER_CLI_FAILED",
+    };
+    HostRefusal { code, message }
 }
 
 /// File paths in a browser CLI request are resolved by the GUI process, whose cwd is
@@ -5155,6 +5193,64 @@ pub fn run_daemon_headless(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forwardable_browser_command_maps_to_the_host_whitelist() {
+        let (command, params) = browser_remote_command(&BrowserCliCommand::Navigate {
+            browser_id: "b1".into(),
+            url: "https://example.com".into(),
+        })
+        .expect("navigate is whitelisted");
+        assert_eq!(command, "navigate");
+        assert_eq!(params, Some(serde_json::json!({ "url": "https://example.com" })));
+
+        for command in [
+            BrowserCliCommand::Back { browser_id: "b1".into() },
+            BrowserCliCommand::Forward { browser_id: "b1".into() },
+            BrowserCliCommand::Reload { browser_id: "b1".into() },
+            BrowserCliCommand::Snapshot { browser_id: "b1".into() },
+        ] {
+            assert!(browser_remote_command(&command).is_ok(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn eval_and_local_only_commands_are_refused_before_they_travel() {
+        let refusal = browser_remote_command(&BrowserCliCommand::Eval {
+            browser_id: "b1".into(),
+            script: "1".into(),
+        })
+        .expect_err("a forwarded eval never carries an approval");
+        assert_eq!(refusal.code, "BROWSER_EVAL_REQUIRES_LOCAL_APPROVAL");
+
+        let refusal = browser_remote_command(&BrowserCliCommand::List)
+            .expect_err("list belongs to this machine");
+        assert_eq!(refusal.code, "BROWSER_UNSUPPORTED_ON_HOST");
+        assert!(refusal.message.contains("list"), "{}", refusal.message);
+        assert!(
+            refusal.message.contains("navigate"),
+            "the refusal teaches the accepted set: {}",
+            refusal.message
+        );
+    }
+
+    #[test]
+    fn a_daemon_answer_keeps_its_own_code() {
+        let refusal = daemon_refusal(
+            serde_json::json!({
+                "ok": false,
+                "code": "BROWSER_FORBIDDEN",
+                "message": "remote control is busy",
+            })
+            .to_string(),
+        );
+        assert_eq!(refusal.code, "BROWSER_FORBIDDEN");
+        assert_eq!(refusal.message, "remote control is busy");
+
+        let refusal = daemon_refusal("not json".into());
+        assert_eq!(refusal.code, "BROWSER_CLI_FAILED");
+        assert_eq!(refusal.message, "not json");
+    }
 
     #[test]
     fn dom_get_refuses_password_value_vectors() {
