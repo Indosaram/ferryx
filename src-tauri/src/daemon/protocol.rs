@@ -1573,6 +1573,8 @@ pub enum DaemonRequest {
         #[serde(default)]
         mentions: Vec<String>,
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question_id: Option<String>,
     },
     /// Automatic supervisor setup. Gated by `supervisorSetupV1`.
     #[serde(rename_all = "camelCase")]
@@ -3455,13 +3457,13 @@ mod tests {
     #[test]
     fn the_supervisor_converse_round_trips_on_the_daemon_wire() {
         let request: DaemonRequest = serde_json::from_value(serde_json::json!(
-            {"type": "supervisorConverseV1", "text": "hi", "requestId": "r1"}
+            {"type": "supervisorConverseV1", "text": "hi", "requestId": "r1", "questionId": "q-123"}
         ))
         .unwrap();
         assert!(matches!(
             request,
-            DaemonRequest::SupervisorConverseV1 { ref text, ref mentions, ref request_id }
-                if text == "hi" && mentions.is_empty() && request_id == "r1"
+            DaemonRequest::SupervisorConverseV1 { ref text, ref mentions, ref request_id, ref question_id }
+                if text == "hi" && mentions.is_empty() && request_id == "r1" && question_id.as_deref() == Some("q-123")
         ));
         let transcript: DaemonRequest = serde_json::from_value(serde_json::json!(
             {"type": "supervisorReadV1", "request": {"view": "transcript", "cursor": 4}}

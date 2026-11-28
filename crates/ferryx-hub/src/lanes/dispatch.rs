@@ -6,11 +6,6 @@ use crate::chat::session::SessionKey;
 use crate::error::Result;
 use crate::storage::{now_rfc3339, WriteTx};
 
-/// How long an admitted lane event suppresses an identical one for the same lead (2026-10-27:
-/// the same login alert, cron failure and document request each cost a turn two or three
-/// times within a few hours).
-const REPEAT_WINDOW_HOURS: i64 = 6;
-
 /// omo's batch window for ordinary events: a group is admitted once its oldest event is this
 /// old, and a target gets at most one delivery per window. The window is anchored on the
 /// oldest event, so continuous traffic never extends it. The supervisor's goal wakes
@@ -234,6 +229,9 @@ struct QueuedEvent {
     lead: String,
     kind: String,
     body: String,
+    subject_id: Option<String>,
+    state_id: Option<String>,
+    wake_policy: String,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -244,6 +242,18 @@ struct QueuedEvent {
 /// (lane, kind) to the newest body, non-critical ones pass the wake judgment, and the rest are
 /// receipted. An event whose lead is not a session key (the old `meta` lead) can never be
 /// delivered and is receipted as misrouted.
+type EventRow = (
+    i64,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
+
 pub async fn dispatch_tick<A, F>(
     pool: &SqlitePool,
     judge: &crate::judge::Judge,
@@ -255,8 +265,8 @@ where
     F: std::future::Future<Output = bool>,
 {
     let stamp = now.to_rfc3339();
-    let rows: Vec<(i64, Option<String>, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, lane_key, lead_session_key, kind, body, created_at FROM lane_events
+    let rows: Vec<EventRow> = sqlx::query_as(
+        "SELECT id, lane_key, lead_session_key, kind, body, subject_id, state_id, wake_policy, created_at FROM lane_events
          WHERE delivered_at IS NULL AND (release_at IS NULL OR release_at <= ?)
          ORDER BY id",
     )
@@ -265,7 +275,7 @@ where
     .await?;
     let mut misrouted = Vec::new();
     let mut groups = std::collections::BTreeMap::<String, Vec<QueuedEvent>>::new();
-    for (id, lane_key, lead, kind, body, created_at) in rows {
+    for (id, lane_key, lead, kind, body, subject_id, state_id, wake_policy, created_at) in rows {
         if kind == "cron_problem" {
             // One bad cron problem must not block every other lead's events.
             let taken = crate::cron_remediate::handle_event(&body, &lead).await;
@@ -337,6 +347,9 @@ where
             lead,
             kind,
             body,
+            subject_id,
+            state_id,
+            wake_policy,
             created_at,
         };
         let target = if owner_dm_worthy(&event.kind, &event.body) {
@@ -361,6 +374,9 @@ where
         let Some(oldest) = events.iter().map(|event| event.created_at).min() else {
             continue;
         };
+        if !events.iter().any(|event| event.wake_policy == "wake") {
+            continue;
+        }
         if !batch_window_elapsed(oldest, now)
             && !events.iter().any(|event| {
                 matches!(
@@ -387,9 +403,14 @@ where
         let Ok(session) = SessionKey::from_storage_key(&target) else {
             continue;
         };
+        let quiet_events = events
+            .iter()
+            .filter(|event| event.wake_policy == "quiet")
+            .cloned()
+            .collect::<Vec<_>>();
         let mut collapsed =
             std::collections::BTreeMap::<(Option<String>, String), (QueuedEvent, Vec<i64>)>::new();
-        for event in events {
+        for event in events.into_iter().filter(|event| event.wake_policy == "wake") {
             let entry = collapsed
                 .entry((event.lane_key.clone(), event.kind.clone()))
                 .or_insert_with(|| (event.clone(), Vec::new()));
@@ -440,6 +461,8 @@ where
         if ids.is_empty() {
             continue;
         }
+        let mut all_ids = ids;
+        all_ids.extend(quiet_events.iter().map(|event| event.id));
         let lines = selected
             .iter()
             .map(|(event, _)| {
@@ -456,58 +479,59 @@ where
                     body
                 )
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        let quiet_block = quiet_events
+            .iter()
+            .map(|event| {
+                format!(
+                    "{} {}: {}",
+                    event.lane_key.as_deref().unwrap_or("-"),
+                    event.kind,
+                    event.body.chars().take(600).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>();
+        let lines = if quiet_block.is_empty() {
+            lines.join("\n")
+        } else {
+            format!("{}\n[QUIET_EVENTS]\n{}", lines.join("\n"), quiet_block.join("\n"))
+        };
         if !admit(session, format!("[LANE_EVENT]\n{lines}")).await {
             continue;
         }
-        tracing::info!(lead_session_key = %target, events = ids.len(), "lane event admitted to lead turn");
-        receipt(pool, &ids, &stamp, "lead_turn").await?;
+        tracing::info!(lead_session_key = %target, events = all_ids.len(), "lane event admitted to lead turn");
+        receipt(pool, &all_ids, &stamp, "lead_turn").await?;
         admitted += 1;
     }
     Ok(admitted)
 }
 
-/// The identity of a lane event's fact: its body with whitespace collapsed, case folded and
-/// clock readings masked, so a re-check of the same alert at a later time matches while an
-/// event about a different item (other ids, other wording) does not.
-fn normalized_body(body: &str) -> String {
-    static CLOCK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let clock = CLOCK.get_or_init(|| {
-        regex::Regex::new(
-            r"(\d{4}-\d{2}-\d{2}[T ])?\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?",
-        )
-        .expect("clock pattern compiles")
-    });
-    let words = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    clock.replace_all(&words.to_lowercase(), "<t>").into_owned()
-}
-
 /// Receipts `ids` as `duplicate` when an event with the same lead, lane, kind and normalized
-/// body was admitted to a lead turn within `REPEAT_WINDOW_HOURS` of `now`. The lookup and the
-/// receipt share one write transaction so two ticks cannot both admit the same fact.
+/// same producer subject and state were admitted to a lead turn. The lookup and receipt share
+/// one write transaction so two ticks cannot both admit the same fact.
 async fn suppress_repeat(
     pool: &SqlitePool,
     event: &QueuedEvent,
     ids: &[i64],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
-    let since = (now - chrono::Duration::hours(REPEAT_WINDOW_HOURS)).to_rfc3339();
     let mut tx = pool.begin_write().await?;
-    let prior: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM lane_events
+    let prior: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT subject_id, state_id FROM lane_events
          WHERE lead_session_key = ? AND lane_key IS ? AND kind = ?
-           AND delivery_reason = 'lead_turn' AND delivered_at IS NOT NULL
-           AND julianday(delivered_at) >= julianday(?)",
+           AND delivery_reason = 'lead_turn' AND delivered_at IS NOT NULL",
     )
     .bind(&event.lead)
     .bind(&event.lane_key)
     .bind(&event.kind)
-    .bind(&since)
     .fetch_all(&mut *tx)
     .await?;
-    let identity = normalized_body(&event.body);
-    if !prior.iter().any(|body| normalized_body(body) == identity) {
+    let identical = event.subject_id.as_ref().is_some_and(|subject| {
+        prior.iter().any(|(prior_subject, prior_state)| {
+            prior_subject.as_ref() == Some(subject) && prior_state == &event.state_id
+        })
+    });
+    if !identical {
         tx.commit().await?;
         return Ok(false);
     }
@@ -621,6 +645,10 @@ fn critical(kind: &str, body: &str) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_regressions.rs"]
+mod regressions;
 
 #[cfg(test)]
 mod tests {
@@ -881,18 +909,6 @@ mod tests {
         assert_eq!(reason, "lead_turn");
     }
 
-    #[test]
-    fn a_repeat_check_ignores_clock_readings_and_spacing_but_not_ids() {
-        assert_eq!(
-            normalized_body("cron  backup failed at 04:26:01"),
-            normalized_body("Cron backup failed at 05:33:12")
-        );
-        assert_ne!(
-            normalized_body("inbox:12 due"),
-            normalized_body("inbox:13 due")
-        );
-    }
-
     #[tokio::test]
     async fn an_identical_event_within_the_window_is_admitted_once() {
         let pool = crate::storage::memory().await.unwrap();
@@ -934,13 +950,13 @@ mod tests {
         let repeat = dispatch_tick(&pool, &judge, again, |_, _| async { true })
             .await
             .unwrap();
-        assert_eq!(repeat, 0, "the same alert inside the window is suppressed");
+        assert_eq!(repeat, 1, "events without subject identity are not deduplicated");
         let reason: String =
             sqlx::query_scalar("SELECT delivery_reason FROM lane_events ORDER BY id DESC LIMIT 1")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(reason, "duplicate");
+        assert_eq!(reason, "lead_turn");
 
         let other = again + chrono::Duration::minutes(5);
         insert(
@@ -959,12 +975,6 @@ mod tests {
         assert_eq!(different, 1, "a different event is still admitted");
         assert!(seen.lock().unwrap().contains("KAIT"));
 
-        let expired = start + chrono::Duration::hours(REPEAT_WINDOW_HOURS + 1);
-        insert(alert, expired - chrono::Duration::minutes(1)).await;
-        let after = dispatch_tick(&pool, &judge, expired, |_, _| async { true })
-            .await
-            .unwrap();
-        assert_eq!(after, 1, "past the window the alert is admitted again");
     }
 
     #[tokio::test]

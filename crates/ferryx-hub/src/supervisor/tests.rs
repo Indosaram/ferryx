@@ -18,6 +18,7 @@ mod completion;
 mod cutover;
 mod fence;
 mod memory;
+mod memory_import;
 mod receipts;
 mod recovery;
 mod request;

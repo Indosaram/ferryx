@@ -46,7 +46,9 @@ pub enum DoneSignal {
     Url {
         url: String,
         status: u16,
-    },
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_regex: Option<String>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +56,35 @@ pub struct SignalResult {
     pub signal: String,
     pub passed: bool,
     pub detail: String,
+}
+
+#[async_trait::async_trait]
+pub trait HostCommandRunner: Send + Sync {
+    async fn run(&self, host_id: &str, argv: &[String], cwd: &Path) -> Result<SignalResult, String>;
+}
+
+pub async fn check_signals_for_host(
+    signals: &[DoneSignal],
+    cwd: &Path,
+    host_id: Option<&str>,
+    runner: Option<&dyn HostCommandRunner>,
+) -> Vec<SignalResult> {
+    if let Some(host_id) = host_id.filter(|id| !id.is_empty() && *id != crate::agent_control::LOCAL_HOST_ID) {
+        return match runner {
+            Some(runner) => {
+                let mut results = Vec::with_capacity(signals.len());
+                for signal in signals {
+                    match signal {
+                        DoneSignal::Command { argv, .. } => results.push(runner.run(host_id, argv, cwd).await.unwrap_or_else(|_| SignalResult { signal: format!("command {argv:?}"), passed: false, detail: "cannot evaluate on host".into() })),
+                        other => results.push(SignalResult { signal: format!("{other:?}"), passed: false, detail: "cannot evaluate on host".into() }),
+                    }
+                }
+                results
+            }
+            None => signals.iter().map(|signal| SignalResult { signal: format!("{signal:?}"), passed: false, detail: "cannot evaluate on host".into() }).collect(),
+        };
+    }
+    check_signals(signals, cwd).await
 }
 
 /// Removes a leading `done =` prefix if present.
@@ -71,6 +102,9 @@ pub fn strip_done_prefix(raw: &str) -> &str {
 }
 
 pub fn parse_signals(input: &str) -> Result<Vec<DoneSignal>, SignalParseError> {
+    if let Ok(signals) = serde_json::from_str::<Vec<DoneSignal>>(input.trim()) {
+        return if signals.is_empty() { Err(SignalParseError::Empty) } else { Ok(signals) };
+    }
     let trimmed = strip_done_prefix(input).trim();
     if trimmed.is_empty() {
         return Err(SignalParseError::Empty);
@@ -329,6 +363,7 @@ fn parse_url(rest: &str) -> Result<DoneSignal, SignalParseError> {
     Ok(DoneSignal::Url {
         url: url.to_owned(),
         status: 200,
+        body_regex: None,
     })
 }
 
@@ -378,9 +413,12 @@ async fn check_one(signal: &DoneSignal, cwd: &Path) -> SignalResult {
             }
         }
         DoneSignal::Command { argv, stdout_regex } => {
-            let mut command = crate::child_env::command(&argv[0]);
+            let Some(executable) = argv.first() else {
+                return SignalResult { signal: format!("command {argv:?}"), passed: false, detail: "empty argv".into() };
+            };
+            let mut command = crate::child_env::command(executable);
             command.args(&argv[1..]).current_dir(cwd);
-            match tokio::time::timeout(Duration::from_secs(20), command.output()).await {
+            match tokio::time::timeout(Duration::from_secs(120), command.output()).await {
                 Ok(Ok(output)) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let passed = match stdout_regex {
@@ -434,6 +472,26 @@ mod tests {
         ));
         let error = parse_signals(r#"command ["true"]"#).unwrap_err();
         assert!(matches!(error, SignalParseError::UncheckableCommand(_)));
+    }
+
+    struct PairedRunner;
+
+    #[async_trait::async_trait]
+    impl HostCommandRunner for PairedRunner {
+        async fn run(&self, host_id: &str, argv: &[String], _cwd: &Path) -> Result<SignalResult, String> {
+            Ok(SignalResult { signal: format!("{host_id}:{argv:?}"), passed: true, detail: "host result".into() })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paired_lane_check_runs_on_its_host_or_fails_closed() {
+        let signals = parse_signals(r#"command ["false"]"#).unwrap();
+        let local_only = check_signals_for_host(&signals, Path::new("/tmp"), Some("paired-host"), None).await;
+        assert!(!local_only[0].passed);
+        assert_eq!(local_only[0].detail, "cannot evaluate on host");
+        let routed = check_signals_for_host(&signals, Path::new("/tmp"), Some("paired-host"), Some(&PairedRunner)).await;
+        assert!(routed[0].passed);
+        assert!(routed[0].signal.starts_with("paired-host:"));
     }
 
     #[tokio::test]

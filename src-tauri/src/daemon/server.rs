@@ -4464,6 +4464,7 @@ impl DaemonServer {
         );
         session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
         remote_state.start_panel_push_dispatch();
+        remote_state.start_goal_report_push();
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -9174,8 +9175,8 @@ impl DaemonServer {
                         },
                     }
                 }
-                Ok(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id }) => {
-                    let input = ferryx_hub::supervisor::transcript::ConverseInput { text, mentions, request_id };
+                Ok(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id, question_id }) => {
+                    let input = ferryx_hub::supervisor::transcript::ConverseInput { text, mentions, request_id, question_id };
                     match crate::hub_runtime::supervisor_converse(
                         self.remote_state(),
                         crate::hub_runtime::SupervisorCaller::Desktop,

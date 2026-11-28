@@ -421,6 +421,9 @@ pub fn retry_request(
 /// The owner-facing line for a turn that failed with no automatic resume left (the raw error
 /// stays in the logs). It never asks the owner to resend.
 pub fn owner_failure_text(error: &str) -> String {
+    if let Some(pos) = error.find("엔진이 재시작되어 작업이 중단됐습니다") {
+        return error[pos..].to_string();
+    }
     let reason = owner_failure_reason(error);
     if crate::locale::current().is_korean() {
         format!("⚠️ 응답을 만들지 못했어요 ({reason}). 원인은 hub 로그에 남겼어요.")
@@ -1086,20 +1089,26 @@ async fn reap(child: &mut Child, group: &mut GroupKill) {
 
 /// The last `session-lifecycle` record mhc wrote to the session file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Lifecycle {
+pub(crate) struct Lifecycle {
     state: String,
     run_active: bool,
+    pub(crate) waiting_on_human_kinds: Vec<String>,
     /// Background sources and children the session still waits on; a session waiting on the
     /// owner (`waiting_human`) can have them too.
     pending_work: bool,
 }
 impl Lifecycle {
+    pub(crate) fn unsettled(&self) -> bool {
+        self.waiting_on_human_kinds.iter().any(|kind| kind == "interrupted_run")
+            || (self.state == "running" && !self.waiting())
+    }
+
     fn waiting(&self) -> bool {
         self.pending_work
             || matches!(self.state.as_str(), "waiting_background" | "waiting_children")
     }
 }
-async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
+pub(crate) async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
     use std::io::SeekFrom;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = tokio::fs::File::open(path).await.ok()?;
@@ -1128,6 +1137,12 @@ async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
             Some(Lifecycle {
                 state: data["state"].as_str()?.to_owned(),
                 run_active: data["runActive"].as_bool().unwrap_or(false),
+                waiting_on_human_kinds: waits["human"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|wait| wait["kind"].as_str().map(str::to_owned))
+                    .collect(),
                 pending_work: background || waits["children"].as_u64().unwrap_or(0) > 0,
             })
         })
@@ -1183,6 +1198,11 @@ type HeldEntry = (String, UnboundedSender<Handover>);
 fn held() -> &'static Mutex<HashMap<String, HeldEntry>> {
     static HELD: OnceLock<Mutex<HashMap<String, HeldEntry>>> = OnceLock::new();
     HELD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// True while this hub still holds the thread's engine (settling its last run or waiting on
+/// background work): the session has a live owner, whatever its last lifecycle record says.
+pub(crate) fn is_held(thread: &str) -> bool {
+    held().lock().expect("mhc held registry").contains_key(thread)
 }
 fn unregister_held(thread: &str, id: &str) {
     let mut held = held().lock().expect("mhc held registry");
@@ -1743,15 +1763,15 @@ fn workspace_in(root: &std::path::Path, persona: Option<&str>) -> Option<protoco
 }
 
 #[cfg(all(test, unix))]
-mod rpc_tests {
+pub(crate) mod rpc_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    struct Script {
-        dir: PathBuf,
-        config: OmoClientConfig,
+    pub(crate) struct Script {
+        pub(crate) dir: PathBuf,
+        pub(crate) config: OmoClientConfig,
     }
     impl Script {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let dir = std::env::temp_dir().join(format!("hub-mhc-rpc-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
             let binary = dir.join("mhc");
@@ -1760,6 +1780,18 @@ import json, os, sys, pathlib, threading, time
 root = pathlib.Path(__file__).parent
 with (root / 'pids').open('a') as out: out.write(str(os.getpid())+'\n')
 session = root / 'session.jsonl'
+resumed = '--session' in sys.argv
+if not resumed and session.exists(): session = root / 'fresh-session.jsonl'
+unsettled = False
+if resumed and session.exists():
+    for line in session.read_text().splitlines():
+        entry = json.loads(line)
+        if entry.get('customType') == 'session-lifecycle':
+            data = entry['data']
+            waits = data.get('waitingOn', {})
+            interrupted = any(h.get('kind') == 'interrupted_run' for h in waits.get('human', []))
+            custody = waits.get('children', 0) or any(b.get('activeCount', 1) for b in waits.get('background', []))
+            unsettled = interrupted or (data['state'] == 'running' and not custody)
 log = root / 'commands.jsonl'
 scenario = ''
 prompts = 0
@@ -1781,6 +1813,9 @@ def wake():
     message('background done','wake-1')
     lifecycle('done',False)
     event('agent_end',messages=[],willRetry=False)
+def settle_later():
+    with open(root / 'release') as gate: gate.read()
+    lifecycle('done',False)
 assert '--mode' in sys.argv and 'rpc' in sys.argv
 assert sys.argv[1:4] == ['--mode','rpc','--no-model-fallback']
 assert '--multi-session' not in sys.argv
@@ -1793,11 +1828,12 @@ for line in sys.stdin:
     assert kind != 'open_session'
     if kind=='get_state':
         if '--session' in sys.argv: assert sys.argv[sys.argv.index('--session')+1]==str(session)
-        session.write_text(json.dumps(dict(type='session',id='durable-id'))+'\n')
+        if not resumed: session.write_text(json.dumps(dict(type='session',id='durable-id'))+'\n')
         answer(c,dict(sessionId='durable-id',sessionFile=str(session)))
     elif kind in ['set_auto_retry','set_model','set_thinking_level']:
         emit(dict(type='response',id=c['id'],command=kind,success=False,error='persists global settings'))
     elif kind=='prompt':
+        if unsettled or c['message']=='ack-timeout': continue
         prompts+=1
         if c['message']=='.':
             # The hub's continue prompt after an aborted run the engine did not resume.
@@ -1878,7 +1914,12 @@ for line in sys.stdin:
             message('final','m2')
             event('agent_end',messages=[])
             # Recorded before the boundary so a released wake always comes after it.
-            lifecycle('waiting_background' if scenario=='background' else 'done',False)
+            if scenario=='lingering':
+                # mhc keeps the run active through its post-turn work and settles once it ends.
+                os.mkfifo(root / 'release')
+                threading.Thread(target=settle_later,daemon=True).start()
+            else:
+                lifecycle('waiting_background' if scenario=='background' else 'done',False)
             event('agent_end',messages=[],willRetry=False)
             if scenario=='success-exit': sys.exit(0)
     elif kind=='extension_ui_response':
@@ -1903,14 +1944,14 @@ for line in sys.stdin:
             config.idle_timeout = Duration::from_secs(5);
             Self { dir, config }
         }
-        fn commands(&self) -> Vec<Value> {
+        pub(crate) fn commands(&self) -> Vec<Value> {
             std::fs::read_to_string(self.dir.join("commands.jsonl"))
                 .unwrap()
                 .lines()
                 .map(|s| serde_json::from_str(s).unwrap())
                 .collect()
         }
-        fn argv(&self) -> Vec<String> {
+        pub(crate) fn argv(&self) -> Vec<String> {
             serde_json::from_str(&std::fs::read_to_string(self.dir.join("argv.json")).unwrap())
                 .unwrap()
         }
@@ -1958,7 +1999,7 @@ for line in sys.stdin:
             .await;
             (result, replies)
         }
-        fn session(&self) -> String {
+        pub(crate) fn session(&self) -> String {
             self.dir.join("session.jsonl").to_string_lossy().into_owned()
         }
         fn pids(&self) -> Vec<i32> {
@@ -1969,7 +2010,7 @@ for line in sys.stdin:
                 .collect()
         }
         /// Lets the fixture's background task finish: its reader blocks until a writer opens.
-        async fn release_background(&self) {
+        pub(crate) async fn release_background(&self) {
             let path = self.dir.join("release");
             tokio::task::spawn_blocking(move || std::fs::write(path, b"go"))
                 .await
@@ -2664,6 +2705,10 @@ mod lifecycle_tests {
         assert!(korean.contains("5분 뒤"), "{korean}");
         assert!(!korean.contains("다시 보내 주시면"), "{korean}");
         assert!(!owner_failure_text("boom").contains("다시 보내 주시면"));
+        assert_eq!(
+            owner_failure_text("MHC_ENGINE_EXITED: 엔진이 재시작되어 작업이 중단됐습니다: engine exited"),
+            "엔진이 재시작되어 작업이 중단됐습니다: engine exited"
+        );
         crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
             let english = owner_resume_text("429 quota", 5);
             assert_eq!(

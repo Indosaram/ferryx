@@ -577,7 +577,7 @@ where
         }
         Err(error) => {
             tracing::warn!(%error, "owner message was not ingested");
-            json!({"state": "failed", "sourceId": source_id, "code": code})
+            json!({"state": "failed", "sourceId": source_id, "code": code, "error": error})
         }
     }
 }

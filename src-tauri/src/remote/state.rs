@@ -1573,6 +1573,86 @@ impl RemoteGatewayState {
         }
     }
 
+    /// Starts the task that turns a settled goal asked from the phone into one push
+    /// (`push_policy::report_push`). The report itself is already in the app transcript.
+    pub fn start_goal_report_push(self: &Arc<Self>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("goal report push not started: no async runtime");
+            return;
+        };
+        let mut notices = ferryx_hub::supervisor::goal_report::subscribe();
+        let state = Arc::downgrade(self);
+        runtime.spawn(async move {
+            loop {
+                let notice = match notices.recv().await {
+                    Ok(notice) => notice,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "goal report push lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                let Some(state) = state.upgrade() else { return };
+                state.push_goal_report(&notice, std::time::Instant::now()).await;
+            }
+        });
+    }
+
+    /// One push for a goal report to every device that wants input alerts. Returns the sends made.
+    pub(crate) async fn push_goal_report(
+        &self,
+        notice: &ferryx_hub::supervisor::goal_report::ReportNotice,
+        now: std::time::Instant,
+    ) -> usize {
+        let Some(report) = ferryx_hub::supervisor::push_policy::report_push(notice, self.panel_shown(now)) else {
+            return 0;
+        };
+        let notification = crate::remote::push::AgentStateNotification {
+            agent_id: String::new(),
+            agent_name: "Ferryx".to_string(),
+            worktree: None,
+            state: "decision".to_string(),
+            title: report.title,
+            body: report.body,
+            url: Some(report.url.to_string()),
+        };
+        let subs: Vec<_> = self
+            .push
+            .store
+            .list_subscriptions()
+            .into_iter()
+            .filter(|sub| crate::remote::push::PushKind::Decision.wanted_by(sub))
+            .filter(|sub| self.auth_manager.live_device(&sub.device_id).is_some())
+            .collect();
+        let apns = self.push.apns().await;
+        let apns_subs: Vec<_> = self
+            .push
+            .store
+            .list_apns()
+            .into_iter()
+            .filter(|sub| sub.needs_input && self.auth_manager.live_device(&sub.device_id).is_some())
+            .collect();
+        let mut sends: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = crate::remote::push::SendOutcome> + Send + '_>>> =
+            Vec::new();
+        for sub in &subs {
+            let notification = &notification;
+            sends.push(Box::pin(async move { self.push.send(sub, notification).await }));
+        }
+        if let Some(sender) = &apns {
+            for sub in &apns_subs {
+                let notification = &notification;
+                sends.push(Box::pin(async move { self.push.send_apns(sender, sub, notification).await }));
+            }
+        }
+        let outcomes = futures_util::future::join_all(sends).await;
+        for outcome in &outcomes {
+            if let crate::remote::push::SendOutcome::Failed(error) = outcome {
+                tracing::warn!("goal report push failed: {error}");
+            }
+        }
+        outcomes.len()
+    }
+
     /// Whether any client shows the panel: the focused desktop window, or a phone or browser
     /// whose panel is in the foreground.
     pub fn panel_shown(&self, now: std::time::Instant) -> bool {

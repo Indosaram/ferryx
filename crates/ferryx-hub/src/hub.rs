@@ -41,6 +41,9 @@ impl Hub {
         // A checkpoint import staged `hub.sqlite.incoming`: swap it in before the pool exists.
         let pool =
             crate::checkpoint_import::open_with_staged_swap(&path, Utc::now().timestamp()).await?;
+        crate::lanes::actions::migrate_legacy_file_only_lanes(&pool).await?;
+        let stopper = crate::lanes::settle_stop::AgentControlStopper(Arc::clone(&control));
+        crate::lanes::settle_driver::resume_recorded_close_intents(&pool, Some(&stopper)).await?;
         if config.import_invoked {
             if let Some(source) = &config.import_from {
                 import_once(&pool, source).await?;

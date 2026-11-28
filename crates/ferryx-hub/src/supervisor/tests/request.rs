@@ -322,7 +322,38 @@ async fn pause_and_resume_hold_unsent_work_and_requeue_it() {
 }
 
 #[tokio::test]
-async fn pause_keeps_a_running_worker_and_resume_returns_to_running() {
+async fn a_hold_is_reported_only_after_readback() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "hold-readback").await;
+    let receipt = handle(
+        &fixture.pool,
+        &context(OWNER),
+        goal_call("pause", &goal_id, 1, json!({})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt["hold"]["confirmed"], true);
+    let paused: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lane_pauses WHERE lane_key = (SELECT lane_key FROM supervisor_goals WHERE goal_id = ?) AND resumed_at IS NULL)")
+        .bind(&goal_id).fetch_one(&fixture.pool).await.unwrap();
+    assert!(paused);
+}
+
+#[tokio::test]
+async fn an_unsupported_backend_reports_hold_unconfirmed() {
+    let fixture = fixture().await;
+    let mut native_request = request(&fixture, "hold-native", OWNER, &fixture.supervisor_id, &fixture.project_id);
+    native_request.target.kind = ExecutionKind::Mhc;
+    let goal_id = admit_request(&fixture.pool, &native_request).await.unwrap().receipt.goal_id;
+    let before = fingerprint(&fixture.pool).await;
+    let failure = handle(&fixture.pool, &context(OWNER), goal_call("pause", &goal_id, 1, json!({})))
+        .await.unwrap_err();
+    assert_eq!(failure.code, super::super::hold::HOLD_UNCONFIRMED);
+    assert!(failure.message.contains("not held"));
+    assert_eq!(fingerprint(&fixture.pool).await, before);
+}
+
+#[tokio::test]
+async fn continue_restarts_the_quiet_clock() {
     let fixture = fixture().await;
     let goal_id = admit(&fixture, "p2").await;
     start_run(&fixture.pool, &goal_id).await;
@@ -337,7 +368,7 @@ async fn pause_keeps_a_running_worker_and_resume_returns_to_running() {
     )
     .await
     .unwrap();
-    assert!(control.ops().is_empty(), "a pause never stops the worker");
+    assert!(matches!(control.ops().as_slice(), [(_, AgentOp::Stop { .. })]));
     let resumed = handle(
         &fixture.pool,
         &ctx,
@@ -346,6 +377,11 @@ async fn pause_keeps_a_running_worker_and_resume_returns_to_running() {
     .await
     .unwrap();
     assert_eq!(resumed["runState"], "running");
+    let (last_activity, quiet): (String, Option<String>) = sqlx::query_as(
+        "SELECT l.last_activity_at, m.value FROM lanes l LEFT JOIN hub_meta m ON m.key = ? WHERE l.key = (SELECT lane_key FROM supervisor_goals WHERE goal_id = ?)",
+    ).bind(format!("{}{}", crate::supervisor::hold::QUIET_KEY, goal_id)).bind(&goal_id).fetch_one(&fixture.pool).await.unwrap();
+    assert!(!last_activity.is_empty());
+    assert!(quiet.is_some());
 }
 
 #[tokio::test]

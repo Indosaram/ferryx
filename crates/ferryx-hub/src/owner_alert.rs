@@ -780,6 +780,10 @@ pub(crate) async fn delivery_tick(pool: &SqlitePool, owner_session: &str) {
     if let Err(error) = reconcile(pool).await {
         tracing::warn!(%error, "owner alert reconcile failed");
     }
+    // A goal report whose Slack post has no recorded receipt is settled by reading its thread.
+    if let Err(error) = crate::supervisor::goal_report::reconcile_uncertain(pool).await {
+        tracing::warn!(%error, "uncertain goal reports were not reconciled");
+    }
     // After the flush and reconcile: only notices still pending once delivery settled are
     // re-issued, so a line that was just sent is never replaced behind the owner's back.
     match reissuable_alerts(pool, Utc::now()).await {

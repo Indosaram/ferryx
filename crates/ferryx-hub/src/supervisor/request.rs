@@ -111,6 +111,7 @@ pub fn status_for_code(code: &str) -> u16 {
         "INVALID_REQUEST" | "WAIT_CYCLE" | "CROSS_OWNER" => 400,
         "UNAUTHORIZED" | "FORBIDDEN" => 403,
         "NOT_FOUND" => 404,
+        super::hold::HOLD_UNCONFIRMED => 503,
         "REVISION_CONFLICT"
         | "NO_LIVE_RUN"
         | "DISPATCH_IN_FLIGHT"
@@ -874,7 +875,8 @@ async fn goal_action(
                 Some(reason) => format!("{OWNER_PAUSED}: {reason} (by {by})"),
                 None => format!("{OWNER_PAUSED}: by {by}"),
             };
-            pause(pool, &goal, expected, &detail).await?;
+            super::hold::confirm(pool, context, &goal).await?;
+            extra.insert("hold".into(), json!({"confirmed": true, "detail": detail}));
         }
         GoalPayload::Reason(reason) => {
             let detail = match reason {
@@ -935,36 +937,6 @@ async fn goal_action(
         fields.extend(extra);
     }
     Ok(receipt)
-}
-
-/// Owner pause, in one write transaction: the compare-and-set into `paused` (revision bump,
-/// unsent intents superseded) and the state and detail it interrupted, which a resume
-/// restores. A pause never stops the worker.
-async fn pause(
-    pool: &SqlitePool,
-    goal: &SupervisorGoal,
-    expected: i64,
-    detail: &str,
-) -> Result<(), RequestFailure> {
-    let mut tx = pool.begin_write().await?;
-    super::transition_goal_in(
-        &mut tx,
-        &goal.goal_id,
-        expected,
-        goal.run_state,
-        RunState::Paused,
-        Some(detail),
-    )
-    .await?;
-    sqlx::query("UPDATE supervisor_goals SET held_from = ?, held_detail = ? WHERE goal_id = ?")
-        .bind(goal.run_state.as_str())
-        .bind(goal.state_detail.as_deref())
-        .bind(&goal.goal_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    wakes::poke();
-    Ok(())
 }
 
 /// Owner resume of a paused goal, in one write transaction under the revision
@@ -1032,6 +1004,18 @@ async fn resume(
     .execute(&mut *tx)
     .await?;
     clear_lane_pause(&mut tx, &goal.lane_key).await?;
+    let now = crate::storage::now_rfc3339();
+    sqlx::query("UPDATE lanes SET last_activity_at = ?, updated_at = ? WHERE key = ?")
+        .bind(&now).bind(&now).bind(&goal.lane_key).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO hub_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(format!("{}{}", super::hold::QUIET_KEY, goal_id))
+        .bind(chrono::Utc::now().timestamp().to_string()).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM hub_meta WHERE key IN (?, ?)")
+        .bind(format!("{}{}", super::ownership::NUDGE_KEY_PREFIX, goal_id))
+        .bind(format!("{}{}", super::ownership::STALL_KEY_PREFIX, goal_id))
+        .execute(&mut *tx).await?;
+    // The released lane starts a fresh active stretch: a hold set again alerts its lead again.
+    super::hold::clear_active_in(&mut tx, &goal.lane_key).await?;
     tx.commit().await?;
     // A release with nothing to do next holds the goal for the owner: that is a settle.
     super::after_settle(pool, goal_id, to).await;

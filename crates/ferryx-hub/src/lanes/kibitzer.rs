@@ -323,8 +323,8 @@ pub async fn evaluate_at(
     // and the lane dispatcher never turns it into a legacy lead turn.
     let delivered = (!legacy).then(|| now.to_rfc3339());
     let inserted = sqlx::query(
-        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, delivered_at, delivery_reason)
-         SELECT NULL, ?, 'kibitzer', ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE 'owner_notice' END
+        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, delivered_at, delivery_reason, subject_id, state_id, wake_policy)
+         SELECT NULL, ?, 'kibitzer', ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE 'owner_notice' END, ?, ?, 'wake'
          WHERE (SELECT count(*) FROM lane_events WHERE kind = 'kibitzer' AND lead_session_key = ? AND julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?)) < 6",
     )
     .bind(lead)
@@ -332,6 +332,8 @@ pub async fn evaluate_at(
     .bind(now.to_rfc3339())
     .bind(&delivered)
     .bind(&delivered)
+    .bind(format!("kibitzer:{lead}"))
+    .bind(&state)
     .bind(lead)
     .bind(start.to_rfc3339())
     .bind((start + TimeDelta::days(1)).to_rfc3339())
@@ -684,6 +686,14 @@ mod tests {
         .await
         .unwrap();
         assert!(body.contains("\"wake\":true"));
+        let identity: (Option<String>, Option<String>, String) = sqlx::query_as(
+            "SELECT subject_id, state_id, wake_policy FROM lane_events WHERE kind = 'kibitzer' AND lead_session_key = 'meta'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let state = report_state(&pool, "meta").await.unwrap();
+        assert_eq!(identity, (Some("kibitzer:meta".into()), Some(state), "wake".into()));
         assert!(!evaluate_at(&pool, "meta", &judge, &model, now)
             .await
             .unwrap());

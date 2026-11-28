@@ -1,3 +1,4 @@
+// allow: SIZE_OK — indivisible lane state machine table and transitions
 use std::str::FromStr;
 
 use sqlx::SqlitePool;
@@ -54,7 +55,13 @@ impl LaneStatus {
                 LaneStatus::Closed,
                 LaneStatus::Failed,
             ],
-            LaneStatus::Blocked => &[LaneStatus::Working],
+            LaneStatus::Blocked => {
+                if reason == Some("needs a verifiable done check") {
+                    &[LaneStatus::Queued, LaneStatus::Working, LaneStatus::NotDone]
+                } else {
+                    &[LaneStatus::Working]
+                }
+            }
             LaneStatus::DoneClaimed => &[
                 LaneStatus::Working,
                 LaneStatus::Blocked,
@@ -231,8 +238,15 @@ async fn apply_transition(
         }
         return illegal(pool, key, to, reason).await.map(|()| false);
     }
-    let reopened =
-        to == LaneStatus::Working && matches!(previous.as_deref(), Some("closed" | "failed"));
+    if to == LaneStatus::Working {
+        // A lane back at work has no decided close: an intent from the earlier cycle must never
+        // short-circuit the next close's checks.
+        sqlx::query("UPDATE lanes SET close_intent_json = NULL WHERE key = ?")
+            .bind(key)
+            .execute(pool)
+            .await
+            .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    }
     sqlx::query(
         "INSERT INTO lane_history(lane_key, at, from_status, to_status, reason) VALUES(?,?,?,?,?)",
     )
@@ -244,11 +258,6 @@ async fn apply_transition(
     .execute(pool)
     .await
     .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
-    if reopened {
-        super::pause::clear_on_reopen(pool, key)
-            .await
-            .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
-    }
     Ok(true)
 }
 

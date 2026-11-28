@@ -110,6 +110,38 @@ fn classify_session_frame(frame: &Value) -> PanelFrame {
     }
 }
 
+/// The phone push for a settled goal that was asked from the phone (todo 13). The report itself
+/// is a row in the app transcript; the push only says it is there and opens the panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportPush {
+    pub title: String,
+    pub body: String,
+    pub url: &'static str,
+}
+
+/// Whether and what to push for `notice`: nothing while a client already shows the panel (the
+/// report is in front of the owner), otherwise one push naming the outcome and the goal title.
+pub fn report_push(notice: &super::goal_report::ReportNotice, panel_shown: bool) -> Option<ReportPush> {
+    if panel_shown {
+        return None;
+    }
+    let title = match notice.state {
+        super::RunState::Completed => "Goal completed",
+        super::RunState::Degraded => "Goal failed",
+        super::RunState::AwaitingOwner => "Goal needs you",
+        super::RunState::Ready
+        | super::RunState::Dispatching
+        | super::RunState::Running
+        | super::RunState::WaitingChildren
+        | super::RunState::WaitingEvent
+        | super::RunState::Verifying
+        | super::RunState::Paused
+        | super::RunState::DeliveryUncertain
+        | super::RunState::Cancelled => return None,
+    };
+    Some(ReportPush { title: title.to_owned(), body: notice.title.clone(), url: PANEL_DEEP_LINK })
+}
+
 /// What the window does with a decision that passed every other check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowVerdict {
@@ -505,5 +537,18 @@ mod tests {
         presence.report("phone", true, t0 + Duration::from_secs(20));
         assert!(presence.shown(t0 + Duration::from_secs(20) + PANEL_PRESENCE_STALE - Duration::from_secs(1)));
         assert!(!presence.shown(t0 + Duration::from_secs(20) + PANEL_PRESENCE_STALE));
+    }
+
+    #[test]
+    fn a_settled_goal_pushes_once_per_outcome_and_never_over_a_shown_panel() {
+        use crate::supervisor::goal_report::ReportNotice;
+        use crate::supervisor::RunState;
+        let notice = |state| ReportNotice { goal_id: "g".into(), state, title: "Fix cache".into() };
+        let done = report_push(&notice(RunState::Completed), false).unwrap();
+        assert_eq!((done.title.as_str(), done.body.as_str(), done.url), ("Goal completed", "Fix cache", PANEL_DEEP_LINK));
+        assert_eq!(report_push(&notice(RunState::Degraded), false).unwrap().title, "Goal failed");
+        assert_eq!(report_push(&notice(RunState::AwaitingOwner), false).unwrap().title, "Goal needs you");
+        assert_eq!(report_push(&notice(RunState::Running), false), None, "not a settle");
+        assert_eq!(report_push(&notice(RunState::Completed), true), None, "the panel is in front of the owner");
     }
 }

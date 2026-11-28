@@ -102,9 +102,9 @@ async fn creating_a_lane_opens_it_queued_with_its_brief_and_thread() {
         "/lanes",
         &json!({
             "title": "Import the ledger",
-            "brief": "# Ledger\n\nimport it",
+            "brief": "Owner request: import it\nSource: slack:C123:1700000000.000100",
             "cwd": "/work",
-            "done": "tests pass",
+            "done": "merged acme/app#12",
             "thread": "slack:C123:1700000000.000100",
             "key_base": "AGT-7",
         })
@@ -125,22 +125,17 @@ async fn creating_a_lane_opens_it_queued_with_its_brief_and_thread() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(done, "tests pass");
+    assert!(done.contains("acme/app"));
     assert_eq!(thread.as_deref(), Some("slack:C123:1700000000.000100"));
-    let (_, body) = call(
+    let (status, body) = call(
         &app,
         "POST",
         "/lanes",
-        r#"{"title":"No thread","cwd":"/w","done":"d","thread":"not-a-ref"}"#,
+        r#"{"title":"No thread","cwd":"/w","done":"merged acme/app#12","thread":"not-a-ref","brief":"Owner request: fix\nSource: slack:C1:1"}"#,
     )
     .await;
-    assert!(body["lane"]["key"].as_str().unwrap().starts_with("lane-"));
-    let thread: Option<String> =
-        sqlx::query_scalar("SELECT thread_channel_id FROM lanes WHERE title = 'No thread'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(thread, None);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].as_str().unwrap().contains("thread binding"));
 }
 
 #[tokio::test]

@@ -146,12 +146,19 @@ def endpoints():
 
 def session_view(path, kind, secret, routing, limit):
     extra = {} if routing is None else {"sessionId": routing}
-    state = data_of(rpc(path, dict({"type": "get_state"}, **extra), secret=secret))
+    try:
+        info = data_of(rpc(path, {"type": "get_protocol_info"}, secret=secret))
+    except DEAD:
+        raise
+    except (OSError, RuntimeError, PermissionError, ValueError):
+        info = {}
+    observation = {"observe": True} if "observe_reads" in info.get("capabilities", []) else {}
+    state = data_of(rpc(path, dict({"type": "get_state"}, **extra, **observation), secret=secret))
     session_id = state.get("sessionId") or routing
     address = routing or session_id
     try:
         messages = data_of(
-            rpc(path, {"type": "get_messages", "sessionId": address}, 8.0, secret=secret)
+            rpc(path, dict({"type": "get_messages", "sessionId": address}, **observation), 8.0, secret=secret)
         ).get("messages") or []
         messages_error = None
     except DEAD:

@@ -6,7 +6,8 @@ use serde_json::json;
 use sqlx::SqlitePool;
 
 use super::guard::{GuardThresholds, HostLoad};
-use super::settle::settle;
+use super::settle::{claim_done, ClaimRequest, SettleTarget, Settler};
+use super::settle_stop::AgentControlStopper;
 use super::state::{self, set_claim, set_host, transition, LaneStatus};
 use crate::agent_control::{AgentControl, AgentOp, TaskLauncher};
 use crate::error::{HubError, Result};
@@ -32,6 +33,21 @@ pub struct LaneRunner {
 }
 
 impl LaneRunner {
+    /// The model's opinion of a claim's evidence. Recorded with the claim for the lead; it is
+    /// never a reason to settle, so a failure here is no reason to refuse the claim either.
+    async fn advisory_grade(&self, evidence: &str) -> Option<String> {
+        self.judge
+            .choice(
+                crate::judge::Purpose::DoneDiff,
+                evidence,
+                "Does the claim evidence show the lane is done? Reply yes or no.",
+                &["yes", "no"],
+            )
+            .await
+            .ok()
+            .map(|choice| choice.as_str().to_owned())
+    }
+
     pub async fn drive(&self, key: &str) -> Result<DriveReport> {
         let row: Option<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
             "SELECT status, cwd, title, done_signals, omo_thread_id, brief_path FROM lanes WHERE key = ?",
@@ -66,9 +82,7 @@ impl LaneRunner {
             .bind(key)
             .fetch_one(&self.pool)
             .await?;
-            if let Some(evidence) = evidence.filter(|value| !value.trim().is_empty()) {
-                settle(&self.pool, key, &cwd, &done_signals, &evidence, &self.judge).await?;
-            } else {
+            if evidence.filter(|value| !value.trim().is_empty()).is_none() {
                 transition(
                     &self.pool,
                     key,
@@ -76,6 +90,12 @@ impl LaneRunner {
                     Some("interrupted claim has no evidence"),
                 )
                 .await?;
+            } else {
+                // A claim settles only after its objection window and its live checks; before
+                // that this is a pending claim, not a verdict.
+                Settler { pool: &self.pool, stopper: Some(&AgentControlStopper(self.control.clone())) }
+                    .settle_claim(SettleTarget { key, cwd: &cwd }, chrono::Utc::now())
+                    .await?;
             }
             let status = state::status_of(&self.pool, key)
                 .await?
@@ -186,7 +206,21 @@ impl LaneRunner {
             ) && (current != Some(LaneStatus::NotDone)
                 || reserve_reclaim(&self.pool, key, &evidence).await?) {
                 accept_claim(&self.pool, key, &evidence, current == Some(LaneStatus::NotDone)).await?;
-                settle(&self.pool, key, &cwd, &done_signals, &evidence, &self.judge).await?;
+                // The claim opens its objection window; nothing is settled on the spot.
+                let advisory = self.advisory_grade(&evidence).await;
+                claim_done(
+                    &self.pool,
+                    ClaimRequest {
+                        target: SettleTarget { key, cwd: &cwd },
+                        evidence: &evidence,
+                        advisory: advisory.as_deref(),
+                    },
+                    chrono::Utc::now(),
+                )
+                .await?;
+                Settler { pool: &self.pool, stopper: Some(&AgentControlStopper(self.control.clone())) }
+                    .settle_claim(SettleTarget { key, cwd: &cwd }, chrono::Utc::now())
+                    .await?;
             }
         }
         let status = state::status_of(&self.pool, key)
@@ -416,8 +450,27 @@ mod tests {
     use super::*;
     use crate::agent_control::{FixedLauncher, RecordingControl};
     use crate::judge::Judge;
+    use crate::lanes::settle::{settle_claim, SettleTarget};
+    use crate::lanes::state::set_claim;
     use serde_json::json;
     use std::sync::Arc;
+
+    /// The lane's claim window has passed: settle it the way its scheduled wake would.
+    async fn settle_after_the_window(pool: &SqlitePool, key: &str, cwd: &str) -> LaneStatus {
+        sqlx::query("UPDATE lanes SET claim_objection_until = '2020-01-01T00:00:00Z' WHERE key = ?")
+            .bind(key)
+            .execute(pool)
+            .await
+            .unwrap();
+        settle_claim(
+            pool,
+            SettleTarget { key, cwd },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        state::status_of(pool, key).await.unwrap().unwrap()
+    }
 
     #[test]
     fn a_report_line_is_not_a_claim() {
@@ -430,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lane_reaches_verified_done_on_a_pane() {
+    async fn a_lane_claims_done_and_waits_out_its_window() {
         let dir = std::env::temp_dir().join(format!("ferryx-hub-lane-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -477,7 +530,10 @@ mod tests {
         crate::lanes::pause::resume(&pool, "lane-g4").await.unwrap();
         let report = runner.drive("lane-g4").await.unwrap();
         assert_eq!(report.session_id, "pane-g4");
-        assert_eq!(report.status, LaneStatus::VerifiedDone);
+        // A claim is a claim: the lane waits out its objection window before it closes.
+        assert_eq!(report.status, LaneStatus::DoneClaimed);
+        let settled = settle_after_the_window(&pool, "lane-g4", dir.to_str().unwrap()).await;
+        assert_eq!(settled, LaneStatus::VerifiedDone);
         let ops = control.ops();
         assert!(ops.iter().any(|(_, op)| matches!(op, AgentOp::Send { .. })));
         assert!(ops.iter().any(|(_, op)| matches!(op, AgentOp::Read { .. })));
@@ -492,8 +548,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("marker"), "ok").unwrap();
         for (key, signals, evidence, expected) in [
-            ("recheck-ok", "file marker", Some("marker exists"), LaneStatus::VerifiedDone),
-            ("recheck-failed", "file absent", Some("marker exists"), LaneStatus::NotDone),
+            ("recheck-ok", "file marker", Some("marker exists"), LaneStatus::DoneClaimed),
+            ("recheck-failed", "file absent", Some("marker exists"), LaneStatus::DoneClaimed),
             ("recheck-empty", "file marker", None, LaneStatus::NotDone),
         ] {
             let pool = crate::storage::memory().await.unwrap();
@@ -510,6 +566,21 @@ mod tests {
             assert_eq!(runner.drive(key).await.unwrap().status, expected, "{key}");
             assert_eq!(state::status_of(&pool, key).await.unwrap(), Some(expected));
             assert!(control.ops().is_empty(), "recovery must not depend on a pane");
+            // After the window the live checks decide: the passing one closes, the failing one
+            // is objected to, and the evidence-less claim was refused before any window.
+            if let Some(evidence) = evidence {
+                let expected = if key == "recheck-ok" {
+                    LaneStatus::VerifiedDone
+                } else {
+                    LaneStatus::NotDone
+                };
+                assert_eq!(
+                    settle_after_the_window(&pool, key, dir.to_str().unwrap()).await,
+                    expected,
+                    "{key}"
+                );
+                assert!(evidence.contains("marker"));
+            }
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -534,7 +605,11 @@ mod tests {
             "session": {"screen": {"text": "[CLAIM_DONE] reclaim | marker exists"}}
         });
         let runner = full_runner(pool.clone(), control, Arc::new(RemoteLauncher::default()));
-        assert_eq!(runner.drive("reclaim").await.unwrap().status, LaneStatus::VerifiedDone);
+        assert_eq!(runner.drive("reclaim").await.unwrap().status, LaneStatus::DoneClaimed);
+        assert_eq!(
+            settle_after_the_window(&pool, "reclaim", dir.to_str().unwrap()).await,
+            LaneStatus::VerifiedDone
+        );
         let stored: (Option<String>, i64, i64) = sqlx::query_as(
             "SELECT claim_evidence, turns_run, claim_retries FROM lanes WHERE key = 'reclaim'",
         ).fetch_one(&pool).await.unwrap();

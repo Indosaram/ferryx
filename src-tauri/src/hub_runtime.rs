@@ -3813,6 +3813,7 @@ struct AppTurnEngine {
     supervisor: ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
     request_id: String,
     owner_text: String,
+    question_id: Option<String>,
 }
 
 #[async_trait]
@@ -3823,7 +3824,24 @@ impl ferryx_hub::supervisor::transcript::AppConversation for AppTurnEngine {
         message: &str,
     ) -> Result<String, ferryx_hub::meta::mhc_fault::SupervisorFault> {
         debug_assert_eq!(scope, &ferryx_hub::supervisor::app_work::app_scope());
-        ferryx_hub::supervisor::app_work::converse(&self.supervisor, &self.request_id, &self.owner_text, message).await
+        if let Some(question_id) = &self.question_id {
+            ferryx_hub::supervisor::app_work::converse_for_question(
+                &self.supervisor,
+                &self.request_id,
+                &self.owner_text,
+                question_id,
+                message,
+            )
+            .await
+        } else {
+            ferryx_hub::supervisor::app_work::converse(
+                &self.supervisor,
+                &self.request_id,
+                &self.owner_text,
+                message,
+            )
+            .await
+        }
     }
 }
 
@@ -3843,6 +3861,7 @@ fn app_conversation(
             supervisor,
             request_id: input.request_id.clone(),
             owner_text: input.text.trim().to_owned(),
+            question_id: input.question_id.clone(),
         }) as Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>
     })
 }
@@ -3906,6 +3925,9 @@ pub async fn supervisor_converse(
     let ctx = transcript::Converse {
         pool: &pool,
         engine: engine.as_ref(),
+        // The obligation this turn opens carries the surface the request came from, so a phone
+        // turn is not recorded (and re-armed on restart) as the app's.
+        adapter: caller.adapter(),
         rules: rules.as_deref(),
         flights: &state.supervisor_flights,
         now: &transcript::now_ms,
@@ -5119,6 +5141,77 @@ fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
     tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
 }
 
+/// Settles every done claim when its objection window closes, whether or not the lane has a
+/// supervisor goal: it sleeps until the earliest `claim_objection_until` and is woken by a claim.
+fn spawn_claim_due_driver(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let stopper: std::sync::Arc<dyn ferryx_hub::lanes::settle_stop::SessionStopper> =
+        std::sync::Arc::new(ferryx_hub::lanes::settle_stop::AgentControlStopper(
+            launch.bridge.clone(),
+        ));
+    let driver = ferryx_hub::lanes::settle_driver::DueDriver::new(launch.hub.pool.clone(), Some(stopper));
+    tokio::spawn(driver.run(ferryx_hub::lanes::settle_driver::due_signal()))
+}
+
+/// Re-arms the owner answer obligations a stop left open: every `owner_answer_obligations` row
+/// still unanswered and inside its reminder window gets its holding-line timer again, with a
+/// notifier for its own adapter, so an owner whose answer was cut off by a restart is told the
+/// hub is still on it instead of being silently dropped. Runs as this generation's task, so a
+/// stand-down ends the timers with the generation.
+fn spawn_supervisor_obligation_recovery(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let pool = launch.hub.pool.clone();
+    tokio::spawn(async move {
+        match rearm_owner_obligations(&pool).await {
+            Ok(mut timers) => {
+                if !timers.is_empty() {
+                    tracing::info!(rearmed = timers.len(), "pending owner answer obligations were re-armed");
+                }
+                // Own the timers until they finish: ending this task drops the set and aborts them.
+                while timers.join_next().await.is_some() {}
+            }
+            Err(error) => tracing::warn!(%error, "pending owner answer obligations were not re-armed"),
+        }
+    })
+}
+
+/// [`spawn_supervisor_obligation_recovery`] without the generation task, so the start-up re-arm
+/// is exercisable against a real pool: returns the set owning every re-armed timer.
+async fn rearm_owner_obligations(
+    pool: &ferryx_hub::goals::SqlitePool,
+) -> ferryx_hub::error::Result<tokio::task::JoinSet<()>> {
+    let notifier: std::sync::Arc<dyn ferryx_hub::supervisor::obligations::ObligationNotifier> =
+        std::sync::Arc::new(RecoveredObligationNotifier { pool: pool.clone() });
+    ferryx_hub::supervisor::obligations::reconstruct_pending_obligations(pool, notifier).await
+}
+
+/// The notifier a restart re-arms recovered obligations with: a Slack row posts its holding
+/// line back into its own channel and thread, every panel surface (desktop app, CLI, MCP, a
+/// paired phone) writes into the shared app transcript.
+struct RecoveredObligationNotifier {
+    pool: ferryx_hub::goals::SqlitePool,
+}
+
+#[async_trait]
+impl ferryx_hub::supervisor::obligations::ObligationNotifier for RecoveredObligationNotifier {
+    async fn send_holding(
+        &self,
+        obligation: &ferryx_hub::supervisor::obligations::Obligation,
+        text: &str,
+    ) -> ferryx_hub::error::Result<bool> {
+        #[cfg(feature = "hub-slack")]
+        if obligation.adapter == "slack" {
+            return <ferryx_hub::chat::slack_supervisor::SlackObligationNotifier as ferryx_hub::supervisor::obligations::ObligationNotifier>::send_holding(
+                &ferryx_hub::chat::slack_supervisor::SlackObligationNotifier,
+                obligation,
+                text,
+            )
+            .await;
+        }
+        ferryx_hub::supervisor::obligations::AppTranscriptNotifier(self.pool.clone())
+            .send_holding(obligation, text)
+            .await
+    }
+}
+
 /// The supervisor's recovery scheduler for this hub generation: it watches the fleet for
 /// upstream errors, quota stops and stalls, and retries goal lanes whose model hit a quota.
 /// Without an installed autonomy service there is nothing to run. The scheduler reads the
@@ -5145,6 +5238,14 @@ fn spawn_supervisor_ownership(launch: &HubLaunch) -> tokio::task::JoinHandle<()>
     tokio::spawn(ferryx_hub::supervisor::ownership::serve(
         launch.hub.pool.clone(),
     ))
+}
+
+/// Lane oversight: reminders at 10 and 20 quiet minutes, one stall alert at 40, and ceiling
+/// holds, for lanes whose backend reports idle/working and can be held. Quiet is measured from
+/// the last new evidence a worker reported through `lane_report`.
+fn spawn_lane_oversight(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let control: Arc<dyn ferryx_hub::agent_control::AgentControl> = launch.bridge.clone();
+    tokio::spawn(ferryx_hub::lanes::oversight::serve(launch.hub.pool.clone(), control))
 }
 
 /// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
@@ -5248,8 +5349,11 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(spawn_supervisor_dispatcher(launch, idle));
     tasks.push(spawn_supervisor_change_forwarder(launch));
     tasks.push(spawn_supervisor_wakes(launch));
+    tasks.push(spawn_claim_due_driver(launch));
     tasks.push(spawn_supervisor_recovery(launch));
     tasks.push(spawn_supervisor_ownership(launch));
+    tasks.push(spawn_lane_oversight(launch));
+    tasks.push(spawn_supervisor_obligation_recovery(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {

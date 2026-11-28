@@ -279,17 +279,15 @@ async fn handover_turn(
             message: "no supervisor identity for this owner".into(),
         });
     };
-    let Some(resolved) = resolve_project(
-        pool,
-        &identity.supervisor_id,
-        &actor.source_body,
-        &work.title,
-        &mentions,
-        Some(sessions),
-        false,
-    )
-    .await?
-    else {
+    let resolved_project = project_of_mentions(pool, &identity.supervisor_id, &mentions, Some(sessions)).await;
+    let resolved = match resolved_project {
+        Some(project_id) => Some(ProjectResolution {
+            host_id: single_host(pool, &project_id).await?,
+            project_id,
+        }),
+        None => None,
+    };
+    let Some(resolved) = resolved else {
         return Ok(SubmitOutcome::NeedsChoice {
             missing: "project".into(),
             detail: format!(
@@ -397,6 +395,61 @@ pub async fn resolve_project(
     }))
 }
 
+/// The single project the model's `submit` hints name: the `project` hint as a project name or
+/// repository basename, else the project whose checkout contains the `cwd` hint. A `project`
+/// hint that names no single project decides nothing, and the `cwd` is not consulted then:
+/// the owner is asked instead of a project being guessed.
+pub(crate) async fn project_of_hints(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    project: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<Option<String>, AdmissionError> {
+    if let Some(project) = project {
+        return project_of_names(pool, supervisor_id, project, "").await;
+    }
+    let Some(cwd) = cwd.and_then(canonical_path) else {
+        return Ok(None);
+    };
+    let hosts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT h.project_id, h.git_common_dir
+           FROM supervisor_project_hosts h
+           JOIN supervisor_projects p ON p.project_id = h.project_id
+          WHERE p.supervisor_id = ?",
+    )
+    .bind(supervisor_id)
+    .fetch_all(pool)
+    .await?;
+    let mut matched: Vec<String> = hosts
+        .into_iter()
+        .filter(|(_, git_common_dir)| {
+            canonical_path(&admission::checkout_root(git_common_dir))
+                .is_some_and(|root| admission::within(&root, &cwd))
+        })
+        .map(|(project_id, _)| project_id)
+        .collect();
+    matched.sort();
+    matched.dedup();
+    Ok(match matched.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
+}
+
+/// Canonical absolute path (including symlink resolution), or `None` for missing/non-canonical paths.
+fn canonical_path(path: &str) -> Option<String> {
+    let path = std::path::Path::new(path);
+    if !path.is_absolute() {
+        return None;
+    }
+    Some(
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 /// The project of the first session the owner addressed with @: the one whose checkout on that
 /// session's host contains the session's cwd. `None` when that session is unknown to the fleet,
 /// the fleet cannot be listed, or the cwd belongs to no project or to several.
@@ -430,14 +483,14 @@ async fn project_of_mentions(
     .fetch_all(pool)
     .await
     .ok()?;
+    let cwd = canonical_path(&session.cwd);
     let mut matched: Vec<String> = hosts
         .into_iter()
         .filter(|(_, host_id, git_common_dir)| {
+            let root = canonical_path(&admission::checkout_root(git_common_dir));
             host_id == &session.host_id
-                && admission::within(
-                    &admission::checkout_root(git_common_dir),
-                    session.cwd.trim_end_matches(['/', '\\']),
-                )
+                && root.as_deref().zip(cwd.as_deref())
+                    .is_some_and(|(root, cwd)| admission::within(root, cwd))
         })
         .map(|(project_id, _, _)| project_id)
         .collect();
@@ -482,7 +535,7 @@ async fn project_of_names(
 }
 
 /// The host of a project when it has exactly one; `None` for none or several.
-async fn single_host(
+pub(crate) async fn single_host(
     pool: &SqlitePool,
     project_id: &str,
 ) -> Result<Option<String>, AdmissionError> {
@@ -540,6 +593,7 @@ fn names_word(needle: &str, haystack: &str) -> bool {
 struct AppTurn {
     request_id: String,
     text: String,
+    question_id: Option<String>,
     mentions: Vec<SessionRef>,
     outcomes: Vec<SubmitOutcome>,
 }
@@ -572,6 +626,20 @@ impl AppTurnGuard {
         Self::begin_with_mentions(request_id, owner_text, Vec::new())
     }
 
+    pub fn begin_for_question(request_id: &str, owner_text: &str, question_id: &str) -> Self {
+        let mut registry = registry();
+        registry.next += 1;
+        let generation = registry.next;
+        registry.live.insert(generation, AppTurn {
+            request_id: request_id.to_owned(),
+            text: owner_text.to_owned(),
+            question_id: Some(question_id.to_owned()),
+            mentions: Vec::new(),
+            outcomes: Vec::new(),
+        });
+        Self { generation }
+    }
+
     /// Like [`Self::begin`], with the sessions the owner addressed with @ in this message.
     pub fn begin_with_mentions(
         request_id: &str,
@@ -586,6 +654,7 @@ impl AppTurnGuard {
             AppTurn {
                 request_id: request_id.to_owned(),
                 text: owner_text.to_owned(),
+                question_id: None,
                 mentions,
                 outcomes: Vec::new(),
             },
@@ -627,6 +696,24 @@ pub async fn converse(
         request_id,
         owner_text,
         super::transcript::addressed_sessions(message),
+    );
+    supervisor
+        .converse_in_turn(&app_scope(), Some(turn.token()), message)
+        .await
+}
+
+/// Like [`converse`], with an explicit clarification question id from the owner.
+pub async fn converse_for_question(
+    supervisor: &MhcSupervisor,
+    request_id: &str,
+    owner_text: &str,
+    question_id: &str,
+    message: &str,
+) -> Result<String, SupervisorFault> {
+    let turn = AppTurnGuard::begin_for_question(
+        request_id,
+        owner_text,
+        question_id,
     );
     supervisor
         .converse_in_turn(&app_scope(), Some(turn.token()), message)
@@ -704,6 +791,30 @@ async fn project_question(
     Ok(asked)
 }
 
+pub(crate) async fn validate_cwd_hint(
+    pool: &SqlitePool,
+    project_id: &str,
+    cwd_hint: &str,
+) -> Option<String> {
+    let canonical_cwd = canonical_path(cwd_hint)?;
+    let hosts: Vec<String> = sqlx::query_scalar(
+        "SELECT git_common_dir FROM supervisor_project_hosts WHERE project_id = ?",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    for git_common_dir in hosts {
+        if let Some(root) = canonical_path(&admission::checkout_root(&git_common_dir)) {
+            if admission::within(&root, &canonical_cwd) {
+                return Some(canonical_cwd);
+            }
+        }
+    }
+    tracing::info!(cwd = %cwd_hint, %project_id, "ignored cwd hint escaping project checkout");
+    None
+}
+
 /// The submit with the project and host the owner's turn resolves to, unless the proposal or the
 /// owner's choices already named them. A turn whose owner has no supervisor identity resolves
 /// nothing and leaves the scope to admission.
@@ -716,10 +827,24 @@ async fn resolve_for_turn(
     sessions: Option<&SessionTools>,
 ) -> Result<SubmitWork, AdmissionError> {
     let mut work = work.clone();
-    let chosen_project = work
+    let chosen_project = actor
+        .choices
         .project_id
         .clone()
-        .or_else(|| actor.choices.project_id.clone());
+        .or_else(|| work.project_id.clone());
+    if let Some(project_id) = &actor.choices.project_id {
+        if let Some(hint) = work.project_id.as_ref().filter(|hint| *hint != project_id) {
+            tracing::info!(%hint, %project_id, "ignored model project hint conflicting with authenticated owner binding");
+        }
+        work.project_id = Some(project_id.clone());
+        if actor.choices.host_id.is_some() {
+            work.host_id = actor.choices.host_id.clone();
+            return Ok(work);
+        } else if let Ok(Some(host_id)) = single_host(pool, project_id).await {
+            work.host_id = Some(host_id);
+            return Ok(work);
+        }
+    }
     if work.host_id.is_some() && chosen_project.is_some() {
         return Ok(work);
     }
@@ -743,11 +868,18 @@ async fn resolve_for_turn(
                     .unwrap_or_default(),
             };
             let asked = project_question(pool, owner).await?.is_some();
+            let req_text = work
+                .requirements
+                .iter()
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let search_text = format!("{}\n{}", work.title, req_text);
             let Some(resolved) = resolve_project(
                 pool,
                 &identity.supervisor_id,
                 &actor.source_body,
-                &work.title,
+                &search_text,
                 &mentions,
                 sessions,
                 asked,
@@ -762,6 +894,9 @@ async fn resolve_for_turn(
     work.project_id.get_or_insert(resolved.project_id);
     if let Some(host_id) = resolved.host_id {
         work.host_id.get_or_insert(host_id);
+    }
+    if let (Some(project_id), Some(cwd)) = (work.project_id.as_deref(), work.cwd.take()) {
+        work.cwd = validate_cwd_hint(pool, project_id, &cwd).await;
     }
     Ok(work)
 }
@@ -813,6 +948,8 @@ impl WorkToolHandler for AppWorkTools {
                 title,
                 requirements,
                 worker,
+                project,
+                cwd,
             } => {
                 let actor = turn
                     .and_then(|generation| {
@@ -826,7 +963,51 @@ impl WorkToolHandler for AppWorkTools {
                         })
                     })
                     .ok_or_else(no_turn)?;
-                let work = submit_from_call(&title, &requirements, worker, &actor.source_body);
+                let mut work = submit_from_call(&title, &requirements, worker, &actor.source_body);
+                if let Some(identity) = identity_of(&self.pool, &owner).await.map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))? {
+                    if let Some(hinted) = project_of_hints(
+                        &self.pool,
+                        &identity.supervisor_id,
+                        project.as_deref(),
+                        cwd.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| refused(&error))?
+                    {
+                        work.project_id = Some(hinted);
+                        work.cwd = cwd;
+                    }
+                }
+                let explicit_question = turn.and_then(|generation| {
+                    registry().live.get(&generation).and_then(|live| live.question_id.clone())
+                });
+                if let Some(question_id) = explicit_question {
+                    let Some((draft, selected)) = super::questions::answer_question(
+                        &self.pool, &owner, &question_id, &actor.source_body,
+                    ).await.map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?
+                    else {
+                        return Err(WorkToolRejection::new("SUPERVISOR_QUESTION_INVALID", "That clarification is stale or the answer is invalid."));
+                    };
+                    work = draft.work;
+                    match draft.missing.as_str() {
+                        "project" => {
+                            work.project_id = Some(selected.clone());
+                            if work.host_id.is_none() {
+                                if let Ok(Some(host_id)) = single_host(&self.pool, &selected).await {
+                                    work.host_id = Some(host_id);
+                                }
+                            }
+                        }
+                        "host" => work.host_id = Some(selected),
+                        _ => return Err(WorkToolRejection::new("SUPERVISOR_QUESTION_INVALID", "Unsupported clarification.")),
+                    }
+                    let outcome = admission::handle_message(&self.pool, &actor, Some(&work)).await
+                        .map_err(|error| refused(&error))?;
+                    if let Some(generation) = turn {
+                        if let Some(live) = registry().live.get_mut(&generation) { live.outcomes.push(outcome.clone()); }
+                    }
+                    return serde_json::to_value(outcome).map_err(|error| WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string()));
+                }
                 // The owner's own words pause or resume the ownership loop of a session the
                 // supervisor already owns; nothing is admitted and no text reaches the pane.
                 if let Some(command) = OwnershipCommand::of(&actor.source_body) {
@@ -893,23 +1074,76 @@ impl WorkToolHandler for AppWorkTools {
                     Err(error) => return Err(refused(&error)),
                 };
                 let outcome = admission::handle_message(&self.pool, &actor, Some(&work)).await;
-                // The question the next app turn answers. A refused submit is not a question, so
-                // it clears any earlier one instead. The outcome itself is already persisted, so
-                // a failure here is logged rather than turned into a failed submit.
-                let asked = match &outcome {
-                    Ok(SubmitOutcome::NeedsChoice { missing, .. }) if missing == "project" => {
+                let outcome = match outcome {
+                    Ok(SubmitOutcome::NeedsChoice { missing, detail })
+                        if missing == "project" || missing == "host" =>
+                    {
+                        let identity = identity_of(&self.pool, &owner)
+                            .await
+                            .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?
+                            .ok_or_else(|| WorkToolRejection::new(
+                                "SUPERVISOR_IDENTITY_MISSING",
+                                "no supervisor identity for this owner",
+                            ))?;
+                        let options = if missing == "project" {
+                            sqlx::query_as::<_, (String, String)>(
+                                "SELECT project_id, name FROM supervisor_projects WHERE supervisor_id = ? ORDER BY name",
+                            )
+                            .bind(&identity.supervisor_id)
+                            .fetch_all(&self.pool)
+                            .await
+                            .map_err(|error| WorkToolRejection::new("SUPERVISOR_STORE", &error.to_string()))?
+                        } else {
+                            sqlx::query_as::<_, (String, String)>(
+                                "SELECT host_id, host_id FROM supervisor_project_hosts WHERE project_id = ? ORDER BY host_id",
+                            )
+                            .bind(work.project_id.as_deref().unwrap_or_default())
+                            .fetch_all(&self.pool)
+                            .await
+                            .map_err(|error| WorkToolRejection::new("SUPERVISOR_STORE", &error.to_string()))?
+                        };
+                        let options: Vec<super::questions::QuestionOption> = options
+                            .into_iter()
+                            .map(|(id, name)| super::questions::QuestionOption { id, name })
+                            .collect();
+                        sqlx::query("UPDATE supervisor_questions SET status = 'superseded' WHERE owner_principal = ? AND adapter = 'desktop' AND conversation_id = ? AND status = 'open'")
+                            .bind(&owner)
+                            .bind(&actor.source_message_id)
+                            .execute(&self.pool)
+                            .await
+                            .map_err(|error| WorkToolRejection::new("SUPERVISOR_STORE", &error.to_string()))?;
+                        let (question_id, question) = super::questions::ask(
+                            &self.pool,
+                            &super::questions::QuestionDraft {
+                                work: work.clone(),
+                                supervisor_id: identity.supervisor_id,
+                                owner_principal: owner.clone(),
+                                adapter: ChannelProvider::Desktop,
+                                conversation_id: actor.source_message_id.clone(),
+                                channel_id: "app".to_owned(),
+                                thread_id: String::new(),
+                                missing: missing.clone(),
+                            },
+                            &options,
+                        )
+                        .await
+                        .map_err(|error| refused(&error))?;
+                        SubmitOutcome::NeedsChoice {
+                            missing,
+                            detail: format!("{detail}\n{question}\nAnswer with question id {question_id} and an option number or name."),
+                        }
+                    }
+                    result => result.map_err(|error| refused(&error))?,
+                };
+                let legacy_answer_marker = match &outcome {
+                    SubmitOutcome::NeedsChoice { missing, .. } if missing == "project" => {
                         Some(actor.source_message_id.as_str())
                     }
                     _ => None,
                 };
-                if let Err(error) = record_project_choice(&self.pool, &owner, asked).await {
-                    tracing::warn!(
-                        %error,
-                        owner = %owner,
-                        "the project question was not recorded"
-                    );
+                if let Err(error) = record_project_choice(&self.pool, &owner, legacy_answer_marker).await {
+                    tracing::warn!(%error, owner = %owner, "legacy project answer marker was not recorded");
                 }
-                let outcome = outcome.map_err(|error| refused(&error))?;
                 if let Some(generation) = turn {
                     if let Some(live) = registry().live.get_mut(&generation) {
                         live.outcomes.push(outcome.clone());
@@ -1140,6 +1374,27 @@ mod tests {
             title: "Write result.txt".into(),
             requirements: vec!["result.txt contains READY".into()],
             worker: WorkerPreference::Any,
+            project: None,
+            cwd: None,
+        }
+    }
+
+    fn submit_hinted(project: &str) -> WorkToolCall {
+        match submit() {
+            WorkToolCall::Submit {
+                title,
+                requirements,
+                worker,
+                cwd,
+                ..
+            } => WorkToolCall::Submit {
+                title,
+                requirements,
+                worker,
+                project: Some(project.into()),
+                cwd,
+            },
+            other => other,
         }
     }
 
@@ -1659,6 +1914,61 @@ mod tests {
         assert_eq!(host_id, "host-a");
     }
 
+    /// The model's `project` hint resolves directly, though the message names no project.
+    #[tokio::test]
+    async fn a_submit_project_hint_resolves_without_a_question() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-h1", WORK);
+
+        tools
+            .handle(app(Some(turn.token()), submit_hinted("ferryx")))
+            .await
+            .unwrap();
+
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "ferryx"));
+        assert_eq!(host_id, "host-a");
+    }
+
+    /// A `project` hint naming no project is never guessed: the numbered question follows.
+    #[tokio::test]
+    async fn an_unknown_submit_project_hint_asks_the_numbered_question() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-h2", WORK);
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit_hinted("nope")))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+    }
+
+    /// The `cwd` hint inside one project checkout resolves that project.
+    #[tokio::test]
+    async fn a_submit_cwd_hint_inside_a_checkout_resolves_the_project() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-h3", WORK);
+        let call = match submit() {
+            WorkToolCall::Submit { title, requirements, worker, project, .. } => WorkToolCall::Submit {
+                title, requirements, worker, project,
+                cwd: Some("/home/owner/code/pane/src".into()),
+            },
+            other => other,
+        };
+
+        tools.handle(app(Some(turn.token()), call)).await.unwrap();
+
+        let (project_id, _) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "pane"));
+    }
+
     /// The proposal title participates in the match, not only the owner's message.
     #[tokio::test]
     async fn the_proposal_title_also_names_the_project() {
@@ -1670,6 +1980,8 @@ mod tests {
             title: "Fix the typo in pane's README".into(),
             requirements: vec!["the typo is fixed".into()],
             worker: WorkerPreference::Any,
+            project: None,
+            cwd: None,
         };
 
         tools.handle(app(Some(turn.token()), titled)).await.unwrap();
@@ -1806,6 +2118,8 @@ mod tests {
             title: "Fix the typo in pane's README".into(),
             requirements: vec!["the typo is fixed".into()],
             worker: WorkerPreference::Any,
+            project: None,
+            cwd: None,
         };
 
         tools.handle(app(Some(answer.token()), titled)).await.unwrap();
@@ -1825,6 +2139,8 @@ mod tests {
             title: "Fix the typo in pane's README".into(),
             requirements: vec!["the typo is fixed".into()],
             worker: WorkerPreference::Any,
+            project: None,
+            cwd: None,
         };
 
         let outcome = tools.handle(app(Some(turn.token()), titled)).await.unwrap();
@@ -1915,5 +2231,199 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code, "SUPERVISOR_SESSIONS_UNAVAILABLE");
         assert_eq!(fallback.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Rule 1: Authenticated owner choice beats conflicting model proposal hint.
+    #[tokio::test]
+    async fn binding_beats_conflicting_model_hint() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let turn = AppTurnGuard::begin("req-bind-1", WORK);
+        let pane_id = project_id_of(&projects, "pane").to_owned();
+
+        let actor = ActorContext {
+            principal: OWNER.into(),
+            source_adapter: ChannelProvider::Desktop,
+            source_message_id: format!("app:{}", turn.token()),
+            source_body: WORK.into(),
+            channel_binding_id: None,
+            choices: OwnerChoices {
+                project_id: Some(pane_id.clone()),
+                ..OwnerChoices::default()
+            },
+        };
+        let mut work = submit_from_call("Work on ferryx", &["done".into()], WorkerPreference::Any, WORK);
+        work.project_id = Some(project_id_of(&projects, "ferryx").to_owned());
+
+        let resolved = resolve_for_turn(
+            &pool,
+            OWNER,
+            &actor,
+            &work,
+            Some(turn.token()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.project_id.as_deref(), Some(pane_id.as_str()));
+        assert_eq!(resolved.host_id.as_deref(), Some("host-a"));
+    }
+
+    /// Symlink-escaping session cwd is ignored and does not attribute to the project.
+    #[tokio::test]
+    async fn symlink_escaping_session_cwd_is_ignored() {
+        let pool = many_project_pool().await;
+        let mention = SessionRef::new("host-a", "pty-sym");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/tmp/escaped_outside"),
+        );
+        let turn = AppTurnGuard::begin_with_mentions("req-sym1", "fix bug", vec![mention]);
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// Symlink-escaping cwd hint in submit is ignored.
+    #[tokio::test]
+    async fn symlink_escaping_cwd_hint_is_ignored() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let ferryx_id = project_id_of(&projects, "ferryx");
+        let validated = validate_cwd_hint(&pool, ferryx_id, "/etc/passwd").await;
+        assert_eq!(validated, None);
+    }
+
+    /// Multiple hosts for a project asks the owner for host, and answering via question_id admits.
+    #[tokio::test]
+    async fn multiple_hosts_asked_and_answered_by_explicit_question_id() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let ferryx = project_id_of(&projects, "ferryx").to_owned();
+        bind_project_host(&pool, &ferryx, "host-b", "/srv/ferryx/.git")
+            .await
+            .unwrap();
+        let tools = AppWorkTools::new(pool.clone());
+
+        let asked = AppTurnGuard::begin("req-mh1", "fix the ferryx README");
+        let outcome = tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "host");
+        assert_eq!(goals(&pool).await, 0);
+
+        let question_id: String = sqlx::query_scalar(
+            "SELECT question_id FROM supervisor_questions WHERE owner_principal = ? AND missing = 'host' AND status = 'open'",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let answer = AppTurnGuard::begin_for_question("req-mh2", "host-b", &question_id);
+        let admitted = tools
+            .handle(app(Some(answer.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(admitted["outcome"], "admitted");
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, ferryx);
+        assert_eq!(host_id, "host-b");
+        assert_eq!(goals(&pool).await, 1);
+    }
+
+    /// Explicit question id with stale or invalid answer gets refused.
+    #[tokio::test]
+    async fn explicit_question_id_stale_or_invalid_answer_gets_refusal() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+
+        let asked = AppTurnGuard::begin("req-stale1", "고쳐줘");
+        let outcome = tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(outcome["missing"], "project");
+
+        let question_id: String = sqlx::query_scalar(
+            "SELECT question_id FROM supervisor_questions WHERE owner_principal = ? AND missing = 'project' AND status = 'open'",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Invalid answer (out of bounds option 99).
+        let invalid_turn = AppTurnGuard::begin_for_question("req-stale2", "99", &question_id);
+        let err = tools
+            .handle(app(Some(invalid_turn.token()), submit()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "SUPERVISOR_QUESTION_INVALID");
+
+        // Valid answer succeeds.
+        let valid_turn = AppTurnGuard::begin_for_question("req-stale3", "1", &question_id);
+        let ok = tools
+            .handle(app(Some(valid_turn.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(ok["outcome"], "admitted");
+
+        // Now answering the same question again is stale.
+        let stale_turn = AppTurnGuard::begin_for_question("req-stale4", "1", &question_id);
+        let err = tools
+            .handle(app(Some(stale_turn.token()), submit()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "SUPERVISOR_QUESTION_INVALID");
+    }
+
+    /// Silence (a turn without question_id) leaves the open question unchanged.
+    #[tokio::test]
+    async fn silence_leaves_question_open() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+
+        let asked = AppTurnGuard::begin("req-silence1", "고쳐줘");
+        let outcome = tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(outcome["missing"], "project");
+
+        let status_before: String = sqlx::query_scalar(
+            "SELECT status FROM supervisor_questions WHERE owner_principal = ? AND status = 'open'",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status_before, "open");
+
+        // A turn that sends no question id.
+        let silent = AppTurnGuard::begin("req-silence2", "hello");
+        let status_res = tools
+            .handle(app(Some(silent.token()), WorkToolCall::Status { goal_id: None }))
+            .await
+            .unwrap();
+        assert!(status_res["outcomes"].as_array().unwrap().is_empty());
+
+        let status_after: String = sqlx::query_scalar(
+            "SELECT status FROM supervisor_questions WHERE owner_principal = ? AND status = 'open'",
+        )
+        .bind(OWNER)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status_after, "open", "silence never answers");
     }
 }

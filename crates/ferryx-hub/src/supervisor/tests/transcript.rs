@@ -82,6 +82,7 @@ fn input(text: &str, request_id: &str) -> ConverseInput {
         text: text.into(),
         mentions: Vec::new(),
         request_id: request_id.into(),
+        question_id: None,
     }
 }
 
@@ -121,6 +122,7 @@ async fn converse_at(
         &Converse {
             pool,
             engine,
+            adapter: ChannelProvider::Desktop,
             rules: None,
             flights: &flights,
             now: &now,
@@ -144,6 +146,7 @@ fn ctx<'a>(
     Converse {
         pool,
         engine,
+        adapter: ChannelProvider::Desktop,
         rules,
         flights,
         now: NOW,

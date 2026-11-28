@@ -17,6 +17,9 @@ use super::session::{SessionKey, SessionState};
 use crate::error::Result;
 use crate::meta::omo_client::{self, OmoClientConfig, TurnRequest};
 
+#[path = "slack_turn_legacy.rs"]
+mod legacy;
+
 const PLATFORM: &str = "slack";
 
 #[derive(Debug, Clone)]
@@ -272,6 +275,32 @@ pub fn admit(
     })
 }
 
+/// Hub admission preserves legacy filtering except for an authenticated owner's mention gate.
+/// Both live ingress and backfill resolve the same persisted owner identity before admission.
+pub async fn admit_for_hub(
+    pool: &SqlitePool,
+    config: &SlackTurnConfig,
+    payload: &Value,
+) -> Option<Admitted> {
+    let event = payload.get("event")?;
+    let bot = bot_user_id(payload)
+        .map(str::to_owned)
+        .or_else(|| crate::hub_env::var("SLACK_BOT_USER_ID").ok())
+        .unwrap_or_default();
+    let known = known_thread(pool, payload).await;
+    let user = str_field(event, "user").or_else(|| str_field(event, "bot_id"))?;
+    let team = str_field(payload, "team_id")
+        .or_else(|| str_field(event, "team"))
+        .filter(|team| !team.is_empty());
+    if super::slack_supervisor::owner_principal(pool, team, user).await.is_some() {
+        let mut owner_config = config.clone();
+        owner_config.free_channels.push(str_field(event, "channel")?.to_owned());
+        admit(&owner_config, payload, &bot, known)
+    } else {
+        admit(config, payload, &bot, known)
+    }
+}
+
 /// Whether the bot already has a session for this channel thread.
 pub async fn known_thread(pool: &SqlitePool, payload: &Value) -> bool {
     let Some(event) = payload.get("event") else {
@@ -500,16 +529,55 @@ fn strip_handoff_block(text: &str) -> String {
         .join("\n\n")
 }
 
+/// What became of one Slack reply the hub tried to post.
+///
+/// The three outcomes are kept apart because they mean different things to the owner answer
+/// obligation: a delivered reply answered the owner, an explicit silence answered it too (the
+/// reply is the silence, not a missing answer), and only a missing token leaves it unanswered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostOutcome {
+    /// Slack accepted at least one chunk of the reply.
+    Delivered,
+    /// The reply was an explicit silence (`SILENT`, `NO_REPLY`, ...): nothing is posted and the
+    /// owner was still answered by it.
+    SuppressedSilence,
+    /// No bot token is configured, so nothing was sent.
+    NoToken,
+}
+
+impl PostOutcome {
+    /// Whether the reply reached (or answered) the owner.
+    pub fn answered_owner(self) -> bool {
+        match self {
+            Self::Delivered | Self::SuppressedSilence => true,
+            Self::NoToken => false,
+        }
+    }
+}
+
 pub(crate) async fn post(channel: &str, thread: Option<&str>, text: &str) {
+    if let Err(error) = post_checked(channel, thread, text).await {
+        tracing::warn!(%error, "slack reply was not posted");
+    }
+}
+
+/// Posts one reply and says what became of it. An empty reply or an explicit silence posts
+/// nothing and reports [`PostOutcome::SuppressedSilence`], never a failed delivery.
+pub(crate) async fn post_checked(
+    channel: &str,
+    thread: Option<&str>,
+    text: &str,
+) -> crate::error::Result<PostOutcome> {
     let text = outgoing_text(text);
     if text.is_empty() || omo_client::is_explicit_silence(&text) {
-        return;
+        return Ok(PostOutcome::SuppressedSilence);
     }
-    match super::slack::deliver_omo(channel, thread, &text).await {
-        Ok(true) => {}
-        Ok(false) => tracing::warn!("slack reply was not posted: no bot token"),
-        Err(error) => tracing::warn!(%error, "slack reply was not posted"),
+    if super::slack::bot_token().is_none() {
+        return Ok(PostOutcome::NoToken);
     }
+    super::slack::deliver_omo(channel, thread, &text)
+        .await
+        .map(|posted| if posted { PostOutcome::Delivered } else { PostOutcome::NoToken })
 }
 
 pub(crate) async fn react(channel: &str, ts: &str, name: &str, add: bool) {
@@ -963,6 +1031,15 @@ pub async fn run_session_turn(
     if state.system_prompt.is_none() {
         state.system_prompt = inherited_system_prompt(pool, &turn.key).await;
     }
+    let recap = match legacy::recover(pool, &turn.key, &mut state).await {
+        Ok(recap) => recap,
+        Err(error) => {
+            tracing::error!(session = %storage_key, %error, "legacy session recovery failed");
+            status(&turn, "eyes", false).await;
+            status(&turn, "x", true).await;
+            return None;
+        }
+    };
     let omo = config.omo.clone();
     let mut request = TurnRequest {
         thread_id: state
@@ -988,7 +1065,10 @@ pub async fn run_session_turn(
                 .or_else(|| config.default_model.clone())
         },
         toolsets: state.enabled_toolsets.clone(),
-        text: turn.text.clone(),
+        text: match recap {
+            Some(recap) => format!("{recap}\n{}", turn.text),
+            None => turn.text.clone(),
+        },
         pin_model: turn.background,
         followups: Some(follow_ups(pool, &turn)),
     };
@@ -1155,6 +1235,15 @@ pub async fn run_session_turn(
         return None;
     }
     if let Some(failure) = failure {
+        if matches!(omo_client::classify_attempt(&result), omo_client::AttemptOutcome::Ambiguous(ref error)
+            if error.contains(omo_client::TURN_START_ACK_TIMEOUT))
+        {
+            state.metadata.remove("omo_thread_id");
+            state.metadata.insert("legacy_recap_pending".into(), json!(true));
+            if let Err(error) = save_state(pool, &turn.key, &state).await {
+                tracing::error!(session = %storage_key, %error, "ambiguous session pointer was not cleared");
+            }
+        }
         tracing::warn!(session = %storage_key, error = %failure, "session turn failed after its retry");
         // One identity for this owner turn, shared by the resume event and the notice claim.
         let owner_turn = owner_turn_id(&turn)
@@ -1189,7 +1278,11 @@ pub async fn run_session_turn(
                 } else {
                     omo_client::owner_failure_text(&failure)
                 };
-                emit_result(pool, &turn, &notice, Commitments::default(), true).await;
+                if let Some(channel) = turn.reply_channel.as_deref() {
+                    post(channel, turn.reply_thread.as_deref(), &notice).await;
+                } else {
+                    emit_result(pool, &turn, &notice, Commitments::default(), true).await;
+                }
             }
         }
         status(&turn, "x", true).await;
@@ -1205,6 +1298,7 @@ pub async fn run_session_turn(
             tracing::warn!(%error, "cron briefings were not marked injected");
         }
     }
+    state.metadata.remove("legacy_recap_pending");
     state
         .metadata
         .insert("omo_thread_id".into(), json!(outcome.thread_id));
@@ -1404,6 +1498,18 @@ async fn schedule_resume_for(pool: &SqlitePool, turn: &SessionTurn, failure: &st
     {
         return false;
     }
+    let supervised = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM owner_answer_obligations WHERE source_message_id = ? OR source_message_id LIKE ? LIMIT 1",
+    )
+    .bind(owner_turn)
+    .bind(format!("%/{owner_turn}"))
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_default()
+    .is_some();
+    if supervised {
+        return false;
+    }
     let now = chrono::Utc::now();
     // An ACK timeout is the one ambiguous outcome the hub recovers from by itself: the engine
     // emitted no frame of any kind for the whole window (no ACK, no turn start, no busy), so
@@ -1415,13 +1521,15 @@ async fn schedule_resume_for(pool: &SqlitePool, turn: &SessionTurn, failure: &st
         && !failure.contains(omo_client::TURN_START_ACK_TIMEOUT)
     {
         let recorded = sqlx::query(
-            "INSERT OR IGNORE INTO lane_events(lane_key, lead_session_key, kind, body, created_at, release_at, source_event_id) VALUES(NULL,?,'owner_turn_ambiguous',?,?,?,?)",
+            "INSERT OR IGNORE INTO lane_events(lane_key, lead_session_key, kind, body, created_at, release_at, source_event_id, subject_id, state_id, wake_policy) VALUES(NULL,?,'owner_turn_ambiguous',?,?,?, ?, ?, ?, 'wake')",
         )
         .bind(turn.key.storage_key())
         .bind(resume_body(turn, failure, owner_turn))
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
         .bind(format!("owner-turn-ambiguous:{owner_turn}"))
+        .bind(format!("owner_turn_ambiguous:{owner_turn}"))
+        .bind(failure)
         .execute(pool)
         .await;
         if let Err(error) = recorded {
@@ -2044,12 +2152,7 @@ pub async fn intercept(config: &'static SlackTurnConfig, pool: &SqlitePool, fram
         });
         return true;
     }
-    let bot = bot_user_id(payload)
-        .map(str::to_owned)
-        .or_else(|| crate::hub_env::var("SLACK_BOT_USER_ID").ok())
-        .unwrap_or_default();
-    let known = known_thread(pool, payload).await;
-    let Some(admitted) = admit(config, payload, &bot, known) else {
+    let Some(admitted) = admit_for_hub(pool, config, payload).await else {
         return false;
     };
     let pool = pool.clone();
@@ -2058,6 +2161,10 @@ pub async fn intercept(config: &'static SlackTurnConfig, pool: &SqlitePool, fram
     });
     true
 }
+
+#[cfg(all(test, unix))]
+#[path = "slack_turn_legacy_tests.rs"]
+mod legacy_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2081,6 +2188,42 @@ mod tests {
         assert_eq!(recorded, 1);
         // A definite failure is still queued for resume.
         assert!(schedule_resume_for(&pool, &turn, "mhc turn failed: model rejected", "slack:D1:2.0").await);
+    }
+
+    #[tokio::test]
+    async fn no_owner_reply_failed_event_for_a_supervised_message() {
+        let pool = crate::storage::memory().await.unwrap();
+        crate::supervisor::obligations::open_obligation(
+            &pool,
+            "slack",
+            "D1",
+            "slack:D1:supervised.1",
+            Some("D1"),
+            None,
+        )
+        .await
+        .unwrap();
+        let turn = SessionTurn {
+            key: SessionKey::new("slack", None::<String>, "D1", None::<String>, "U1"),
+            reply_channel: Some("D1".into()),
+            reply_thread: None,
+            status_ts: Some("supervised.1".into()),
+            text: "Deploy the release".into(),
+            background: false,
+        };
+        let resumed = schedule_resume_for(
+            &pool,
+            &turn,
+            "mhc turn failed: model rejected",
+            "slack:D1:supervised.1",
+        )
+        .await;
+        assert!(!resumed);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind='owner_reply_failed'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -2414,6 +2557,48 @@ mod tests {
         assert_eq!(dm.key.user_id, "UOWNER");
         // edits and joins are not turns
         assert!(admit(&c, &payload(json!({"type":"message","subtype":"message_changed","user":"UOWNER","channel":"CHOME","ts":"1.7","text":"x"})), "UBOT", false).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unmentioned_owner_message_passes_admit() {
+        // Given an allow-listed sender authenticated as the supervisor owner.
+        let pool = crate::storage::memory().await.unwrap();
+        crate::supervisor::ensure_identity(&pool, "slack:T1:UOWNER").await.unwrap();
+        let c = config();
+        let event = payload(json!({"type":"message","user":"UOWNER","channel":"COTHER","ts":"8.1","text":"hi"}));
+
+        // When the owner speaks without a mention in a non-free channel.
+        let admitted = admit_for_hub(&pool, &c, &event).await;
+
+        // Then the owner reaches admission even without a known thread.
+        assert!(admitted.is_some());
+    }
+
+    #[tokio::test]
+    async fn owner_admission_preserves_channel_exclusions_and_sender_authentication() {
+        // Given an owner identity and a non-free channel.
+        let pool = crate::storage::memory().await.unwrap();
+        crate::supervisor::ensure_identity(&pool, "slack:T1:UOWNER").await.unwrap();
+        let event = payload(json!({"type":"message","user":"UOWNER","channel":"COTHER","ts":"8.2","text":"hi"}));
+        let mut c = config();
+        c.ignored_channels.push("COTHER".into());
+        let mut scoped = config();
+        scoped.allowed_channels.push("CHOME".into());
+        let mut foreign = event.clone();
+        foreign["event"]["user"] = json!("UOTHER");
+        let mut wrong_team = event.clone();
+        wrong_team["team_id"] = json!("TOTHER");
+
+        // When each excluded or unauthenticated message is offered to hub admission.
+        let results = [
+            admit_for_hub(&pool, &c, &event).await,
+            admit_for_hub(&pool, &scoped, &event).await,
+            admit_for_hub(&pool, &config(), &foreign).await,
+            admit_for_hub(&pool, &config(), &wrong_team).await,
+        ];
+
+        // Then none bypasses the existing channel or identity checks.
+        assert!(results.iter().all(Option::is_none));
     }
 
     #[tokio::test]

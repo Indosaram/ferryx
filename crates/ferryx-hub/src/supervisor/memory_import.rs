@@ -10,6 +10,10 @@
 //! through [`super::memory::ingest`] with the provenance adapter `import`, once per turn;
 //! `supervisor_memory_imports` remembers what a session hashed to, so an unchanged session is
 //! not read again and a rerun ingests nothing.
+mod breaker;
+mod pass;
+pub use breaker::{daily_cap, daily_tokens, DailyTokens, DailyTokensTime};
+
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -125,6 +129,10 @@ pub struct ImportReport {
     pub skipped: usize,
     /// Turns owner ingest did not accept.
     pub failed: usize,
+    /// Admission refusals are separate from failed turns and compaction wait timeouts.
+    pub refusals: usize,
+    pub wait_timeouts: usize,
+    pub stop_reason: Option<String>,
 }
 
 /// Provider session ids the hub itself drove: every session a supervisor dispatch reached or a
@@ -285,11 +293,15 @@ pub async fn import_sessions_budgeted(
             id: principal.to_owned(),
         });
     }
+    let omo = sessions.iter().any(|session| session.provider == OMO_MEMORY_PROVIDER);
     let driven = hub_driven_session_ids(pool).await?;
     let mut report = ImportReport::default();
     let total = sessions.len();
     let mut taken = 0usize;
     for session in sessions.into_iter().take(bounds.max_sessions) {
+        if report.stop_reason.is_some() {
+            break;
+        }
         if budget.is_some_and(|budget| report.turns_ingested >= budget) {
             break;
         }
@@ -342,16 +354,26 @@ pub async fn import_sessions_budgeted(
             }
             let source = source_message_id(&session.provider, &session.session_id, *ordinal);
             let fenced = crate::chat::fence::fence_untrusted(&origin, text);
-            let outcome = ingest(
-                pool,
-                memory,
-                principal,
-                ChannelProvider::Import,
-                &source,
-                project.as_deref(),
-                &fenced,
-            )
-            .await;
+            if omo {
+                let tokens = daily_tokens(pool, chrono::Utc::now(), daily_cap()).await?;
+                if tokens.reached {
+                    report.stop_reason = Some(format!("daily input-token cap reached for UTC {}; held until the next UTC day", tokens.day));
+                    exhausted = true;
+                    break;
+                }
+            }
+            let outcome = if omo {
+                let (outcome, attempt) = pass::ingest_item(pool, memory, pass::ImportItem {
+                    principal, source: &source, project: project.as_deref(), text: &fenced,
+                }).await;
+                report.refusals += attempt.refusals;
+                report.failed += attempt.failed;
+                report.wait_timeouts += attempt.wait_timeouts;
+                report.stop_reason = attempt.stop_reason;
+                outcome
+            } else {
+                ingest(pool, memory, principal, ChannelProvider::Import, &source, project.as_deref(), &fenced).await
+            };
             match outcome["state"].as_str() {
                 Some("ingested") if outcome["duplicate"] == true => {
                     report.duplicates += 1;
@@ -363,9 +385,15 @@ pub async fn import_sessions_budgeted(
                 }
                 Some("skipped") => {}
                 _ => {
-                    report.failed += 1;
+                    if !omo {
+                        report.failed += 1;
+                    }
                     failed += 1;
                 }
+            }
+            if report.stop_reason.is_some() {
+                exhausted = true;
+                break;
             }
         }
         if exhausted {
@@ -382,6 +410,10 @@ pub async fn import_sessions_budgeted(
         report.sessions += 1;
     }
     report.skipped += total.saturating_sub(taken);
+    if omo {
+        record_pass(pool, OMO_MEMORY_PASS_KEY, OMO_MEMORY_CAUSE, &now_rfc3339(), &report,
+            serde_json::json!({"stopReason": report.stop_reason})).await?;
+    }
     Ok(report)
 }
 

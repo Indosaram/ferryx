@@ -466,6 +466,10 @@ impl DecisionGate {
         crate::control::is_paused(&self.pool).await.unwrap_or(true)
     }
 
+    pub async fn session_paused(&self, session: &SessionRef) -> bool {
+        self.paused().await || super::hold::session_held(&self.pool, session).await.unwrap_or(true)
+    }
+
     /// The hub database the goal decisions and answer history live in.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -480,7 +484,7 @@ impl AnswerGate for DecisionGate {
         prompt: &PendingPrompt,
         option_index: usize,
     ) -> std::result::Result<(), String> {
-        if self.paused().await {
+        if self.session_paused(&session.session_ref).await {
             return Err("the supervisor is paused; the owner decides".to_owned());
         }
         let worktree = (!session.cwd.is_empty()).then_some(session.cwd.as_str());
@@ -777,7 +781,7 @@ impl Autonomy {
         if replaced && self.escalations.remove(&session.session_ref).is_some() {
             self.publisher.decision(&session.session_ref, None);
         }
-        let paused = self.gate.paused().await;
+        let paused = self.gate.session_paused(&session.session_ref).await;
         // While the supervisor is degraded, or the owner has paused it, every prompt goes to the
         // owner, including the ones a rule or the owner's own past answers would settle: no
         // engine call is spent and nothing is typed.

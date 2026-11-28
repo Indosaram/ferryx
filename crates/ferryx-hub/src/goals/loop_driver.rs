@@ -342,13 +342,46 @@ async fn propose<C: AgentControl + ?Sized>(
     }
 }
 
-/// Marks every requirement met with its verdict's evidence and finishes the lane.
+/// Marks every requirement met with its verdict's evidence and finishes the lane, but only
+/// after the shared settlement gate re-checks the world live: the blind convergence verdict is
+/// advisory, and a lane with unsent work, a failing done check or an undelivered message is
+/// objected to instead of being marked verified done.
 async fn finish(
     pool: &SqlitePool,
     contract: &Contract,
     verdicts: &[converge::RequirementVerdict],
 ) -> Result<LoopOutcome, GoalError> {
     let lane_key = contract.lane_key.as_str();
+    let cwd: Option<String> = sqlx::query_scalar("SELECT cwd FROM lanes WHERE key = ?")
+        .bind(lane_key)
+        .fetch_optional(pool)
+        .await?;
+    let verifiers: Vec<String> = contract
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.status != RequirementStatus::Waived)
+        .map(|requirement| requirement.verifier.clone())
+        .collect();
+    let reasons = crate::lanes::settle::verify_before_close(
+        pool,
+        crate::lanes::settle::SettleTarget {
+            key: lane_key,
+            cwd: cwd.as_deref().unwrap_or(""),
+        },
+        &verifiers,
+    )
+    .await
+    .map_err(hub_error)?;
+    if !reasons.is_empty() {
+        let detail = reasons.join("; ");
+        return stop(
+            pool,
+            lane_key,
+            StopReason::CompletionEvidenceMissing,
+            Some(&detail),
+        )
+        .await;
+    }
     for verdict in verdicts {
         contract::update_requirement(
             pool,
@@ -363,6 +396,16 @@ async fn finish(
     contract::clear_stop(pool, lane_key).await?;
     contract::clear_proposal(pool, lane_key).await?;
     contract::reset_divergence(pool, lane_key).await?;
+    // Every fallible contract write succeeded: only now is the close decided and recorded, so a
+    // crash resumes it and a failed write never leaves an intent behind.
+    crate::lanes::settle::record_close_intent(
+        pool,
+        lane_key,
+        "goal converged",
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(hub_error)?;
     state::transition(
         pool,
         lane_key,
@@ -733,9 +776,15 @@ mod tests {
     const DIVERGED: &str = r#"{"requirements":[{"req_id":"r1","met":false,"evidence_refs":[]}]}"#;
 
     async fn lane_pool(mode: Option<GoalMode>) -> SqlitePool {
+        lane_pool_with(mode, "file marker").await
+    }
+
+    /// A lane whose contract names `verifier`; `file marker` passes because the lane writes one.
+    async fn lane_pool_with(mode: Option<GoalMode>, verifier: &str) -> SqlitePool {
         let pool = crate::storage::memory().await.unwrap();
         let cwd = std::env::temp_dir().join(format!("ferryx-goal-loop-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("marker"), "ok").unwrap();
         insert_lane(
             &pool,
             LANE,
@@ -754,7 +803,7 @@ mod tests {
             let spec = RequirementSpec {
                 id: "r1".into(),
                 text: "the tests pass".into(),
-                verifier: "cargo test".into(),
+                verifier: verifier.to_owned(),
             };
             set_contract(&pool, LANE, &[spec], mode, 20).await.unwrap();
         }
@@ -1166,6 +1215,64 @@ mod tests {
         assert!(contract::all_met(&contract));
         assert!(control.sends().is_empty());
         assert_eq!(model.calls(), 2);
+    }
+
+    /// The convergence verdict is advisory: the shared settlement gate re-checks the lane live,
+    /// and a failing check refuses the close. The lane is stopped for missing evidence, is not
+    /// `verified_done`, and is told the failing check.
+    #[tokio::test]
+    async fn a_loop_converged_lane_with_a_failing_check_is_not_verified_done() {
+        let pool = lane_pool_with(Some(GoalMode::Full), "file absent-marker").await;
+        let model = ScriptedModel::new(&[COMPLETE, CONVERGED]);
+        let control = FakeControl::default();
+        let outcome = on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            outcome.stop_reason,
+            Some(StopReason::CompletionEvidenceMissing)
+        );
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        let contract = goal(&pool).await;
+        assert_eq!(contract.requirements[0].status, RequirementStatus::Pending);
+        assert!(!contract::all_met(&contract));
+        let told: Option<String> = sqlx::query_scalar(
+            "SELECT body FROM lane_events WHERE lane_key = ? AND kind = 'settlement_objection'",
+        )
+        .bind(LANE)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let told = told.expect("the lane is told why its convergence was refused");
+        assert!(told.contains("done signal failed now"), "{told}");
+        assert!(control.sends().is_empty());
+    }
+
+    /// A close intent must not outlive a failed contract write: with the intent recorded first,
+    /// a stale one made the next close skip every live check.
+    #[tokio::test]
+    async fn a_failed_requirement_write_leaves_no_close_intent_to_bypass_the_next_checks() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let verdicts = vec![converge::RequirementVerdict {
+            req_id: "r1".into(),
+            met: true,
+            evidence_refs: vec!["git:clean".into()],
+        }];
+        let mut stale = goal(&pool).await;
+        stale.revision += 1;
+        assert!(finish(&pool, &stale, &verdicts).await.is_err());
+        assert!(crate::lanes::settle::close_intent(&pool, LANE).await.unwrap().is_none());
+
+        let mut poisoned = goal(&pool).await;
+        poisoned.requirements[0].verifier = "file absent-marker".into();
+        let outcome = finish(&pool, &poisoned, &verdicts).await.unwrap();
+
+        assert_eq!(outcome.stop_reason, Some(StopReason::CompletionEvidenceMissing));
+        assert_ne!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::VerifiedDone));
     }
 
     #[tokio::test]

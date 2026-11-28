@@ -157,6 +157,10 @@ pub struct MemoryImportStatus {
     pub sessions: i64,
     pub turns: i64,
     pub last_at: Option<String>,
+    #[serde(default)]
+    pub last_pass: Option<serde_json::Value>,
+    #[serde(default)]
+    pub daily_tokens: Option<super::memory_import::DailyTokens>,
 }
 
 /// The shared setup status (camelCase on the wire).
@@ -405,7 +409,16 @@ pub async fn setup_status(
             engine_fault.get_or_insert(fault);
         }
     }
-    let supervisor_healthy = engine_state != DEGRADED;
+    let uncertain_owner_deliveries = super::obligations::uncertain_deliveries(pool)
+        .await
+        .map_err(|error| SupervisorError::Storage(error.to_string()))?;
+    let supervisor_healthy = engine_state != DEGRADED && uncertain_owner_deliveries.is_empty();
+    if !uncertain_owner_deliveries.is_empty() {
+        engine_fault.get_or_insert(EngineFault {
+            code: "OWNER_ANSWER_UNCERTAIN".to_owned(),
+            message: format!("{} owner answer delivery obligation(s) are uncertain", uncertain_owner_deliveries.len()),
+        });
+    }
     let restart_required = engine.enabled && !engine.installed;
     let owner = identities(pool).await?.into_iter().next().map(|identity| SetupOwner {
         supervisor_id: identity.supervisor_id,
@@ -426,6 +439,8 @@ pub async fn setup_status(
         sessions: totals.sessions,
         turns: totals.turns,
         last_at: totals.last_at,
+        last_pass: super::memory_import::last_pass(pool, super::memory_import::OMO_MEMORY_PASS_KEY).await?,
+        daily_tokens: Some(super::memory_import::daily_tokens(pool, chrono::Utc::now(), super::memory_import::daily_cap()).await?),
     };
     let adoptable = adoptable_lanes(pool).await?;
     let next_action = if !engine.enabled {

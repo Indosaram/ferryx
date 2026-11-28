@@ -5,6 +5,10 @@ use sqlx::SqlitePool;
 use crate::error::Result;
 use crate::storage::now_rfc3339;
 
+#[cfg(test)]
+#[path = "actions/contract_tests.rs"]
+mod contract_tests;
+
 /// The brief file text an external tracker shows for a lane: the first 20 KiB, lossy UTF-8;
 /// empty when there is no file or it cannot be read.
 pub async fn read_brief_content(brief_path: &str) -> String {
@@ -31,6 +35,49 @@ pub(crate) async fn open_lane(
     done: &str,
     thread: Option<&str>,
 ) -> Result<String> {
+    let request = LaneRequest { key_base, title, brief, cwd, done, thread };
+    open_lane_with_policy(pool, request, false).await
+}
+
+pub(crate) struct LaneRequest<'a> {
+    pub key_base: &'a str,
+    pub title: &'a str,
+    pub brief: &'a str,
+    pub cwd: &'a str,
+    pub done: &'a str,
+    pub thread: Option<&'a str>,
+}
+
+pub(crate) async fn open_lane_with_policy(
+    pool: &SqlitePool,
+    request: LaneRequest<'_>,
+    cron_remediation: bool,
+) -> Result<String> {
+    let LaneRequest { key_base, title, brief, cwd, done, thread } = request;
+    let parsed = crate::lanes::signals::parse_signals(done)
+        .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+    if !cron_remediation && parsed.iter().all(|signal| matches!(signal, crate::lanes::signals::DoneSignal::File { .. })) {
+        return Err(crate::error::HubError::message("needs a verifiable done check"));
+    }
+    let brief_text = brief.trim();
+    if brief_text.is_empty() || !brief_text.to_ascii_lowercase().contains("source:") || !brief_text.to_ascii_lowercase().contains("owner request:") {
+        return Err(crate::error::HubError::message("brief must contain the owner's original request and source message reference"));
+    }
+    let thread = thread
+        .filter(|value| crate::lanes::threads::parse_ref(value).is_some())
+        .ok_or_else(|| crate::error::HubError::message("lane requires a valid thread binding"))?;
+    for signal in &parsed {
+        if !cron_remediation {
+            if let crate::lanes::signals::DoneSignal::Command { .. } = signal {
+                let results = crate::lanes::signals::check_signals(std::slice::from_ref(signal), std::path::Path::new(cwd)).await;
+                if results.first().is_some_and(|result| result.passed) {
+                    return Err(crate::error::HubError::message(format!("command done check already passes at open: {}", results[0].detail)));
+                }
+            }
+        }
+    }
+    let stored_signals = serde_json::to_string(&parsed)
+        .map_err(|error| crate::error::HubError::message(error.to_string()))?;
     let lane_key = sanitize_lane_key(&format!(
         "{}-{:04x}",
         key_base,
@@ -49,17 +96,59 @@ pub(crate) async fn open_lane(
     tokio::fs::write(&brief_path, brief)
         .await
         .map_err(|error| crate::error::HubError::message(error.to_string()))?;
-    crate::lanes::state::insert_lane(pool, &lane_key, title, "tracker", cwd, done)
+    crate::lanes::state::insert_lane(pool, &lane_key, title, "tracker", cwd, &stored_signals)
         .await
         .map_err(|error| crate::error::HubError::message(error.to_string()))?;
-    if let Some(thread) = thread.filter(|value| crate::lanes::threads::parse_ref(value).is_some()) {
-        sqlx::query("UPDATE lanes SET thread_channel_id = ? WHERE key = ?")
-            .bind(thread)
-            .bind(&lane_key)
-            .execute(pool)
-            .await?;
-    }
+    crate::lanes::worktree::create(pool, &lane_key, cwd).await?;
+    sqlx::query("UPDATE lanes SET thread_channel_id = ? WHERE key = ?")
+        .bind(thread)
+        .bind(&lane_key)
+        .execute(pool)
+        .await?;
+    let kickoff = format!("Starting: {title}. Done checks: {done}");
+    sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(?,?,?,?,?)")
+        .bind(&lane_key)
+        .bind("tracker")
+        .bind("kickoff")
+        .bind(kickoff)
+        .bind(now_rfc3339())
+        .execute(pool)
+        .await?;
     Ok(lane_key)
+}
+
+pub async fn migrate_legacy_file_only_lanes(pool: &SqlitePool) -> Result<u64> {
+    let lanes: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT key, status, lead_session_key, done_signals FROM lanes
+         WHERE status NOT IN ('verified_done','closed','failed') AND key NOT LIKE 'cron-fix-%'",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut blocked = 0;
+    for (key, status, lead, stored) in lanes {
+        let parsed = serde_json::from_str::<Vec<crate::lanes::signals::DoneSignal>>(&stored)
+            .or_else(|_| crate::lanes::signals::parse_signals(&stored));
+        if !parsed.is_ok_and(|signals| !signals.is_empty() && signals.iter().all(|signal| matches!(signal, crate::lanes::signals::DoneSignal::File { .. }))) {
+            continue;
+        }
+        let transitioned = if status == "blocked" {
+            true
+        } else {
+            crate::lanes::state::transition_unless_supervised(
+                pool, &key, crate::lanes::state::LaneStatus::Blocked,
+                Some("needs a verifiable done check"),
+            ).await.map_err(|error| crate::error::HubError::message(error.to_string()))?
+        };
+        if transitioned {
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lane_events WHERE lane_key = ? AND kind = 'legacy_file_only_done_check')")
+                .bind(&key).fetch_one(pool).await?;
+            if !exists {
+                crate::lanes::dispatch::enqueue(pool, &key, &lead, "legacy_file_only_done_check", "Lane blocked: needs a verifiable done check").await?;
+            }
+            blocked += 1;
+        }
+    }
+    Ok(blocked)
 }
 
 fn sanitize_lane_key(key: &str) -> String {
@@ -129,6 +218,14 @@ pub(crate) async fn apply_lane_action(
             ))
         }
         Err(error) => return Err(error.to_string()),
+    }
+    // A reopened lane starts a new run: a fresh quiet clock, evidence set and ceilings.
+    if action == "reopen" {
+        let now = chrono::Utc::now().timestamp_millis();
+        let ceilings = crate::lanes::oversight::Ceilings::default();
+        if let Err(error) = crate::lanes::oversight::start_run(pool, lane_key, ceilings, now).await {
+            return Err(error.to_string());
+        }
     }
     let kind = if action == "object" {
         "blocked"
