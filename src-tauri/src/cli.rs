@@ -1855,7 +1855,10 @@ fn browser_remote_command(
             value(vec![
                 (
                     "condition",
-                    serde_json::to_value(condition).map_err(|e| e.to_string())?,
+                    serde_json::to_value(condition).map_err(|error| HostRefusal {
+                        code: "BROWSER_CLI_INVALID",
+                        message: error.to_string(),
+                    })?,
                 ),
                 (
                     "timeoutMs",

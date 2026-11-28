@@ -185,7 +185,7 @@ pub(crate) async fn forward_capabilities(
                 .machine_error
                 .as_ref()
                 .map(|machine| machine.message.clone())
-                .unwrap_or(error.message),
+                .unwrap_or_else(|| error.code.clone()),
             details: None,
         },
     }

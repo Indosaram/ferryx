@@ -978,6 +978,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ReferenceChatIdentity => "referenceChatIdentity",
         DaemonRequest::AgentMemoryBlock { .. } => "agentMemoryBlock",
         DaemonRequest::ReferenceChat { .. } => "referenceChat",
+        DaemonRequest::Browser { .. } => "browser",
+        DaemonRequest::HostCapabilities { .. } => "hostCapabilities",
     }
 }
 
@@ -1214,6 +1216,13 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
             after_revision: Some(_),
             ..
         } => LAYOUT_LONG_POLL_REQUEST_TIMEOUT,
+        // A forwarded command runs capabilities, journal and the command on the host, and a
+        // `wait` command parks there until its condition or timeout: the 15 s default would
+        // report a live command as failed while the host still applies it.
+        DaemonRequest::Browser { host_id: Some(_), .. } => {
+            DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT
+        }
+        DaemonRequest::HostCapabilities { .. } => DaemonClient::PAIRED_QUERY_OUTER_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }
@@ -2700,6 +2709,9 @@ impl DaemonClient {
             | Operation::LayoutPut { .. }
             | Operation::Resources
             | Operation::Operation { .. } => None,
+            // A browser command carries no journal id: the host's driver lease, not a replay
+            // token, is what keeps a repeated command from applying twice.
+            Operation::Browser { .. } => None,
             // Idempotent: a holder's fence push raises a maximum and never types anything.
             Operation::SupervisorFence { .. } => None,
             Operation::AgentControl { op, .. } => op.mutation_request_id(),

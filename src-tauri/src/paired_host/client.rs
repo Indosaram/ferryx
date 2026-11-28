@@ -523,11 +523,14 @@ impl Operation {
                 // A command that changes the page is a mutation: it must not be retried when
                 // the answer is ambiguous, or the host would apply it twice.
                 r.idempotent = matches!(command.as_str(), "getState" | "snapshot");
-                r.body = Some(serde_json::json!({
-                    "browserId": browser_id,
-                    "command": command,
-                    "params": params,
-                }));
+                r.body = Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "browserId": browser_id,
+                        "command": command,
+                        "params": params,
+                    }))
+                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
             }
             Self::SupervisorRequest { .. } => {
                 path = "supervisor/request";
