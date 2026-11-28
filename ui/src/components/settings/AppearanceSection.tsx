@@ -42,6 +42,7 @@ import { ThemeEditorPanel } from "./ThemeEditorPanel";
 import { ThemeImportDialog } from "./ThemeImportDialog";
 import { ThemePreviewCircles } from "./ThemePreviewCircles";
 import { ThemeSearchSection } from "./ThemeSearchSection";
+import { T3ThemeStoreSection } from "./T3ThemeStoreSection";
 
 export function AppearanceSection() {
   const { settings, invalidThemes, updateSettings, resetSettings } = useAppearanceSettings();
@@ -257,6 +258,18 @@ export function ThemeLibrary({
     });
     setErrors([]);
     setStatus(`Activated ${doc.name}.`);
+  }
+
+  function installDocuments(docs: ThemeDocumentV1[]) {
+    const byId = new Map(settings.customThemes.map((theme) => [theme.id, theme]));
+    for (const doc of docs) byId.set(doc.id, doc);
+    const first = docs[0];
+    updateSettings({
+      customThemes: Array.from(byId.values()),
+      ...(first ? { activeCustomThemeId: first.id, themeHalves: undefined } : {}),
+    });
+    setErrors([]);
+    if (first) setStatus(`Installed and activated ${first.name}.`);
   }
 
   function acceptDocument(raw: unknown) {
@@ -683,18 +696,9 @@ export function ThemeLibrary({
           ))}
         </ul>
 
-        <ThemeSearchSection
-          onInstallThemes={(docs) => {
-            const byId = new Map(settings.customThemes.map((t) => [t.id, t]));
-            for (const doc of docs) byId.set(doc.id, doc);
-            const first = docs[0];
-            updateSettings({
-              customThemes: Array.from(byId.values()),
-              ...(first ? { activeCustomThemeId: first.id, themeHalves: undefined } : {}),
-            });
-            if (first) setStatus(`Installed and activated ${first.name}.`);
-          }}
-        />
+        <ThemeSearchSection onInstallThemes={installDocuments} />
+
+        <T3ThemeStoreSection onInstallThemes={installDocuments} />
 
         <div className="my-3 flex flex-wrap gap-2">
           <button type="button" className={controlClass} onClick={() => fileInput.current?.click()}>
