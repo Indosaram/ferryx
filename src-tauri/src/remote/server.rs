@@ -38,7 +38,6 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
-    Json,
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};

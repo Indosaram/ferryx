@@ -10019,7 +10019,7 @@ impl DaemonServer {
                         // One command on a paired host, through the same relay route the remote
                         // UI uses. A lost answer is outcome-unknown and is not issued again.
                         Some(host_id) => {
-                            crate::remote::server::browser_command_service::forward_browser(
+                            crate::remote::browser_command_service::forward_browser(
                                 &self.remote_state,
                                 &self.paired_hosts,
                                 host_id,
