@@ -9,6 +9,7 @@ pub mod auth;
 pub mod backend;
 pub mod browser_admission;
 pub mod browser_backend;
+pub mod browser_command_service;
 pub mod browser_protocol;
 pub mod browser_security;
 pub mod browser_ws;

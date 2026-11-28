@@ -9978,6 +9978,67 @@ impl DaemonServer {
                         }
                     }
                 }
+                Ok(DaemonRequest::Browser {
+                    browser_id,
+                    command,
+                    params,
+                    host_id,
+                    document_generation,
+                    browser_instance_id,
+                    desktop_epoch,
+                    lease_epoch,
+                    device_id,
+                    connection_id,
+                }) => {
+                    match host_id {
+                        // This machine's own backend, the same one the remote UI drives.
+                        None => {
+                            let ctx = crate::remote::browser_backend::BrowserCommandContext {
+                                browser_id,
+                                command,
+                                params,
+                                document_generation,
+                                browser_instance_id,
+                                desktop_epoch,
+                                lease_epoch,
+                                device_id,
+                                connection_id,
+                            };
+                            match self.remote_state.browser_backend().execute_command(ctx).await {
+                                Ok(result) => DaemonResponse::BrowserOk {
+                                    result: serde_json::to_value(result)
+                                        .unwrap_or(serde_json::Value::Null),
+                                },
+                                Err(error) => {
+                                    crate::remote::browser_command_service::browser_error_response(
+                                        error,
+                                    )
+                                }
+                            }
+                        }
+                        // One command on a paired host, through the same relay route the remote
+                        // UI uses. A lost answer is outcome-unknown and is not issued again.
+                        Some(host_id) => {
+                            crate::remote::server::browser_command_service::forward_browser(
+                                &self.remote_state,
+                                &self.paired_hosts,
+                                host_id,
+                                crate::remote::browser_backend::BrowserCommandContext {
+                                    browser_id,
+                                    command,
+                                    params,
+                                    document_generation,
+                                    browser_instance_id,
+                                    desktop_epoch,
+                                    lease_epoch,
+                                    device_id,
+                                    connection_id,
+                                },
+                            )
+                            .await
+                        }
+                    }
+                }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),
             };
 

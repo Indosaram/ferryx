@@ -38,6 +38,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
+    Json,
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -5111,6 +5112,8 @@ fn gateway_capability_names(
         capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
         capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
+        // One browser command per request, on the same backend the remote UI already drives.
+        capabilities.push(BROWSER_REMOTE_CAPABILITY);
         if supervisor {
             capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
             capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
@@ -6477,6 +6480,81 @@ fn browser_http_error(err: RemoteBrowserError) -> (StatusCode, String) {
         ),
     }
 }
+
+/// One browser command forwarded from a paired caller (`browserRemoteV1`).
+///
+/// This is the same surface the remote UI already drives over its browser WebSocket, reached
+/// over HTTP instead: the backend applies its closed command whitelist, `eval` stays refused
+/// because a forwarded request never carries an approval, and any mutation still has to pass
+/// the `Execute` driver-lease guard. The command is never run here; it is handed to the
+/// backend exactly as a remote client's would be.
+async fn browser_command(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(body): Json<BrowserCommandBody>,
+) -> Result<Response, (StatusCode, String)> {
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    // A command acts on one browser inside the desktop's published scope, so an absent scope
+    // is refused rather than defaulted: no scope means nothing is shared right now.
+    let scope = derive_desktop_scope(&state).ok_or((
+        StatusCode::CONFLICT,
+        "BROWSER_NO_ACTIVE_SCOPE: no workspace is shared by the desktop".to_string(),
+    ))?;
+    if body.browser_id.trim().is_empty() || body.command.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BROWSER_INVALID_REQUEST: browserId and command are required".to_string(),
+        ));
+    }
+
+    let ctx = super::browser_backend::BrowserCommandContext {
+        browser_id: body.browser_id,
+        command: body.command,
+        params: body.params,
+        document_generation: body.document_generation,
+        browser_instance_id: body.browser_instance_id,
+        desktop_epoch: body.desktop_epoch,
+        lease_epoch: body.lease_epoch,
+        device_id: body.device_id,
+        connection_id: body.connection_id,
+    };
+    match state.browser_backend().execute_command(ctx).await {
+        Ok(result) => Ok(Json(result).into_response()),
+        Err(e) => Err(browser_http_error(e)),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCommandBody {
+    browser_id: String,
+    command: String,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+    #[serde(default)]
+    document_generation: Option<String>,
+    #[serde(default)]
+    browser_instance_id: Option<String>,
+    #[serde(default)]
+    desktop_epoch: Option<String>,
+    #[serde(default)]
+    lease_epoch: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    connection_id: Option<String>,
+}
+
+/// One browser command per request on a paired host. A peer must advertise it before a
+/// `browser/command` request is written, so an older host never receives a route it cannot
+/// serve.
+pub const BROWSER_REMOTE_CAPABILITY: &str = "browserRemoteV1";
 
 async fn list_browser_sessions(
     State(state): State<Arc<RemoteGatewayState>>,
@@ -10995,6 +11073,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
         .route("/api/v1/browser/sessions", get(list_browser_sessions))
+        .route("/api/v1/browser/command", post(browser_command))
         .route("/api/v1/browser/identify", get(identify_browser_session))
         .route("/api/v1/browser/{browserId}", get(ws_browser_handler))
         .route(

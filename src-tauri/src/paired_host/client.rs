@@ -131,6 +131,16 @@ pub enum Operation {
     },
     /// Host and per-session resource sample (`resourceUsageV1`); read-only.
     Resources,
+    /// One browser command on the paired host (`browserRemoteV1`). The host's browser backend
+    /// validates it exactly as it validates a remote UI client: a closed command whitelist,
+    /// `eval` refused because a forwarded operation never carries an approval, and every
+    /// mutation gated behind `Execute` with a driver lease.
+    Browser {
+        browser_id: String,
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<serde_json::Value>,
+    },
     /// A new supervisor lease holder raises the host's fence for its account
     /// (`POST supervisor/fence`, `supervisorFenceV1`).
     SupervisorFence { account: String, fence: u64 },
@@ -186,6 +196,8 @@ pub enum OperationResult {
     /// A layout write whose base revision the host had already moved past.
     LayoutConflict(m::SharedLayout),
     AgentControl(serde_json::Value),
+    /// One browser command's answer from the paired host.
+    Browser(serde_json::Value),
     Resources(crate::daemon::resource_usage::HostResourceSnapshot),
     /// The holder's answer to a supervisor request or observation.
     Supervisor(serde_json::Value),
@@ -499,6 +511,23 @@ impl Operation {
             Self::Resources => {
                 path = "resources";
                 r.capability = Some(crate::remote::resources_api::RESOURCE_USAGE_CAPABILITY);
+            }
+            Self::Browser {
+                browser_id,
+                command,
+                params,
+            } => {
+                path = "browser/command";
+                r.method = Method::POST;
+                r.capability = Some(crate::remote::server::BROWSER_REMOTE_CAPABILITY);
+                // A command that changes the page is a mutation: it must not be retried when
+                // the answer is ambiguous, or the host would apply it twice.
+                r.idempotent = matches!(command.as_str(), "getState" | "snapshot");
+                r.body = Some(serde_json::json!({
+                    "browserId": browser_id,
+                    "command": command,
+                    "params": params,
+                }));
             }
             Self::SupervisorRequest { .. } => {
                 path = "supervisor/request";
@@ -2718,6 +2747,7 @@ fn map_result(
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::SupervisorFence { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::Resources => OperationResult::Resources(decode(bytes)?),
+        Operation::Browser { .. } => OperationResult::Browser(decode(bytes)?),
         Operation::SupervisorRequest { .. }
         | Operation::SupervisorObserve { .. }
         | Operation::LaneLifecycle { .. } => {

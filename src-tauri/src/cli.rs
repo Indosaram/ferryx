@@ -1783,6 +1783,144 @@ pub fn build_dom_find_script(subselector: &BrowserFindSubselector) -> String {
     }
 }
 
+/// Map a CLI command onto the closed set a paired host accepts.
+///
+/// The host validates the command name against its own whitelist and refuses the rest with
+/// `Unsupported command`, so a command outside that set is refused here with the same typed
+/// shape instead of travelling and failing remotely. `eval` is deliberately absent: a
+/// forwarded operation never carries an approval, so the host would refuse it anyway.
+fn browser_remote_command(
+    command: &BrowserCliCommand,
+) -> Result<(String, Option<serde_json::Value>), String> {
+    let value = |pairs: Vec<(&str, serde_json::Value)>| {
+        Some(serde_json::Value::Object(
+            pairs
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        ))
+    };
+    match command {
+        BrowserCliCommand::Navigate { url, .. } => {
+            Ok(("navigate".into(), value(vec![("url", url.clone().into())])))
+        }
+        BrowserCliCommand::Back { .. } => Ok(("back".into(), None)),
+        BrowserCliCommand::Forward { .. } => Ok(("forward".into(), None)),
+        BrowserCliCommand::Reload { .. } => Ok(("reload".into(), None)),
+        BrowserCliCommand::Snapshot { .. } => Ok(("snapshot".into(), None)),
+        BrowserCliCommand::Url { .. } | BrowserCliCommand::Title { .. } => {
+            Ok(("getState".into(), None))
+        }
+        BrowserCliCommand::Click {
+            generation,
+            reference,
+            ..
+        } => Ok((
+            "click".into(),
+            value(vec![
+                ("reference", reference.clone().into()),
+                ("documentGeneration", (*generation).into()),
+            ]),
+        )),
+        BrowserCliCommand::Fill {
+            generation,
+            reference,
+            value: text,
+            ..
+        } => Ok((
+            "fill".into(),
+            value(vec![
+                ("reference", reference.clone().into()),
+                ("value", text.clone().into()),
+                ("documentGeneration", (*generation).into()),
+            ]),
+        )),
+        BrowserCliCommand::Keypress {
+            generation, key, ..
+        } => Ok((
+            "keypress".into(),
+            value(vec![
+                ("key", key.clone().into()),
+                ("documentGeneration", (*generation).into()),
+            ]),
+        )),
+        BrowserCliCommand::Wait {
+            condition,
+            timeout_ms,
+            ..
+        } => Ok((
+            "wait".into(),
+            value(vec![
+                (
+                    "condition",
+                    serde_json::to_value(condition).map_err(|e| e.to_string())?,
+                ),
+                (
+                    "timeoutMs",
+                    timeout_ms.map_or(serde_json::Value::Null, |ms| ms.into()),
+                ),
+            ]),
+        )),
+        BrowserCliCommand::Eval { .. } => Err(
+            "BROWSER_EVAL_REQUIRES_LOCAL_APPROVAL: `eval` needs an approval this side cannot \
+             give, so a paired host refuses it; use snapshot + click/fill instead"
+                .into(),
+        ),
+        other => Err(format!(
+            "BROWSER_UNSUPPORTED_ON_HOST: `{}` runs only against this machine's browser; \
+             a paired host accepts navigate, back, forward, reload, click, fill, keypress, \
+             wait, snapshot and getState",
+            browser_cli_verb(other)
+        )),
+    }
+}
+
+fn browser_cli_verb(command: &BrowserCliCommand) -> &'static str {
+    match command {
+        BrowserCliCommand::Vault { .. } => "vault",
+        BrowserCliCommand::List => "list",
+        BrowserCliCommand::Open { .. } => "open",
+        BrowserCliCommand::Navigate { .. } => "navigate",
+        BrowserCliCommand::Back { .. } => "back",
+        BrowserCliCommand::Forward { .. } => "forward",
+        BrowserCliCommand::Reload { .. } => "reload",
+        BrowserCliCommand::Close { .. } => "close",
+        BrowserCliCommand::Identify => "identify",
+        BrowserCliCommand::Url { .. } => "url",
+        BrowserCliCommand::Title { .. } => "title",
+        BrowserCliCommand::Snapshot { .. } => "snapshot",
+        BrowserCliCommand::Click { .. } => "click",
+        BrowserCliCommand::Fill { .. } => "fill",
+        BrowserCliCommand::Keypress { .. } => "keypress",
+        BrowserCliCommand::Dblclick { .. } => "dblclick",
+        BrowserCliCommand::Hover { .. } => "hover",
+        BrowserCliCommand::Check { .. } => "check",
+        BrowserCliCommand::Uncheck { .. } => "uncheck",
+        BrowserCliCommand::ScrollIntoView { .. } => "scroll-into-view",
+        BrowserCliCommand::Select { .. } => "select",
+        BrowserCliCommand::Type { .. } => "type",
+        BrowserCliCommand::Scroll { .. } => "scroll",
+        BrowserCliCommand::Eval { .. } => "eval",
+        BrowserCliCommand::Wait { .. } => "wait",
+        BrowserCliCommand::Screenshot { .. } => "screenshot",
+        BrowserCliCommand::Console { .. } => "console",
+        BrowserCliCommand::Errors { .. } => "errors",
+        BrowserCliCommand::Focus { .. } => "focus",
+        BrowserCliCommand::Cookies { .. } => "cookies",
+        BrowserCliCommand::Storage { .. } => "storage",
+        BrowserCliCommand::Get { .. } => "get",
+        BrowserCliCommand::Is { .. } => "is",
+        BrowserCliCommand::Find { .. } => "find",
+        BrowserCliCommand::Dialog { .. } => "dialog",
+        BrowserCliCommand::Download { .. } => "download",
+        BrowserCliCommand::Highlight { .. } => "highlight",
+        BrowserCliCommand::DropFiles { .. } => "drop-files",
+        BrowserCliCommand::Extensions { .. } => "extensions",
+        BrowserCliCommand::Tab { .. } => "tab",
+        BrowserCliCommand::State { .. } => "state",
+    }
+}
+
 fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
     match command {
         BrowserCliCommand::Vault { browser_id, action } => BrowserCliRequest::Vault { browser_id, action },
@@ -4417,6 +4555,77 @@ pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let output = format_browser_cli_response(&command, response)?;
     println!("{output}");
+    Ok(())
+}
+
+/// The browser id a command acts on, or `None` for the commands that name none.
+fn browser_command_id(command: &BrowserCliCommand) -> Option<&str> {
+    match command {
+        BrowserCliCommand::Navigate { browser_id, .. }
+        | BrowserCliCommand::Back { browser_id }
+        | BrowserCliCommand::Forward { browser_id }
+        | BrowserCliCommand::Reload { browser_id }
+        | BrowserCliCommand::Close { browser_id }
+        | BrowserCliCommand::Url { browser_id }
+        | BrowserCliCommand::Title { browser_id }
+        | BrowserCliCommand::Snapshot { browser_id }
+        | BrowserCliCommand::Click { browser_id, .. }
+        | BrowserCliCommand::Fill { browser_id, .. }
+        | BrowserCliCommand::Keypress { browser_id, .. }
+        | BrowserCliCommand::Dblclick { browser_id, .. }
+        | BrowserCliCommand::Hover { browser_id, .. }
+        | BrowserCliCommand::Check { browser_id, .. }
+        | BrowserCliCommand::Uncheck { browser_id, .. }
+        | BrowserCliCommand::ScrollIntoView { browser_id, .. }
+        | BrowserCliCommand::Select { browser_id, .. }
+        | BrowserCliCommand::Type { browser_id, .. }
+        | BrowserCliCommand::Scroll { browser_id, .. }
+        | BrowserCliCommand::Eval { browser_id, .. }
+        | BrowserCliCommand::Wait { browser_id, .. }
+        | BrowserCliCommand::Screenshot { browser_id, .. }
+        | BrowserCliCommand::Console { browser_id, .. }
+        | BrowserCliCommand::Errors { browser_id, .. }
+        | BrowserCliCommand::Focus { browser_id, .. }
+        | BrowserCliCommand::Cookies { browser_id, .. }
+        | BrowserCliCommand::Storage { browser_id, .. }
+        | BrowserCliCommand::Get { browser_id, .. }
+        | BrowserCliCommand::Is { browser_id, .. }
+        | BrowserCliCommand::Find { browser_id, .. }
+        | BrowserCliCommand::Dialog { browser_id, .. }
+        | BrowserCliCommand::Highlight { browser_id, .. }
+        | BrowserCliCommand::DropFiles { browser_id, .. }
+        | BrowserCliCommand::State { browser_id, .. } => Some(browser_id),
+        BrowserCliCommand::Vault { browser_id, .. } => Some(browser_id),
+        BrowserCliCommand::List
+        | BrowserCliCommand::Open { .. }
+        | BrowserCliCommand::Identify
+        | BrowserCliCommand::Download { .. }
+        | BrowserCliCommand::Extensions { .. }
+        | BrowserCliCommand::Tab { .. } => None,
+    }
+}
+
+/// Runs one browser command against a paired host.
+///
+/// The command travels over the daemon socket as `DaemonRequest::Browser { host_id }`, the
+/// same seam `agents --host` uses, so the relay is not reached from here and the host applies
+/// its own command whitelist, `eval` refusal and driver-lease guard.
+pub fn run_browser_cli_on_host(
+    host: &str,
+    command: BrowserCliCommand,
+) -> Result<(), String> {
+    let browser_id = browser_command_id(&command)
+        .ok_or_else(|| format!("`{}` needs a browser on the host", browser_cli_verb(&command)))?
+        .to_string();
+    let (command_name, params) = browser_remote_command(&command)?;
+    let runtime = browser_cli_runtime()?;
+    let response = runtime.block_on(crate::daemon::browser_command::request_browser_daemon(
+        browser_id,
+        command_name,
+        params,
+        Some(host.to_string()),
+    ))?;
+    println!("{response}");
     Ok(())
 }
 

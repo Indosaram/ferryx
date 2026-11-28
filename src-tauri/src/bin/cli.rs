@@ -110,7 +110,15 @@ fn main() {
         }
     }
     if group == Some("browser") {
-        let outcome = if let Some(parsed) = ferryx_lib::cli::parse_browser_controllers_cli(&args) {
+        // `ferryx <host> browser ...` arrives here with `--host <id>` right after `browser`.
+        // A browser command on a host goes through the daemon, not the local browser socket.
+        let mut browser_args = args.clone();
+        let host = ferryx_lib::cli::host_ref::take_host_flag(&mut browser_args);
+        let outcome = if let Some(host) = host {
+            parse_browser_cli(&browser_args).and_then(|command| {
+                ferryx_lib::cli::run_browser_cli_on_host(&host, command)
+            })
+        } else if let Some(parsed) = ferryx_lib::cli::parse_browser_controllers_cli(&args) {
             parsed.and_then(ferryx_lib::cli::run_browser_controllers_cli)
         } else if let Some(parsed) = ferryx_lib::cli::parse_browser_adapter_cli(&args) {
             parsed.and_then(ferryx_lib::cli::run_browser_adapter_cli)

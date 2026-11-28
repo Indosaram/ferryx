@@ -22,9 +22,20 @@ pub enum HostSpelling {
 
 pub fn spelling(group: &str) -> HostSpelling {
     match group {
-        "agents" | "supervisor" => HostSpelling::Flag,
+        "agents" | "supervisor" | "browser" => HostSpelling::Flag,
         _ => HostSpelling::Unsupported,
     }
+}
+
+/// Removes `--host <id>` from an argument list, returning the id it named.
+///
+/// A browser command is the one place where the flag has to be taken back out: its parser
+/// rejects unknown options, so the id is read here and the request is routed by the caller.
+pub fn take_host_flag(args: &mut Vec<String>) -> Option<String> {
+    let index = args.iter().position(|arg| arg == "--host")?;
+    let value = args.get(index + 1)?.clone();
+    args.drain(index..=index + 1);
+    Some(value)
 }
 
 /// Groups whose host is named inline, inside an argument, rather than by a prefix. A prefix
@@ -163,13 +174,45 @@ mod tests {
     }
 
     #[test]
+    fn browser_takes_the_host_flag_and_gives_it_back() {
+        let out = apply_host_prefix(&argv(&[
+            "ferryx-cli",
+            "air",
+            "browser",
+            "snapshot",
+            "--browser-id",
+            "b1",
+        ]))
+        .expect("browser reaches a host");
+        assert_eq!(
+            out,
+            argv(&[
+                "ferryx-cli",
+                "browser",
+                "--host",
+                "air",
+                "snapshot",
+                "--browser-id",
+                "b1",
+            ])
+        );
+        let mut rest = out;
+        assert_eq!(take_host_flag(&mut rest).as_deref(), Some("air"));
+        assert_eq!(
+            rest,
+            argv(&["ferryx-cli", "browser", "snapshot", "--browser-id", "b1"]),
+            "the parser sees no --host option"
+        );
+    }
+
+    #[test]
     fn a_group_that_cannot_reach_a_host_is_refused() {
         let refusal = apply_host_prefix(&argv(&[
-            "ferryx-cli", "air", "browser", "snapshot", "--browser-id", "b1",
+            "ferryx-cli", "air", "mcp", "--something",
         ]))
-        .expect_err("browser has no host path yet");
+        .expect_err("mcp has no host path");
         assert_eq!(refusal.code, "TARGET_UNSUPPORTED");
-        assert!(refusal.message.contains("browser"));
+        assert!(refusal.message.contains("mcp"));
         assert!(refusal.message.contains("agents"));
     }
 
@@ -193,10 +236,17 @@ mod tests {
         for group in CLI_GROUPS {
             let args = argv(&["ferryx-cli", "air", group, "sub"]);
             match apply_host_prefix(&args) {
-                Ok(out) => assert!(
-                    out.iter().any(|token| token == "air"),
-                    "{group} accepted the prefix but lost the host: {out:?}"
-                ),
+                Ok(out) => {
+                    // `browser` hands the flag to a parser that rejects unknown options, so the
+                    // caller takes it back out; every other accepted group keeps it in argv.
+                    let mut out = out;
+                    let taken = take_host_flag(&mut out);
+                    assert!(
+                        taken.as_deref() == Some("air")
+                            || out.iter().any(|token| token == "air"),
+                        "{group} accepted the prefix but lost the host: {out:?}"
+                    );
+                }
                 Err(refusal) => assert_eq!(refusal.code, "TARGET_UNSUPPORTED"),
             }
         }

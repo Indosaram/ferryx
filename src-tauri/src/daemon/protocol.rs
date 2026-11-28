@@ -1834,6 +1834,30 @@ pub enum DaemonRequest {
     },
     /// The Settings card: the agent-control switch, excluded devices and the newest audit lines.
     AgentControlSettingsGet,
+    /// One browser command, run either on this machine's browser backend or on a paired host.
+    /// `host_id` absent means local. The host's own backend applies the same closed command
+    /// whitelist, `eval` refusal, and driver-lease guard a remote UI client meets.
+    #[serde(rename_all = "camelCase")]
+    Browser {
+        browser_id: String,
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        document_generation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        browser_instance_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        desktop_epoch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_epoch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_id: Option<String>,
+    },
     /// Save the agent-control switch and excluded devices to `agent-control.json`.
     #[serde(rename_all = "camelCase")]
     AgentControlSettingsSet {
@@ -2390,6 +2414,11 @@ pub enum DaemonResponse {
     AcknowledgeAgentOutcomeOk,
     #[serde(rename_all = "camelCase")]
     AgentControlOk {
+        result: serde_json::Value,
+    },
+    /// One browser command's answer: `{ success, value }` as the browser backend reports it.
+    #[serde(rename_all = "camelCase")]
+    BrowserOk {
         result: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]

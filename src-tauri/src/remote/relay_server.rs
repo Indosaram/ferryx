@@ -3506,6 +3506,21 @@ async fn terminal_preferences_handler(
 // These literal HTTP endpoints must outrank /browser/{browser_id} so that
 // HTTP discovery requests are forwarded to HTTP endpoints rather than captured
 // by the WebSocket upgrade handler.
+async fn browser_command_http_handler(
+    state: State<RelayState>,
+    AxumPath(machine): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    request: Request<Body>,
+) -> Result<Response, StatusCode> {
+    host_http_handler(
+        state,
+        AxumPath((machine, "browser/command".into())),
+        peer,
+        request,
+    )
+    .await
+}
+
 async fn browser_sessions_http_handler(
     state: State<RelayState>,
     AxumPath(machine): AxumPath<String>,
@@ -3585,6 +3600,10 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["voice", "status"])
             | ("POST", ["voice", "transcribe" | "speak"])
             | ("GET", ["browser", "sessions" | "identify"])
+            // One browser command on the host's own browser backend, on the same closed
+            // command whitelist and driver-lease guard the remote UI already goes through.
+            // `browserRemoteV1` is advertised by the host and required by the caller.
+            | ("POST", ["browser", "command"])
             | ("POST", ["workspace", "select" | "selection"])
             // Paired desktop machine reads/uploads. Paste-upload and file-write chunks are
             // 32 KiB raw, which stays under the 64 KiB forwarded-body bound once base64 + JSON wrapped.
@@ -4467,6 +4486,10 @@ pub fn relay_router_with_account(
         .route(
             "/host/{machine_id}/api/v1/browser/sessions",
             get(browser_sessions_http_handler),
+        )
+        .route(
+            "/host/{machine_id}/api/v1/browser/command",
+            post(browser_command_http_handler),
         )
         .route(
             "/host/{machine_id}/api/v1/browser/identify",
