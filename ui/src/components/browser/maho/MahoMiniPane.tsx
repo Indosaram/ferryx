@@ -13,7 +13,7 @@
 // hands the native surface over without a reload.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Check, Copy, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Globe, Link, X } from "lucide-react";
 
 import {
   browserStore,
@@ -27,7 +27,7 @@ import { normalizeBrowserAddress, type BrowserSettingsState, loadBrowserSettings
 import { isMacShortcutPlatform } from "../../../lib/shortcuts";
 import type { BrowserTab } from "../../../lib/types";
 import { BrowserPane } from "../../BrowserPane";
-import { displayHost, displayUrl } from "./mahoBrowserTabActions";
+import { displayHost } from "./mahoBrowserTabActions";
 import { spacePaletteStyle } from "./mahoSpacePalette";
 import "./maho.css";
 
@@ -88,6 +88,7 @@ export function MahoMiniPane({
   const [selectedSpaceId, setSelectedSpaceId] = useState<string | null>(targetSpaceId ?? null);
   const [draftUrl, setDraftUrl] = useState("");
   const [copied, setCopied] = useState(false);
+  const [compact, setCompact] = useState(false);
   const settingsRef = useRef<BrowserSettingsState>(loadBrowserSettings());
   settingsRef.current = loadBrowserSettings();
 
@@ -108,8 +109,9 @@ export function MahoMiniPane({
   const shortcutLabel = isMacShortcutPlatform() ? "⌘O" : "Ctrl+O";
 
   useEffect(() => {
-    setDraftUrl(miniUrl ? displayUrl(miniUrl) : "");
+    setDraftUrl(miniUrl && miniUrl !== "about:blank" ? displayHost(miniUrl) : "");
     setCopied(false);
+    setCompact(false);
   }, [miniBrowserId, miniUrl]);
 
   // A second mini replaces the slot: the session the pane was holding is transient, so it ends
@@ -215,10 +217,11 @@ export function MahoMiniPane({
 
   return (
     <section
-      className="flex h-full min-h-0 w-full flex-col overflow-hidden border-l border-border bg-background"
+      className="maho-mini-pane flex h-full min-h-0 w-full flex-col overflow-hidden border-l border-border bg-background"
       data-maho-space={chosenSpace?.id ?? ""}
       data-testid="maho-mini-pane"
       data-visible={visible ? "true" : "false"}
+      data-compact={compact ? "true" : "false"}
       aria-label="Maho Mini"
       aria-hidden={visible ? undefined : true}
       style={paletteStyle as unknown as CSSProperties}
@@ -226,27 +229,25 @@ export function MahoMiniPane({
       {/* One row, Maho Mini's own order: `[Space chip | centered host | copy] [Open in <Space>
           ⌘O | Space selector] [x]`. */}
       <div
-        className="flex items-center gap-1 border-b border-border px-2 py-1"
+        className="maho-mini-bar"
         role="toolbar"
         aria-label="Maho Mini bar"
       >
+        <div className="maho-mini-integrated">
         <span
-          className="inline-flex max-w-24 shrink-0 items-center gap-1.5 truncate rounded-full bg-muted px-2 py-0.5 text-[11px]"
+          className="maho-mini-space"
           data-testid="maho-mini-space-chip"
           title={`Space: ${chosenSpace?.name ?? ""}`}
         >
-          <span
-            className="size-2 shrink-0 rounded-full"
-            style={{ backgroundColor: chosenSpace?.color ?? "currentColor" }}
-            aria-hidden="true"
-          />
+          <Globe className="size-3.5 shrink-0" style={{ color: chosenSpace?.color }} aria-hidden="true" />
           <span className="truncate">{chosenSpace?.name ?? "Space"}</span>
         </span>
         <input
-          className="h-6 min-w-0 flex-1 rounded border border-border bg-background px-2 text-center text-xs outline-none focus:border-ring"
-          aria-label="Mini address"
+          className="maho-mini-address"
+          aria-label="Address"
           value={draftUrl}
-          placeholder={host}
+          placeholder="Search or enter address"
+          title={host}
           onChange={(event) => setDraftUrl(event.target.value)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
@@ -256,26 +257,29 @@ export function MahoMiniPane({
         />
         <button
           type="button"
-          className="maho-top-bar__button"
-          aria-label="Copy URL"
-          title="Copy URL"
+          className="maho-mini-copy maho-top-bar__button"
+          aria-label="Copy link"
+          title="Copy link"
           onClick={copyUrl}
         >
-          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+          {copied ? <Check aria-hidden="true" /> : <Link aria-hidden="true" />}
         </button>
+        </div>
+        <div className="maho-mini-promote-control">
         <button
           type="button"
-          className="flex h-6 min-w-0 shrink-0 items-center gap-1 rounded bg-primary px-2 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+          className="maho-mini-promote"
           aria-label={`Open in ${chosenSpace?.name ?? "Space"}`}
           title={`Open in ${chosenSpace?.name ?? "Space"} (${shortcutLabel})`}
           onClick={promote}
         >
           <span className="max-w-28 truncate">Open in {chosenSpace?.name ?? "Space"}</span>
-          <kbd className="rounded border border-primary-foreground/30 px-1 text-[10px]">{shortcutLabel}</kbd>
+          <kbd>{shortcutLabel}</kbd>
         </button>
+        <label className="maho-mini-choose">
+        <ChevronDown aria-hidden="true" />
         <select
-          className="h-6 w-24 min-w-0 shrink-0 rounded border border-border bg-background px-1 text-[11px] outline-none focus:border-ring"
-          aria-label="Promote to Space"
+          aria-label="Choose Space"
           value={chosenSpaceId}
           onChange={(event) => setSelectedSpaceId(event.target.value)}
         >
@@ -285,6 +289,11 @@ export function MahoMiniPane({
             </option>
           ))}
         </select>
+        </label>
+        </div>
+        <button type="button" className="maho-mini-toggle maho-top-bar__button" aria-label={compact ? "Expand Mini window" : "Compact Mini window"} onClick={() => setCompact((value) => !value)}>
+          {compact ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
+        </button>
         <button
           type="button"
           className="maho-top-bar__button"
@@ -295,12 +304,12 @@ export function MahoMiniPane({
           <X aria-hidden="true" />
         </button>
       </div>
-      <div className="min-h-0 flex-1">
+      <div className="maho-mini-page min-h-0 flex-1">
         {/* A hidden mini keeps its transient session in the store but must not touch the native
             surface: `BrowserPane` claims `browserViewportCoordinator` on mount and hides the
             surface whenever it is not visible, which would blank a live worktree split or
             Browser-mode pane showing this same `browserId`. */}
-        {visible ? (
+        {visible && !compact ? (
           <BrowserPane
             tab={miniTabFor(miniTab)}
             visible

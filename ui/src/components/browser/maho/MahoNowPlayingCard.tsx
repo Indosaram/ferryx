@@ -7,11 +7,9 @@
 // the media map and `browserStore.tabs` - so it is where that stale entry is dropped
 // (`browserMediaStore.forget`), which is what fixes the lingering-track edge case.
 //
-// Everything the page reports (title, artist, artwork) is display text: the artwork is
-// only rendered for http/https URLs, and a host failure is shown from its structured
-// code (`extractBrowserErrorCode`), never from pattern-matching a message.
+// Source mapping: maho_now_playing_card.cc ignores artwork and expands metadata on hover.
 
-import { Music2, Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { Music2, Pause, Play, Volume2, VolumeX, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -27,24 +25,12 @@ import {
   type BrowserStore,
 } from "../../../state/browserStore";
 import { displayHost } from "./mahoBrowserTabActions";
-import { MAHO_LAYOUT_TOKENS } from "./mahoTokens";
 
 export type MahoNowPlayingCardProps = {
   store?: BrowserStore;
   /** Switch the browser to the playing tab. */
   onSelectTab: (browserId: string) => void;
 };
-
-/** Only a real web address is worth loading as an image; `data:`/`file:` are not artwork. */
-function safeArtworkUrl(url: string): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * The media entry the card shows: the most recently reported tab that still exists in
@@ -67,6 +53,7 @@ export function MahoNowPlayingCard({ store = browserStore, onSelectTab }: MahoNo
   const mediaStates = useBrowserMediaStates();
   const tabs = useBrowserStore((state) => state.tabs, store);
   const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [dismissedId, setDismissedId] = useState<string | null>(null);
 
   // A media entry whose tab is gone describes a session that cannot be controlled:
   // drop it instead of drawing controls that would fail.
@@ -90,11 +77,11 @@ export function MahoNowPlayingCard({ store = browserStore, onSelectTab }: MahoNo
     }
   }, []);
 
-  if (!current) return null;
+  if (!current || current.browserId === dismissedId) return null;
 
   const tab = tabs[current.browserId];
   const title = current.title.trim() || (tab ? tab.title.trim() || displayHost(tab.url) : "Now playing");
-  const artwork = safeArtworkUrl(current.artworkUrl);
+  const artist = current.artist.trim() || displayHost(tab.url);
   const toggleLabel = current.playing ? "Pause" : "Play";
   const muteLabel = current.muted ? "Unmute" : "Mute";
 
@@ -106,34 +93,16 @@ export function MahoNowPlayingCard({ store = browserStore, onSelectTab }: MahoNo
       data-browser-id={current.browserId}
       data-playing={current.playing ? "true" : "false"}
       data-muted={current.muted ? "true" : "false"}
-      className="maho-now-playing flex items-center gap-2 rounded-xl bg-muted/60 px-2 py-1.5"
-      style={{ borderRadius: MAHO_LAYOUT_TOKENS.rows.cornerRadius }}
-      onClick={() => onSelectTab(current.browserId)}
-      title={`Switch to ${title}`}
+      className="maho-now-playing"
     >
-      {artwork ? (
-        <img
-          src={artwork}
-          alt=""
-          data-testid="maho-now-playing-artwork"
-          className="size-8 shrink-0 rounded-md object-cover"
-        />
-      ) : (
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-          <Music2 className="size-4" aria-hidden="true" />
-        </span>
-      )}
-
-      <span className="min-w-0 flex-1">
-        <span data-testid="maho-now-playing-title" className="block truncate text-xs text-foreground">
-          {title}
-        </span>
-        {current.artist.trim() ? (
-          <span data-testid="maho-now-playing-artist" className="block truncate text-[10px] text-muted-foreground">
-            {current.artist}
-          </span>
-        ) : null}
-        {errorCode ? (
+      <div className="maho-now-playing__metadata">
+        <div className="maho-now-playing__title-row">
+          <span data-testid="maho-now-playing-title" className="min-w-0 flex-1 truncate">{title}</span>
+          <button type="button" aria-label="Dismiss Now Playing" title="Dismiss" onClick={() => setDismissedId(current.browserId)}><X aria-hidden="true" /></button>
+        </div>
+        <span data-testid="maho-now-playing-artist" className="maho-now-playing__artist block truncate">{artist}</span>
+      </div>
+      {errorCode ? (
           <span
             data-testid="maho-now-playing-error"
             className="block truncate font-mono text-[10px] text-destructive"
@@ -142,8 +111,12 @@ export function MahoNowPlayingCard({ store = browserStore, onSelectTab }: MahoNo
             {errorCode}
           </span>
         ) : null}
-      </span>
-
+      <div className="maho-now-playing__controls">
+        <button type="button" className="maho-now-playing__source" aria-label="Jump to source tab" title="Jump to source tab" onClick={() => onSelectTab(current.browserId)}>
+          {tab.faviconUrl ? <img src={tab.faviconUrl} alt="" /> : <Music2 aria-hidden="true" />}
+          {current.playing ? <span className="maho-now-playing__notes" aria-hidden="true">♪</span> : null}
+        </button>
+        <span className="flex-1" />
       <button
         type="button"
         aria-label={toggleLabel}
@@ -157,7 +130,7 @@ export function MahoNowPlayingCard({ store = browserStore, onSelectTab }: MahoNo
       >
         {current.playing ? <Pause className="size-4" aria-hidden="true" /> : <Play className="size-4" aria-hidden="true" />}
       </button>
-
+      <span className="flex-1" />
       <button
         type="button"
         aria-label={muteLabel}
@@ -171,6 +144,7 @@ export function MahoNowPlayingCard({ store = browserStore, onSelectTab }: MahoNo
       >
         {current.muted ? <VolumeX className="size-4" aria-hidden="true" /> : <Volume2 className="size-4" aria-hidden="true" />}
       </button>
+      </div>
     </div>
   );
 }

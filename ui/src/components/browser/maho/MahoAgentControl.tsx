@@ -10,7 +10,7 @@
 // IPC failures arrive as structured `{ code, message, details }`; they are read
 // through `extractBrowserErrorCode`, never by matching message text.
 
-import { ChevronDown, ChevronRight, Hand, ShieldQuestion } from "lucide-react";
+import { ChevronDown, ChevronRight, Hammer, Hand, Pause, ShieldQuestion } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { extractBrowserErrorCode } from "../../../lib/browserTauri";
@@ -300,27 +300,32 @@ function MahoAgentError({ activity, testId }: { activity: BrowserAgentActivity; 
 }
 
 /** Compact chip for `MahoSidebarTopBar`'s `controlActivity` slot. */
-export function MahoControlActivityChip({ activity }: { activity: BrowserAgentActivity }) {
-  if (activity.badgeCount === 0) return null;
-  const label = activity.activeTasks[0]?.controllerLabel ?? activity.handoffRequests[0]?.controllerLabel ?? null;
-  const helpCount = activity.handoffRequests.length;
+export function MahoControlActivityChip({ activity, onDetails, onSelectTab }: { activity: BrowserAgentActivity; onDetails?: () => void; onSelectTab?: (browserId: string) => void }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const task = activity.activeTasks[0];
+  const handoff = activity.handoffRequests[0];
+  const pending = activity.pendingApprovals.length > 0;
+  if (activity.badgeCount === 0 && !pending) return null;
+  const phrase = pending ? "Waiting for approval" : handoff ? "Paused" : "Acting on this tab";
+  const target = task?.title || "Untitled tab";
+  const label = task?.controllerLabel ?? handoff?.controllerLabel ?? "Maho AI";
+  const browserId = task?.browserId ?? handoff?.browserId;
+  const stop = () => {
+    if (pending && task?.controllerId) void activity.revokeController(task.controllerId);
+    else if (browserId) void activity.takeOver(browserId);
+    else for (const approval of activity.pendingApprovals) void activity.resolveApproval(approval.id, "deny");
+  };
   return (
-    <span
-      role="status"
-      aria-live="polite"
-      data-testid="maho-control-activity-chip"
-      className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/60 px-2 py-0.5 text-[11px] text-foreground"
-      title={helpCount > 0 ? `${agentLabel(label)} needs you on ${helpCount} tab(s)` : `${agentLabel(label)} controls ${activity.badgeCount} tab(s)`}
-    >
-      <Hand aria-hidden="true" className="h-3 w-3" />
-      <span className="max-w-[88px] truncate font-medium">{agentLabel(label)}</span>
-      <span className="text-muted-foreground">{activity.badgeCount}</span>
-      {helpCount > 0 ? (
-        <span data-testid="maho-control-activity-help" className="font-medium text-primary">
-          {helpCount} needs you
-        </span>
-      ) : null}
-    </span>
+    <div className="maho-control-activity">
+      <div role="status" aria-live="polite" aria-label={`${label} - ${phrase} - ${target}`} data-testid="maho-control-activity-chip" className="maho-control-activity__chip">
+        {pending ? <ShieldQuestion aria-hidden="true" /> : handoff ? <Pause aria-hidden="true" /> : <Hammer aria-hidden="true" />}
+        <span className="maho-control-activity__status">AI - {phrase}</span>
+        <span className="maho-control-activity__target">{target}</span>
+        <button type="button" aria-expanded={detailsOpen} onClick={() => onDetails ? onDetails() : setDetailsOpen((value) => !value)}>Details</button>
+        <button type="button" disabled={activity.busy} onClick={stop}>{pending || handoff ? "Revoke" : "Stop"}</button>
+      </div>
+      {detailsOpen ? <MahoAgentTasksSection activity={activity} onSelectTab={onSelectTab} /> : null}
+    </div>
   );
 }
 
@@ -359,63 +364,42 @@ export function MahoAgentTasksSection({
 }) {
   const [open, setOpen] = useState(true);
   const taskCount = activity.activeTasks.length;
+  const hasActivity = taskCount > 0 || activity.handoffRequests.length > 0 || activity.pendingApprovals.length > 0;
+  useEffect(() => {
+    if (activity.handoffRequests.length || activity.pendingApprovals.length) setOpen(true);
+  }, [activity.handoffRequests.length, activity.pendingApprovals.length]);
+  if (!hasActivity && !activity.errorCode) return null;
 
   return (
-    <section aria-label="Agent tasks" data-testid="maho-agent-tasks" className="text-[12px]">
+    <section aria-label="Agent tasks" data-testid="maho-agent-tasks" className="maho-agent-tasks">
       <button
         type="button"
         aria-expanded={open}
+        aria-label="Tasks"
         onClick={() => setOpen((current) => !current)}
-        className="flex w-full items-center gap-1 rounded-md px-1 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground hover:bg-muted/60"
+        className="maho-agent-tasks__header"
       >
         {open ? <ChevronDown aria-hidden="true" className="h-3 w-3" /> : <ChevronRight aria-hidden="true" className="h-3 w-3" />}
-        Agent tasks
-        <span data-testid="maho-agent-tasks-count" className="ml-auto text-foreground">
+        Tasks ({open ? "expanded" : "collapsed"})
+        <span data-testid="maho-agent-tasks-count" className="sr-only">
           {activity.badgeCount}
         </span>
       </button>
       {open ? (
-        <div className="mt-1 flex flex-col gap-1">
+        <div className="flex flex-col gap-0.5">
           {activity.activeTasks.map((task) => (
-            <div key={task.browserId} className="flex items-center gap-1 rounded-md px-1 py-0.5">
+            <div key={task.browserId} className="maho-agent-tasks__row">
               <button
                 type="button"
                 onClick={() => onSelectTab?.(task.browserId)}
-                aria-label={`Focus ${task.title}`}
+                aria-label={`Running: ${task.title}`}
                 className="flex min-w-0 flex-1 items-center gap-1 text-left hover:underline"
               >
-                <Hand aria-hidden="true" className="h-3 w-3 shrink-0" />
-                <span className="truncate">{task.title}</span>
+                <span className="truncate">Running: {task.title}</span>
               </button>
-              <MahoTabBorrowChip browserId={task.browserId} controllerLabel={task.controllerLabel} />
-              {task.controllerId ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-5 px-1.5 text-[10px]"
-                  disabled={activity.busy}
-                  aria-label={`Revoke ${task.controllerLabel ?? task.controllerId} on ${task.title}`}
-                  onClick={() => {
-                    const controllerId = task.controllerId;
-                    if (controllerId) void activity.revokeController(controllerId);
-                  }}
-                >
-                  Revoke
-                </Button>
-              ) : (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-5 px-1.5 text-[10px]"
-                  disabled={activity.busy}
-                  aria-label={`Take over ${task.title}`}
-                  onClick={() => void activity.takeOver(task.browserId)}
-                >
-                  Take over
-                </Button>
-              )}
+              <button type="button" disabled={activity.busy} aria-label={`Disconnect ${task.title}`} onClick={() => void activity.takeOver(task.browserId)}>
+                Disconnect
+              </button>
             </div>
           ))}
           {activity.handoffRequests.map((request) => (
@@ -529,12 +513,12 @@ export function MahoAgentControlledBanner({
       role="status"
       data-testid="maho-agent-controlled-banner"
       data-browser-id={browserId}
-      className="flex flex-col gap-1 border-b border-border bg-muted/70 px-3 py-1.5 text-[12px]"
+      className="maho-agent-banner-wrap"
     >
-      <div className="flex items-center gap-2">
-        <Hand aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+      <div className="maho-agent-banner">
+        <span className="maho-agent-banner__dot" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate">
-          <span className="font-medium">{agentLabel(label)}</span> is controlling this tab
+          This tab is controlled by {label ?? "the agent"}
         </span>
         {handoff ? null : (
           <Button
@@ -545,19 +529,28 @@ export function MahoAgentControlledBanner({
             disabled={activity.busy}
             onClick={() => void activity.takeOver(browserId)}
           >
-            Take over
+            Stop
           </Button>
         )}
       </div>
       {handoff ? (
         <div
           data-testid="maho-agent-help-bar"
-          className="flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1"
+          className="maho-agent-help-bar"
         >
-          <span className="min-w-0 flex-1 truncate">
-            <span className="font-medium">{agentLabel(handoff.controllerLabel ?? label)}</span> needs help
-            {handoff.reason ? `: ${handoff.reason}` : ""}
+          <span className="min-w-0 flex-1">
+            {handoff.reason || "Agent is waiting for your help"}
           </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-6 px-2 text-[11px]"
+            disabled={activity.busy}
+            onClick={() => void activity.doneHandoff(browserId)}
+          >
+            Complete
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -566,16 +559,7 @@ export function MahoAgentControlledBanner({
             disabled={activity.busy}
             onClick={() => void activity.takeOver(browserId)}
           >
-            Take over
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            className="h-6 px-2 text-[11px]"
-            disabled={activity.busy}
-            onClick={() => void activity.doneHandoff(browserId)}
-          >
-            Done
+            Cancel
           </Button>
         </div>
       ) : null}

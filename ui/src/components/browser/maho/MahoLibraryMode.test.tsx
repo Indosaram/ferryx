@@ -122,19 +122,19 @@ describe("category rail", () => {
 
     const rail = screen.getByRole("tablist", { name: "Browser library" });
     expect(within(rail).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual([
-      "Archive",
       "Downloads",
+      "Archived Tabs",
       "Bookmarks",
       "History",
     ]);
-    expect(within(rail).getByRole("tab", { name: "Archive" })).toHaveAttribute("aria-selected", "true");
+    expect(within(rail).getByRole("tab", { name: "Archived Tabs" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("maho-library-archive")).toBeInTheDocument();
 
     // Downloads reads the registry; it answers with an empty list here.
     fireEvent.click(within(rail).getByRole("tab", { name: "Downloads" }));
     expect(screen.getByRole("tab", { name: "Downloads" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByTestId("maho-library-downloads")).toBeInTheDocument();
-    expect(await screen.findByText("No downloads yet.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Search downloads" })).toBeInTheDocument();
 
     fireEvent.click(within(rail).getByRole("tab", { name: "Bookmarks" }));
     expect(await screen.findByTestId("maho-library-bookmarks")).toBeInTheDocument();
@@ -180,14 +180,14 @@ describe("archive", () => {
     const onOpenTab = vi.fn();
     render(<MahoLibraryMode store={store} onOpenTab={onOpenTab} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restore GitHub to Today" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore archived tab GitHub" }));
 
     const state = store.getState();
     expect(state.tabs.github).toBeDefined();
     expect(state.tabs.github.section).toBe("today");
     expect(state.archive).toHaveLength(0);
     expect(onOpenTab).toHaveBeenCalledWith("github");
-    expect(screen.getByText("Nothing archived yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore archived tab GitHub" })).toBeNull();
   });
 
   it("filters archived tabs by title and URL", async () => {
@@ -196,10 +196,59 @@ describe("archive", () => {
     archiveClosedTab(store, "docs", "Docs");
     render(<MahoLibraryMode store={store} />);
 
-    expect(screen.getByRole("button", { name: "Restore GitHub to Today" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Search archive"), { target: { value: "docs" } });
-    expect(screen.queryByRole("button", { name: "Restore GitHub to Today" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Restore Docs to Today" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore archived tab GitHub" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search Archive"), { target: { value: "docs" } });
+    expect(screen.queryByRole("button", { name: "Restore archived tab GitHub" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Restore archived tab Docs" })).toBeInTheDocument();
+  });
+});
+
+describe("download controls", () => {
+  it("searches filenames and keeps completed file actions wired", async () => {
+    host.downloads = [
+      { id: "report", url: "https://example.com/report.pdf", filePath: "/downloads/report.pdf", status: "completed", receivedBytes: 1024, totalBytes: 1024, createdAtMs: 1, updatedAtMs: 1 },
+      { id: "photo", url: "https://example.com/photo.png", filePath: "/downloads/photo.png", status: "completed", receivedBytes: 2048, totalBytes: 2048, createdAtMs: 2, updatedAtMs: 2 },
+    ];
+    render(<MahoLibraryMode store={makeStore()} defaultCategory="downloads" />);
+    await screen.findByTestId("download-row-report");
+    fireEvent.change(screen.getByRole("textbox", { name: "Search downloads" }), { target: { value: "report" } });
+    expect(screen.queryByTestId("download-row-photo")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("download-row-report")).getByRole("button", { name: "Open download" }));
+    await waitFor(() => expect(host.calls).toContainEqual({ command: "cmd_open_file_path", args: { path: "/downloads/report.pdf", editor: "system" } }));
+  });
+});
+
+describe("archive controls", () => {
+  it("deletes an archived tab without restoring it", () => {
+    const store = makeStore();
+    archiveClosedTab(store, "docs", "Docs");
+    render(<MahoLibraryMode store={store} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete archived tab Docs" }));
+    expect(store.getState().archive).toHaveLength(0);
+    expect(store.getState().tabs.docs).toBeUndefined();
+  });
+
+  it("filters archived tabs by date with a fixed clock", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    try {
+      const store = makeStore();
+      archiveClosedTab(store, "docs", "Docs");
+      render(<MahoLibraryMode store={store} />);
+      fireEvent.change(screen.getByRole("combobox", { name: "Filter archived tabs" }), { target: { value: "Older" } });
+      expect(screen.queryByRole("button", { name: "Restore archived tab Docs" })).toBeNull();
+      fireEvent.change(screen.getByRole("combobox", { name: "Filter archived tabs" }), { target: { value: "Today" } });
+      expect(screen.getByRole("button", { name: "Restore archived tab Docs" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dismisses the covering library on Escape", () => {
+    const onClose = vi.fn();
+    render(<MahoLibraryMode store={makeStore()} overlay onClose={onClose} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
 

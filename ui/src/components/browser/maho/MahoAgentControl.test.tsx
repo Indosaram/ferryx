@@ -136,12 +136,12 @@ describe("useBrowserAgentActivity surfaces", () => {
 
     expect(view.getByTestId("badge-count")).toHaveTextContent("1");
     await vi.waitFor(() =>
-      expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("qa-agent"),
+      expect(view.getByTestId("maho-control-activity-chip")).toHaveAttribute("aria-label", "qa-agent - Acting on this tab - Docs"),
     );
-    expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("1");
+    expect(within(view.getByTestId("maho-control-activity-chip")).getByRole("button", { name: "Stop" })).toBeEnabled();
 
     const section = view.getByTestId("maho-agent-tasks");
-    expect(within(section).getByText("Docs")).toBeInTheDocument();
+    expect(within(section).getByRole("button", { name: "Running: Docs" })).toBeInTheDocument();
     expect(within(section).getByTestId("maho-agent-tasks-count")).toHaveTextContent("1");
 
     // The tab row's own chip, outside the Agent Tasks section.
@@ -152,7 +152,7 @@ describe("useBrowserAgentActivity surfaces", () => {
     const banner = await view.findByTestId("maho-agent-controlled-banner");
     expect(banner).toHaveAttribute("data-browser-id", "docs");
     expect(banner).toHaveTextContent("qa-agent");
-    expect(banner).toHaveTextContent("is controlling this tab");
+    expect(within(banner).getByRole("button", { name: "Stop" })).toBeEnabled();
   });
 
   it("renders nothing agent-related while no agent holds a tab", async () => {
@@ -164,7 +164,7 @@ describe("useBrowserAgentActivity surfaces", () => {
     expect(view.queryByTestId("maho-control-activity-chip")).toBeNull();
     expect(within(view.getByTestId("tab-row-chips")).queryByTestId("maho-tab-borrow-chip")).toBeNull();
     expect(view.queryByTestId("maho-agent-controlled-banner")).toBeNull();
-    expect(within(view.getByTestId("maho-agent-tasks")).getByText("No agent activity")).toBeInTheDocument();
+    expect(view.queryByTestId("maho-agent-tasks")).toBeNull();
   });
 
   it("increments the badge when the backend adds a controlled tab", async () => {
@@ -179,7 +179,7 @@ describe("useBrowserAgentActivity surfaces", () => {
 
     await vi.waitFor(() => expect(view.getByTestId("badge-count")).toHaveTextContent("1"));
     await vi.waitFor(() =>
-      expect(view.getByTestId("maho-control-activity-chip")).toHaveTextContent("qa-agent"),
+      expect(view.getByTestId("maho-control-activity-chip")).toHaveAttribute("aria-label", "qa-agent - Acting on this tab - Docs"),
     );
     expect(view.getByTestId("maho-agent-controlled-banner")).toBeInTheDocument();
   });
@@ -189,7 +189,7 @@ describe("useBrowserAgentActivity surfaces", () => {
     const onSelectTab = vi.fn();
     const view = await mountSurfaces(store, "docs", onSelectTab);
 
-    fireEvent.click(within(view.getByTestId("maho-agent-tasks")).getByRole("button", { name: "Focus Docs" }));
+    fireEvent.click(within(view.getByTestId("maho-agent-tasks")).getByRole("button", { name: "Running: Docs" }));
     expect(onSelectTab).toHaveBeenCalledWith("docs");
   });
 });
@@ -200,7 +200,7 @@ describe("handoff and take over", () => {
     addTab(store, "docs", { title: "Docs", agentControlled: true });
     const view = await mountSurfaces(store, "docs");
 
-    fireEvent.click(within(view.getByTestId("maho-agent-controlled-banner")).getByRole("button", { name: "Take over" }));
+    fireEvent.click(within(view.getByTestId("maho-agent-controlled-banner")).getByRole("button", { name: "Stop" }));
 
     await vi.waitFor(() => expect(host.reclaim).toHaveBeenCalledWith("docs", true));
     // The tab survives: reclaiming a lease never closes or reloads the page.
@@ -220,7 +220,7 @@ describe("handoff and take over", () => {
     expect(helpBar).toHaveTextContent("human sign-in required");
     expect(view.getByTestId("badge-count")).toHaveTextContent("2");
 
-    fireEvent.click(within(helpBar).getByRole("button", { name: "Done" }));
+    fireEvent.click(within(helpBar).getByRole("button", { name: "Complete" }));
 
     await vi.waitFor(() => expect(host.reclaim).toHaveBeenCalledWith("signin", false));
     await vi.waitFor(() => expect(view.queryByTestId("maho-agent-help-bar")).toBeNull());
@@ -243,14 +243,15 @@ describe("handoff and take over", () => {
     await vi.waitFor(() => expect(store.getState().tabs.signin.agentControlled).toBe(false));
   });
 
-  it("revokes a controller from the Agent Tasks section", async () => {
+  it("disconnects only the selected task from the Agent Tasks section", async () => {
     const store = makeStore();
     addTab(store, "docs", { title: "Docs", agentControlled: true });
     const view = await mountSurfaces(store, "docs");
 
-    fireEvent.click(within(view.getByTestId("maho-agent-tasks")).getByRole("button", { name: "Revoke qa-agent on Docs" }));
+    fireEvent.click(within(view.getByTestId("maho-agent-tasks")).getByRole("button", { name: "Disconnect Docs" }));
 
-    await vi.waitFor(() => expect(host.revoke).toHaveBeenCalledWith(controllerId));
+    await vi.waitFor(() => expect(host.reclaim).toHaveBeenCalledWith("docs", true));
+    expect(host.revoke).not.toHaveBeenCalled();
   });
 });
 
@@ -290,7 +291,7 @@ describe("structured IPC failures", () => {
     host.reclaim.mockRejectedValue({ code: "AGENT_SESSION_GONE", message: "session 12345 vanished" });
     const view = await mountSurfaces(store, "docs");
 
-    fireEvent.click(within(view.getByTestId("maho-agent-controlled-banner")).getByRole("button", { name: "Take over" }));
+    fireEvent.click(within(view.getByTestId("maho-agent-controlled-banner")).getByRole("button", { name: "Stop" }));
 
     const alert = await view.findByTestId("maho-agent-banner-error");
     expect(alert).toHaveTextContent("AGENT_SESSION_GONE");

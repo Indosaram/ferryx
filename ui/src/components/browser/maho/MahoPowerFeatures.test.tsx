@@ -466,7 +466,7 @@ describe("MahoNowPlayingCard", () => {
 
     expect(screen.getByTestId("maho-now-playing-title")).toHaveTextContent("Song");
     expect(screen.getByTestId("maho-now-playing-artist")).toHaveTextContent("Artist");
-    expect(screen.getByTestId("maho-now-playing-artwork")).toHaveAttribute("src", "https://cdn.example.com/a.jpg");
+    expect(screen.queryByTestId("maho-now-playing-artwork")).toBeNull();
   });
 
   it("toggles pause and mute through controlBrowserMedia", async () => {
@@ -513,9 +513,22 @@ describe("MahoNowPlayingCard", () => {
     await act(async () => {});
     emitMedia(mediaState({ browserId: "tab-a" }));
 
-    fireEvent.click(screen.getByTestId("maho-now-playing"));
+    fireEvent.click(screen.getByRole("button", { name: "Jump to source tab" }));
 
     expect(onSelectTab).toHaveBeenCalledWith("tab-a");
+  });
+
+  it("dismisses without stopping media or closing the tab", async () => {
+    const store = makeStore();
+    addTab(store, "tab-a");
+    render(<MahoNowPlayingCard store={store} onSelectTab={vi.fn()} />);
+    await act(async () => {});
+    emitMedia(mediaState());
+    fireEvent.click(screen.getByLabelText("Dismiss Now Playing"));
+    expect(screen.queryByTestId("maho-now-playing")).toBeNull();
+    expect(store.getState().tabs["tab-a"]).toBeDefined();
+    expect(browserMediaStore.getState().has("tab-a")).toBe(true);
+    expect(tauri.invoke).not.toHaveBeenCalled();
   });
 
   it("hides and forgets the media entry once its tab is closed", async () => {

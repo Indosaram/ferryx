@@ -69,7 +69,7 @@ describe("MahoMiniPane", () => {
     expect(probe).toHaveAttribute("data-chrome", "maho-minimal");
     expect(probe).toHaveAttribute("data-visible", "true");
     // The address field is centered on the bare host, Maho-style.
-    expect(screen.getByRole("textbox", { name: "Mini address" })).toHaveValue("example.com/docs");
+    expect(screen.getByRole("textbox", { name: "Address" })).toHaveValue("example.com");
     expect(screen.getByTestId("maho-mini-space-chip")).toHaveTextContent("Personal");
   });
 
@@ -233,6 +233,30 @@ describe("MahoMiniPane", () => {
 
     rerender(<MahoMiniPane store={store} visible onDestroyMiniSession={vi.fn()} />);
     expect(screen.getByTestId("browser-pane-probe")).toHaveAttribute("data-browser-id", "mini-1");
+  });
+
+  it("compacts without destroying the session and expands the same browser", () => {
+    const store = makeStore();
+    seed(store, "mini-1");
+    store.setMini("mini-1");
+    const props = paneProps(store);
+    render(<MahoMiniPane {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Compact Mini window" }));
+    expect(screen.getByTestId("maho-mini-pane")).toHaveAttribute("data-compact", "true");
+    expect(screen.queryByTestId("browser-pane-probe")).toBeNull();
+    expect(props.onDestroyMiniSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Mini window" }));
+    expect(screen.getByTestId("browser-pane-probe")).toHaveAttribute("data-browser-id", "mini-1");
+  });
+
+  it("copies the full URL rather than the displayed host", () => {
+    const store = makeStore();
+    seed(store, "mini-1", "https://example.com/docs");
+    store.setMini("mini-1");
+    const onCopyUrl = vi.fn();
+    render(<MahoMiniPane {...paneProps(store)} onCopyUrl={onCopyUrl} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(onCopyUrl).toHaveBeenCalledWith("https://example.com/docs");
   });
 
   it("renders nothing without a mini slot", () => {

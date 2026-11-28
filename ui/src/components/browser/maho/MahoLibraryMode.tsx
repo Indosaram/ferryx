@@ -1,10 +1,7 @@
 // Maho Library mode: the 92dp category rail plus the list pane beside it.
 //
-// Maho's `maho_sidebar_library_rail_view` replaces the sidebar body with a rail of
-// four categories (Archive, Downloads, Bookmarks, History) and one list pane. The
-// geometry comes from `MAHO_LAYOUT_TOKENS.library` (92dp rail, 80dp item, 24dp icon)
-// and every color is a Ferryx semantic token, so the pane matches the app and the
-// Space palette tints only the rail through `maho.css`.
+// Source: maho_sidebar_library_rail_view.cc and maho_library_overlay_view.cc.
+// Ferryx retains its working bookmarks/history managers alongside the ported panels.
 //
 // The pane reuses the shipped data layer instead of re-implementing it:
 // `useBookmarks` / `addBookmark` / `updateBookmark` / `deleteBookmark` /
@@ -22,20 +19,20 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   AlertTriangle,
   Archive,
-  Bookmark,
-  Download,
+  Home,
+  Images,
+  ArrowDownToLine,
   FolderPlus,
   Globe,
-  History as HistoryIcon,
   Pencil,
-  RotateCcw,
   Search,
   Trash2,
   X,
   type LucideIcon,
 } from "lucide-react";
 
-import { BrowserDownloadRow } from "../../BrowserDownloadRow";
+import { extractDownloadName, formatBytes } from "../../BrowserDownloadRow";
+import { downloadFailureLabel } from "../../../lib/browserSystem";
 import { useBrowserDownloadActions, useBrowserDownloads } from "../../BrowserDownloadsShelf";
 import {
   addBookmark,
@@ -47,13 +44,13 @@ import {
   useBookmarks,
   type HostHistoryEntry,
 } from "../../../lib/browserLibrary";
-import { browserStore, useBrowserStore, type BrowserStore } from "../../../state/browserStore";
+import { browserStore, selectSpaceList, useBrowserStore, type BrowserStore } from "../../../state/browserStore";
 import { MAHO_LAYOUT_TOKENS } from "./mahoTokens";
 
 const LIBRARY = MAHO_LAYOUT_TOKENS.library;
 const HISTORY_LIMIT = 100;
 
-export type MahoLibraryCategory = "archive" | "downloads" | "bookmarks" | "history";
+export type MahoLibraryCategory = "archive" | "downloads" | "spaces" | "media" | "bookmarks" | "history";
 
 /** The rail's four categories, in Maho's order. */
 export const MAHO_LIBRARY_CATEGORIES: ReadonlyArray<{
@@ -61,10 +58,10 @@ export const MAHO_LIBRARY_CATEGORIES: ReadonlyArray<{
   label: string;
   icon: LucideIcon;
 }> = [
-  { id: "archive", label: "Archive", icon: Archive },
-  { id: "downloads", label: "Downloads", icon: Download },
-  { id: "bookmarks", label: "Bookmarks", icon: Bookmark },
-  { id: "history", label: "History", icon: HistoryIcon },
+  { id: "downloads", label: "Downloads", icon: ArrowDownToLine },
+  { id: "archive", label: "Archived Tabs", icon: Archive },
+  { id: "spaces", label: "Spaces", icon: Home },
+  { id: "media", label: "Media", icon: Images },
 ];
 
 const RECOVERY_NOTICE: Readonly<Record<"recoveredFromBackup" | "resetCorrupt", string>> = {
@@ -83,6 +80,9 @@ export type MahoLibraryModeProps = {
   onOpenTab?: (browserId: string) => void;
   onOpenUrl?: (url: string) => void;
   onClose?: () => void;
+  showMedia?: boolean;
+  railOnly?: boolean;
+  contentOnly?: boolean;
 };
 
 export function MahoLibraryMode({
@@ -94,10 +94,25 @@ export function MahoLibraryMode({
   onOpenTab,
   onOpenUrl,
   onClose,
+  showMedia = false,
+  railOnly = false,
+  contentOnly = false,
 }: MahoLibraryModeProps) {
   const [internalCategory, setInternalCategory] = useState<MahoLibraryCategory>(defaultCategory);
   const active = category ?? internalCategory;
   const activeLabel = MAHO_LIBRARY_CATEGORIES.find((candidate) => candidate.id === active)?.label ?? "Archive";
+
+  useEffect(() => {
+    if (!overlay || !onClose) return;
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [overlay, onClose]);
 
   const select = useCallback((next: MahoLibraryCategory) => {
     setInternalCategory(next);
@@ -107,7 +122,7 @@ export function MahoLibraryMode({
   return (
     <LibraryFrame overlay={overlay}>
       <div className="flex h-full min-h-0 w-full">
-        <nav
+        {!contentOnly ? <nav
           role="tablist"
           aria-label="Browser library"
           aria-orientation="vertical"
@@ -119,7 +134,7 @@ export function MahoLibraryMode({
             paddingBottom: LIBRARY.railInsets.bottom,
           }}
         >
-          {MAHO_LIBRARY_CATEGORIES.map(({ id, label, icon: Icon }) => (
+          {MAHO_LIBRARY_CATEGORIES.filter((item) => item.id !== "media" || showMedia).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               type="button"
@@ -133,20 +148,17 @@ export function MahoLibraryMode({
               onClick={() => select(id)}
             >
               <Icon aria-hidden="true" />
-              <span className="max-w-full truncate text-[10px] leading-none">{label}</span>
+              <span className="maho-library-rail__label">{id === "archive" ? <>Archived<br />Tabs</> : label}</span>
             </button>
           ))}
-        </nav>
-        <section
+        </nav> : null}
+        {!railOnly ? <section
           role="tabpanel"
           aria-label={activeLabel}
-          className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground"
+          className="maho-library-content flex min-h-0 min-w-0 flex-1 flex-col"
         >
-          <div className="flex items-center gap-1 border-b border-border px-2.5 py-1.5">
-            <h2 className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-              {activeLabel}
-            </h2>
-            {onClose ? (
+          {onClose ? (
+            <div className="maho-library-close">
               <button
                 type="button"
                 aria-label="Close library"
@@ -155,18 +167,22 @@ export function MahoLibraryMode({
               >
                 <X className="size-3.5" aria-hidden="true" />
               </button>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
           {active === "archive" ? (
             <ArchivePanel store={store} onOpenTab={onOpenTab} />
           ) : active === "downloads" ? (
             <DownloadsPanel />
+          ) : active === "spaces" ? (
+            <LibrarySpaces store={store} onOpenTab={onOpenTab} />
+          ) : active === "media" ? (
+            <LibraryMedia store={store} onOpenTab={onOpenTab} />
           ) : active === "bookmarks" ? (
             <BookmarksPanel onOpenUrl={onOpenUrl} />
           ) : (
             <HistoryPanel onOpenUrl={onOpenUrl} />
           )}
-        </section>
+        </section> : null}
       </div>
     </LibraryFrame>
   );
@@ -191,7 +207,7 @@ function LibraryFrame({ overlay, children }: { overlay: boolean; children: React
       aria-label="Browser library"
       data-maho-library="true"
       data-maho-library-overlay="true"
-      className="absolute inset-y-0 start-0 z-30 flex min-h-0 flex-col overflow-hidden rounded-e-xl border-e border-border bg-background text-foreground shadow-2xl"
+      className="maho-library-overlay absolute inset-y-0 start-0 z-30 flex min-h-0 flex-col overflow-hidden"
       style={{ width: LIBRARY.railWidth + LIBRARY.overlayContentWidth }}
     >
       {children}
@@ -199,27 +215,48 @@ function LibraryFrame({ overlay, children }: { overlay: boolean; children: React
   );
 }
 
+function LibrarySpaces({ store, onOpenTab }: { store: BrowserStore; onOpenTab?: (id: string) => void }) {
+  const state = useBrowserStore((snapshot) => snapshot, store);
+  return <div className="maho-library-spaces">{selectSpaceList(state).map((space) => (
+    <section key={space.id}>
+      <button type="button" className="maho-library-space-title" onClick={() => store.setActiveSpace(space.id)}><Home aria-hidden="true" style={{ color: space.color }} />{space.name}</button>
+      {Object.values(state.tabs).filter((tab) => tab.spaceId === space.id && tab.browserId !== state.miniBrowserId).map((tab) => <button type="button" key={tab.browserId} className="maho-library-row__open" onClick={() => onOpenTab?.(tab.browserId)}>{tab.title || compactLocation(tab.url)}</button>)}
+    </section>
+  ))}</div>;
+}
+
+function LibraryMedia({ store, onOpenTab }: { store: BrowserStore; onOpenTab?: (id: string) => void }) {
+  const tabs = useBrowserStore((state) => Object.values(state.tabs), store);
+  const media = tabs.filter((tab) => /\.(?:mp4|webm|mp3|ogg|wav|png|jpe?g|gif|webp)(?:[?#]|$)/i.test(tab.url));
+  return <div className="maho-library-media">{media.map((tab) => <button type="button" key={tab.browserId} onClick={() => onOpenTab?.(tab.browserId)}>{/\.(?:png|jpe?g|gif|webp)(?:[?#]|$)/i.test(tab.url) ? <img src={tab.url} alt="" /> : <Images aria-hidden="true" />}<span>{tab.title || compactLocation(tab.url)}</span></button>)}</div>;
+}
+
 function SearchField({
   label,
   placeholder,
   value,
   onChange,
+  autoFocus = false,
 }: {
   label: string;
   placeholder: string;
   value: string;
   onChange: (value: string) => void;
+  autoFocus?: boolean;
 }) {
   return (
-    <div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
-      <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+    <div className="maho-library-search-wrap">
+      <label className="maho-library-search">
+      <Search className="size-3.5 shrink-0" aria-hidden="true" />
       <input
         aria-label={label}
+        autoFocus={autoFocus}
         placeholder={placeholder}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-2 text-xs outline-none focus:border-ring"
+        className="min-w-0 flex-1 bg-transparent outline-none"
       />
+      </label>
     </div>
   );
 }
@@ -238,11 +275,25 @@ function matchesTerms(terms: readonly string[], haystack: string): boolean {
 function ArchivePanel({ store, onOpenTab }: { store: BrowserStore; onOpenTab?: (browserId: string) => void }) {
   const archive = useBrowserStore((state) => state.archive, store);
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("Any time");
+  const [menu, setMenu] = useState<{ browserId: string; x: number; y: number } | null>(null);
+  const deleteEntry = (id: string) => store.setState((state) => ({ ...state, archive: state.archive.filter((entry) => entry.tab.browserId !== id) }));
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", key);
+    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", key); };
+  }, [menu]);
   const terms = useMemo(() => searchTerms(query), [query]);
-  const rows = useMemo(
-    () => archive.filter((entry) => matchesTerms(terms, `${entry.tab.title} ${entry.tab.url}`)),
-    [archive, terms],
-  );
+  const rows = useMemo(() => {
+    const today = new Date().setHours(0, 0, 0, 0);
+    const week = today - 7 * 86_400_000;
+    return archive.filter((entry) => matchesTerms(terms, `${entry.tab.title} ${entry.tab.url}`)
+      && (filter === "Any time" || (filter === "Today" ? entry.archivedAt >= today
+        : filter === "Past week" ? entry.archivedAt >= week : entry.archivedAt < week)));
+  }, [archive, terms, filter]);
 
   const restore = (browserId: string) => {
     const result = store.restoreFromArchive(browserId);
@@ -251,69 +302,132 @@ function ArchivePanel({ store, onOpenTab }: { store: BrowserStore; onOpenTab?: (
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="maho-library-archive">
-      <SearchField label="Search archive" placeholder="Search archive" value={query} onChange={setQuery} />
-      <ul aria-label="Archived tabs" className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1">
+      <SearchField label="Search Archive" placeholder="Search archived tabs..." value={query} onChange={setQuery} autoFocus />
+      <div className="maho-library-filter">
+        <span>{rows.length === 0 ? "No tabs" : `${rows.length} ${rows.length === 1 ? "tab" : "tabs"}`}</span>
+        <select aria-label="Filter archived tabs" value={filter} onChange={(event) => setFilter(event.target.value)}>
+          {["Any time", "Today", "Past week", "Older"].map((value) => <option key={value}>{value}</option>)}
+        </select>
+      </div>
+      <ul aria-label="Archived tabs" className="maho-library-list">
         {rows.length === 0 ? (
-          <li className="px-2 py-6 text-center text-[11px] text-muted-foreground">
-            {archive.length === 0 ? "Nothing archived yet." : "No archived tab matches that search."}
+          <li className="maho-library-empty">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="4" rx="1" /><path d="M5 7v13h14V7M10 11h4" /></svg>
+            <strong>{archive.length === 0 ? "Nothing archived yet" : "No matching tabs"}</strong>
+            <span>{archive.length === 0 ? "Tabs you archive will stay here until you bring them back." : "Clear the search or adjust the filter to see archived tabs."}</span>
           </li>
         ) : null}
-        {rows.map((entry) => {
-          const label = entry.tab.title.trim() || entry.tab.url;
+        {rows.map((entry, index) => {
+          const label = entry.tab.title.trim() || compactLocation(entry.tab.url);
+          const group = archiveDateGroup(entry.archivedAt);
           return (
-            <li key={entry.tab.browserId} className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-accent/60">
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[11px]">{label}</span>
-                <span className="block truncate font-mono text-[10px] text-muted-foreground">
-                  {entry.tab.url} · {entry.reason === "cleared" ? "Cleared" : "Closed"}
-                </span>
-              </span>
-              <button
-                type="button"
-                aria-label={`Restore ${label} to Today`}
-                title="Restore to Today"
-                onClick={() => restore(entry.tab.browserId)}
-                className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-accent"
-              >
-                <RotateCcw className="size-3" aria-hidden="true" />
-                Restore
-              </button>
+            <li key={entry.tab.browserId}>
+              {index === 0 || archiveDateGroup(rows[index - 1].archivedAt) !== group ? <div className="maho-library-date">{group}<span>{rows.filter((row) => archiveDateGroup(row.archivedAt) === group).length} tabs</span></div> : null}
+              <div className="maho-library-row" onContextMenu={(event) => { event.preventDefault(); setMenu({ browserId: entry.tab.browserId, x: event.clientX, y: event.clientY }); }}>
+                <button type="button" aria-label={`Restore archived tab ${label}`} onClick={() => restore(entry.tab.browserId)} className="maho-library-row__open">
+                  <span className="maho-library-tile" aria-hidden="true">{entry.tab.faviconUrl ? <img src={entry.tab.faviconUrl} alt="" /> : label.charAt(0).toUpperCase()}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="maho-library-row__title">{label}</span>
+                    <span className="maho-library-row__subtitle">{compactLocation(entry.tab.url)}</span>
+                  </span>
+                </button>
+                <button type="button" className="maho-library-row__delete" aria-label={`Delete archived tab ${label}`} onClick={() => deleteEntry(entry.tab.browserId)}>
+                  <Trash2 aria-hidden="true" />
+                </button>
+              </div>
             </li>
           );
         })}
       </ul>
+      {menu ? <div role="dialog" aria-label="Archived tab actions" className="maho-library-context" style={{ left: menu.x, top: menu.y }}><div role="menu"><button type="button" role="menuitem" onClick={() => { restore(menu.browserId); setMenu(null); }}>Restore</button><button type="button" role="menuitem" onClick={() => { deleteEntry(menu.browserId); setMenu(null); }}>Delete</button></div></div> : null}
     </div>
   );
 }
 
+export function archiveDateGroup(timestamp: number, now = Date.now()): string {
+  if (!timestamp) return "Earlier";
+  const date = new Date(timestamp);
+  const today = new Date(now);
+  const days = Math.max(0, Math.round((Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()) - Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())) / 86_400_000));
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days <= 7) return `${days} days ago`;
+  if (days <= 14) return "Last 2 weeks";
+  if (days <= 21) return "3 weeks ago";
+  if (days <= 28) return "4 weeks ago";
+  return "Earlier";
+}
+
+function compactLocation(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/^\/+|\/+$/g, "");
+    return parsed.host + (path ? ` / ${path.length > 28 ? `${path.slice(0, 25)}...` : path}` : "");
+  } catch {
+    return url;
+  }
+}
+
+function dateGroup(timestamp: number): string {
+  const today = new Date().setHours(0, 0, 0, 0);
+  if (timestamp >= today) return "Today";
+  if (timestamp >= today - 86_400_000) return "Yesterday";
+  if (timestamp >= today - 7 * 86_400_000) return "Last Week";
+  return "Older";
+}
+
 function DownloadsPanel() {
+  const [query, setQuery] = useState("");
   const { downloads, loadErrorCode, loading } = useBrowserDownloads();
   const { missingFileIds, actionErrors, handleCancel, handlePause, handleOpen, handleReveal } =
     useBrowserDownloadActions();
-  const sorted = useMemo(() => [...downloads].sort((a, b) => b.createdAtMs - a.createdAtMs), [downloads]);
+  const sorted = useMemo(() => [...downloads]
+    .filter((record) => matchesTerms(searchTerms(query), `${extractDownloadName(record.filePath, record.url)} ${record.url}`))
+    .sort((a, b) => b.createdAtMs - a.createdAtMs), [downloads, query]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-2" data-testid="maho-library-downloads">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="maho-library-downloads">
+      <SearchField label="Search downloads" placeholder="Search downloads..." value={query} onChange={setQuery} />
       {loadErrorCode ? (
         <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
           Could not read the download list <span className="font-mono text-[10px]">{loadErrorCode}</span>
         </div>
       ) : null}
       {sorted.length === 0 && !loading && !loadErrorCode ? (
-        <div className="py-6 text-center text-[11px] text-muted-foreground">No downloads yet.</div>
+        <div className="maho-library-empty">
+          <ArrowDownToLine aria-hidden="true" />
+          <strong>{downloads.length ? "No matching downloads" : "No downloads yet"}</strong>
+          <span>{downloads.length ? "Clear the search to see all downloads." : "Files you download will show up here."}</span>
+        </div>
       ) : null}
-      <div role="list" aria-label="Downloads" className="flex flex-col gap-1.5">
-        {sorted.map((record) => (
+      <div role="list" aria-label="Downloads" className="maho-library-list maho-library-download-list">
+        {sorted.map((record, index) => (
           <div role="listitem" key={record.id}>
-            <BrowserDownloadRow
-              record={record}
-              missing={missingFileIds.has(record.id)}
-              actionError={actionErrors[record.id]}
-              onCancel={(id) => void handleCancel(id)}
-              onPause={(id, pause) => void handlePause(id, pause)}
-              onOpen={(item) => void handleOpen(item)}
-              onReveal={(item) => void handleReveal(item)}
-            />
+            {index === 0 || dateGroup(sorted[index - 1].createdAtMs) !== dateGroup(record.createdAtMs) ? <div className="maho-library-date">{dateGroup(record.createdAtMs)}</div> : null}
+            <div className="maho-library-download-row" data-testid={`download-row-${record.id}`}>
+              <span className="maho-library-tile" aria-hidden="true"><ArrowDownToLine /></span>
+              <div className="min-w-0 flex-1">
+                <span className="maho-library-row__title">{extractDownloadName(record.filePath, record.url)}</span>
+                <span className="maho-library-row__subtitle">
+                  {record.status === "failed" ? downloadFailureLabel(record.failure, record.error) : missingFileIds.has(record.id) ? "Deleted on disk" : record.status === "cancelled" ? "Cancelled" : `${record.status === "paused" ? "Paused - " : ""}${formatBytes(record.receivedBytes)}${record.totalBytes && record.status !== "completed" ? ` of ${formatBytes(record.totalBytes)}` : ""} from ${compactLocation(record.url).split(" / ")[0]}`}
+                </span>
+                {actionErrors[record.id] ? <span role="alert" className="text-destructive text-xs">{actionErrors[record.id]}</span> : null}
+              </div>
+              <div className="maho-library-download-actions">
+                {record.status === "inProgress" || record.status === "pending" || record.status === "paused" ? (
+                  <>
+                    <progress aria-label="Download progress" max={record.totalBytes || undefined} value={record.totalBytes ? record.receivedBytes : undefined} />
+                    {record.canPause ? <button type="button" aria-label={record.status === "paused" ? "Resume download" : "Pause download"} onClick={() => void handlePause(record.id, record.status !== "paused")}>{record.status === "paused" ? "Resume" : "Pause"}</button> : null}
+                    {record.canCancel !== false ? <button type="button" aria-label="Cancel download" onClick={() => void handleCancel(record.id)}>Cancel</button> : null}
+                  </>
+                ) : record.status === "completed" && !missingFileIds.has(record.id) ? (
+                  <>
+                    <button type="button" aria-label="Open download" onClick={() => void handleOpen(record)}>Open</button>
+                    <button type="button" aria-label="Reveal in folder" onClick={() => void handleReveal(record)}>Show in folder</button>
+                  </>
+                ) : null}
+              </div>
+            </div>
           </div>
         ))}
       </div>
@@ -466,7 +580,7 @@ function BookmarksPanel({ onOpenUrl }: { onOpenUrl?: (url: string) => void }) {
           {error}
         </div>
       ) : null}
-      <ul aria-label="Bookmarks" className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1">
+      <ul aria-label="Bookmarks" className="maho-library-manager-list min-h-0 flex-1 overflow-y-auto">
         {rows.length === 0 ? (
           <li className="px-2 py-6 text-center text-[11px] text-muted-foreground">No bookmarks here.</li>
         ) : null}
@@ -584,7 +698,7 @@ function HistoryPanel({ onOpenUrl }: { onOpenUrl?: (url: string) => void }) {
           {error}
         </div>
       ) : null}
-      <ul aria-label="History" className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1">
+      <ul aria-label="History" className="maho-library-manager-list min-h-0 flex-1 overflow-y-auto">
         {loaded && rows.length === 0 ? (
           <li className="px-2 py-6 text-center text-[11px] text-muted-foreground">No browsing history.</li>
         ) : null}
