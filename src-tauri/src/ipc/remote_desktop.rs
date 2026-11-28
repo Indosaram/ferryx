@@ -2201,6 +2201,7 @@ pub mod commands {
     use parking_lot::Mutex;
     use serde::{Deserialize, Serialize};
     use tauri::ipc::{Channel, Response};
+    use tauri::Manager;
 
     use super::transport::{
         self, rd_error, RD_CONNECT_FAILED, RD_NOT_FOUND, RD_PERMISSION_REQUIRED, RD_UNSUPPORTED,
@@ -3557,7 +3558,7 @@ mod transport {
             let code = error
                 .get("code")
                 .and_then(|v| v.as_str())
-                .unwrap_or(RD_HOST_UNAVAILABLE);
+                .unwrap_or(RD_HOST_OFFLINE);
             let message = error
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -3606,7 +3607,7 @@ mod transport {
         }
         args.push(host.target());
         args.push(
-            "for b in ferryx-cli \"$HOME/.local/bin/ferryx-cli\" /usr/local/bin/ferryx-cli /Applications/Ferryx.app/Contents/MacOS/ferryx; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" rd-bridge; [ -x \"$b\" ] && exec \"$b\" rd-bridge; done; printf '%s\\n' '{\"error\":{\"code\":\"RD_HOST_UNAVAILABLE\",\"message\":\"Ferryx is not installed on this SSH host\"}}'; exit 127".to_owned(),
+            "for b in ferryx-cli \"$HOME/.local/bin/ferryx-cli\" /usr/local/bin/ferryx-cli /Applications/Ferryx.app/Contents/MacOS/ferryx; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" rd-bridge; [ -x \"$b\" ] && exec \"$b\" rd-bridge; done; printf '%s\\n' '{\"error\":{\"code\":\"RD_HOST_OFFLINE\",\"message\":\"Ferryx is not installed on this SSH host\"}}'; exit 127".to_owned(),
         );
         args
     }
@@ -3652,7 +3653,7 @@ mod transport {
             Ok(Ok(0)) => {
                 let _ = child.kill().await;
                 return Err(rd_error(
-                    RD_HOST_UNAVAILABLE,
+                    RD_HOST_OFFLINE,
                     "SSH host closed before sending remote desktop pairing header",
                 ));
             }
