@@ -18,7 +18,7 @@
 //
 // Geometry maps to maho_command_overlay_view.cc and maho_command_result_row_view.cc.
 
-import { ChevronRight, Globe } from "lucide-react";
+import { ChevronRight, Globe, Sparkles } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -51,8 +51,8 @@ import {
 /** Where a chosen result lands. `mini` is the transient Mini Pane slot. */
 export type MahoCommandBarTarget = "current" | "new-tab" | "mini";
 
-/** `navigate` is the `Cmd+L` face; `new-tab` is the `Cmd+T` face. */
-export type MahoCommandBarMode = "navigate" | "new-tab" | "all-tabs" | "commands";
+/** `navigate` is the `Cmd+L` face; `new-tab` is the `Cmd+T` face; `ask` attaches the page agent. */
+export type MahoCommandBarMode = "navigate" | "new-tab" | "all-tabs" | "commands" | "ask";
 
 export type MahoBrowserCommand = { id: string; title: string; run: () => void; disabled?: boolean };
 export type MahoSiteSearch = { keyword: string; name: string; urlTemplate: string };
@@ -133,6 +133,10 @@ export type MahoCommandBarProps = {
   /** An open tab was chosen: switch to it rather than navigate. */
   onSelectOpenTab: (browserId: string) => void;
   onNavigate: (url: string, target: MahoCommandBarTarget) => void;
+  /** Dispatches an Ask Agent prompt attached to the active browser page. */
+  onAskPage?: (prompt: string) => void;
+  activePageTitle?: string | null;
+  activePageUrl?: string | null;
 };
 
 /** Open tabs outrank every other source; the boost is what keeps search below them. */
@@ -298,6 +302,9 @@ export function MahoCommandBar({
   onClose,
   onSelectOpenTab,
   onNavigate,
+  onAskPage,
+  activePageTitle,
+  activePageUrl,
 }: MahoCommandBarProps) {
   const [query, setQuery] = useState(initialQuery ?? "");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -310,14 +317,25 @@ export function MahoCommandBar({
   const tabs = useBrowserStore((state) => state.tabs, store);
   const spaces = useBrowserStore((state) => state.spaces, store);
   const [siteSearch, setSiteSearch] = useState<MahoSiteSearch | null>(null);
+  const [askSubmode, setAskSubmode] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const commandsMode = mode === "commands" || query.startsWith(">");
-  const matchedSite = siteSearch || mode === "all-tabs" ? null : matchMahoSiteSearch(query, siteSearches);
+  const askMode = Boolean(onAskPage) && (mode === "ask" || askSubmode || query.startsWith("?"));
+  const commandsMode = !askMode && (mode === "commands" || query.startsWith(">"));
+  const matchedSite = askMode || siteSearch || mode === "all-tabs" ? null : matchMahoSiteSearch(query, siteSearches);
   const siteUrl = siteSearch ? expandMahoSiteSearch(siteSearch.urlTemplate, query) : matchedSite?.url;
   const activeSite = siteSearch ?? matchedSite?.engine;
   const enterSiteSearch = useCallback((engine: MahoSiteSearch) => {
+    setAskSubmode(false);
     setSiteSearch(engine);
     setQuery("");
+    setSelectedIndex(0);
+    setPickerOpen(false);
+    inputRef.current?.focus();
+  }, []);
+  const enterAskMode = useCallback(() => {
+    setSiteSearch(null);
+    setAskSubmode(true);
+    setQuery((current) => current.replace(/^[?>]\s*/, ""));
     setSelectedIndex(0);
     setPickerOpen(false);
     inputRef.current?.focus();
@@ -325,6 +343,22 @@ export function MahoCommandBar({
 
   const results = useMemo(
     (): MahoCommandBarResult[] => {
+      if (askMode) {
+        const prompt = query.replace(/^\?\s*/, "").trim();
+        if (!prompt) return [];
+        const pageLabel = activePageTitle?.trim() || (activePageUrl ? compactUrl(activePageUrl) : "Active page");
+        return [{
+          id: "action:ask-agent",
+          source: "action",
+          title: prompt,
+          subtitle: `Ask Agent on ${pageLabel}`,
+          url: "",
+          favorite: false,
+          isSearch: false,
+          score: 0,
+          recency: 0,
+        }];
+      }
       if (commandsMode) {
         const filter = query.replace(/^>\s*/, "").trim();
         return commands.filter((command) => !command.disabled && (!filter || candidateScore(filter, command.id, command.title) > 0))
@@ -343,7 +377,7 @@ export function MahoCommandBar({
         mode,
       });
     },
-    [activeSite, commands, commandsMode, history, matchedSite?.query, mode, query, settings, siteSearch, siteUrl, spaces, tabs, tree.bookmarks],
+    [activePageTitle, activePageUrl, activeSite, askMode, commands, commandsMode, history, matchedSite?.query, mode, query, settings, siteSearch, siteUrl, spaces, tabs, tree.bookmarks],
   );
 
   // Opening remembers who had focus and takes it. Kept on `open` alone so a second face
@@ -367,6 +401,7 @@ export function MahoCommandBar({
     if (!open) return;
     setQuery(initialQuery ?? "");
     setSiteSearch(null);
+    setAskSubmode(mode === "ask");
     setPickerOpen(false);
     setSelectedIndex(0);
   }, [initialQuery, mode, open]);
@@ -384,8 +419,9 @@ export function MahoCommandBar({
       if (event.key !== "Escape") return;
       event.preventDefault();
       if (pickerOpen) { setPickerOpen(false); inputRef.current?.focus(); return; }
-      if (siteSearch || query.startsWith(">")) {
+      if (siteSearch || askSubmode || query.startsWith(">") || query.startsWith("?")) {
         setSiteSearch(null);
+        setAskSubmode(false);
         setQuery("");
         return;
       }
@@ -393,7 +429,7 @@ export function MahoCommandBar({
     };
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
-  }, [onClose, open, pickerOpen, query, siteSearch]);
+  }, [askSubmode, onClose, open, pickerOpen, query, siteSearch]);
 
   // Keep the highlight inside the list as the query narrows it.
   useEffect(() => {
@@ -415,6 +451,13 @@ export function MahoCommandBar({
 
   const commit = useCallback((row: MahoCommandBarResult | undefined, target: MahoCommandBarTarget) => {
     if (!row) return;
+    if (row.id === "action:ask-agent") {
+      const prompt = row.title.trim();
+      if (!prompt || !onAskPage) return;
+      onClose();
+      onAskPage(prompt);
+      return;
+    }
     if (row.commandId) {
       onClose();
       commands.find((command) => command.id === row.commandId)?.run();
@@ -433,16 +476,20 @@ export function MahoCommandBar({
     }
     onNavigate(row.url, resolved);
     onClose();
-  }, [commands, mode, onClose, onNavigate, onSelectOpenTab, typedAddressKey]);
+  }, [commands, mode, onAskPage, onClose, onNavigate, onSelectOpenTab, typedAddressKey]);
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing) return;
-    if (event.key === "Tab" && !event.shiftKey && !commandsMode && mode !== "all-tabs") {
+    if (event.key === "Tab" && !event.shiftKey && !commandsMode && !askMode && mode !== "all-tabs") {
       const keyword = query.trim().replace(/^@/, "").toLowerCase();
       const engine = siteSearches.find((entry) => entry.keyword === keyword || entry.name.toLowerCase() === keyword);
       if (engine) { event.preventDefault(); enterSiteSearch(engine); return; }
     }
-    if (event.key === "Backspace" && !query && siteSearch) { setSiteSearch(null); return; }
+    if (event.key === "Backspace" && !query && (siteSearch || askSubmode)) {
+      setSiteSearch(null);
+      setAskSubmode(false);
+      return;
+    }
     if (event.key === "ArrowDown") {
       event.preventDefault();
       if (results.length === 0) return;
@@ -464,7 +511,7 @@ export function MahoCommandBar({
         ? "new-tab"
         : "current";
     commit(results[boundedIndex], target);
-  }, [boundedIndex, commandsMode, commit, enterSiteSearch, mode, query, results, siteSearch, siteSearches]);
+  }, [askMode, askSubmode, boundedIndex, commandsMode, commit, enterSiteSearch, mode, query, results, siteSearch, siteSearches]);
 
   if (!open) return null;
 
@@ -486,7 +533,7 @@ export function MahoCommandBar({
       >
         <div className="maho-command-search-row">
           <span className="maho-command-glyph" aria-hidden="true">
-            {query ? contextFavicon ? <img src={contextFavicon} alt="" /> : <Globe /> : null}
+            {askMode ? <Sparkles /> : query ? contextFavicon ? <img src={contextFavicon} alt="" /> : <Globe /> : null}
           </span>
           <input
             ref={inputRef}
@@ -498,7 +545,7 @@ export function MahoCommandBar({
             aria-activedescendant={activeOptionId}
             data-testid="maho-command-bar-input"
             value={query}
-            placeholder={commandsMode ? "Search commands…" : activeSite ? "Search…" : mode === "all-tabs" ? "Search tabs…" : "Search or Enter URL…"}
+            placeholder={askMode ? "Ask agent to work on this page…" : commandsMode ? "Search commands…" : activeSite ? "Search…" : mode === "all-tabs" ? "Search tabs…" : "Search or Enter URL…"}
             onChange={(event) => {
               setQuery(event.target.value);
               setSelectedIndex(0);
@@ -506,15 +553,16 @@ export function MahoCommandBar({
             onKeyDown={handleKeyDown}
             className="maho-command-input"
           />
-          {commandsMode || activeSite || mode === "all-tabs" ? (
-            <span className="maho-command-mode-chip"><i />{commandsMode ? "Commands" : activeSite?.name ?? "Tabs"}</span>
+          {askMode || commandsMode || activeSite || mode === "all-tabs" ? (
+            <span className="maho-command-mode-chip"><i />{askMode ? "Ask Agent" : commandsMode ? "Commands" : activeSite?.name ?? "Tabs"}</span>
           ) : null}
           <button type="button" className="maho-command-picker-button" aria-label="Choose search mode or engine"
-            aria-expanded={pickerOpen} onClick={() => setPickerOpen((current) => !current)}>Search</button>
+            aria-expanded={pickerOpen} onClick={() => setPickerOpen((current) => !current)}>{askMode ? "Ask" : "Search"}</button>
         </div>
         {pickerOpen ? (
           <div className="maho-command-picker" role="group" aria-label="Search modes and engines">
-            <button type="button" onClick={() => { setSiteSearch(null); setQuery(">"); setPickerOpen(false); inputRef.current?.focus(); }}>Commands</button>
+            {onAskPage ? <button type="button" onClick={enterAskMode}>Ask Agent</button> : null}
+            <button type="button" onClick={() => { setAskSubmode(false); setSiteSearch(null); setQuery(">"); setPickerOpen(false); inputRef.current?.focus(); }}>Commands</button>
             {siteSearches.map((engine) => <button type="button" key={engine.keyword}
               onClick={() => enterSiteSearch(engine)}>{engine.name}</button>)}
           </div>
@@ -566,7 +614,11 @@ export function MahoCommandBar({
 
         {results.length === 0 ? (
           <div className="maho-command-empty" data-compact={Boolean(query.trim())}>
-            {query.trim() ? `No results for “${query.trim()}”` : "Type to search tabs, history, and URLs"}
+            {askMode
+              ? "Type what the agent should do on this page and press Enter"
+              : query.trim()
+                ? `No results for “${query.trim()}”`
+                : "Type to search tabs, history, and URLs"}
           </div>
         ) : null}
 

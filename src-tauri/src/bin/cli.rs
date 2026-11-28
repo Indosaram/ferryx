@@ -34,6 +34,9 @@ fn main() {
         println!("{}\nUsage: {USAGE}", ferryx_lib::cli::cli_version_line());
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "rd-bridge") {
+        std::process::exit(ferryx_lib::cli::run_rd_bridge_cli());
+    }
     // Only the groups named in CLI_GROUPS dispatch here; everything else falls through to
     // the launch-mode handling below.
     let group = args.get(1).map(String::as_str).filter(|arg| CLI_GROUPS.contains(arg));

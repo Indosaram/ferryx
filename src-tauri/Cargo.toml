@@ -105,10 +105,8 @@ hub-slack = ["ferryx-hub/hub-slack"]
 hub-discord = ["ferryx-hub/hub-discord"]
 hub-voice = ["ferryx-hub/hub-voice"]
 # Remote desktop (ferryx-rd engine): the daemon-owned host, the gateway RD routes and the GUI
-# client. Part of every desktop build. It links FFmpeg 9 (the pinned LGPL SDK that
-# scripts/fetch-ffmpeg.mjs fetches and .cargo/config.toml points FFMPEG_DIR at), Opus and the
-# platform capture stacks, so the headless `ferryx-cli`, `ferryx-relay` and `ferryx-account`
-# builds use `--no-default-features` to leave it out.
+# client. Enabled by default in both desktop `ferryx` and `ferryx-cli` daemon builds. Only the
+# relay/account server binaries (`ferryx-relay`, `ferryx-account`) leave it out.
 remote-desktop = [
     "dep:ferryx-rd-proto",
     "dep:ferryx-rd-net",

@@ -180,6 +180,7 @@ elif [ "$PLATFORM_OS" = "darwin" ]; then
 fi
 
 # 4. Resolve download URLs
+BUNDLE_ARTIFACT_NAME="${ARTIFACT_NAME}.tar.gz"
 PRIMARY_URL="${FERRYX_ORIGIN}/download/${ARTIFACT_NAME}"
 SECONDARY_URL="${FERRYX_ORIGIN}/download/ferryx-cli"
 if [ "$FERRYX_VERSION" = "latest" ]; then
@@ -188,10 +189,15 @@ else
   RELEASE_BASE_URL="https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}"
 fi
 GITHUB_URL="${RELEASE_BASE_URL}/${ARTIFACT_NAME}"
+PRIMARY_BUNDLE_URL="${FERRYX_ORIGIN}/download/${BUNDLE_ARTIFACT_NAME}"
+GITHUB_BUNDLE_URL="${RELEASE_BASE_URL}/${BUNDLE_ARTIFACT_NAME}"
 
 # 5. Temporary download location
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')"
 TMP_BIN="${TMP_DIR}/ferryx-cli"
+TMP_BUNDLE="${TMP_DIR}/ferryx-cli-bundle.tar.gz"
+TMP_BUNDLE_DIR="${TMP_DIR}/bundle"
+TMP_FFMPEG_DIR=""
 TMP_SUMS="${TMP_DIR}/SHA256SUMS"
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -295,14 +301,25 @@ if [ "$SUMS_FOUND" -ne 1 ]; then
   echo "Error: could not download SHA256SUMS from ${RELEASE_BASE_URL}; refusing to install an unverified binary." >&2
   exit 1
 fi
+EXPECTED_BUNDLE_SHA256="$(awk -v name="$BUNDLE_ARTIFACT_NAME" '$2 == name || $2 == "*" name { print tolower($1); exit }' "$TMP_SUMS")"
 EXPECTED_SHA256="$(awk -v name="$ARTIFACT_NAME" '$2 == name || $2 == "*" name { print tolower($1); exit }' "$TMP_SUMS")"
-case "$EXPECTED_SHA256" in
-  ????????????????????????????????????????????????????????????????) ;;
-  *)
-    echo "Error: SHA256SUMS from ${RELEASE_BASE_URL} has no valid entry for ${ARTIFACT_NAME}." >&2
-    exit 1
+INSTALL_MODE="binary"
+case "$EXPECTED_BUNDLE_SHA256" in
+  ????????????????????????????????????????????????????????????????)
+    if command -v tar >/dev/null 2>&1; then
+      INSTALL_MODE="bundle"
+    fi
     ;;
 esac
+if [ "$INSTALL_MODE" = "binary" ]; then
+  case "$EXPECTED_SHA256" in
+    ????????????????????????????????????????????????????????????????) ;;
+    *)
+      echo "Error: SHA256SUMS from ${RELEASE_BASE_URL} has no valid entry for ${ARTIFACT_NAME}." >&2
+      exit 1
+      ;;
+  esac
+fi
 if ! sha256_of "$TMP_SUMS" >/dev/null; then
   echo "Error: neither sha256sum nor shasum was found; cannot verify the download." >&2
   exit 1
@@ -311,24 +328,64 @@ fi
 echo "--> Downloading ferryx-cli for ${PLATFORM_OS}/${PLATFORM_ARCH}..."
 DOWNLOAD_SUCCESS=0
 CHECKSUM_MISMATCH=0
-for url in "$PRIMARY_URL" "$SECONDARY_URL" "$GITHUB_URL"; do
-  echo "    Trying $url ..."
-  if download "$url" "$TMP_BIN" 2>/dev/null && [ -s "$TMP_BIN" ]; then
-    if ! artifact_matches_platform "$TMP_BIN"; then
-      echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
-      continue
+if [ "$INSTALL_MODE" = "bundle" ]; then
+  for url in "$PRIMARY_BUNDLE_URL" "$GITHUB_BUNDLE_URL"; do
+    echo "    Trying $url ..."
+    if download "$url" "$TMP_BUNDLE" 2>/dev/null && [ -s "$TMP_BUNDLE" ]; then
+      actual_sha256="$(sha256_of "$TMP_BUNDLE" | tr 'A-F' 'a-f')"
+      if [ "$actual_sha256" != "$EXPECTED_BUNDLE_SHA256" ]; then
+        echo "    Skipping: SHA256 mismatch (expected ${EXPECTED_BUNDLE_SHA256}, got ${actual_sha256})"
+        CHECKSUM_MISMATCH=1
+        continue
+      fi
+      rm -rf "$TMP_BUNDLE_DIR"
+      mkdir -p "$TMP_BUNDLE_DIR"
+      if ! tar -xzf "$TMP_BUNDLE" -C "$TMP_BUNDLE_DIR" 2>/dev/null || [ ! -s "${TMP_BUNDLE_DIR}/ferryx-cli" ]; then
+        echo "    Skipping: bundle archive is corrupt or missing ferryx-cli"
+        continue
+      fi
+      if ! artifact_matches_platform "${TMP_BUNDLE_DIR}/ferryx-cli"; then
+        echo "    Skipping: bundled binary is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
+        continue
+      fi
+      echo "    SHA256 verified: ${actual_sha256}"
+      TMP_BIN="${TMP_BUNDLE_DIR}/ferryx-cli"
+      if [ -d "${TMP_BUNDLE_DIR}/ffmpeg" ]; then
+        TMP_FFMPEG_DIR="${TMP_BUNDLE_DIR}/ffmpeg"
+      fi
+      DOWNLOAD_SUCCESS=1
+      break
     fi
-    actual_sha256="$(sha256_of "$TMP_BIN" | tr 'A-F' 'a-f')"
-    if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
-      echo "    Skipping: SHA256 mismatch (expected ${EXPECTED_SHA256}, got ${actual_sha256})"
-      CHECKSUM_MISMATCH=1
-      continue
-    fi
-    echo "    SHA256 verified: ${actual_sha256}"
-    DOWNLOAD_SUCCESS=1
-    break
+  done
+  if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+    case "$EXPECTED_SHA256" in
+      ????????????????????????????????????????????????????????????????)
+        INSTALL_MODE="binary"
+        ;;
+    esac
   fi
-done
+fi
+
+if [ "$INSTALL_MODE" = "binary" ] && [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+  for url in "$PRIMARY_URL" "$SECONDARY_URL" "$GITHUB_URL"; do
+    echo "    Trying $url ..."
+    if download "$url" "$TMP_BIN" 2>/dev/null && [ -s "$TMP_BIN" ]; then
+      if ! artifact_matches_platform "$TMP_BIN"; then
+        echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
+        continue
+      fi
+      actual_sha256="$(sha256_of "$TMP_BIN" | tr 'A-F' 'a-f')"
+      if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+        echo "    Skipping: SHA256 mismatch (expected ${EXPECTED_SHA256}, got ${actual_sha256})"
+        CHECKSUM_MISMATCH=1
+        continue
+      fi
+      echo "    SHA256 verified: ${actual_sha256}"
+      DOWNLOAD_SUCCESS=1
+      break
+    fi
+  done
+fi
 
 if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
   if [ "$CHECKSUM_MISMATCH" -eq 1 ]; then
@@ -376,7 +433,16 @@ case "$verify_status" in
     ;;
 esac
 
-# 10. Install atomically: stage beside the target, then rename over it.
+# 10. Install atomically: stage runtime libraries and binary beside the target, then rename.
+if [ -n "$TMP_FFMPEG_DIR" ] && [ -d "$TMP_FFMPEG_DIR" ]; then
+  TARGET_FFMPEG="${TARGET_DIR}/ffmpeg"
+  STAGED_FFMPEG="${TARGET_FFMPEG}.new"
+  rm -rf "$STAGED_FFMPEG"
+  mkdir -p "$STAGED_FFMPEG"
+  cp -R "${TMP_FFMPEG_DIR}/." "$STAGED_FFMPEG/"
+  rm -rf "$TARGET_FFMPEG"
+  mv -f "$STAGED_FFMPEG" "$TARGET_FFMPEG"
+fi
 rm -f "$STAGED_BIN"
 if ! install -m 0755 "$TMP_BIN" "$STAGED_BIN"; then
   rm -f "$STAGED_BIN"

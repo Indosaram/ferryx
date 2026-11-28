@@ -244,6 +244,7 @@ static THROTTLES: LazyLock<Mutex<HashMap<String, MediaEventThrottle>>> = LazyLoc
 
 /// Emits `browser_media_state` for `state` when it is a change and within the rate limit.
 /// Returns whether it was emitted.
+#[cfg(feature = "desktop")]
 pub fn publish<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: BrowserMediaState) -> bool {
     let now = Instant::now();
     let emit = {
@@ -267,6 +268,7 @@ pub fn forget_browser(browser_id: &str) {
 }
 
 /// Handles the `media` envelope the trusted bridge delivered for `browser_id`.
+#[cfg(feature = "desktop")]
 pub fn handle_media_envelope<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     browser_id: &str,
@@ -428,6 +430,7 @@ const ENGINE_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 /// page-script evaluation path, and the answers go through the same throttle as the webview
 /// push. Engine tabs only: a system webview tab pushes its own reports. On a build with no
 /// engine (a test or headless target) this does nothing.
+#[cfg(feature = "desktop")]
 pub fn install_engine_media_poller<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     manager: std::sync::Arc<crate::browser::manager::BrowserManager>,

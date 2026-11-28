@@ -4,7 +4,7 @@
 // decides whether a click drives `browserTabNavigation` or a caller-owned engine,
 // and Todo 14's ControlActivity chip drops into `controlActivity` unchanged.
 
-import { ChevronLeft, ChevronRight, PanelLeft, RotateCw } from "lucide-react";
+import { ChevronLeft, ChevronRight, PanelLeft, RotateCw, Sparkles } from "lucide-react";
 import type { ReactNode } from "react";
 
 export type MahoSidebarTopBarProps = {
@@ -19,6 +19,8 @@ export type MahoSidebarTopBarProps = {
   showNavigation?: boolean;
   /** Slot for Todo 14's agent ControlActivity chip. */
   controlActivity?: ReactNode;
+  agentPanelOpen?: boolean;
+  onToggleAgentPanel?: () => void;
 };
 
 export function MahoSidebarTopBar({
@@ -31,6 +33,8 @@ export function MahoSidebarTopBar({
   onReload,
   showNavigation = true,
   controlActivity,
+  agentPanelOpen = false,
+  onToggleAgentPanel,
 }: MahoSidebarTopBarProps) {
   return (
     <div className="maho-top-bar" role="toolbar" aria-label="Browser navigation">
@@ -70,6 +74,18 @@ export function MahoSidebarTopBar({
         </>
       ) : null}
       {controlActivity ? <div className="maho-top-bar__chip">{controlActivity}</div> : null}
+      {onToggleAgentPanel ? (
+        <button
+          type="button"
+          className="maho-top-bar__button"
+          aria-label="Ask agent on this page"
+          aria-pressed={agentPanelOpen}
+          title="Ask agent on this page"
+          onClick={onToggleAgentPanel}
+        >
+          <Sparkles aria-hidden="true" />
+        </button>
+      ) : null}
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -157,4 +158,32 @@ test("a release without SHA256SUMS exits non-zero and installs nothing", async (
   expect(result.code).not.toBe(0);
   expect(result.stderr).toContain("could not download SHA256SUMS");
   expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
+});
+
+test("Linux x86_64 bundle archive installs ferryx-cli together with its ffmpeg runtime directory", async () => {
+  const binary = fakeLinuxAmd64Binary();
+  const stage = mkdtempSync(join(tmpdir(), "ferryx-install-bundle-stage-"));
+  sandboxes.push(stage);
+  mkdirSync(join(stage, "ffmpeg"));
+  writeFileSync(join(stage, "ferryx-cli"), binary);
+  chmodSync(join(stage, "ferryx-cli"), 0o755);
+  writeFileSync(join(stage, "ffmpeg", "libavcodec.so.63"), "mock-ffmpeg-so");
+  writeFileSync(join(stage, "ffmpeg", "libpipewire-0.3.so.0"), "mock-pipewire-so");
+  const tarPath = join(stage, `${ARTIFACT}.tar.gz`);
+  execFileSync("tar", ["-C", stage, "-czf", tarPath, "ferryx-cli", "ffmpeg"]);
+  const bundleBytes = readFileSync(tarPath);
+
+  const box = sandbox({
+    arch: "x86_64",
+    sums: `${sha256(bundleBytes)}  ${ARTIFACT}.tar.gz\n`,
+  });
+  writeFileSync(join(box.root, "fixtures", `${ARTIFACT}.tar.gz`), bundleBytes);
+
+  const result = await runInstaller(box);
+  expect(result.stderr).toBe("");
+  expect(result.code).toBe(0);
+  expect(result.stdout).toContain(`SHA256 verified: ${sha256(bundleBytes)}`);
+  expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(true);
+  expect(readFileSync(join(box.installDir, "ffmpeg", "libavcodec.so.63"), "utf8")).toBe("mock-ffmpeg-so");
+  expect(readFileSync(join(box.installDir, "ffmpeg", "libpipewire-0.3.so.0"), "utf8")).toBe("mock-pipewire-so");
 });

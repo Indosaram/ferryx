@@ -4761,6 +4761,28 @@ impl DaemonServer {
     #[cfg(feature = "remote-desktop")]
     async fn handle_remote_desktop(&self, request: DaemonRequest) -> DaemonResponse {
         let host = Arc::clone(&self.remote_state.remote_desktop);
+        if let DaemonRequest::RemoteDesktopLocalPair { device_name } = request {
+            let outcome = tokio::task::spawn_blocking(move || host.pair_local(&device_name)).await;
+            return match outcome {
+                Ok(Ok((grant, tcp_port, udp_port))) => DaemonResponse::RemoteDesktopLocalPairOk {
+                    pairing_id: grant.pairing_id,
+                    key_b64: grant.key_b64,
+                    host_name: grant.host_name,
+                    tcp_port,
+                    udp_port,
+                },
+                Ok(Err(error)) => DaemonResponse::Error {
+                    message: error.message,
+                    code: Some(error.code.into()),
+                    details: None,
+                },
+                Err(error) => DaemonResponse::Error {
+                    message: format!("Remote desktop local pairing failed: {error}"),
+                    code: Some("INTERNAL_ERROR".into()),
+                    details: None,
+                },
+            };
+        }
         let outcome = tokio::task::spawn_blocking(move || match request {
             DaemonRequest::RemoteDesktopHostSet { enabled, allow_input, allow_clipboard } => {
                 host.set(enabled, allow_input, allow_clipboard)
@@ -8957,7 +8979,8 @@ impl DaemonServer {
                 },
                 Ok(request @ (DaemonRequest::RemoteDesktopHostGet
                     | DaemonRequest::RemoteDesktopHostSet { .. }
-                    | DaemonRequest::RemoteDesktopHostRespond { .. })) => {
+                    | DaemonRequest::RemoteDesktopHostRespond { .. }
+                    | DaemonRequest::RemoteDesktopLocalPair { .. })) => {
                     self.handle_remote_desktop(request).await
                 }
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {

@@ -16,7 +16,8 @@ import {
 } from "../../state/remoteDesktopStore";
 import { RemoteDesktopPane } from "../RemoteDesktopPane";
 import { remoteHostStore, selectHostList, type HostEndpoint } from "../../state/remoteHostStore";
-import { PairedMachineRow } from "./RemoteDesktopActivitySidebar";
+import { useSshHosts } from "../../lib/sshHosts";
+import { mergeSshHostsForRemoteDesktop, PairedMachineRow } from "./RemoteDesktopActivitySidebar";
 import { RemoteDesktopHostSection } from "../settings/remote/RemoteDesktopHostSection";
 import { Input } from "../ui/input";
 import { Button } from "../ui/button";
@@ -37,7 +38,8 @@ function ComputerLibrary({ onSelectHost }: Pick<GlobalRemoteDesktopCanvasProps, 
   const [wakeMacDraft, setWakeMacDraft] = useState("");
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeStatus, setWakeStatus] = useState<{ tone: "info" | "error"; text: string } | null>(null);
-  const hosts = selectHostList(inventory);
+  const { hosts: sshHosts } = useSshHosts();
+  const hosts = mergeSshHostsForRemoteDesktop(selectHostList(inventory), sshHosts);
   const filtered = hosts.filter((host) => (!availableOnly || host.online) &&
     `${host.displayName ?? host.name} ${host.address}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
 

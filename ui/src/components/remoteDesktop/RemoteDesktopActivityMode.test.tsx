@@ -28,6 +28,7 @@ import { loadSidebarWidthForMode, type ActivityMode } from "../../lib/sidebarPer
 import { sidebarWidthStorageKey } from "../../lib/storageKeys";
 import { remoteDesktopStore } from "../../state/remoteDesktopStore";
 import { remoteHostStore, type HostEndpoint } from "../../state/remoteHostStore";
+import { resetSshHostsCache } from "../../lib/sshHosts";
 import { GlobalRemoteDesktopCanvas, liveRemoteDesktopSessionCount } from "./GlobalRemoteDesktopCanvas";
 import { RemoteDesktopActivitySidebar, remoteDesktopConnectBlock } from "./RemoteDesktopActivitySidebar";
 
@@ -105,6 +106,7 @@ function seedHosts(hosts: HostEndpoint[]): void {
 
 beforeEach(() => {
   channels.length = 0;
+  resetSshHostsCache();
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === "cmd_rd_connect") return { rdSessionId: `rd-${String(args?.hostId)}` };
     if (command === "cmd_rd_supported") return true;
@@ -381,5 +383,34 @@ describe("Remote Desktop Activity mode", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_rd_host_respond", { requestId: "req-1", approve: true }));
     fireEvent.click(await screen.findByRole("button", { name: "Revoke Phone" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("cmd_remote_device_revoke", { deviceId: "dev-1" }));
+  });
+
+  it("lists SSH-only machines and connects to them via the ssh: RD prefix", async () => {
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "cmd_rd_supported") return true;
+      if (command === "cmd_rd_host_state") {
+        return { enabled: true, running: true, allowInput: true, allowClipboard: true, sessions: [], pending: [], error: null };
+      }
+      if (command === "cmd_remote_devices") return [];
+      if (command === "cmd_ssh_list_hosts") {
+        return [
+          { id: "omarchy-ssh", label: "Omarchy SSH", hostname: "100.78.73.12", username: "indo", source: "config", authMethod: "agent" },
+          { id: "disabled-ssh", label: "Disabled Box", hostname: "10.0.0.2", source: "manual", authMethod: "key", disabled: true },
+        ];
+      }
+      if (command === "cmd_rd_connect") return { rdSessionId: `rd-${String(args?.hostId)}` };
+      return undefined;
+    });
+    render(<Harness />);
+    const connectButtons = await screen.findAllByRole("button", { name: "Connect Omarchy SSH" });
+    expect(connectButtons.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("Disabled Box")).toBeNull();
+    fireEvent.click(connectButtons[0]);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "cmd_rd_connect",
+        expect.objectContaining({ hostId: "ssh:omarchy-ssh" }),
+      ),
+    );
   });
 });

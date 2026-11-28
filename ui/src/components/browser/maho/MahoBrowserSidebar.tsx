@@ -62,6 +62,8 @@ export type MahoBrowserSidebarProps = {
   libraryContent?: ReactNode;
   libraryOpen?: boolean;
   onToggleLibrary?: () => void;
+  agentPanelOpen?: boolean;
+  onToggleAgentPanel?: () => void;
 };
 
 export function MahoBrowserSidebar({
@@ -85,6 +87,8 @@ export function MahoBrowserSidebar({
   libraryContent,
   libraryOpen = false,
   onToggleLibrary,
+  agentPanelOpen = false,
+  onToggleAgentPanel,
 }: MahoBrowserSidebarProps) {
   const [creatingSpace, setCreatingSpace] = useState(false);
   const state = useBrowserStore((snapshot) => snapshot, store);
@@ -137,6 +141,8 @@ export function MahoBrowserSidebar({
           onForward={onForward}
           onReload={onReload}
           controlActivity={controlActivity}
+          agentPanelOpen={agentPanelOpen}
+          onToggleAgentPanel={onToggleAgentPanel}
         />
         {libraryOpen && libraryContent ? (
           <div className="maho-sidebar__library">{libraryContent}</div>

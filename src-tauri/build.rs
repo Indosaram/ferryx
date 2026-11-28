@@ -163,6 +163,7 @@ fn remote_desktop_rpath() {
     let rpaths: &[&str] = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("macos") => &[
             "@executable_path/../Frameworks",
+            "@executable_path/ffmpeg",
             "@executable_path/../../../../Frameworks",
             "@executable_path/../../../ffmpeg",
         ],

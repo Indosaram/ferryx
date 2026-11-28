@@ -4836,8 +4836,10 @@ fn is_downloadable_artifact(artifact: &str) -> bool {
         artifact,
         "ferryx-cli"
             | "ferryx-cli-linux-amd64"
+            | "ferryx-cli-linux-amd64.tar.gz"
             | "ferryx-cli-linux-arm64"
             | "ferryx-cli-darwin-arm64"
+            | "ferryx-cli-darwin-arm64.tar.gz"
             | "ferryx-cli-darwin-universal"
             | "ferryx-cli-windows-amd64.exe"
     )
@@ -11965,6 +11967,16 @@ mod tests {
         assert_eq!(response.headers()[header::CONTENT_LENGTH], artifact.len().to_string());
         let body = axum::body::to_bytes(response.into_body(), artifact.len() + 1).await.unwrap();
         assert_eq!(body.as_ref(), artifact.as_slice());
+    }
+
+    #[test]
+    fn downloadable_artifacts_include_cli_bundles_and_reject_unknown_names() {
+        assert!(is_downloadable_artifact("ferryx-cli-linux-amd64.tar.gz"));
+        assert!(is_downloadable_artifact("ferryx-cli-darwin-arm64.tar.gz"));
+        assert!(is_downloadable_artifact("ferryx-cli-linux-amd64"));
+        assert!(is_downloadable_artifact("ferryx-cli-darwin-arm64"));
+        assert!(!is_downloadable_artifact("../ferryx-cli-linux-amd64.tar.gz"));
+        assert!(!is_downloadable_artifact("ferryx-cli-unknown.tar.gz"));
     }
 
     async fn spawn_test_relay_with_account_state(

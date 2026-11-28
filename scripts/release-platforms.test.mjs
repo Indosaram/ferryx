@@ -780,12 +780,12 @@ test("createLinuxBuildScript: refuses a ferryx-cli-linux-amd64 that links deskto
         encoding: "utf8",
       });
     };
-    const headless = runGuard(["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"]);
-    assert.equal(headless.status, 0, headless.stderr);
-    const desktop = runGuard(["libpipewire-0.3.so.0", "libavcodec.so.63", "libc.so.6"]);
+    const cliWithRd = runGuard(["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2", "libpipewire-0.3.so.0", "libavcodec.so.63"]);
+    assert.equal(cliWithRd.status, 0, cliWithRd.stderr);
+    const desktop = runGuard(["libgtk-3.so.0", "libwebkit2gtk-4.1.so.0", "libc.so.6"]);
     assert.equal(desktop.status, 1);
-    assert.match(desktop.stderr, /libpipewire-0\.3\.so\.0/);
-    assert.match(desktop.stderr, /libavcodec\.so\.63/);
+    assert.match(desktop.stderr, /libgtk-3\.so\.0/);
+    assert.match(desktop.stderr, /libwebkit2gtk-4\.1\.so\.0/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -937,9 +937,9 @@ fi
     assert.equal(readFileSync(cliFile, "utf8"), "ELF_MOCK_CLI_BYTES");
     assert.equal(readFileSync(join(workspaceDir, "out", "ferryx-rd-client-linux-amd64"), "utf8"), "ELF_MOCK_RD_BYTES");
     assert.equal(existsSync(tarGzFile), false, "AppImage.tar.gz must NOT be created");
-    // The standalone Linux CLI must build without the desktop feature, so it links no GTK/WebKit.
+    // The Linux CLI builds with remote-desktop hosting by default, without the desktop GUI stack (GTK/WebKit).
     const cargoBuildArgs = readFileSync(join(workspaceDir, "cargo-target", "cargo-build-args.log"), "utf8");
-    assert.match(cargoBuildArgs, /--release --no-default-features --bin ferryx-cli/);
+    assert.match(cargoBuildArgs, /--release --no-default-features --features remote-desktop --bin ferryx-cli/);
     // The FFmpeg prefix is built without OpenH264 and cached under the workspace.
     const receipt = readFileSync(join(workspaceDir, "ffmpeg-cache", "lgpl-0123456789abcdef-noopenh264-" + execFileSync("uname", ["-m"], { encoding: "utf8" }).trim(), "build-receipt.txt"), "utf8");
     assert.equal(receipt, "OPENH264=0\n");

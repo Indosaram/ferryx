@@ -79,6 +79,7 @@ import { MahoCommandBar, type MahoCommandBarMode, type MahoCommandBarTarget } fr
 import { MahoLibraryMode } from "./MahoLibraryMode";
 import { MahoMiniPane } from "./MahoMiniPane";
 import { MahoNowPlayingCard } from "./MahoNowPlayingCard";
+import { MahoPageAgentPanel } from "./MahoPageAgentPanel";
 import { MahoTabSwitcher, type MahoTabSwitcherDirection } from "./MahoTabSwitcher";
 import { activateMahoTab } from "./mahoBrowserTabActions";
 import { useBrowserAutoArchive } from "./mahoAutoArchive";
@@ -237,6 +238,16 @@ export function useMahoBrowserShell({
   widthRef.current = width;
 
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [agentPanelOpen, setAgentPanelOpen] = useState(false);
+  const [pendingAgentPrompt, setPendingAgentPrompt] = useState<{ id: number; text: string } | null>(null);
+  const agentPromptSeqRef = useRef(0);
+  const handleAskPage = useCallback((prompt: string) => {
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
+    agentPromptSeqRef.current += 1;
+    setAgentPanelOpen(true);
+    setPendingAgentPrompt({ id: agentPromptSeqRef.current, text: trimmed });
+  }, []);
   const [thumbnails, setThumbnails] = useState<Readonly<Record<string, string>>>({});
 
   useEffect(() => {
@@ -546,6 +557,8 @@ export function useMahoBrowserShell({
           onNewTab={handleNewTab}
           onTidy={handleTidy}
           onCopyUrl={copyUrl}
+          agentPanelOpen={agentPanelOpen}
+          onToggleAgentPanel={() => setAgentPanelOpen((open) => !open)}
           controlActivity={(
             <MahoControlActivityChip
               activity={activity}
@@ -600,7 +613,15 @@ export function useMahoBrowserShell({
           activeBrowserId ? <MahoAgentControlledBanner activity={activity} browserId={activeBrowserId} /> : null
         }
         rightOverlayPane={
-          miniBrowserId ? (
+          agentPanelOpen ? (
+            <MahoPageAgentPanel
+              tab={activeTab}
+              activity={activity}
+              pendingPrompt={pendingAgentPrompt}
+              onPendingPromptHandled={() => setPendingAgentPrompt(null)}
+              onClose={() => setAgentPanelOpen(false)}
+            />
+          ) : miniBrowserId ? (
             <MahoMiniPane
               store={store}
               visible
@@ -633,6 +654,7 @@ export function useMahoBrowserShell({
         store={store}
         commands={[
           { id: "new-tab", title: "New tab", run: handleNewTab },
+          { id: "ask-agent", title: "Ask agent on this page", run: () => setAgentPanelOpen(true) },
           { id: "close-tab", title: "Close tab", run: closeActiveTab, disabled: !activeBrowserId },
           { id: "reload", title: "Reload tab", run: () => { if (activeBrowserId) handleCanvasReload(activeBrowserId); }, disabled: !activeBrowserId },
           { id: "copy-url", title: "Copy URL", run: () => { if (activeTab) copyUrl(activeTab.url); }, disabled: !activeTab },
@@ -647,6 +669,9 @@ export function useMahoBrowserShell({
         onClose={closeCommandBar}
         onSelectOpenTab={activateTab}
         onNavigate={handleCommandBarNavigate}
+        onAskPage={handleAskPage}
+        activePageTitle={activeTab?.title ?? null}
+        activePageUrl={activeTab?.url ?? null}
       />
       <MahoTabSwitcher
         open={switcher.open}

@@ -2445,25 +2445,87 @@ pub mod commands {
         }
         let dir = data_dir()?;
         let service = PairedHostService::open(dir.clone());
-        let host = service
+        let paired_hosts = service
             .list()
             .await
-            .map_err(|error| rd_error(RD_CONNECT_FAILED, error.message))?
-            .into_iter()
-            .find(|host| host.host_id == host_id)
-            .ok_or_else(|| rd_error(RD_NOT_FOUND, "That paired host is not known"))?;
-        if host.grant_scope != GrantScope::Machine || host.auth_status != AuthStatus::Paired {
-            return Err(rd_error(
-                RD_PERMISSION_REQUIRED,
-                "Remote desktop needs a current Machine pairing with control access",
-            ));
-        }
-        let client = Arc::new(MachineClient::new());
-        let body = client
-            .remote_desktop_pair(&service, host_id.clone(), host.generation)
-            .await
-            .map_err(|error| transport::map_client_error(&error))?;
-        let pairing = transport::pairing_record(&body, now_unix_ms())?;
+            .map_err(|error| rd_error(RD_CONNECT_FAILED, error.message))?;
+
+        let (pairing, bridge_kind, initial_route): (
+            ferryx_rd_app::PairingRecord,
+            transport::BridgeKind,
+            &'static str,
+        ) = if let Some(ssh_host_id) = host_id.strip_prefix(transport::SSH_HOST_PREFIX) {
+            if let Some(paired) = paired_hosts.into_iter().find(|candidate| {
+                candidate.ssh_host_id.as_deref() == Some(ssh_host_id)
+                    && candidate.grant_scope == GrantScope::Machine
+                    && candidate.auth_status == AuthStatus::Paired
+            }) {
+                let client = Arc::new(MachineClient::new());
+                let body = client
+                    .remote_desktop_pair(&service, paired.host_id.clone(), paired.generation)
+                    .await
+                    .map_err(|error| transport::map_client_error(&error))?;
+                let pairing = transport::pairing_record(&body, now_unix_ms())?;
+                let first = client
+                    .remote_desktop_stream_with_transport(&service, paired.host_id.clone(), paired.generation)
+                    .await
+                    .map_err(|error| transport::map_client_error(&error))?;
+                let initial_route = first.transport.route().as_str();
+                (
+                    pairing,
+                    transport::BridgeKind::Paired {
+                        first,
+                        client,
+                        service,
+                        host_id: paired.host_id,
+                        generation: paired.generation,
+                    },
+                    initial_route,
+                )
+            } else {
+                let store_path = crate::ipc::ssh::get_ssh_store_path(window.app_handle())?;
+                let ssh_id = ssh_host_id.to_owned();
+                let ssh_host = crate::ipc::run_blocking(move || {
+                    crate::ssh::projects::enabled_host(&store_path, &ssh_id)
+                })
+                .await?;
+                let opened = transport::open_ssh_rd_bridge(&ssh_host, now_unix_ms()).await?;
+                (opened.pairing, transport::BridgeKind::Ssh(opened.stream), "direct")
+            }
+        } else {
+            let host = paired_hosts
+                .into_iter()
+                .find(|host| host.host_id == host_id)
+                .ok_or_else(|| rd_error(RD_NOT_FOUND, "That paired host is not known"))?;
+            if host.grant_scope != GrantScope::Machine || host.auth_status != AuthStatus::Paired {
+                return Err(rd_error(
+                    RD_PERMISSION_REQUIRED,
+                    "Remote desktop needs a current Machine pairing with control access",
+                ));
+            }
+            let client = Arc::new(MachineClient::new());
+            let body = client
+                .remote_desktop_pair(&service, host_id.clone(), host.generation)
+                .await
+                .map_err(|error| transport::map_client_error(&error))?;
+            let pairing = transport::pairing_record(&body, now_unix_ms())?;
+            let first = client
+                .remote_desktop_stream_with_transport(&service, host_id.clone(), host.generation)
+                .await
+                .map_err(|error| transport::map_client_error(&error))?;
+            let initial_route = first.transport.route().as_str();
+            (
+                pairing,
+                transport::BridgeKind::Paired {
+                    first,
+                    client,
+                    service,
+                    host_id,
+                    generation: host.generation,
+                },
+                initial_route,
+            )
+        };
         let store_path = dir.join(PAIRING_FILE);
         let record = pairing.clone();
         let path = store_path.clone();
@@ -2476,12 +2538,6 @@ pub mod commands {
             })
         })
         .await?;
-
-        let first = client
-            .remote_desktop_stream_with_transport(&service, host_id.clone(), host.generation)
-            .await
-            .map_err(|error| transport::map_client_error(&error))?;
-        let initial_route = first.transport.route().as_str();
         let local = |error: std::io::Error| {
             rd_error(
                 RD_CONNECT_FAILED,
@@ -2545,23 +2601,42 @@ pub mod commands {
 
         let route_runtime = Arc::clone(&runtime);
         let route_session = session.clone();
-        tokio::spawn(transport::start_bridge(
-            listener,
-            udp,
-            first,
-            transport::StreamSource {
+        match bridge_kind {
+            transport::BridgeKind::Paired {
+                first,
                 client,
                 service,
                 host_id,
-                generation: host.generation,
-                on_route: Some(Arc::new(move |route| {
-                    route_runtime.set_route(route.as_str());
-                    route_runtime.emit_meta(&route_session);
-                })),
-            },
-            bridge_stopped,
-            Some(Arc::clone(&shared.telemetry)),
-        ));
+                generation,
+            } => {
+                tokio::spawn(transport::start_bridge(
+                    listener,
+                    udp,
+                    first,
+                    transport::StreamSource {
+                        client,
+                        service,
+                        host_id,
+                        generation,
+                        on_route: Some(Arc::new(move |route| {
+                            route_runtime.set_route(route.as_str());
+                            route_runtime.emit_meta(&route_session);
+                        })),
+                    },
+                    bridge_stopped,
+                    Some(Arc::clone(&shared.telemetry)),
+                ));
+            }
+            transport::BridgeKind::Ssh(stream) => {
+                tokio::spawn(transport::start_ssh_stdio_bridge(
+                    listener,
+                    udp,
+                    stream,
+                    bridge_stopped,
+                    Some(Arc::clone(&shared.telemetry)),
+                ));
+            }
+        }
         let exit_id = rd_session_id.clone();
         let spawned = std::thread::Builder::new()
             .name("ferryx-rd-recv".to_owned())
@@ -3446,6 +3521,251 @@ mod transport {
 
     /// [`run_bridge`] with the transport the first stream was opened on, plus the shared
     /// telemetry that reports `transport_mode` on every `pump` (re)start.
+    pub const SSH_HOST_PREFIX: &str = "ssh:";
+
+    pub struct SshRdStream {
+        pub child: tokio::process::Child,
+        pub stdin: tokio::process::ChildStdin,
+        pub stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
+        pub _lease: Option<crate::ssh::master::MasterLease>,
+    }
+
+    pub struct OpenedSshRdBridge {
+        pub pairing: PairingRecord,
+        pub stream: SshRdStream,
+    }
+
+    pub enum BridgeKind {
+        Paired {
+            first: RdStreamConnection,
+            client: Arc<MachineClient>,
+            service: PairedHostService,
+            host_id: String,
+            generation: Epoch,
+        },
+        Ssh(SshRdStream),
+    }
+
+    pub fn parse_ssh_bridge_header(line: &str, now_unix_ms: u64) -> Result<PairingRecord, IpcError> {
+        let value: serde_json::Value = serde_json::from_str(line.trim()).map_err(|error| {
+            rd_error(
+                RD_CONNECT_FAILED,
+                format!("Remote SSH rd-bridge sent an unreadable header: {error}"),
+            )
+        })?;
+        if let Some(error) = value.get("error") {
+            let code = error
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or(RD_HOST_UNAVAILABLE);
+            let message = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Remote desktop bridge failed on the SSH host");
+            return Err(rd_error(code, message));
+        }
+        pairing_record(line.trim().as_bytes(), now_unix_ms)
+    }
+
+    fn ssh_rd_bridge_args(
+        host: &crate::ssh::SshHost,
+        master_socket: Option<&std::path::Path>,
+    ) -> Vec<String> {
+        let mut args = match master_socket {
+            Some(socket) => crate::ssh::master::client_reuse_args(socket),
+            None => Vec::new(),
+        };
+        args.extend([
+            "-T".to_owned(),
+            "-o".to_owned(),
+            "BatchMode=yes".to_owned(),
+            "-o".to_owned(),
+            "ConnectTimeout=10".to_owned(),
+            "-o".to_owned(),
+            "ServerAliveInterval=15".to_owned(),
+            "-o".to_owned(),
+            "ServerAliveCountMax=3".to_owned(),
+            "-o".to_owned(),
+            "ClearAllForwardings=yes".to_owned(),
+        ]);
+        if let Some(port) = host.port {
+            args.push("-p".to_owned());
+            args.push(port.to_string());
+        }
+        if let Some(identity) = &host.identity_file {
+            if !identity.trim().is_empty() {
+                args.push("-i".to_owned());
+                args.push(identity.clone());
+            }
+        }
+        if let Some(jump) = &host.jump_host {
+            if !jump.trim().is_empty() {
+                args.push("-J".to_owned());
+                args.push(jump.clone());
+            }
+        }
+        args.push(host.target());
+        args.push(
+            "for b in ferryx-cli \"$HOME/.local/bin/ferryx-cli\" /usr/local/bin/ferryx-cli /Applications/Ferryx.app/Contents/MacOS/ferryx; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" rd-bridge; [ -x \"$b\" ] && exec \"$b\" rd-bridge; done; printf '%s\\n' '{\"error\":{\"code\":\"RD_HOST_UNAVAILABLE\",\"message\":\"Ferryx is not installed on this SSH host\"}}'; exit 127".to_owned(),
+        );
+        args
+    }
+
+    pub async fn open_ssh_rd_bridge(
+        host: &crate::ssh::SshHost,
+        now_unix_ms: u64,
+    ) -> Result<OpenedSshRdBridge, IpcError> {
+        use tokio::io::AsyncBufReadExt as _;
+        let program = crate::ssh::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_owned());
+        let lease = crate::ssh::master::acquire(host).await.ok().flatten();
+        let args = ssh_rd_bridge_args(host, lease.as_ref().map(|held| held.socket()));
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|error| {
+            rd_error(RD_CONNECT_FAILED, format!("Could not start SSH tunnel: {error}"))
+        })?;
+        let Some(stdin) = child.stdin.take() else {
+            let _ = child.kill().await;
+            return Err(rd_error(RD_CONNECT_FAILED, "SSH bridge stdin unavailable"));
+        };
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill().await;
+            return Err(rd_error(RD_CONNECT_FAILED, "SSH bridge stdout unavailable"));
+        };
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_secs(25),
+            reader.read_line(&mut line),
+        )
+        .await;
+        match read_result {
+            Ok(Ok(0)) => {
+                let _ = child.kill().await;
+                return Err(rd_error(
+                    RD_HOST_UNAVAILABLE,
+                    "SSH host closed before sending remote desktop pairing header",
+                ));
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                let _ = child.kill().await;
+                return Err(rd_error(
+                    RD_CONNECT_FAILED,
+                    format!("Reading SSH bridge header failed: {error}"),
+                ));
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(rd_error(
+                    RD_CONNECT_FAILED,
+                    "Timed out waiting for SSH remote desktop bridge",
+                ));
+            }
+        }
+        let pairing = match parse_ssh_bridge_header(&line, now_unix_ms) {
+            Ok(pairing) => pairing,
+            Err(error) => {
+                let _ = child.kill().await;
+                return Err(error);
+            }
+        };
+        Ok(OpenedSshRdBridge {
+            pairing,
+            stream: SshRdStream {
+                child,
+                stdin,
+                stdout: reader,
+                _lease: lease,
+            },
+        })
+    }
+
+    pub async fn start_ssh_stdio_bridge(
+        listener: TcpListener,
+        udp: UdpSocket,
+        mut stream: SshRdStream,
+        mut stop: watch::Receiver<bool>,
+        telemetry: Option<Arc<Mutex<RdTelemetry>>>,
+    ) {
+        use crate::remote::remote_desktop::{read_stdio_frame, write_stdio_frame, StreamChannel};
+        if let Some(telemetry) = &telemetry {
+            telemetry.lock().set_transport_mode(TRANSPORT_WS_DIRECT);
+        }
+        let mut udp_peer: Option<SocketAddr> = None;
+        let mut udp_buf = vec![0_u8; 64 * 1024];
+        let tcp = loop {
+            tokio::select! {
+                biased;
+                _ = stopped(&mut stop) => {
+                    let _ = stream.child.kill().await;
+                    return;
+                }
+                accepted = listener.accept() => match accepted {
+                    Ok((tcp, _)) => break tcp,
+                    Err(_) => {
+                        let _ = stream.child.kill().await;
+                        return;
+                    }
+                },
+                received = udp.recv_from(&mut udp_buf) => {
+                    if let Ok((_, from)) = received {
+                        udp_peer = Some(from);
+                    }
+                }
+            }
+        };
+        let _ = tcp.set_nodelay(true);
+        let (mut tcp_read, mut tcp_write) = tcp.into_split();
+        let mut tcp_buf = vec![0_u8; wire::MAX_TCP_CHUNK];
+        loop {
+            tokio::select! {
+                biased;
+                _ = stopped(&mut stop) => break,
+                incoming = read_stdio_frame(&mut stream.stdout) => match incoming {
+                    Ok(Some((StreamChannel::Tcp, payload))) => {
+                        if tcp_write.write_all(&payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some((StreamChannel::Udp, payload))) => {
+                        if let Some(peer) = udp_peer {
+                            let _ = udp.send_to(&payload, peer).await;
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                },
+                read = tcp_read.read(&mut tcp_buf) => match read {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if write_stdio_frame(&mut stream.stdin, StreamChannel::Tcp, &tcp_buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                },
+                received = udp.recv_from(&mut udp_buf) => match received {
+                    Ok((n, from)) => {
+                        udp_peer = Some(from);
+                        if write_stdio_frame(&mut stream.stdin, StreamChannel::Udp, &udp_buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                },
+            }
+        }
+        let _ = stream.child.kill().await;
+    }
+
     pub async fn start_bridge(
         listener: TcpListener,
         udp: UdpSocket,
@@ -4157,8 +4477,11 @@ mod transport {
                     Some(dir.path().join("remote-auth.json")),
                 ))
             };
-            // The host stays disabled: never call set(), so this is the default state the GUI
-            // finds on a machine whose owner turned remote desktop off.
+            // Explicitly turn remote desktop off so we verify the opt-out refusal path.
+            state
+                .remote_desktop
+                .set(false, true, true)
+                .expect("disable host");
             assert!(!state.remote_desktop.state().enabled);
 
             let listener = rt
@@ -4222,6 +4545,25 @@ mod transport {
             assert_eq!(code_of(&map_client_error(&client_error)), RD_HOST_DISABLED);
 
             server.abort();
+        }
+
+        #[test]
+        fn ssh_bridge_header_parses_pair_grant_and_typed_errors() {
+            let key_b64 = base64::engine::general_purpose::STANDARD.encode([0x42_u8; 32]);
+            let ok_line = serde_json::json!({
+                "pairingId": "FERRYX-0123456789ABCDEF",
+                "keyB64": key_b64,
+                "hostName": "Studio Linux",
+            })
+            .to_string();
+            let parsed = parse_ssh_bridge_header(&ok_line, 1234).expect("valid header");
+            assert_eq!(parsed.id, "FERRYX-0123456789ABCDEF");
+            assert_eq!(parsed.name, "Studio Linux");
+            assert_eq!(parsed.key, [0x42_u8; 32]);
+
+            let err_line = r#"{"error":{"code":"RD_HOST_DISABLED","message":"remote desktop hosting is off"}}"#;
+            let err = parse_ssh_bridge_header(err_line, 1234).unwrap_err();
+            assert_eq!(code_of(&err), RD_HOST_DISABLED);
         }
     }
 }

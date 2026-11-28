@@ -4661,6 +4661,115 @@ where
     }
 }
 
+pub fn run_rd_bridge_cli() -> i32 {
+    #[cfg(not(feature = "remote-desktop"))]
+    {
+        println!(
+            "{}",
+            serde_json::json!({
+                "error": {
+                    "code": "RD_UNSUPPORTED",
+                    "message": "This Ferryx build does not include remote desktop"
+                }
+            })
+        );
+        return 1;
+    }
+    #[cfg(feature = "remote-desktop")]
+    {
+        use std::io::Write as _;
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(error) => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "error": {
+                            "code": "INTERNAL_ERROR",
+                            "message": format!("runtime init failed: {error}")
+                        }
+                    })
+                );
+                return 1;
+            }
+        };
+        rt.block_on(async {
+            let client = crate::daemon::DaemonClient::new();
+            let reply = client
+                .send_request(crate::daemon::protocol::DaemonRequest::RemoteDesktopLocalPair {
+                    device_name: "SSH Client".to_owned(),
+                })
+                .await;
+            match reply {
+                Ok(crate::daemon::protocol::DaemonResponse::RemoteDesktopLocalPairOk {
+                    pairing_id,
+                    key_b64,
+                    host_name,
+                    tcp_port,
+                    udp_port,
+                }) => {
+                    let header = serde_json::json!({
+                        "pairingId": pairing_id,
+                        "keyB64": key_b64,
+                        "hostName": host_name,
+                    });
+                    if writeln!(std::io::stdout(), "{header}").is_err()
+                        || std::io::stdout().flush().is_err()
+                    {
+                        return 1;
+                    }
+                    match crate::remote::remote_desktop::run_stdio_bridge(tcp_port, udp_port).await
+                    {
+                        Ok(()) => 0,
+                        Err(_) => 1,
+                    }
+                }
+                Ok(crate::daemon::protocol::DaemonResponse::Error { code, message, .. }) => {
+                    let code = code.unwrap_or_else(|| "RD_HOST_UNAVAILABLE".to_owned());
+                    let _ = writeln!(
+                        std::io::stdout(),
+                        "{}",
+                        serde_json::json!({ "error": { "code": code, "message": message } })
+                    );
+                    let _ = std::io::stdout().flush();
+                    1
+                }
+                Ok(_) => {
+                    let _ = writeln!(
+                        std::io::stdout(),
+                        "{}",
+                        serde_json::json!({
+                            "error": {
+                                "code": "INTERNAL_ERROR",
+                                "message": "Unexpected daemon remote desktop response"
+                            }
+                        })
+                    );
+                    let _ = std::io::stdout().flush();
+                    1
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        std::io::stdout(),
+                        "{}",
+                        serde_json::json!({
+                            "error": {
+                                "code": "RD_HOST_UNAVAILABLE",
+                                "message": error.message
+                            }
+                        })
+                    );
+                    let _ = std::io::stdout().flush();
+                    1
+                }
+            }
+        })
+    }
+}
+
 pub fn run_daemon_headless(
     handover_from: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

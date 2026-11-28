@@ -75,6 +75,12 @@ if (params.get("open") === "command") {
     window.dispatchEvent(new CustomEvent(BROWSER_MODE_SHORTCUT_EVENT, { detail: { action: "command-bar" } }));
   }, 300);
 }
+if (params.get("open") === "agent") {
+  window.setTimeout(() => {
+    const button = document.querySelector<HTMLButtonElement>('button[aria-label="Ask agent on this page"]');
+    button?.click();
+  }, 300);
+}
 
 const el = document.getElementById("root");
 if (el) {

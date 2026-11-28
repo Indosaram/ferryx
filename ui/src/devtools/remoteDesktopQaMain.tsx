@@ -18,17 +18,31 @@ applyAppearanceSettings(loadAppearanceSettings());
 
 mockWindows("main");
 mockIPC((command) => {
-  if (command === "cmd_rd_is_supported") return true;
-  if (command === "cmd_rd_host_status") {
+  if (command === "cmd_rd_supported" || command === "cmd_rd_is_supported") return true;
+  if (command === "cmd_rd_host_state") {
     return {
       running: true,
       enabled: true,
-      listeningAddr: "127.0.0.1:44411",
-      activeClients: 0,
-      pin: "482913",
+      allowInput: true,
+      allowClipboard: true,
+      sessions: [],
+      pending: [],
+      error: null,
     };
   }
-  if (command === "cmd_rd_list_trusted_clients") return [];
+  if (command === "cmd_remote_devices") return [];
+  if (command === "cmd_ssh_list_hosts") {
+    return [
+      {
+        id: "dev-ssh-box",
+        label: "Dev SSH Box",
+        hostname: "100.80.12.5",
+        username: "indo",
+        source: "config",
+        authMethod: "agent",
+      },
+    ];
+  }
   if (command === "cmd_rd_list_audio_devices") return [];
   if (command === "cmd_rd_connect") return { rdSessionId: "rd-qa-1", supportsStreamOptions: true };
   return null;

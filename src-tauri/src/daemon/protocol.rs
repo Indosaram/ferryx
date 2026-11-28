@@ -1877,6 +1877,11 @@ pub enum DaemonRequest {
         request_id: String,
         approve: bool,
     },
+    /// Mints a local loopback remote desktop pairing for an authenticated SSH `rd-bridge` session.
+    #[serde(rename_all = "camelCase")]
+    RemoteDesktopLocalPair {
+        device_name: String,
+    },
     ReferenceChatIdentity,
     #[serde(rename_all = "camelCase")]
     ReferenceChat {
@@ -2531,6 +2536,14 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     RemoteDesktopHostState {
         state: RdHostState,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoteDesktopLocalPairOk {
+        pairing_id: String,
+        key_b64: String,
+        host_name: String,
+        tcp_port: u16,
+        udp_port: u16,
     },
     #[serde(rename_all = "camelCase")]
     AgentMemoryBlockOk {

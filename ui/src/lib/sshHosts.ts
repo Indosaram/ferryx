@@ -190,7 +190,8 @@ export async function listSshHosts(): Promise<SshHost[]> {
   const requestEpoch = inventoryEpoch;
   inflightFetch = (async () => {
     try {
-      const hosts = await invoke<SshHost[]>("cmd_ssh_list_hosts");
+      const raw = await invoke<SshHost[]>("cmd_ssh_list_hosts");
+      const hosts = Array.isArray(raw) ? raw : [];
       if (requestEpoch !== inventoryEpoch) {
         // A mutation completed while this read was in flight; the read is obsolete.
         // Discard it so stale inventory cannot overwrite the newer mutation result.

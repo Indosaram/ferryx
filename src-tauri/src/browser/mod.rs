@@ -57,10 +57,12 @@ pub use guest::{
     BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
 pub use manager::BrowserManager;
+#[cfg(feature = "desktop")]
+pub use media::handle_media_envelope;
 pub use media::{
     browser_media_control_script, browser_media_control_script_at, clamp_seek_position,
-    handle_media_envelope, is_media_envelope, BrowserMediaControlResult,
-    BrowserMediaState, MediaControlAction, BROWSER_MEDIA_STATE_EVENT, MAX_SEEK_POSITION_MS,
+    is_media_envelope, BrowserMediaControlResult, BrowserMediaState, MediaControlAction,
+    BROWSER_MEDIA_STATE_EVENT, MAX_SEEK_POSITION_MS,
 };
 pub use model::*;
 pub use remote_bridge_protocol::*;

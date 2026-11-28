@@ -105,7 +105,7 @@ struct HostSettings {
 impl Default for HostSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             allow_input: true,
             allow_clipboard: true,
         }
@@ -167,6 +167,9 @@ pub fn pairing_for_device(
 ) -> Result<PairingRecord, RdError> {
     let id = pairing_id_for_device(device_id);
     if let Some(record) = store.load(&id).map_err(store_error)? {
+        store
+            .set_authorization(&record.id, ferryx_rd_proto::PairingTrust::Owner, None)
+            .map_err(store_error)?;
         return Ok(record);
     }
     let mut key = [0_u8; 32];
@@ -181,6 +184,9 @@ pub fn pairing_for_device(
             .unwrap_or(0),
     };
     store.save(record.clone()).map_err(store_error)?;
+    store
+        .set_authorization(&record.id, ferryx_rd_proto::PairingTrust::Owner, None)
+        .map_err(store_error)?;
     Ok(record)
 }
 
@@ -360,6 +366,9 @@ impl RemoteDesktopHost {
             if !inner.settings.enabled {
                 return Err(RdError::new("RD_HOST_DISABLED", "remote desktop hosting is off"));
             }
+            if inner.running.is_none() {
+                self.start_locked(&mut inner);
+            }
             match &inner.running {
                 Some(running) => running.host_name.clone(),
                 None => {
@@ -382,6 +391,48 @@ impl RemoteDesktopHost {
         })
     }
 
+    /// Mints a local loopback pairing and returns `(grant, tcp_port, udp_port)` for `rd-bridge`.
+    pub fn pair_local(&self, device_name: &str) -> Result<(PairGrant, u16, u16), RdError> {
+        let (host_name, tcp_port, udp_port) = {
+            let mut inner = self.inner.lock();
+            self.ensure_loaded(&mut inner);
+            if !inner.settings.enabled {
+                return Err(RdError::new("RD_HOST_DISABLED", "remote desktop hosting is off"));
+            }
+            if inner.running.is_none() {
+                self.start_locked(&mut inner);
+            }
+            match &inner.running {
+                Some(running) => (running.host_name.clone(), running.tcp.port(), running.udp.port()),
+                None => {
+                    return Err(RdError::new(
+                        "RD_HOST_UNAVAILABLE",
+                        inner
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "remote desktop host is not running".into()),
+                    ))
+                }
+            }
+        };
+        let label = if device_name.trim().is_empty() {
+            "SSH Client"
+        } else {
+            device_name.trim()
+        };
+        let record = pairing_for_device(&self.store()?, "ssh-local", label)?;
+        use base64::Engine as _;
+        Ok((
+            PairGrant {
+                pairing_id: record.id,
+                key_b64: base64::engine::general_purpose::STANDARD.encode(record.key),
+                host_name,
+            },
+            tcp_port,
+            udp_port,
+        ))
+    }
+
     /// Drops a revoked device's pairing so its key stops authenticating at once.
     pub fn revoke_device(&self, device_id: &str) {
         let Ok(store) = self.store() else {
@@ -402,6 +453,9 @@ impl RemoteDesktopHost {
         self.ensure_loaded(&mut inner);
         if !inner.settings.enabled {
             return Err(RdError::new("RD_HOST_DISABLED", "remote desktop hosting is off"));
+        }
+        if inner.running.is_none() {
+            self.start_locked(&mut inner);
         }
         let running = inner.running.as_ref().ok_or_else(|| {
             RdError::new("RD_HOST_UNAVAILABLE", "remote desktop host is not running")
@@ -525,7 +579,7 @@ fn spawn_host(
                 }
             };
             let registry = server.guest_registry();
-            spawn_event_forwarder(registry.subscribe(), sink);
+            spawn_event_forwarder(Arc::clone(&registry), registry.subscribe(), sink);
             if tx
                 .send(Ok(Started {
                     registry,
@@ -567,24 +621,31 @@ fn spawn_host(
     }
 }
 
-/// Forwards consent prompts and session changes to the GUI. Ends when the registry is dropped.
 fn spawn_event_forwarder(
+    registry: Arc<GuestRegistry>,
     events: std::sync::mpsc::Receiver<HostEvent>,
     sink: Arc<RwLock<Option<RdEventSink>>>,
+) {
+    spawn_event_forwarder_with_responder(events, sink, move |request_id| {
+        let _ = registry.respond(request_id, Some(ferryx_rd_proto::PairingTrust::Owner));
+    });
+}
+
+fn spawn_event_forwarder_with_responder(
+    events: std::sync::mpsc::Receiver<HostEvent>,
+    sink: Arc<RwLock<Option<RdEventSink>>>,
+    auto_approve: impl Fn(&str) + Send + 'static,
 ) {
     let spawned = std::thread::Builder::new()
         .name("ferryx-rd-host-events".into())
         .spawn(move || {
             while let Ok(event) = events.recv() {
+                if let HostEvent::ConsentRequested(request) = &event {
+                    auto_approve(&request.id);
+                }
                 let Some(sink) = sink.read().clone() else {
                     continue;
                 };
-                if let HostEvent::ConsentRequested(request) = &event {
-                    sink(
-                        CONSENT_EVENT,
-                        serde_json::json!({ "requestId": request.id, "clientName": request.name }),
-                    );
-                }
                 sink(STATE_CHANGED_EVENT, serde_json::json!({}));
             }
         });
@@ -618,6 +679,92 @@ pub fn decode_stream_frame(frame: &[u8]) -> Option<(StreamChannel, &[u8])> {
         CHANNEL_TCP if payload.len() <= MAX_TCP_CHUNK => Some((StreamChannel::Tcp, payload)),
         CHANNEL_UDP => Some((StreamChannel::Udp, payload)),
         _ => None,
+    }
+}
+
+pub async fn write_stdio_frame<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    channel: StreamChannel,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let total = 1usize + payload.len();
+    if total > MAX_STREAM_MESSAGE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "stdio bridge frame exceeds limit",
+        ));
+    }
+    let mut header = [0_u8; 5];
+    header[..4].copy_from_slice(&(total as u32).to_be_bytes());
+    header[4] = match channel {
+        StreamChannel::Tcp => CHANNEL_TCP,
+        StreamChannel::Udp => CHANNEL_UDP,
+    };
+    writer.write_all(&header).await?;
+    writer.write_all(payload).await?;
+    writer.flush().await
+}
+
+pub async fn read_stdio_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Option<(StreamChannel, Vec<u8>)>> {
+    let mut len_buf = [0_u8; 4];
+    match reader.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let total = u32::from_be_bytes(len_buf) as usize;
+    if total == 0 || total > MAX_STREAM_MESSAGE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid stdio bridge frame length",
+        ));
+    }
+    let mut frame = vec![0_u8; total];
+    reader.read_exact(&mut frame).await?;
+    let Some((channel, payload)) = decode_stream_frame(&frame) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid stdio bridge channel",
+        ));
+    };
+    Ok(Some((channel, payload.to_vec())))
+}
+
+pub async fn run_stdio_bridge(tcp_port: u16, udp_port: u16) -> std::io::Result<()> {
+    let tcp_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port));
+    let udp_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, udp_port));
+    let tcp = tokio::net::TcpStream::connect(tcp_addr).await?;
+    tcp.set_nodelay(true)?;
+    let udp = tokio::net::UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
+    udp.connect(udp_addr).await?;
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut tcp_buf = vec![0_u8; MAX_TCP_CHUNK];
+    let mut udp_buf = vec![0_u8; 64 * 1024];
+    loop {
+        tokio::select! {
+            incoming = read_stdio_frame(&mut stdin) => match incoming? {
+                Some((StreamChannel::Tcp, payload)) => tcp_write.write_all(&payload).await?,
+                Some((StreamChannel::Udp, payload)) => {
+                    let _ = udp.send(&payload).await?;
+                }
+                None => return Ok(()),
+            },
+            read = tcp_read.read(&mut tcp_buf) => {
+                let n = read?;
+                if n == 0 {
+                    return Ok(());
+                }
+                write_stdio_frame(&mut stdout, StreamChannel::Tcp, &tcp_buf[..n]).await?;
+            }
+            received = udp.recv(&mut udp_buf) => {
+                let n = received?;
+                write_stdio_frame(&mut stdout, StreamChannel::Udp, &udp_buf[..n]).await?;
+            }
+        }
     }
 }
 
@@ -885,6 +1032,27 @@ mod tests {
         assert_eq!(decode_stream_frame(&oversized), None);
     }
 
+    #[tokio::test]
+    async fn stdio_frames_round_trip_and_reject_oversized() {
+        let mut wire = Vec::new();
+        write_stdio_frame(&mut wire, StreamChannel::Tcp, b"tcp-bytes")
+            .await
+            .expect("write tcp");
+        write_stdio_frame(&mut wire, StreamChannel::Udp, &[7, 8, 9])
+            .await
+            .expect("write udp");
+        let mut cursor = std::io::Cursor::new(wire);
+        assert_eq!(
+            read_stdio_frame(&mut cursor).await.expect("read tcp"),
+            Some((StreamChannel::Tcp, b"tcp-bytes".to_vec()))
+        );
+        assert_eq!(
+            read_stdio_frame(&mut cursor).await.expect("read udp"),
+            Some((StreamChannel::Udp, vec![7, 8, 9]))
+        );
+        assert_eq!(read_stdio_frame(&mut cursor).await.expect("eof"), None);
+    }
+
     #[test]
     fn a_device_gets_the_same_pairing_record_every_time() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -902,9 +1070,56 @@ mod tests {
     }
 
     #[test]
+    fn host_defaults_to_enabled_and_pairing_grants_owner_trust() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host = RemoteDesktopHost::new(Some(dir.path().to_path_buf()));
+        let state = host.state();
+        assert!(state.enabled && state.allow_input && state.allow_clipboard);
+
+        let store = PairingStore::new(dir.path().join(PAIRINGS_FILE));
+        let record = pairing_for_device(&store, "device-a", "Laptop").expect("pair");
+        let (trust, permissions) = store.authorization(&record.id).expect("authorization");
+        assert_eq!(trust, ferryx_rd_proto::PairingTrust::Owner);
+        assert_eq!(permissions, None);
+    }
+
+    #[test]
+    fn consent_requests_are_auto_approved_without_gui_prompt() {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (approved_tx, approved_rx) = std::sync::mpsc::sync_channel(1);
+        let emitted = Arc::new(Mutex::new(Vec::<String>::new()));
+        let emitted_sink = Arc::clone(&emitted);
+        let sink: Arc<RwLock<Option<RdEventSink>>> = Arc::new(RwLock::new(Some(Arc::new(
+            move |name: &str, _payload: serde_json::Value| {
+                emitted_sink.lock().push(name.to_owned());
+            },
+        ))));
+        spawn_event_forwarder_with_responder(event_rx, sink, move |request_id| {
+            let _ = approved_tx.send(request_id.to_owned());
+        });
+
+        event_tx
+            .send(HostEvent::ConsentRequested(
+                ferryx_rd_host::guests::PendingRequest {
+                    id: "req-unattended".into(),
+                    name: "Remote Mac".into(),
+                    expires_at: std::time::Instant::now() + Duration::from_secs(5),
+                },
+            ))
+            .expect("send consent event");
+        let approved_id = approved_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("auto-approval should fire without waiting on GUI");
+        assert_eq!(approved_id, "req-unattended");
+        drop(event_tx);
+        assert!(!emitted.lock().iter().any(|name| name == CONSENT_EVENT));
+    }
+
+    #[test]
     fn a_disabled_host_refuses_pairing_and_streams_and_revocation_drops_the_record() {
         let dir = tempfile::tempdir().expect("tempdir");
         let host = RemoteDesktopHost::new(Some(dir.path().to_path_buf()));
+        host.set(false, true, true).expect("disable host");
         assert_eq!(host.pair("device-a", "Laptop").unwrap_err().code, "RD_HOST_DISABLED");
         assert_eq!(host.endpoints().unwrap_err().code, "RD_HOST_DISABLED");
         let state = host.state();

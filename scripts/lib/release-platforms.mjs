@@ -703,18 +703,32 @@ export NO_STRIP=true
 rm -rf "$CARGO_TARGET_DIR/release/bundle"
 cd "$source_dir"
 ${tauriBuild}
-cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli
+cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --features remote-desktop --bin ferryx-cli
 cp "$CARGO_TARGET_DIR/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64" || cp "$source_dir/src-tauri/target/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
 test -s "$out_dir/ferryx-cli-linux-amd64"
-# ferryx-cli-linux-amd64 is what install.sh puts on headless servers. A copy that links the
-# desktop stack (PipeWire, FFmpeg, GTK) dies with exit 127 there, which is how release
-# v2026.1107.2 shipped, so refuse any dynamic dependency beyond the C runtime.
+# ferryx-cli-linux-amd64 carries remote-desktop hosting by default (FFmpeg + PipeWire) but must
+# never pull in the GUI stack (GTK, WebKitGTK, JavaScriptCore, GDK).
 cli_needed="$(objdump -p "$out_dir/ferryx-cli-linux-amd64" | awk '$1 == "NEEDED" { print $2 }')"
-cli_extra_needed="$(printf '%s\\n' "$cli_needed" | grep -Ev '^(libc|libm|libgcc_s|libpthread|libdl|librt|libutil|ld-linux-x86-64)\\.so(\\.[0-9]+)*$' || true)"
+cli_extra_needed="$(printf '%s\\n' "$cli_needed" | grep -Ev '^(libc|libm|libgcc_s|libpthread|libdl|librt|libutil|ld-linux-x86-64|libavcodec|libavfilter|libavformat|libavutil|libswscale|libswresample|libpipewire-0\\.3)\\.so(\\.[0-9]+)*$' || true)"
 if [ -n "$cli_extra_needed" ]; then
-  echo "ferryx-cli-linux-amd64 must link only the C runtime; it also needs: $cli_extra_needed" >&2
+  echo "ferryx-cli-linux-amd64 must link only the C runtime and remote-desktop stack; it also needs: $cli_extra_needed" >&2
   exit 1
 fi
+# Bundle ferryx-cli with its FFmpeg + PipeWire shared libraries so install.sh works on clean
+# headless servers (rpath $ORIGIN/ffmpeg).
+cli_bundle_dir="$workspace/cli-bundle"
+rm -rf "$cli_bundle_dir"
+mkdir -p "$cli_bundle_dir/ffmpeg"
+cp "$out_dir/ferryx-cli-linux-amd64" "$cli_bundle_dir/ferryx-cli"
+if [ -d "$source_dir/${FFMPEG_PAYLOAD_REL}/x86_64-unknown-linux-gnu/runtime" ]; then
+  cp -a "$source_dir/${FFMPEG_PAYLOAD_REL}/x86_64-unknown-linux-gnu/runtime/." "$cli_bundle_dir/ffmpeg/"
+fi
+pw_lib="$(ldd "$out_dir/ferryx-cli-linux-amd64" 2>/dev/null | awk '/libpipewire-0\\.3\\.so\\.0/ && $3 ~ /^\\// { print $3; exit }' || true)"
+if [ -n "$pw_lib" ] && [ -r "$pw_lib" ]; then
+  cp -L "$pw_lib" "$cli_bundle_dir/ffmpeg/libpipewire-0.3.so.0"
+fi
+tar -C "$cli_bundle_dir" -czf "$out_dir/ferryx-cli-linux-amd64.tar.gz" ferryx-cli ffmpeg
+test -s "$out_dir/ferryx-cli-linux-amd64.tar.gz"
 # The remote-desktop client is a separate headless binary (crates/ferryx-rd/ferryx-rd-app,
 # required-features "cli"). Without it every remote host answered "no RD client on PATH" and the
 # daemon-lifetime Q00/Q11 lanes could not drive the GUI at all, so ship it next to ferryx-cli.
@@ -1688,15 +1702,24 @@ export async function buildHost({
         },
       );
 
-      // The headless binaries ship standalone (ferryx-cli-darwin-arm64) and must not load the
-      // FFmpeg dylibs that only the app bundle carries, so rebuild them without default features.
+      // ferryx-cli includes remote-desktop hosting by default (no GUI/Tauri stack); server-only
+      // binaries (ferryx-account, ferryx-relay) build without default features.
       for (const triple of ["aarch64-apple-darwin"]) {
         execFileSync(
           "cargo",
           [
             "build", "--manifest-path", join(isolatedSource, "src-tauri", "Cargo.toml"), "--release",
+            "--no-default-features", "--features", "remote-desktop", "--target", triple,
+            "--bin", "ferryx-cli",
+          ],
+          { cwd: isolatedSource, env: buildEnv, stdio: "pipe", timeout: timeoutMs },
+        );
+        execFileSync(
+          "cargo",
+          [
+            "build", "--manifest-path", join(isolatedSource, "src-tauri", "Cargo.toml"), "--release",
             "--no-default-features", "--target", triple,
-            "--bin", "ferryx-cli", "--bin", "ferryx-account", "--bin", "ferryx-relay",
+            "--bin", "ferryx-account", "--bin", "ferryx-relay",
           ],
           { cwd: isolatedSource, env: buildEnv, stdio: "pipe", timeout: timeoutMs },
         );
@@ -1981,6 +2004,21 @@ export async function buildHost({
       const arm64Cli = join(aarch64Rel, "ferryx-cli");
       if (existsSync(arm64Cli)) {
         execFileSync("cp", [arm64Cli, join(artifactsOutDir, "ferryx-cli-darwin-arm64")]);
+        const cliBundleDir = join(isolatedSource, ".ferryx-cli-bundle-darwin-arm64");
+        const cliFfmpegDir = join(cliBundleDir, "ffmpeg");
+        rmSync(cliBundleDir, { recursive: true, force: true });
+        mkdirSync(cliFfmpegDir, { recursive: true });
+        execFileSync("cp", [arm64Cli, join(cliBundleDir, "ferryx-cli")]);
+        const macFfmpegRuntime = join(isolatedSource, FFMPEG_PAYLOAD_REL, "aarch64-apple-darwin", "runtime");
+        if (existsSync(macFfmpegRuntime)) {
+          execFileSync("cp", ["-R", `${macFfmpegRuntime}/.`, cliFfmpegDir]);
+        }
+        execFileSync(
+          "tar",
+          ["--no-xattrs", "-czf", join(artifactsOutDir, "ferryx-cli-darwin-arm64.tar.gz"), "-C", cliBundleDir, "ferryx-cli", "ffmpeg"],
+          { env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: "pipe" },
+        );
+        rmSync(cliBundleDir, { recursive: true, force: true });
       }
       const arm64RdClient = join(aarch64Rel, "ferryx-rd-client");
       if (existsSync(arm64RdClient)) {
@@ -2016,7 +2054,7 @@ export async function buildHost({
         const script = createLinuxBuildScript({ workspaceDir, plan, hostConfig });
         const result = await runHostScript(hostConfig, { posix: script }, { timeoutMs });
         toolchains = parseBuildResult(result.stdout);
-        for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64", "ferryx-rd-client-linux-amd64"]) {
+        for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64", "ferryx-cli-linux-amd64.tar.gz", "ferryx-rd-client-linux-amd64"]) {
           await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir}/out/${name}`, artifactsOutDir], { timeoutMs });
         }
       } else {

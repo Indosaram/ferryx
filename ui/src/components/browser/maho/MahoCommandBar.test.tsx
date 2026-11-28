@@ -387,4 +387,31 @@ describe("MahoCommandBar", () => {
     expect(document.querySelector('[role="dialog"][aria-label="Maho command bar"]')).toBeNull();
     expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("true");
   });
+
+  it("switches to Ask Agent mode via picker or ? prefix and dispatches the page prompt", () => {
+    const onAskPage = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <MahoCommandBar
+        open
+        onClose={onClose}
+        onNavigate={vi.fn()}
+        onSelectOpenTab={vi.fn()}
+        onAskPage={onAskPage}
+        activePageTitle="GitHub PR"
+        activePageUrl="https://github.com/Indosaram/ferryx/pull/1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose search mode or engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ask Agent" }));
+
+    const field = screen.getByTestId("maho-command-bar-input");
+    fireEvent.change(field, { target: { value: "Review the diff and summarize blockers" } });
+    expect(screen.getByRole("option")).toHaveTextContent("Ask Agent on GitHub PR");
+
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onAskPage).toHaveBeenCalledWith("Review the diff and summarize blockers");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });

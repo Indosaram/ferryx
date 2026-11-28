@@ -11,6 +11,7 @@ import { ChevronRight, Monitor, ScreenShare } from "lucide-react";
 
 import { cn } from "../../lib/cn";
 import { rdErrorMessage } from "../../lib/remoteDesktop";
+import { useSshHosts, type SshHost } from "../../lib/sshHosts";
 import {
   clampSidebarWidth,
   loadSidebarWidthForMode,
@@ -78,9 +79,42 @@ export type RemoteDesktopActivitySidebarProps = {
  * remote-desktop grant state, one-click connect/disconnect against the keep-alive session store,
  * and a collapsible host-sharing section (Settings > Remote keeps its own copy).
  */
+export const SSH_RD_HOST_PREFIX = "ssh:";
+
+export function mergeSshHostsForRemoteDesktop(
+  pairedHosts: readonly HostEndpoint[],
+  sshHosts: readonly SshHost[],
+): HostEndpoint[] {
+  const coveredSshIds = new Set(
+    pairedHosts.map((item) => item.sshHostId).filter((id): id is string => Boolean(id)),
+  );
+  const extra: HostEndpoint[] = [];
+  for (const ssh of sshHosts) {
+    if (ssh.disabled || coveredSshIds.has(ssh.id)) continue;
+    const hostId = `${SSH_RD_HOST_PREFIX}${ssh.id}`;
+    const address = ssh.username ? `${ssh.username}@${ssh.hostname}` : ssh.hostname;
+    const name = ssh.label.trim() || ssh.hostname;
+    extra.push({
+      hostId,
+      machineId: hostId,
+      name,
+      displayName: name,
+      address,
+      transport: "sshTunnel",
+      authStatus: "paired",
+      online: true,
+      grantScope: "machine",
+      generation: "ssh",
+      sshHostId: ssh.id,
+    });
+  }
+  return [...pairedHosts, ...extra];
+}
+
 export function RemoteDesktopActivitySidebar({ activeHostId, onSelectHost }: RemoteDesktopActivitySidebarProps) {
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const hosts = selectHostList(remoteState);
+  const { hosts: sshHosts } = useSshHosts();
+  const hosts = mergeSshHostsForRemoteDesktop(selectHostList(remoteState), sshHosts);
   const [width, setWidth] = useState(() => loadSidebarWidthForMode("remoteDesktop"));
   const [sharingOpen, setSharingOpen] = useState(false);
   const widthRef = useRef(width);
